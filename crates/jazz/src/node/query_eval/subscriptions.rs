@@ -312,9 +312,6 @@ where
             .pending_opening_binding_views
             .retain(|key| !reclaimed.contains(key.shape_id));
         self.query
-            .pending_terminal_operations_by_binding_view
-            .retain(|key, _| !reclaimed.contains(key.shape_id));
-        self.query
             .outbound_binding_owners
             .retain(|subscription, _| !reclaimed.contains(subscription.shape_id));
     }
@@ -644,9 +641,6 @@ where
             .remove(&binding_view_key);
         self.query
             .pending_authoritative_reset_binding_views
-            .remove(&binding_view_key);
-        self.query
-            .pending_terminal_operations_by_binding_view
             .remove(&binding_view_key);
         self.query
             .deferred_publication_binding_views

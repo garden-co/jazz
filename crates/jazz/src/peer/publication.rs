@@ -865,7 +865,6 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             })));
@@ -1007,7 +1006,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
-            terminal_operations,
+            terminal_operations: _,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -1018,9 +1017,7 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        let public_result_is_silent = result_member_adds.is_empty()
-            && result_member_removes.is_empty()
-            && terminal_operations.is_empty();
+        let public_result_is_silent = result_member_adds.is_empty() && result_member_removes.is_empty();
         // Deletion witnesses require a one-shot reconciliation only when the
         // result terminal itself was silent. When Groove already emitted the
         // complete public delta, reopening the maintained view would discard
@@ -1074,7 +1071,6 @@ impl PeerState {
         if maintained_view_update_is_empty(
             &result_member_adds,
             &result_member_removes,
-            &terminal_operations,
             &program_fact_adds,
             &program_fact_removes,
         ) {
@@ -1087,7 +1083,6 @@ impl PeerState {
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     result_member_adds: Vec::new(),
                     result_member_removes: Vec::new(),
-                    terminal_operations: Vec::new(),
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
                 }),
@@ -1151,14 +1146,7 @@ impl PeerState {
                 },
             ).await
         };
-        let mut update = update?;
-        if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            terminal_operations: outgoing,
-            ..
-        }) = &mut update
-        {
-            *outgoing = terminal_operations;
-        }
+        let update = update?;
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
@@ -1254,7 +1242,6 @@ impl PeerState {
         let mut observed_result_delta_batches = 0_usize;
         let mut requires_authoritative_membership_reconcile = false;
         let mut initial_deletion_witness = false;
-        let mut terminal_operations = Vec::new();
         {
             let Some(maintained_subscription_view) = self
                 .publication_states
@@ -1294,7 +1281,9 @@ impl PeerState {
                             requires_authoritative_membership_reconcile |=
                                 transitions.requires_authoritative_membership_reconcile;
                         }
-                        terminal_operations.extend(transitions.terminal_operations);
+                        // Groove terminals belong to the local host binding ABI.
+                        // Peer sync carries the maintained program's covered inputs,
+                        // never this authority-owned output.
                         program_fact_adds.extend(filter_program_facts_for_result_table(
                             transitions.program_fact_adds,
                             result_table_filter,
@@ -1434,10 +1423,10 @@ impl PeerState {
             result_payload_removes: Vec::new(),
             program_fact_adds,
             program_fact_removes,
+            terminal_operations: Vec::new(),
             allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
-            terminal_operations,
         })
     }
 
@@ -1552,7 +1541,6 @@ impl PeerState {
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     result_member_adds: Vec::new(),
                     result_member_removes: previous_member_result_set.iter().cloned().collect(),
-                    terminal_operations: Vec::new(),
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
                 });
@@ -2126,7 +2114,7 @@ impl PeerState {
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_result_delta_batches: _,
             requires_authoritative_membership_reconcile: _,
-            terminal_operations: source_terminal_operations,
+            terminal_operations: _,
         } = source_transitions;
         let known_state = self
             .downstream_known_states
@@ -2152,7 +2140,6 @@ impl PeerState {
         .then(|| source_removes.clone());
         if !source_adds.is_empty()
             || !source_removes.is_empty()
-            || !source_terminal_operations.is_empty()
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
@@ -2165,7 +2152,6 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: source_adds,
                 result_member_removes: source_removes,
-                terminal_operations: source_terminal_operations,
                 program_fact_adds: source_program_fact_adds,
                 program_fact_removes: source_program_fact_removes,
             }));
@@ -2327,7 +2313,6 @@ impl PeerState {
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds,
                 result_member_removes,
-                terminal_operations,
                 program_fact_adds,
                 program_fact_removes,
                 ..
@@ -2337,7 +2322,6 @@ impl PeerState {
                 maintained_view_update_is_empty(
                     result_member_adds,
                     result_member_removes,
-                    terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
                 ),

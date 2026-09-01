@@ -22,7 +22,6 @@ fn view_updates_drop_unknown_usage_site_bindings() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -529,7 +528,6 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             },
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -570,7 +568,6 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             },
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -597,7 +594,6 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))

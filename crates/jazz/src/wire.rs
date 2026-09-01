@@ -1470,7 +1470,6 @@ mod tests {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory,
                 result_member_adds: Vec<crate::protocol::ResultMemberEntry>,
                 result_member_removes: Vec<crate::protocol::ResultMemberEntry>,
-                terminal_operations: Vec<groove::ivm::TerminalOperation>,
                 program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
                 program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
             },
@@ -1487,7 +1486,6 @@ mod tests {
             peer_payload_inventory: payload.peer_payload_inventory.clone(),
             result_member_adds: payload.result_member_adds.clone(),
             result_member_removes: payload.result_member_removes.clone(),
-            terminal_operations: payload.terminal_operations.clone(),
             program_fact_adds: payload.program_fact_adds.clone(),
             program_fact_removes: payload.program_fact_removes.clone(),
         };
@@ -1662,7 +1660,6 @@ mod tests {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1931,7 +1928,6 @@ mod tests {
                     result_member_removes: Vec::new(),
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
-                    terminal_operations: Vec::new(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2021,7 +2017,6 @@ mod tests {
                 },
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             }),
@@ -2098,7 +2093,6 @@ mod tests {
             },
             result_member_adds: vec![entry.into()],
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         });

@@ -884,7 +884,6 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         peer_payload_inventory: Default::default(),
         result_member_adds: vec![("tasks".to_owned().into(), row_uuid, tx_id).into()],
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -1169,7 +1168,6 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         peer_payload_inventory: Default::default(),
         result_member_adds: vec![("tasks".to_owned().into(), task_row, tx_id).into()],
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });

@@ -548,7 +548,6 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         peer_payload_inventory: Default::default(),
         result_member_adds: vec![("todos".to_owned().into(), row, tx_id).into()],
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });

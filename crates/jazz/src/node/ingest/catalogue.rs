@@ -278,7 +278,6 @@ where
                     peer_payload_inventory,
                     result_member_adds,
                     result_member_removes,
-                    terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
                 }) => {
@@ -293,7 +292,6 @@ where
                         opening_pending: peer_payload_inventory.opening_pending,
                         result_member_adds,
                         result_member_removes,
-                        terminal_operations,
                         program_fact_adds,
                         program_fact_removes,
                     })

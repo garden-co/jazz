@@ -4090,7 +4090,6 @@ where
                                     },
                                     result_member_adds: Vec::new(),
                                     result_member_removes: Vec::new(),
-                                    terminal_operations: Vec::new(),
                                     program_fact_adds: Vec::new(),
                                     program_fact_removes: Vec::new(),
                                 }))
@@ -5363,7 +5362,6 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }) => ViewUpdateParts {
@@ -5377,7 +5375,6 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             opening_pending: peer_payload_inventory.opening_pending,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         },
@@ -6311,9 +6308,8 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
-            terminal_operations,
         }) => format!(
-            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={} terminal_ops={}",
+            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
             summarize_subscription_key(*subscription),
             settled_through.0,
             reset_result_set,
@@ -6324,8 +6320,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             result_member_adds.len(),
             result_member_removes.len(),
             program_fact_adds.len(),
-            program_fact_removes.len(),
-            terminal_operations.len()
+            program_fact_removes.len()
         ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {

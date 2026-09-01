@@ -249,8 +249,6 @@ pub struct ViewUpdatePayload {
     pub result_member_adds: Vec<ResultMemberEntry>,
     /// Result members removed by the update.
     pub result_member_removes: Vec<ResultMemberEntry>,
-    /// Terminal-owned structural result edits.
-    pub terminal_operations: Vec<groove::ivm::TerminalOperation>,
     /// Program facts added by this update.
     pub program_fact_adds: Vec<ProgramFactEntry>,
     /// Program facts removed by this update.
@@ -3359,6 +3357,12 @@ pub enum ProgramFactEntry {
     PolicyDecision(PolicyDecisionEntry),
     /// Content/deletion/replacement version witness.
     VersionWitness(VersionWitnessEntry),
+    /// A source version that belongs to the authority-approved input closure.
+    ///
+    /// This is an input fact, not a rendered result row: receivers use it to
+    /// advance their local maintained program even when output membership and
+    /// relation facts are unchanged.
+    CoveredInput(CoveredInputEntry),
     /// Policy dependency witness.
     PolicyWitness(PolicyWitnessEntry),
     /// Contributing member/batch provenance.
@@ -3462,6 +3466,57 @@ pub struct VersionWitnessEntry {
     pub version: RowVersionRefEntry,
     /// Result member this witness serves, when scoped to one member.
     pub member: Option<ResultMemberEntry>,
+}
+
+/// One concrete source occurrence/version in a peer's covered query input.
+///
+/// The surrounding `ViewUpdate` supplies the exact subscription (and an
+/// authorization-scope wrapper, when present); `source` preserves the stable
+/// row occurrence and `version` pins the concrete content or deletion layer.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct CoveredInputEntry {
+    /// Stable normalized query source occurrence, never a runtime-local slot.
+    pub source: ProgramSourceId,
+    /// Logical table naming the concrete version body.
+    ///
+    /// This remains explicit because a source may be reached through a lens
+    /// whose source-role table and authored version-table label differ.
+    pub version_table: groove::Intern<String>,
+    /// Source row occurrence within that table.
+    pub source_row: RowUuid,
+    /// Exact source version admitted in the covered input closure.
+    pub version: RowVersionRefEntry,
+}
+
+/// Canonical, wire-safe identity of one logical source occurrence in a
+/// normalized maintained program.
+///
+/// It deliberately distinguishes repeated scans of the same table (aliases,
+/// relation paths, policy sources, and recursive roles) without referring to
+/// a collector slot or runtime allocation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ProgramSourceId {
+    /// Logical table emitted by this source occurrence.
+    pub table: groove::Intern<String>,
+    /// Ordered normalized-role path from the query root to this occurrence.
+    pub path: Vec<ProgramSourceRole>,
+}
+
+/// One component of a [`ProgramSourceId`] path.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum ProgramSourceRole {
+    /// Root query source.
+    Root,
+    /// Explicit alias in a join or relation path.
+    Alias(String),
+    /// Recursive seed source.
+    RecursiveSeed(String),
+    /// Recursive step/frontier source.
+    RecursiveStep(String),
+    /// Correlated child source.
+    CorrelatedChild(String),
+    /// Policy-augmentation source.
+    Policy(String),
 }
 
 /// Policy dependency witness fact.

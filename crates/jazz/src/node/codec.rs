@@ -8,9 +8,10 @@
 use super::query_engine::{left_field, user_column_field};
 use super::*;
 use crate::protocol::{
-    CompleteTxPayloadCoverageEntry, ContributingMembersEntry, PathCorrelationCoverageEntry,
-    PathHoleState, PointReadEntry, PolicyDecisionEntry, PolicyDecisionOutcomeEntry,
-    PolicyWitnessEntry, PredicateOutputSetEntry, PredicateOutputSetRoleEntry, PredicateReadEntry,
+    CompleteTxPayloadCoverageEntry, ContributingMembersEntry, CoveredInputEntry,
+    PathCorrelationCoverageEntry, PathHoleState, PointReadEntry, PolicyDecisionEntry,
+    PolicyDecisionOutcomeEntry, PolicyWitnessEntry, PredicateOutputSetEntry,
+    PredicateOutputSetRoleEntry, PredicateReadEntry, ProgramSourceId, ProgramSourceRole,
     ReadFrontierSettledEntry, RelationEdgeEntry, RelationEdgeKind, RelationEdgeRole,
     ResultMemberPayloadEntry, ResultRowLayer, ResultRowSource, RowVersionRefEntry, SnapshotRef,
     SourceCoverageEntry, SyntheticReplacementToken, VersionWitnessEntry,
@@ -4404,6 +4405,73 @@ fn program_fact_member(
     }
     result_member_from_storage_bytes(&reader.bytes()?)
 }
+fn program_fact_put_source(bytes: &mut Vec<u8>, value: &ProgramSourceId) -> Result<(), Error> {
+    if value.table.is_empty()
+        || value.path.is_empty()
+        || value.path.len() > MAX_PROGRAM_FACT_NESTING
+    {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact source identity is invalid",
+        ));
+    }
+    program_fact_put_string(bytes, value.table.as_str())?;
+    program_fact_put_u32(bytes, value.path.len())?;
+    for role in &value.path {
+        match role {
+            ProgramSourceRole::Root => bytes.push(0),
+            ProgramSourceRole::Alias(name) => {
+                bytes.push(1);
+                program_fact_put_string(bytes, name)?;
+            }
+            ProgramSourceRole::RecursiveSeed(name) => {
+                bytes.push(2);
+                program_fact_put_string(bytes, name)?;
+            }
+            ProgramSourceRole::RecursiveStep(name) => {
+                bytes.push(3);
+                program_fact_put_string(bytes, name)?;
+            }
+            ProgramSourceRole::CorrelatedChild(name) => {
+                bytes.push(4);
+                program_fact_put_string(bytes, name)?;
+            }
+            ProgramSourceRole::Policy(name) => {
+                bytes.push(5);
+                program_fact_put_string(bytes, name)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn program_fact_source(
+    reader: &mut ProgramFactStorageReader<'_>,
+) -> Result<ProgramSourceId, Error> {
+    let table: groove::Intern<String> = reader.string()?.into();
+    let len = usize::try_from(reader.u32()?)
+        .map_err(|_| Error::InvalidStoredValue("settled program fact source path is too large"))?;
+    if table.is_empty() || len == 0 || len > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact source identity is invalid",
+        ));
+    }
+    let mut path = Vec::with_capacity(len);
+    for _ in 0..len {
+        path.push(match reader.u8()? {
+            0 => ProgramSourceRole::Root,
+            1 => ProgramSourceRole::Alias(reader.string()?),
+            2 => ProgramSourceRole::RecursiveSeed(reader.string()?),
+            3 => ProgramSourceRole::RecursiveStep(reader.string()?),
+            4 => ProgramSourceRole::CorrelatedChild(reader.string()?),
+            5 => ProgramSourceRole::Policy(reader.string()?),
+            _ => {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact source role tag is invalid",
+                ));
+            }
+        });
+    }
+    Ok(ProgramSourceId { table, path })
+}
 fn program_fact_put_version(bytes: &mut Vec<u8>, value: &RowVersionRefEntry) -> Result<(), Error> {
     program_fact_put_tx(bytes, value.tx);
     program_fact_put_option(bytes, &value.schema_version, |b, v| {
@@ -4619,6 +4687,13 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
                 program_fact_put_member(b, v, 1)
             })?;
         }
+        ProgramFactEntry::CoveredInput(v) => {
+            bytes.push(14);
+            program_fact_put_source(&mut bytes, &v.source)?;
+            program_fact_put_string(&mut bytes, v.version_table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.source_row.0);
+            program_fact_put_version(&mut bytes, &v.version)?;
+        }
         ProgramFactEntry::PolicyWitness(v) => {
             bytes.push(9);
             program_fact_put_member(&mut bytes, &v.protected, 1)?;
@@ -4826,6 +4901,12 @@ pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramF
             role: r.string()?,
             version: program_fact_version(&mut r)?,
             member: program_fact_option(&mut r, |r| program_fact_member(r, 1))?,
+        }),
+        14 => ProgramFactEntry::CoveredInput(CoveredInputEntry {
+            source: program_fact_source(&mut r)?,
+            version_table: r.string()?.into(),
+            source_row: RowUuid(r.uuid()?),
+            version: program_fact_version(&mut r)?,
         }),
         9 => ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
             protected: program_fact_member(&mut r, 1)?,
@@ -6340,6 +6421,15 @@ mod result_member_storage_codec_tests {
                 version: version.clone(),
                 member: Some(member.clone()),
             }),
+            ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                source: crate::protocol::ProgramSourceId {
+                    table: "a".to_owned().into(),
+                    path: vec![crate::protocol::ProgramSourceRole::Root],
+                },
+                version_table: "a".to_owned().into(),
+                source_row: RowUuid::from_bytes([38; 16]),
+                version: version.clone(),
+            }),
             ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
                 protected: member.clone(),
                 policy_path: "p".into(),
@@ -6380,10 +6470,13 @@ mod result_member_storage_codec_tests {
             .iter()
             .map(|fact| program_fact_storage_bytes(fact).unwrap())
             .collect::<Vec<_>>();
-        for (tag, (fact, bytes)) in facts.iter().zip(&encoded).enumerate() {
+        for (expected_tag, (fact, bytes)) in [0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 9, 10, 11, 12, 13]
+            .into_iter()
+            .zip(facts.iter().zip(&encoded))
+        {
             assert_eq!(&bytes[..4], PROGRAM_FACT_STORAGE_MAGIC);
             assert_eq!(bytes[4], PROGRAM_FACT_STORAGE_VERSION);
-            assert_eq!(usize::from(bytes[5]), tag);
+            assert_eq!(usize::from(bytes[5]), expected_tag);
             assert_eq!(program_fact_from_storage_bytes(bytes).unwrap(), *fact);
         }
         assert_eq!(
@@ -6401,6 +6494,7 @@ mod result_member_storage_codec_tests {
                 "90b3bda57c07eeda03fc389e0287f93627085ab0dfc2db66ea30eea9d7352a44",
                 "2d1ae58110da67261105647b85d16b2cd0eed8e0ad602a2393a49dcd20e1e307",
                 "f19b832022c7623e85f35a321908882ac8d54d685ecdd7b892c041c217b467b9",
+                "fb564f29e166cb50b8ef729a121dfeb5113f717737fbe1bec9d78f6291d17cb0",
                 "0e3395f68049bf529f1e5014170d4aa5f55ac6d45daf6998e9f3376fefce4a47",
                 "67e1ab722ba171d14ab66f5fc31bc948344a75f936865330aebb222c10161be6",
                 "cd7baa59c57b431ceb32580a74541393890e69af5c6587d4a16dfacf4ff10482",

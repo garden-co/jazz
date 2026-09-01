@@ -606,7 +606,6 @@ where
                 deferred_publication_binding_views: BTreeSet::new(),
                 pending_authoritative_reset_binding_views: BTreeSet::new(),
                 pending_opening_binding_views: BTreeSet::new(),
-                pending_terminal_operations_by_binding_view: BTreeMap::new(),
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),

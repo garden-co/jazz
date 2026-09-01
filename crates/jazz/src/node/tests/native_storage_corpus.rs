@@ -728,7 +728,6 @@ where
                 notes_tx,
             ))],
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: vec![fact],
             program_fact_removes: Vec::new(),
         },

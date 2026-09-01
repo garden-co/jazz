@@ -692,7 +692,6 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         reset_result_set,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         ..
     }) = unchanged else {
         panic!("expected maintained view update");
@@ -700,7 +699,6 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     assert!(!reset_result_set, "idempotent target registration must not reset");
     assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
-    assert!(terminal_operations.is_empty());
 
     let unknown = row(0x7c);
     let unknown_tx = accept_global(

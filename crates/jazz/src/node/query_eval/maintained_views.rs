@@ -817,17 +817,12 @@ where
                 }
             }
         }
-        if states.is_empty()
-            && payload_states.is_empty()
-            && fact_states.is_empty()
-            && terminal_operations.is_empty()
-        {
+        if states.is_empty() && payload_states.is_empty() && fact_states.is_empty() {
             return Ok((None, suppressed_authoritative_change));
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
             authoritative_membership_changed,
             authoritative_member_adds,
-            terminal_operations,
             ..Default::default()
         };
         for (entry, (before, after)) in states {

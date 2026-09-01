@@ -216,6 +216,25 @@ fn relation_edge_version_rows_for_bundle(
         .collect()
 }
 
+/// Versions named by the maintained program's covered-input stream. Unlike a
+/// relation edge, this witness changes for an in-place nested update or an
+/// order-key replacement even when the public member set remains unchanged.
+fn covered_input_version_rows_for_bundle(
+    facts: &[ProgramFactEntry],
+) -> BTreeSet<(String, RowUuid, TxId)> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            ProgramFactEntry::CoveredInput(input) => Some((
+                input.version_table.to_string(),
+                input.source_row,
+                input.version.tx,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Source vocabulary required to turn maintained flat-tuple membership into
 /// canonical contributor facts. Construct this from the validated query rather
 /// than independently from its result rows: an empty vocabulary on a flat join
@@ -856,10 +875,12 @@ where
             .chain(known_tuple_source_bundle_rows)
             .collect::<BTreeSet<_>>();
         let relation_edge_add_rows = relation_edge_version_rows_for_bundle(&program_fact_adds);
+        let covered_input_add_rows = covered_input_version_rows_for_bundle(&program_fact_adds);
         let wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
             .chain(relation_edge_add_rows)
+            .chain(covered_input_add_rows)
             // The contributor fact names canonical authored history; the
             // maintained index is keyed by the source graph's read-schema
             // label. Ship that exact retained witness and normalize it to
@@ -984,8 +1005,7 @@ where
                 }
             }
             if tx_versions.iter().any(|version| {
-                version.deletion().is_none()
-                    && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
+                wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
             }) {
                 let stored_tx = self
                     .query_transaction_memo(*tx_id, &mut context)
@@ -1253,7 +1273,6 @@ where
                 },
                 result_member_adds: result_member_adds.into_iter().collect(),
                 result_member_removes: result_member_removes.into_iter().collect(),
-                terminal_operations: Vec::new(),
                 program_fact_adds,
                 program_fact_removes,
             },
@@ -1446,7 +1465,6 @@ where
             opening_pending,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         } = update;
@@ -1535,11 +1553,6 @@ where
                 .or_default();
             state.initial_hydration = true;
         }
-        // Terminal edits are a publication optimization. The complete
-        // carriers in the same authority update drive the maintained query;
-        // retaining a second pending operation stream here would create a
-        // competing receiver path and can short-circuit that evaluation.
-        let _ = terminal_operations;
         self.query
             .authority_results
             .entry(authority_result_key.clone())

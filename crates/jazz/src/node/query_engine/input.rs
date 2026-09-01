@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::{ProgramSourceId, ProgramSourceRole};
 
 /// One validated API request before semantic lowering.
 #[derive(Clone, Debug, PartialEq)]
@@ -195,6 +196,36 @@ pub(crate) struct SourceId {
     pub(crate) table: String,
     /// Stable path/role inside the normalized query.
     pub(crate) path: SourcePath,
+}
+
+impl SourceId {
+    /// Convert the normalized source identity into the frozen wire vocabulary.
+    /// This is deliberately structural: sink names and runtime graph ids are
+    /// diagnostic implementation details and are not safe cross-peer keys.
+    pub(crate) fn program_source_id(&self) -> ProgramSourceId {
+        ProgramSourceId {
+            table: self.table.clone().into(),
+            path: self
+                .path
+                .components
+                .iter()
+                .map(|role| match role {
+                    SourceRole::Root => ProgramSourceRole::Root,
+                    SourceRole::Alias(name) => ProgramSourceRole::Alias(name.clone()),
+                    SourceRole::RecursiveSeed(name) => {
+                        ProgramSourceRole::RecursiveSeed(name.clone())
+                    }
+                    SourceRole::RecursiveStep(name) => {
+                        ProgramSourceRole::RecursiveStep(name.clone())
+                    }
+                    SourceRole::CorrelatedChild(name) => {
+                        ProgramSourceRole::CorrelatedChild(name.clone())
+                    }
+                    SourceRole::Policy(name) => ProgramSourceRole::Policy(name.clone()),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Stable source path inside a normalized row-set program.

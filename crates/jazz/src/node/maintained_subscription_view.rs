@@ -22,8 +22,9 @@ use super::query_engine::{
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
-    BranchKey, ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
-    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
+    BranchKey, CoveredInputEntry, ProgramFactEntry, ProgramSourceId, RealRowMemberEntry,
+    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer,
+    RowVersionRefEntry, SyntheticReplacementToken,
 };
 use crate::schema::{RuntimeSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
@@ -175,8 +176,8 @@ pub(crate) struct ResultTransitions {
     pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
-    /// Generic Groove terminal patches. These bypass relation/result assembly
-    /// and are forwarded unchanged to the subscription boundary.
+    /// Groove terminal patches are local binding output. They never enter a
+    /// peer `ViewUpdate`, whose contract is the covered input closure only.
     pub(crate) terminal_operations: Vec<TerminalOperation>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_result_delta_batches: usize,
@@ -200,10 +201,22 @@ pub(crate) enum DecodedMaintainedEvent {
         synthetic: super::query_engine::SyntheticResultMembershipSchema,
         value_fields: Vec<String>,
     },
-    VersionContent(VersionRow),
-    VersionDeletion(VersionRow),
-    ReplacementContent(VersionRow),
-    ReplacementDeletion(VersionRow),
+    VersionContent {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
+    VersionDeletion {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
+    ReplacementContent {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
+    ReplacementDeletion {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
     RelationEdge(RelationEdgeEntry),
     StructuredAppRow {
         root: RowUuid,
@@ -237,8 +250,8 @@ enum MaintainedTerminalKind {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EventIdentity {
     Result(ResultMemberEntry),
-    Version(VersionIdentity),
-    Replacement(ReplacementKey, VersionIdentity),
+    Version(ProgramSourceId, VersionIdentity),
+    Replacement(ProgramSourceId, ReplacementKey, VersionIdentity),
     ProgramFact(ProgramFactEntry),
     StructuredAppRow(RowUuid, Vec<u8>),
 }
@@ -252,8 +265,8 @@ enum NetEvent {
         super::query_engine::SyntheticResultMembershipSchema,
         Vec<String>,
     ),
-    Version(VersionIdentity, VersionRow),
-    Replacement(ReplacementKey, VersionIdentity, VersionRow),
+    Version(ProgramSourceId, VersionIdentity, VersionRow),
+    Replacement(ProgramSourceId, ReplacementKey, VersionIdentity, VersionRow),
     ProgramFact(ProgramFactEntry),
     StructuredAppRow(RowUuid, OwnedRecord),
 }
@@ -410,20 +423,20 @@ impl MaintainedSubscriptionView {
                     synthetic,
                     value_fields,
                 } => NetEvent::AggregateResult(member, payload, synthetic, value_fields),
-                DecodedMaintainedEvent::VersionContent(row)
-                | DecodedMaintainedEvent::VersionDeletion(row) => {
+                DecodedMaintainedEvent::VersionContent { source, row }
+                | DecodedMaintainedEvent::VersionDeletion { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
-                    NetEvent::Version(identity, row)
+                    NetEvent::Version(source, identity, row)
                 }
-                DecodedMaintainedEvent::ReplacementContent(row) => {
+                DecodedMaintainedEvent::ReplacementContent { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
                     let key = ReplacementKey::for_row(&row, VersionLayer::Content);
-                    NetEvent::Replacement(key, identity, row)
+                    NetEvent::Replacement(source, key, identity, row)
                 }
-                DecodedMaintainedEvent::ReplacementDeletion(row) => {
+                DecodedMaintainedEvent::ReplacementDeletion { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
                     let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
-                    NetEvent::Replacement(key, identity, row)
+                    NetEvent::Replacement(source, key, identity, row)
                 }
                 DecodedMaintainedEvent::RelationEdge(edge) => {
                     NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
@@ -457,13 +470,33 @@ impl MaintainedSubscriptionView {
                         &mut transitions,
                     )?;
                 }
-                NetEvent::Version(identity, row) => {
+                NetEvent::Version(source, identity, row) => {
+                    let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.versions
                         .apply_delta(identity, row, weight, node_aliases)?;
+                    if weight > 0 {
+                        transitions
+                            .program_fact_adds
+                            .push(ProgramFactEntry::CoveredInput(covered_input));
+                    } else {
+                        transitions
+                            .program_fact_removes
+                            .push(ProgramFactEntry::CoveredInput(covered_input));
+                    }
                 }
-                NetEvent::Replacement(key, identity, row) => {
+                NetEvent::Replacement(source, key, identity, row) => {
+                    let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.replacements
                         .apply_delta(key, identity, row, weight, node_aliases)?;
+                    if weight > 0 {
+                        transitions
+                            .program_fact_adds
+                            .push(ProgramFactEntry::CoveredInput(covered_input));
+                    } else {
+                        transitions
+                            .program_fact_removes
+                            .push(ProgramFactEntry::CoveredInput(covered_input));
+                    }
                 }
                 NetEvent::ProgramFact(fact) => {
                     if weight > 0 {
@@ -912,6 +945,37 @@ impl MaintainedSubscriptionView {
             .map(|(member, payload)| (Some(member), Some(payload)))
             .unwrap_or((None, None))
     }
+}
+
+/// Preserve the exact source occurrence that made a maintained program
+/// advance. This intentionally names input rows rather than collector output:
+/// a retained result member can change because a nested child, a sort key, or
+/// a deletion-register witness advanced while the output membership did not.
+fn covered_input_for_version(
+    source: ProgramSourceId,
+    row: &VersionRow,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+) -> Result<CoveredInputEntry, super::Error> {
+    let tx = version_tx_id_from_aliases(row, node_aliases).ok_or(
+        super::Error::InvalidStoredValue("covered input tx node alias must exist"),
+    )?;
+    let branch_or_prefix = row.branch_key().canonical_bytes();
+    Ok(CoveredInputEntry {
+        source,
+        version_table: row.table().to_owned().into(),
+        source_row: row.row_uuid(),
+        version: RowVersionRefEntry {
+            tx,
+            schema_version: None,
+            layer: match row.layer() {
+                VersionLayer::Content => ResultRowLayer::Content,
+                VersionLayer::Deletion => ResultRowLayer::Deletion,
+            },
+            batch: Some(tx),
+            branch_or_prefix: (!branch_or_prefix.is_empty()).then_some(branch_or_prefix),
+            row_digest: None,
+        },
+    })
 }
 
 /// Rebind a runtime terminal operation to its early-bound prepared layout.
@@ -1500,23 +1564,39 @@ fn decode_typed_terminal_record(
         }
         MaintainedTerminalKind::VersionContent(schema) => {
             validate_witness_event_kind(record, "version_content")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
-                .map(DecodedMaintainedEvent::VersionContent)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::VersionContent {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
         }
         MaintainedTerminalKind::VersionDeletion(schema) => {
             validate_witness_event_kind(record, "version_deletion")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
-                .map(DecodedMaintainedEvent::VersionDeletion)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::VersionDeletion {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
         }
         MaintainedTerminalKind::ReplacementContent(schema) => {
             validate_witness_event_kind(record, "replacement_content")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
-                .map(DecodedMaintainedEvent::ReplacementContent)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::ReplacementContent {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
         }
         MaintainedTerminalKind::ReplacementDeletion(schema) => {
             validate_witness_event_kind(record, "replacement_deletion")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
-                .map(DecodedMaintainedEvent::ReplacementDeletion)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::ReplacementDeletion {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
         }
         MaintainedTerminalKind::RelationEdge(schema) => {
             decode_typed_relation_edge(record, schema, tables, node_aliases)
@@ -2309,9 +2389,11 @@ impl NetEvent {
         match self {
             Self::Result(entry, _) => EventIdentity::Result(entry.clone()),
             Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
-            Self::Version(identity, _) => EventIdentity::Version(identity.clone()),
-            Self::Replacement(key, identity, _) => {
-                EventIdentity::Replacement(key.clone(), identity.clone())
+            Self::Version(source, identity, _) => {
+                EventIdentity::Version(source.clone(), identity.clone())
+            }
+            Self::Replacement(source, key, identity, _) => {
+                EventIdentity::Replacement(source.clone(), key.clone(), identity.clone())
             }
             Self::ProgramFact(fact) => EventIdentity::ProgramFact(fact.clone()),
             Self::StructuredAppRow(root, record) => {
@@ -2811,6 +2893,10 @@ mod tests {
 
     fn witness_schema() -> VersionWitnessSchema {
         VersionWitnessSchema {
+            source: ProgramSourceId {
+                table: "todos".to_owned().into(),
+                path: vec![crate::protocol::ProgramSourceRole::Root],
+            },
             descriptor: RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
             identity: crate::node::query_engine::VersionIdentityFields {
                 table_field: "table".to_owned(),
@@ -2908,6 +2994,41 @@ mod tests {
         ("todos".to_owned().into(), row_uuid, tx(1, time))
     }
 
+    fn test_source() -> ProgramSourceId {
+        ProgramSourceId {
+            table: "todos".to_owned().into(),
+            path: vec![crate::protocol::ProgramSourceRole::Root],
+        }
+    }
+
+    fn version_content(row: VersionRow) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::VersionContent {
+            source: test_source(),
+            row,
+        }
+    }
+
+    fn version_deletion(row: VersionRow) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::VersionDeletion {
+            source: test_source(),
+            row,
+        }
+    }
+
+    fn replacement_content(row: VersionRow) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::ReplacementContent {
+            source: test_source(),
+            row,
+        }
+    }
+
+    fn replacement_deletion(row: VersionRow) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::ReplacementDeletion {
+            source: test_source(),
+            row,
+        }
+    }
+
     fn result_current(member: ResultMemberEntry) -> DecodedMaintainedEvent {
         DecodedMaintainedEvent::ResultCurrent {
             payload: ResultMemberPayloadEntry {
@@ -2964,10 +3085,7 @@ mod tests {
 
         let mut second = maintained
             .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
-                    1,
-                )],
+                [(version_content(version(row(1), 10, "ready")), 1)],
                 &aliases,
             )
             .unwrap();
@@ -3082,10 +3200,7 @@ mod tests {
 
         let mut content = maintained
             .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
-                    1,
-                )],
+                [(version_content(version(row(1), 10, "ready")), 1)],
                 &aliases,
             )
             .unwrap();
@@ -3102,10 +3217,7 @@ mod tests {
         // stream halves; restoring that witness emits the current pair again.
         let mut content_retraction = maintained
             .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
-                    -1,
-                )],
+                [(version_content(version(row(1), 10, "ready")), -1)],
                 &aliases,
             )
             .unwrap();
@@ -3120,10 +3232,7 @@ mod tests {
 
         let mut content_restore = maintained
             .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
-                    1,
-                )],
+                [(version_content(version(row(1), 10, "ready")), 1)],
                 &aliases,
             )
             .unwrap();
@@ -3343,8 +3452,8 @@ mod tests {
         maintained
             .apply_decoded_deltas(
                 [
-                    (DecodedMaintainedEvent::VersionContent(version_b.clone()), 1),
-                    (DecodedMaintainedEvent::VersionContent(version_a.clone()), 1),
+                    (version_content(version_b.clone()), 1),
+                    (version_content(version_a.clone()), 1),
                 ],
                 &aliases,
             )
@@ -3371,13 +3480,7 @@ mod tests {
         );
 
         maintained
-            .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version_a.clone()),
-                    -1,
-                )],
-                &aliases,
-            )
+            .apply_decoded_deltas([(version_content(version_a.clone()), -1)], &aliases)
             .unwrap();
         assert_eq!(
             maintained.versions_by_tx(tx_id),
@@ -3395,10 +3498,7 @@ mod tests {
         let mut maintained = MaintainedSubscriptionView::default();
 
         maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ReplacementContent(old.clone()), 1)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(replacement_content(old.clone()), 1)], &aliases)
             .unwrap();
         assert_eq!(
             maintained.replacement_for("todos", row_uuid).0,
@@ -3408,8 +3508,8 @@ mod tests {
         maintained
             .apply_decoded_deltas(
                 [
-                    (DecodedMaintainedEvent::ReplacementContent(old), -1),
-                    (DecodedMaintainedEvent::ReplacementContent(new.clone()), 1),
+                    (replacement_content(old), -1),
+                    (replacement_content(new.clone()), 1),
                 ],
                 &aliases,
             )
@@ -3420,13 +3520,7 @@ mod tests {
         );
 
         maintained
-            .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::ReplacementDeletion(deletion.clone()),
-                    1,
-                )],
-                &aliases,
-            )
+            .apply_decoded_deltas([(replacement_deletion(deletion.clone()), 1)], &aliases)
             .unwrap();
         assert_eq!(
             maintained.replacement_for("todos", row_uuid),
@@ -3442,18 +3536,12 @@ mod tests {
         let mut maintained = MaintainedSubscriptionView::default();
 
         maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::VersionDeletion(version.clone()), 1)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(version_deletion(version.clone()), 1)], &aliases)
             .unwrap();
         assert_eq!(maintained.versions_by_tx(tx_id), vec![version.clone()]);
 
         maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::VersionDeletion(version), -1)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(version_deletion(version), -1)], &aliases)
             .unwrap();
         assert!(maintained.versions_by_tx(tx_id).is_empty());
         assert!(!maintained.versions.by_tx.contains_key(&tx_id));

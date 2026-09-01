@@ -889,7 +889,6 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             },
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })

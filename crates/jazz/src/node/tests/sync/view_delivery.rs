@@ -63,7 +63,6 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -212,7 +211,6 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -264,7 +262,6 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -290,7 +287,6 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })

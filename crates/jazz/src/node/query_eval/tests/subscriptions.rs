@@ -167,7 +167,6 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
             opening_pending: false,
             result_member_adds: adds,
             result_member_removes: removes,
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }
@@ -474,7 +473,7 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
 /// opening reset for Alice and a deferred reset for Bob can each be consumed,
 /// requeued, and completed without either stream starving the other.
 #[test]
-fn interleaved_policy_scoped_lifecycles_keep_reset_defer_and_terminal_streams_separate() {
+fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate() {
     let (_dir, mut relay) = open_node();
     let shape = Query::from("issues")
         .validate(&relay.catalogue.schema)
@@ -504,49 +503,29 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_defer_and_terminal_streams_se
         .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
         .unwrap();
 
-    let terminal = |marker| groove::ivm::TerminalOperation {
-        root_descriptor: groove::records::RecordDescriptor::default(),
-        root_key: vec![marker],
-        path: Vec::new(),
-        edit: groove::ivm::TerminalEdit::Remove { key: vec![marker] },
+    let update = |subscription, reset_result_set, opening_pending, defer_settlement| {
+        crate::node::ViewUpdateParts {
+            subscription,
+            settled_through: crate::time::GlobalTime(7),
+            defer_settlement,
+            reset_result_set,
+            version_carriers: Vec::new(),
+            peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: Some(3),
+            opening_pending,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        }
     };
-    let update =
-        |subscription, reset_result_set, opening_pending, defer_settlement, marker: Option<u8>| {
-            crate::node::ViewUpdateParts {
-                subscription,
-                settled_through: crate::time::GlobalTime(7),
-                defer_settlement,
-                reset_result_set,
-                version_carriers: Vec::new(),
-                peer_complete_tx_payload_refs: Vec::new(),
-                authorization_progress: Some(3),
-                opening_pending,
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                terminal_operations: marker.into_iter().map(terminal).collect(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
-            }
-        };
 
     relay
-        .apply_view_update(update(
-            alice_subscribe.subscription,
-            true,
-            true,
-            false,
-            Some(1),
-        ))
+        .apply_view_update(update(alice_subscribe.subscription, true, true, false))
         .resolve()
         .unwrap();
     relay
-        .apply_view_update(update(
-            bob_subscribe.subscription,
-            true,
-            false,
-            false,
-            Some(2),
-        ))
+        .apply_view_update(update(bob_subscribe.subscription, true, false, false))
         .resolve()
         .unwrap();
 
@@ -573,7 +552,7 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_defer_and_terminal_streams_se
     // Bob can defer a later publication while Alice's opening continues. That
     // deferred marker is also exact-policy state, not binding-view state.
     relay
-        .apply_view_update(update(bob_subscribe.subscription, false, false, true, None))
+        .apply_view_update(update(bob_subscribe.subscription, false, false, true))
         .resolve()
         .unwrap();
     assert!(relay.publication_deferred_for_authority_result(&bob_key));
@@ -589,23 +568,11 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_defer_and_terminal_streams_se
     );
 
     relay
-        .apply_view_update(update(
-            alice_subscribe.subscription,
-            false,
-            false,
-            false,
-            None,
-        ))
+        .apply_view_update(update(alice_subscribe.subscription, false, false, false))
         .resolve()
         .unwrap();
     relay
-        .apply_view_update(update(
-            bob_subscribe.subscription,
-            false,
-            false,
-            false,
-            None,
-        ))
+        .apply_view_update(update(bob_subscribe.subscription, false, false, false))
         .resolve()
         .unwrap();
     assert!(!relay.opening_pending_for_authority_result(&alice_key));

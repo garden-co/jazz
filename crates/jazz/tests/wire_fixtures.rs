@@ -10,12 +10,13 @@ use jazz::ids::{
     RowUuid, SchemaVersionId,
 };
 use jazz::protocol::{
-    CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, DelegatedSessionBinding, LensOp,
-    MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest,
-    PhysicalTableIdentity, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
-    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
-    VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
+    CatalogueAck, CatalogueSnapshot, CoveredInputEntry, CurrentWriteSchema,
+    DelegatedSessionBinding, LensOp, MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity,
+    PhysicalIdentityManifest, PhysicalTableIdentity, ProgramFactEntry, ProgramSourceId,
+    ProgramSourceRole, RegisterShapeOptions, ResultRowEntry, ResultRowLayer, RowVersionRef,
+    RowVersionRefEntry, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
+    SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
+    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
@@ -443,7 +444,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 },
                 result_member_adds: vec![result_row_entry(tx_id).into()],
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             }),
@@ -459,13 +459,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             }),
         ),
         (
-            "view_update_terminal_patch",
+            "view_update_covered_input_closure",
             "ViewUpdate",
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
@@ -475,16 +474,22 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: vec![TerminalOperation {
-                    root_descriptor: RecordDescriptor::new([("enabled", ValueType::Bool)]),
-                    root_key: vec![10; 17],
-                    path: vec![TerminalPathSegment::Collection("children".to_owned())],
-                    edit: TerminalEdit::Move {
-                        key: vec![11; 17],
-                        index: 3,
+                program_fact_adds: vec![ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                    source: ProgramSourceId {
+                        table: "todos".to_owned().into(),
+                        path: vec![ProgramSourceRole::Root],
                     },
-                }],
-                program_fact_adds: Vec::new(),
+                    version_table: "todos".to_owned().into(),
+                    source_row: RowUuid::from_bytes([0x79; 16]),
+                    version: RowVersionRefEntry {
+                        tx: tx_id,
+                        schema_version: Some(schema_version),
+                        layer: ResultRowLayer::Content,
+                        batch: Some(tx_id),
+                        branch_or_prefix: Some(vec![0x01]),
+                        row_digest: None,
+                    },
+                })],
                 program_fact_removes: Vec::new(),
             }),
         ),

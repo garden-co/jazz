@@ -1420,7 +1420,6 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds,
             result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
         }))
@@ -1499,7 +1498,6 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
             result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
         }))

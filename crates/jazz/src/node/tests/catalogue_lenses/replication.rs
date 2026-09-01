@@ -482,7 +482,6 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -506,7 +505,6 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])
@@ -543,7 +541,6 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -563,7 +560,6 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         })),
@@ -598,7 +594,6 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -622,7 +617,6 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
                 opening_pending: false,
                 result_member_adds,
                 result_member_removes,
-                terminal_operations,
                 program_fact_adds,
                 program_fact_removes,
             })
@@ -693,7 +687,6 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -719,7 +712,6 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])
@@ -762,7 +754,6 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -795,7 +786,6 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])

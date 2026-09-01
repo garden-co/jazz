@@ -873,8 +873,6 @@ struct QueryServing {
     deferred_publication_binding_views: BTreeSet<BindingViewKey>,
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
     pending_opening_binding_views: BTreeSet<BindingViewKey>,
-    pending_terminal_operations_by_binding_view:
-        BTreeMap<BindingViewKey, Vec<groove::ivm::TerminalOperation>>,
 }
 
 /// One authority-owned result stream, including every receipt that makes its
@@ -1938,7 +1936,6 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) opening_pending: bool,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
-    pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
     pub(crate) program_fact_adds: Vec<ViewFactEntry>,
     pub(crate) program_fact_removes: Vec<ViewFactEntry>,
 }

@@ -1367,7 +1367,6 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
             peer_payload_inventory: PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }),

@@ -74,7 +74,6 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
             row_uuid,
             TxId::new(TxTime(777), node(44)),
         ))],
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -114,7 +113,6 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -179,7 +177,6 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
             row_uuid,
             invisible_tx,
         ))],
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -229,7 +226,6 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
             row_uuid,
             TxId::new(TxTime(1000), node(45)),
         ))],
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -324,7 +320,6 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -898,7 +893,6 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             tx_a,
         ))],
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -1227,7 +1221,6 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: adds,
             program_fact_removes: removes,
         })
@@ -1325,7 +1318,6 @@ fn settled_result_members_use_digest_keys_and_recover_large_payloads() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: adds,
             result_member_removes: removes,
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1472,7 +1464,6 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: vec![fact.clone()],
             program_fact_removes: Vec::new(),
         }))

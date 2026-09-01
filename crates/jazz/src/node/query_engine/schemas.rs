@@ -260,6 +260,8 @@ pub(crate) struct VersionWitnessSchemas {
 /// One version-witness terminal row schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VersionWitnessSchema {
+    /// Frozen normalized source occurrence that emitted this witness.
+    pub(crate) source: crate::protocol::ProgramSourceId,
     /// Record descriptor emitted by the terminal graph.
     pub(crate) descriptor: RecordDescriptor,
     /// Fields that identify the concrete row version.

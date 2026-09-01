@@ -211,6 +211,7 @@ pub(super) fn lowered_terminals(
             let output = fact_output(
                 fact,
                 plan,
+                plan.root_source(),
                 source,
                 resolved_sources,
                 request,
@@ -268,6 +269,7 @@ pub(super) fn lowered_terminals(
                         fact,
                         ProgramFactTerminal::Primary,
                         plan,
+                        source_id,
                         resolved_source,
                         resolved_sources,
                         request,
@@ -305,6 +307,7 @@ pub(super) fn lowered_terminals(
                         fact,
                         ProgramFactTerminal::Primary,
                         plan,
+                        &contribution.source,
                         resolved_source,
                         resolved_sources,
                         request,
@@ -341,6 +344,7 @@ pub(super) fn lowered_terminals(
                     fact,
                     ProgramFactTerminal::VersionWitnessContent,
                     plan,
+                    source_id,
                     resolved_source,
                     resolved_sources,
                     request,
@@ -358,6 +362,7 @@ pub(super) fn lowered_terminals(
                     fact,
                     ProgramFactTerminal::VersionWitnessDeletion,
                     plan,
+                    source_id,
                     resolved_source,
                     resolved_sources,
                     request,
@@ -378,6 +383,7 @@ pub(super) fn lowered_terminals(
                     fact,
                     ProgramFactTerminal::ReplacementWitnessContent,
                     plan,
+                    source_id,
                     resolved_source,
                     resolved_sources,
                     request,
@@ -395,6 +401,7 @@ pub(super) fn lowered_terminals(
                     fact,
                     ProgramFactTerminal::ReplacementWitnessDeletion,
                     plan,
+                    source_id,
                     resolved_source,
                     resolved_sources,
                     request,
@@ -418,6 +425,7 @@ pub(super) fn lowered_terminals(
             let output = fact_output(
                 fact,
                 plan,
+                plan.root_source(),
                 source,
                 resolved_sources,
                 request,
@@ -1186,6 +1194,7 @@ fn lowered_aggregate_terminals(
             let output = fact_output(
                 fact,
                 plan,
+                plan.root_source(),
                 source,
                 &BTreeMap::new(),
                 request,
@@ -1298,6 +1307,7 @@ pub(super) fn project_source_fields_with_routes_from_prefix(
 fn fact_output(
     key: &ProgramFactKey,
     plan: &AnalyzedQueryPlan,
+    source_id: &SourceId,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
@@ -1307,6 +1317,7 @@ fn fact_output(
         key,
         ProgramFactTerminal::Primary,
         plan,
+        source_id,
         source,
         resolved_sources,
         request,
@@ -1318,6 +1329,7 @@ fn fact_output_with_terminal(
     key: &ProgramFactKey,
     terminal: ProgramFactTerminal,
     plan: &AnalyzedQueryPlan,
+    source_id: &SourceId,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
@@ -1386,7 +1398,7 @@ fn fact_output_with_terminal(
         }
         ProgramFactKey::VersionWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
-            let witness = version_witness_schema(source, &version);
+            let witness = version_witness_schema(source_id, source, &version);
             ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
                 role_field: "event_kind".to_owned(),
                 content: Some(witness.clone()),
@@ -1395,7 +1407,7 @@ fn fact_output_with_terminal(
         }
         ProgramFactKey::ReplacementWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
-            let witness = version_witness_schema(source, &version);
+            let witness = version_witness_schema(source_id, source, &version);
             ProgramFactSchema::ReplacementWitnesses(VersionWitnessSchemas {
                 role_field: "event_kind".to_owned(),
                 content: Some(witness.clone()),
@@ -2589,10 +2601,12 @@ fn content_version_schema(version: &VersionWitnessFieldRefs) -> ResultMembership
 }
 
 fn version_witness_schema(
+    source_id: &SourceId,
     source: &ResolvedSource,
     version: &VersionWitnessFieldRefs,
 ) -> VersionWitnessSchema {
     VersionWitnessSchema {
+        source: source_id.program_source_id(),
         descriptor: source.row_shape.descriptor,
         identity: VersionIdentityFields {
             table_field: "table_name".to_owned(),

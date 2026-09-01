@@ -536,6 +536,19 @@ diagnostic, compatibility, or facade-side application path. Ordered terminal
 operations remain an internal output of the receiver's own Groove graph and may
 cross the local Rust-to-host binding ABI, which is not peer sync.
 
+Each post-cut `ViewUpdate` instead carries typed covered-input facts scoped by
+its exact authority result and subscription. A covered input names the
+canonical normalized source path (including aliases, recursive, correlated, and
+policy roles), its logical source table and row occurrence, plus the logical
+table, concrete content/deletion version, transaction, and branch identity of
+the version body; the ordinary
+`VersionBundle` path carries the corresponding version body. A retained result therefore emits a covered-input
+remove/add when its nested child, deletion witness, or order-key source changes,
+even when result membership and relation facts do not. An idempotent authority
+tick emits neither fact transition nor body. This is the only publication seam
+needed by receiver-local reconciliation; it neither exposes collector output
+nor creates an authority ordering/index path.
+
 **Hard aggregate boundary; exceptions require a new protocol decision.** An
 ordinary aggregate is reconstructible only when its entire admitted canonical
 input multiset, grouping/window/order facts, and deterministic aggregate

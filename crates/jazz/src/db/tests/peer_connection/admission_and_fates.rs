@@ -1074,7 +1074,6 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
         peer_payload_inventory: PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });

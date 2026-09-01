@@ -13,13 +13,11 @@ use crate::tools::OutputOccurrenceId;
 pub(super) fn maintained_view_update_is_empty(
     result_member_adds: &[ResultMemberEntry],
     result_member_removes: &[ResultMemberEntry],
-    terminal_operations: &[groove::ivm::TerminalOperation],
     program_fact_adds: &[ProgramFactEntry],
     program_fact_removes: &[ProgramFactEntry],
 ) -> bool {
     result_member_adds.is_empty()
         && result_member_removes.is_empty()
-        && terminal_operations.is_empty()
         && program_fact_adds.is_empty()
         && program_fact_removes.is_empty()
 }

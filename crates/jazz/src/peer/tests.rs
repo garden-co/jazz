@@ -55,11 +55,7 @@ fn flat_tuple_source_vocabulary_is_derived_positionally_from_the_validated_query
     );
 
     let shared_source_table = Query::from(table("todos").alias("root"))
-        .flat_join(
-            table("todos").alias("first"),
-            "root.title",
-            "first.title",
-        )
+        .flat_join(table("todos").alias("first"), "root.title", "first.title")
         .flat_join(
             table("todos").alias("second"),
             "first.title",
@@ -71,6 +67,85 @@ fn flat_tuple_source_vocabulary_is_derived_positionally_from_the_validated_query
         crate::node::FlatTupleSourceTables::for_query(&shared_source_table).as_slice(),
         &["todos".to_owned(), "todos".to_owned()],
         "shared physical tables retain one contributor role per source position"
+    );
+}
+
+/// A self-join can observe the same physical version through two normalized
+/// source roles. Covered-input facts must retain those roles so a receiver can
+/// route each delta to the same local program frontier without borrowing a
+/// collector occurrence or guessing from the table name.
+#[test]
+fn covered_inputs_distinguish_same_table_self_join_source_roles() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x8f));
+    let shared = row(0x8e);
+    let shared_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", shared, 1_000).cells(title_cells("shared")),
+        )
+        .unwrap();
+    accept_global(&mut core, shared_tx, 1);
+    let shape = Query::from(table("todos").alias("root"))
+        .flat_join(table("todos").alias("peer"), "root.title", "peer.title")
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::new();
+
+    let _ = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let updated_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", shared, 1_001).cells(title_cells("updated")),
+        )
+        .unwrap();
+    accept_global(&mut core, updated_tx, 2);
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    }) = peer.query_update(&mut core, &shape, &binding).unwrap()
+    else {
+        panic!("expected self-join delta update")
+    };
+    let source_paths = program_fact_adds
+        .into_iter()
+        .filter_map(|fact| match fact {
+            ProgramFactEntry::CoveredInput(input)
+                if input.source.table.as_str() == "todos"
+                    && input.source_row == shared
+                    && input.version.tx == updated_tx =>
+            {
+                Some(input.source.path)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        source_paths.len() >= 2,
+        "the same row version must be emitted once per normalized self-join source role: {source_paths:?}"
+    );
+    assert!(
+        source_paths.iter().any(|path| {
+            path.iter()
+                .any(|role| matches!(role, crate::protocol::ProgramSourceRole::Alias(_)))
+        }),
+        "the peer alias must remain a wire-safe source role rather than collapsing to the table name: {source_paths:?}"
+    );
+    let retracted_source_paths = program_fact_removes
+        .into_iter()
+        .filter_map(|fact| match fact {
+            ProgramFactEntry::CoveredInput(input)
+                if input.source.table.as_str() == "todos"
+                    && input.source_row == shared
+                    && input.version.tx == shared_tx =>
+            {
+                Some(input.source.path)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        retracted_source_paths, source_paths,
+        "each normalized source frontier retracts exactly its former witness before accepting the replacement"
     );
 }
 
@@ -273,7 +348,9 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     let (_dir, mut core) = open_node_with_uuid(node(0x91));
     let live = row(0x31);
     let live_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", live, 1_000).cells(title_cells("live")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", live, 1_000).cells(title_cells("live")),
+        )
         .unwrap();
     accept_global(&mut core, live_tx, 1);
     let shape = Query::from("todos").validate(&schema()).unwrap();
@@ -337,8 +414,15 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set, "retained matching token may resume");
-    assert!(result_member_adds.is_empty());
+    // A fast membership receipt proves only the public member set. It does
+    // not prove that the receiver still has the source closure now required
+    // to derive that member locally, so post-cut rehydration deliberately
+    // refreshes both the member and its covered input witness.
+    assert!(
+        reset_result_set,
+        "a membership-only fast receipt cannot skip the covered-input closure"
+    );
+    assert_eq!(result_member_adds, vec![retained_member.clone()]);
     assert_eq!(
         fresh.publication_states[&subscription]
             .member_index
@@ -346,8 +430,8 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
             .next()
             .unwrap()
             .refcount,
-        2,
-        "retained resume must preserve contribution refcounts"
+        1,
+        "a closure refresh rebuilds membership from its exact source inputs"
     );
 
     let deleted_tx = core
@@ -413,10 +497,7 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
 
     let update = peer
         .rehydrate_query_for_subscription_from_maintained_subscription(
-            &mut core,
-            canonical,
-            target,
-            &shape,
+            &mut core, canonical, target, &shape,
         )
         .unwrap()
         .expect("expected view update");
@@ -463,7 +544,10 @@ fn maintained_subscription_fast_cursor_skips_covered_members_and_sends_only_newe
     };
     let mut peer = PeerState::relay();
     for subscription in [canonical, fully_covered, partially_covered] {
-        peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
+        peer.set_subscription_policy_binding(
+            subscription,
+            (AuthorSubject::SYSTEM, BTreeMap::new()),
+        );
     }
     peer.rehydrate_query_for_subscription_with_opts(
         &mut core,
@@ -529,7 +613,10 @@ fn maintained_subscription_fast_cursor_skips_covered_members_and_sends_only_newe
         panic!("expected partial view update");
     };
     assert!(!reset_result_set);
-    assert_eq!(result_member_adds, vec![("todos".to_owned().into(), second_row, second_tx)]);
+    assert_eq!(
+        result_member_adds,
+        vec![("todos".to_owned().into(), second_row, second_tx)]
+    );
     assert!(result_member_removes.is_empty());
 }
 
@@ -571,12 +658,16 @@ fn served_subscription_paths_fail_closed_when_a_relay_binding_is_removed() {
         .ensure_direct_internal_subscription_policy_binding(&core, subscription)
         .unwrap();
     assert_eq!(
-        direct.served_subscription_policy_binding(subscription).unwrap(),
+        direct
+            .served_subscription_policy_binding(subscription)
+            .unwrap(),
         (alice, claims.clone())
     );
     core.set_test_provider_claims(alice, BTreeMap::new());
     assert_eq!(
-        direct.served_subscription_policy_binding(subscription).unwrap(),
+        direct
+            .served_subscription_policy_binding(subscription)
+            .unwrap(),
         (alice, claims),
         "direct helper captures claims once; later identity-cache mutation cannot retarget it"
     );
@@ -649,7 +740,10 @@ fn incremental_delivery_removes_a_superseded_output_occurrence() {
     let replacement = output_member(root, row(0x32), 11);
 
     assert_eq!(
-        replacement_removals(&indexed_members(std::slice::from_ref(&previous)), &[replacement]),
+        replacement_removals(
+            &indexed_members(std::slice::from_ref(&previous)),
+            &[replacement]
+        ),
         vec![previous],
         "a newer current-row version must replace the version already sent for the same output occurrence"
     );
@@ -710,18 +804,19 @@ fn incremental_delivery_keeps_terminal_children_with_their_root() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(42)),
         read_view: Default::default(),
     };
-    let update = |adds, removes| SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        subscription,
-        settled_through: GlobalTime(0),
-        reset_result_set: false,
-        version_carriers: Vec::new(),
-        peer_payload_inventory: Default::default(),
-        result_member_adds: adds,
-        result_member_removes: removes,
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    });
+    let update = |adds, removes| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(0),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            peer_payload_inventory: Default::default(),
+            result_member_adds: adds,
+            result_member_removes: removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+    };
     let mut peer = PeerState::default();
     peer.apply_outgoing_view_update_result_set(&update(
         vec![root_member.clone(), child_member.clone()],
@@ -753,7 +848,10 @@ fn incremental_delivery_replaces_equal_tx_with_a_new_rendered_revision() {
     .into();
 
     assert_eq!(
-        replacement_removals(&indexed_members(std::slice::from_ref(&previous)), &[replacement]),
+        replacement_removals(
+            &indexed_members(std::slice::from_ref(&previous)),
+            &[replacement]
+        ),
         vec![previous],
     );
 }
@@ -769,18 +867,19 @@ fn maintained_delivery_does_not_leak_intermediate_replacement_refcounts() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(12)),
         read_view: Default::default(),
     };
-    let update = |adds, removes| SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        subscription,
-        settled_through: GlobalTime(0),
-        reset_result_set: false,
-        version_carriers: Vec::new(),
-        peer_payload_inventory: Default::default(),
-        result_member_adds: adds,
-        result_member_removes: removes,
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    });
+    let update = |adds, removes| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(0),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            peer_payload_inventory: Default::default(),
+            result_member_adds: adds,
+            result_member_removes: removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+    };
     let mut peer = PeerState::default();
     peer.apply_outgoing_view_update_result_set(&update(vec![tx10.clone()], Vec::new()));
     peer.apply_outgoing_view_update_result_set(&update(
@@ -808,18 +907,19 @@ fn maintained_delivery_rekeys_delta_and_reset_by_output_occurrence() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(2)),
         read_view: Default::default(),
     };
-    let update = |reset_result_set, adds, removes| SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        subscription,
-        settled_through: GlobalTime(0),
-        reset_result_set,
-        version_carriers: Vec::new(),
-        peer_payload_inventory: Default::default(),
-        result_member_adds: adds,
-        result_member_removes: removes,
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    });
+    let update = |reset_result_set, adds, removes| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(0),
+            reset_result_set,
+            version_carriers: Vec::new(),
+            peer_payload_inventory: Default::default(),
+            result_member_adds: adds,
+            result_member_removes: removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+    };
     let mut peer = PeerState::default();
 
     peer.apply_outgoing_view_update_result_set(&update(
@@ -888,10 +988,7 @@ fn priority_cells(title: impl Into<String>, priority: u64) -> BTreeMap<String, V
 
 fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
     let path = path.iter().map(|segment| (*segment).to_owned()).collect();
-    PublicPolicyExpr::eq_session(
-        column,
-        path,
-    )
+    PublicPolicyExpr::eq_session(column, path)
 }
 
 fn public_exists(table: &str, conditions: Vec<PublicPolicyExpr>) -> PublicPolicyExpr {
@@ -965,15 +1062,17 @@ fn aggregate_access_policy_schema() -> JazzSchema {
 
 fn session_claim_read_policy_schema() -> JazzSchema {
     let policy = public_session_eq("owner", &["claims", "session_id"]);
-    public_peer_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("resources")
-            .column("owner", PublicColumnType::Uuid)
-            .policies(
-                PublicTablePolicies::new()
-                    .with_select(policy.clone())
-                    .with_insert(policy),
-            ),
-    ))
+    public_peer_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("resources")
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(policy.clone())
+                        .with_insert(policy),
+                ),
+        ),
+    )
 }
 
 fn session_seed_write_policy_schema() -> JazzSchema {
@@ -1080,7 +1179,8 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
     .expect("SYSTEM must not bind session claims for a bypassed write");
     assert_eq!(peer.terminal_authority_scope_proof_count(), 0);
 
-    let denied = crate::db::block_on(node_state.dry_run_mergeable_write_allows_in_schema(
+    let denied = crate::db::block_on(
+        node_state.dry_run_mergeable_write_allows_in_schema(
             schema.version_id(),
             MergeableCommit::new("resources", row(0xa2), 2)
                 .made_by(AuthorSubject::for_test_bytes([0xa3; 16]))
@@ -1088,7 +1188,8 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
                     "owner".to_owned(),
                     Value::Uuid(uuid::Uuid::from_bytes([0xa3; 16])),
                 )])),
-        ));
+        ),
+    );
     assert!(
         denied.is_err(),
         "an unseeded session must not inherit SYSTEM bypass: {denied:?}"
@@ -1167,8 +1268,14 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
             .is_empty(),
         "the writer's bound claim must authorize the seeded resource"
     );
-    assert_eq!(system_serving_peer.link_identity(), Some(transport_identity));
-    assert_eq!(system_serving_peer.permission_subject(), Some(AuthorSubject::SYSTEM));
+    assert_eq!(
+        system_serving_peer.link_identity(),
+        Some(transport_identity)
+    );
+    assert_eq!(
+        system_serving_peer.permission_subject(),
+        Some(AuthorSubject::SYSTEM)
+    );
 
     // A present but ill-typed claim remains a real binding error; only an
     // absent claim receives the fail-closed empty-proof treatment.
@@ -1192,7 +1299,10 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
         )
         .expect_err("present ill-typed claim must remain an error");
     assert_eq!(wrong_type_peer.link_identity(), Some(transport_identity));
-    assert_eq!(wrong_type_peer.permission_subject(), Some(transport_identity));
+    assert_eq!(
+        wrong_type_peer.permission_subject(),
+        Some(transport_identity)
+    );
 }
 
 /// Deferred edge fates own their support receiver by the exact admission
@@ -1218,10 +1328,7 @@ fn deferred_edge_support_coexists_across_same_link_claim_refresh() {
         )
         .expect("seed a resource visible only to writer's A claim");
     accept_global(&mut edge, seed, 1);
-    let a_raw_claims = BTreeMap::from([(
-        "session_id".to_owned(),
-        Value::Uuid(writer.test_uuid()),
-    )]);
+    let a_raw_claims = BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]);
     edge.set_test_provider_claims(writer, a_raw_claims);
     let a_claims = edge.session_claims_for(writer);
     let mut peer = PeerState::edge_client(writer);
@@ -1293,11 +1400,15 @@ fn deferred_edge_support_coexists_across_same_link_claim_refresh() {
         "the refreshed B fate receives a distinct support receiver"
     );
     assert!(
-        !peer.publication_states[&a_subscription].result_member_set.is_empty(),
+        !peer.publication_states[&a_subscription]
+            .result_member_set
+            .is_empty(),
         "A evaluates against the visible writer claim"
     );
     assert!(
-        !peer.publication_states[&b_subscription].result_member_set.is_empty(),
+        !peer.publication_states[&b_subscription]
+            .result_member_set
+            .is_empty(),
         "B evaluates independently under its refreshed snapshot"
     );
 
@@ -1324,14 +1435,7 @@ fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let mut peer = PeerState::edge_client(writer);
 
     let outcome = peer
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            tx.clone(),
-            versions,
-            10,
-            10,
-            BTreeMap::new(),
-        )
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions, 10, 10, BTreeMap::new())
         .expect("missing prepared seed claim must be a deferred empty support proof");
     let updates = edge.persist_and_settle_outcome(outcome).unwrap();
     assert!(updates.is_empty());
@@ -1406,31 +1510,33 @@ fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Va
 
 fn schema() -> JazzSchema {
     public_peer_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
     )
 }
 
 fn nullable_title_schema() -> JazzSchema {
-    public_peer_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("anchor", PublicColumnType::Text)
-            .nullable_column("maybe_title", PublicColumnType::Text),
-    ))
+    public_peer_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("anchor", PublicColumnType::Text)
+                .nullable_column("maybe_title", PublicColumnType::Text),
+        ),
+    )
 }
 
 fn priority_schema() -> JazzSchema {
-    public_peer_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("priority", PublicColumnType::Timestamp),
-    ))
+    public_peer_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("priority", PublicColumnType::Timestamp),
+        ),
+    )
 }
 
 fn public_peer_schema(builder: PublicSchemaBuilder) -> JazzSchema {
-    crate::schema::JazzSchema::new(&builder.build())
-        .expect("peer-test public schema compiles")
+    crate::schema::JazzSchema::new(&builder.build()).expect("peer-test public schema compiles")
 }
 
 fn open_node_with_schema(
@@ -1467,7 +1573,10 @@ fn edge_ingest_uses_monotonic_scope_ttl_and_retains_wall_admission_time() {
         read_view: Default::default(),
     };
     let ttl_ms = edge_scope_ttl_ms();
-    assert!(ttl_ms > 0, "this receipt requires the normal positive edge-scope TTL");
+    assert!(
+        ttl_ms > 0,
+        "this receipt requires the normal positive edge-scope TTL"
+    );
 
     peer.retain_edge_scope_subscription(subscription);
     peer.release_edge_scope_subscription(&mut edge, subscription, 100);
@@ -1480,19 +1589,21 @@ fn edge_ingest_uses_monotonic_scope_ttl_and_retains_wall_admission_time() {
     // The missing support claim intentionally parks this write before HLC
     // validation. That lets the receipt inject an extreme authority clock and
     // assert that it is retained only as the deferred admission timestamp.
-    let first_outcome = peer.ingest_edge_mergeable_commit_unit(
-        &mut edge,
-        tx.clone(),
-        versions.clone(),
-        100 + ttl_ms - 1,
-        u64::MAX,
-        BTreeMap::new(),
-    )
-    .expect("missing support defers the edge write");
+    let first_outcome = peer
+        .ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            tx.clone(),
+            versions.clone(),
+            100 + ttl_ms - 1,
+            u64::MAX,
+            BTreeMap::new(),
+        )
+        .expect("missing support defers the edge write");
     let first_updates = edge.persist_and_settle_outcome(first_outcome).unwrap();
     assert!(first_updates.is_empty(), "a deferred write has no fate yet");
     assert!(
-        peer.idle_edge_scope_subscriptions.contains_key(&subscription),
+        peer.idle_edge_scope_subscriptions
+            .contains_key(&subscription),
         "an authority wall-clock jump cannot immediately evict a still-fresh scope"
     );
     assert_eq!(
@@ -1501,19 +1612,25 @@ fn edge_ingest_uses_monotonic_scope_ttl_and_retains_wall_admission_time() {
         "the deferred fate retains the separately supplied HLC admission time"
     );
 
-    let retry_outcome = peer.ingest_edge_mergeable_commit_unit(
-        &mut edge,
-        tx,
-        versions,
-        100 + ttl_ms,
-        u64::MAX,
-        BTreeMap::new(),
-    )
-    .expect("an identical deferred retransmit remains admissible");
+    let retry_outcome = peer
+        .ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            tx,
+            versions,
+            100 + ttl_ms,
+            u64::MAX,
+            BTreeMap::new(),
+        )
+        .expect("an identical deferred retransmit remains admissible");
     let retry_updates = edge.persist_and_settle_outcome(retry_outcome).unwrap();
-    assert!(retry_updates.is_empty(), "the retry remains deferred without support");
     assert!(
-        !peer.idle_edge_scope_subscriptions.contains_key(&subscription),
+        retry_updates.is_empty(),
+        "the retry remains deferred without support"
+    );
+    assert!(
+        !peer
+            .idle_edge_scope_subscriptions
+            .contains_key(&subscription),
         "the monotonic TTL evicts the idle scope at its boundary"
     );
 }
@@ -1715,8 +1832,7 @@ fn register_shape_binding_for_receiver_with_opts(
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            version_carriers,
-            ..
+            version_carriers, ..
         }) => crate::protocol::expand_version_carriers(version_carriers)
             .expect("test update carriers should expand"),
         _ => Vec::new(),
@@ -1782,12 +1898,8 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     first_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
-    core.register_shape_for_peer(
-        0xfeed,
-        shape.shape_id(),
-        ShapeAst::from_validated(&shape),
-    )
-    .unwrap();
+    core.register_shape_for_peer(0xfeed, shape.shape_id(), ShapeAst::from_validated(&shape))
+        .unwrap();
     reconnected_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, edge_opts)
         .unwrap();
@@ -1982,27 +2094,23 @@ fn maintained_subscription_view_default_rehydrate_installs_subscription() {
 /// alice (head) ──delete + runtime rehydrate──► bob (one removal)
 #[test]
 fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
-    let schema = public_peer_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("branch_id", PublicColumnType::Uuid)
-            .column("title", PublicColumnType::Text)
-            .branch_by("branch_id"),
-    ));
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .branch_by("branch_id"),
+        ),
+    );
     let (_dir, mut core) = open_node_with_schema(node(0x98), schema.clone());
-    let base = BranchSelector::new([(
-        "branch_id",
-        Value::Uuid(uuid::Uuid::from_bytes([0x99; 16])),
-    )]);
-    let head = BranchSelector::new([(
-        "branch_id",
-        Value::Uuid(uuid::Uuid::from_bytes([0x9a; 16])),
-    )]);
+    let base =
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0x99; 16])))]);
+    let head =
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0x9a; 16])))]);
     let deleted_row = row(0x9b);
     let retained_row = row(0x9c);
-    for (sequence, row_uuid, title) in [
-        (1, deleted_row, "deleted"),
-        (2, retained_row, "retained"),
-    ] {
+    for (sequence, row_uuid, title) in [(1, deleted_row, "deleted"), (2, retained_row, "retained")]
+    {
         let tx_id = core
             .commit_mergeable_settled(
                 MergeableCommit::new("todos", row_uuid, 1_000 + sequence)
@@ -2080,8 +2188,8 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
                 .branch(head)
                 .authored_columns(BTreeSet::from(["branch_id".to_owned()]))
                 .deletion(DeletionEvent::Deleted),
-    )
-    .unwrap();
+        )
+        .unwrap();
     accept_global(&mut core, deletion_tx, 3);
     let stale_runtime_token = core.groove_runtime_token().checked_add(1).unwrap();
     peer.publication_states
@@ -2138,7 +2246,7 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
 }
 
 #[test]
-fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
+fn maintained_structured_change_ships_covered_relation_fact() {
     let schema = public_peer_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
@@ -2150,13 +2258,10 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     );
     let (_dir, mut core) = open_node_with_schema(node(0x93), schema.clone());
     let user = row(0xa1);
-    let user_tx = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("users", user, 1_000).cells(BTreeMap::from([(
-                "name".to_owned(),
-                Value::String("owner".to_owned()),
-            )])),
-        )
+    let user_tx =
+        core.commit_mergeable_settled(MergeableCommit::new("users", user, 1_000).cells(
+            BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+        ))
         .unwrap();
     accept_global(&mut core, user_tx, 1);
     let shape = Query::from("users")
@@ -2173,12 +2278,12 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     let child_tx = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0xb1), 1_001).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(0xb1), 1_001).cells(
+            BTreeMap::from([
                 ("title".to_owned(), Value::String("child".to_owned())),
                 ("owner_id".to_owned(), Value::Uuid(user.0)),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     accept_global(&mut core, child_tx, 2);
     let child_update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -2202,10 +2307,7 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     };
     let duplicate = peer
         .rehydrate_query_for_subscription_from_maintained_subscription(
-            &mut core,
-            canonical,
-            target,
-            &shape,
+            &mut core, canonical, target, &shape,
         )
         .unwrap()
         .expect("duplicate structured usage receives a reset");
@@ -2226,21 +2328,21 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     );
 
     let child_update_tx = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0xb1), 1_002).cells(BTreeMap::from([(
+        .commit_mergeable_settled(MergeableCommit::new("todos", row(0xb1), 1_002).cells(
+            BTreeMap::from([(
                 "title".to_owned(),
                 Value::String("updated child".to_owned()),
-            )])),
-        )
+            )]),
+        ))
         .unwrap();
     accept_global(&mut core, child_update_tx, 3);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
+        version_carriers,
         program_fact_adds,
         program_fact_removes,
-        terminal_operations,
         ..
     }) = update
     else {
@@ -2248,16 +2350,52 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     };
     assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
-    assert!(!terminal_operations.is_empty());
-    assert!(!maintained_view_update_is_empty(
-        &[],
-        &[],
-        &terminal_operations,
-        &[],
-        &[],
-    ));
-    let _ = (program_fact_adds, program_fact_removes);
+    assert!(
+        !version_carriers.is_empty(),
+        "the peer ships the changed covered row input, not a terminal patch"
+    );
+    assert!(
+        program_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::CoveredInput(input)
+                    if input.source.table.as_str() == "todos"
+                        && input.source_row == row(0xb1)
+                        && input.version.tx == child_update_tx
+            )
+        }),
+        "a retained parent membership must still publish the nested child's changed covered input"
+    );
+    assert!(
+        program_fact_removes.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::CoveredInput(input)
+                    if input.source.table.as_str() == "todos"
+                        && input.source_row == row(0xb1)
+                        && input.version.tx == child_tx
+            )
+        }),
+        "the superseded nested input must be retracted with its exact former version"
+    );
 
+    let idempotent = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        result_member_adds,
+        result_member_removes,
+        version_carriers,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    }) = idempotent
+    else {
+        panic!("expected idempotent view update")
+    };
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    assert!(version_carriers.is_empty());
+    assert!(program_fact_adds.is_empty());
+    assert!(program_fact_removes.is_empty());
 }
 
 #[test]
@@ -2408,13 +2546,14 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x93));
     let row_uuid = row_from_u64(10);
     let original_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
+        )
         .unwrap();
     accept_global(&mut core, original_tx, 1);
     let delete_tx = core
         .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 1_001)
-                .deletion(DeletionEvent::Deleted),
+            MergeableCommit::new("todos", row_uuid, 1_001).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
     accept_global(&mut core, delete_tx, 2);
@@ -2491,13 +2630,14 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x95));
     let row_uuid = row_from_u64(10);
     let original_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
+        )
         .unwrap();
     accept_edge(&mut core, original_tx);
     let delete_tx = core
         .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 1_001)
-                .deletion(DeletionEvent::Deleted),
+            MergeableCommit::new("todos", row_uuid, 1_001).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
     accept_edge(&mut core, delete_tx);
@@ -2574,13 +2714,14 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x97));
     let row_uuid = row_from_u64(10);
     let original_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 1_000).cells(title_cells("old")),
+        )
         .unwrap();
     accept_edge(&mut core, original_tx);
     let delete_tx = core
         .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 1_001)
-                .deletion(DeletionEvent::Deleted),
+            MergeableCommit::new("todos", row_uuid, 1_001).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
     accept_edge(&mut core, delete_tx);
@@ -2682,9 +2823,16 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         .unwrap();
     accept_global(&mut core, delete_first_tx, 3);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let expected_update = update.clone();
+    assert_view_update_rows(
+        expected_update,
+        vec![("todos", second_row, second_tx)],
+        vec![("todos", first_row, first_tx)],
+    );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
         ..
     }) = update
     else {
@@ -2697,6 +2845,19 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
     assert_eq!(
         result_member_adds,
         vec![("todos".to_owned().into(), second_row, second_tx)]
+    );
+    assert!(
+        program_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::CoveredInput(input)
+                    if input.source.table.as_str() == "todos"
+                        && input.source_row == first_row
+                        && input.version.tx == delete_first_tx
+                        && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+            )
+        }),
+        "a deletion witness is a covered input and must ship even though its visible member retracts"
     );
 
     let new_first_row = row_from_u64(5);
@@ -2877,10 +3038,35 @@ fn maintained_subscription_view_order_by_limit_updates_move_rows_across_boundary
         .unwrap();
     accept_global(&mut core, charlie_promoted_tx, 4);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let expected_update = update.clone();
     assert_view_update_rows(
-        update,
+        expected_update,
         vec![("todos", charlie, charlie_promoted_tx)],
         vec![("todos", bravo, bravo_tx)],
+    );
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        program_fact_adds,
+        version_carriers,
+        ..
+    }) = update
+    else {
+        panic!("expected view update");
+    };
+    assert!(
+        program_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::CoveredInput(input)
+                    if input.source.table.as_str() == "todos"
+                        && input.source_row == charlie
+                        && input.version.tx == charlie_promoted_tx
+            )
+        }),
+        "a bounded order-key transition ships the changed input version, not a collector position"
+    );
+    assert!(
+        !version_carriers.is_empty(),
+        "the covered input chooses its exact version body through the ordinary bundle path"
     );
 
     let charlie_demoted_tx = core
@@ -3562,7 +3748,6 @@ fn maintained_subscription_view_forget_with_node_unsubscribes_and_drops_state() 
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3669,8 +3854,7 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     );
     let re_restored_tx = core
         .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0x51), 1_004)
-                .deletion(DeletionEvent::Restored),
+            MergeableCommit::new("todos", row(0x51), 1_004).deletion(DeletionEvent::Restored),
         )
         .unwrap();
     accept_global(&mut core, re_restored_tx, 5);
@@ -3693,11 +3877,15 @@ fn maintained_storage_fallback_batches_multi_row_replacement_removals() {
     let first = row(0x9a);
     let second = row(0x9b);
     let first_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")),
+        )
         .unwrap();
     accept_global(&mut core, first_tx, 1);
     let second_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", second, 1_001).cells(title_cells("match")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", second, 1_001).cells(title_cells("match")),
+        )
         .unwrap();
     accept_global(&mut core, second_tx, 2);
     let shape = Query::from("todos")
@@ -3731,7 +3919,9 @@ fn maintained_storage_fallback_batches_multi_row_replacement_removals() {
         None,
     )
     .unwrap();
-    let (replacement_tx, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_002).unwrap();
+    let (replacement_tx, _unit) = core
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_002)
+        .unwrap();
     accept_global(&mut core, replacement_tx, 3);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -4200,7 +4390,9 @@ fn maintained_subscription_view_exclusive_delta_stays_maintained() {
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000)
+        .unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -4237,7 +4429,9 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000)
+        .unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -4261,6 +4455,9 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
     );
     assert!(result_member_removes.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
+    // The matching row is the only rendered member, but both rows are input
+    // candidates of its local predicate. The view-scoped bundle therefore
+    // keeps the transaction's two covered input versions together.
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
@@ -4268,9 +4465,16 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
         version_bundles[0].scope,
         crate::protocol::VersionBundleScope::ViewScoped
     );
-    assert_eq!(version_bundles[0].tx.n_total_writes, 1);
-    assert_eq!(version_bundles[0].versions.len(), 1);
-    assert_eq!(version_bundles[0].versions[0].row_uuid(), row(0x71));
+    assert_eq!(version_bundles[0].tx.n_total_writes, 2);
+    assert_eq!(version_bundles[0].versions.len(), 2);
+    assert_eq!(
+        version_bundles[0]
+            .versions
+            .iter()
+            .map(crate::protocol::VersionRecord::row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0x71), row(0x72)]),
+    );
     assert!(peer.shipped_complete_tx_payloads().is_empty());
 }
 
@@ -4291,7 +4495,9 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000)
+        .unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -4352,12 +4558,10 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
     let schema = public_peer_schema(
         PublicSchemaBuilder::new()
             .table(
-                PublicTableSchemaBuilder::new("warehouses")
-                    .column("ytd", PublicColumnType::Double),
+                PublicTableSchemaBuilder::new("warehouses").column("ytd", PublicColumnType::Double),
             )
             .table(
-                PublicTableSchemaBuilder::new("stock")
-                    .column("ytd", PublicColumnType::Timestamp),
+                PublicTableSchemaBuilder::new("stock").column("ytd", PublicColumnType::Timestamp),
             )
             .table(
                 PublicTableSchemaBuilder::new("orderLines")
@@ -4384,12 +4588,12 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
         .unwrap();
     accept_global(&mut core, stock_tx, 2);
     let line_tx = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("orderLines", line, 12).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("orderLines", line, 12).cells(
+            BTreeMap::from([
                 ("warehouse".to_owned(), Value::Uuid(warehouse.0)),
                 ("stock".to_owned(), Value::Uuid(stock.0)),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     accept_global(&mut core, line_tx, 3);
 
@@ -4406,8 +4610,17 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
         result_member_adds,
         vec![("orderLines".to_owned().into(), line, line_tx)]
     );
-    assert_eq!(version_bundles.len(), 1);
-    assert_eq!(version_bundles[0].tx.tx_id, line_tx);
+    // The line's nested relation reads both dimensions. Those current source
+    // rows must accompany the output line so the receiving IVM can derive the
+    // same relation without an authority terminal patch.
+    assert_eq!(version_bundles.len(), 3);
+    assert_eq!(
+        version_bundles
+            .iter()
+            .map(|bundle| bundle.tx.tx_id)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([warehouse_tx, stock_tx, line_tx]),
+    );
 }
 
 #[test]
@@ -4426,7 +4639,9 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
         .unwrap();
     core.tx_write(tx, "docs", doc_b, doc_cells("b", project), None)
         .unwrap();
-    let (docs_tx, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
+    let (docs_tx, _unit) = core
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .unwrap();
     accept_global(&mut core, docs_tx, 1);
     let grant_a = core
         .commit_mergeable_settled(
@@ -4494,7 +4709,9 @@ fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexe
     let first = row(0x21);
     let second = row(0x22);
     let first_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")),
+        )
         .unwrap();
     accept_global(&mut core, first_tx, 1);
     let (shape, binding) = title_shape_binding("match");
@@ -4507,7 +4724,9 @@ fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexe
         .expect("initial maintained subscription missing");
 
     let second_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", second, 2_000).cells(title_cells("match")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", second, 2_000).cells(title_cells("match")),
+        )
         .unwrap();
     accept_global(&mut core, second_tx, 2);
     let tick = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -4594,7 +4813,9 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
     let (_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(1);
     let tx_id = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("shared")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 10).cells(title_cells("shared")),
+        )
         .unwrap();
     accept_global(&mut core, tx_id, 1);
     let mut peer = PeerState::new();
@@ -4733,8 +4954,14 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     writer
         .tx_write(tx, "docs", doc_two, doc_cells("two", project), None)
         .unwrap();
-    let (docs_tx, unit) = writer.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let (docs_tx, unit) = writer
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
@@ -4867,7 +5094,9 @@ fn all_exclusive_never_gated_stays_incremental() {
         .unwrap();
     core.tx_write(tx, "todos", row_two, title_cells("two"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
+    let (tx_id, _unit) = core
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
@@ -4956,7 +5185,9 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
         .unwrap();
     accept_global(&mut core, deleted_tx, 1);
     let live_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", live_row, 11).cells(title_cells("live")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", live_row, 11).cells(title_cells("live")),
+        )
         .unwrap();
     accept_global(&mut core, live_tx, 2);
     let mut peer = PeerState::new();
@@ -5056,7 +5287,9 @@ fn peer_state_sends_result_removes_after_deletes() {
     );
 
     let deletion_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted),
+        )
         .unwrap();
     accept_global(&mut core, deletion_tx, 2);
     let removed = peer.current_rows_update(&mut core, "todos").unwrap();
@@ -5098,7 +5331,9 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
         .apply_sync_message_settled(peer.current_rows_update(&mut core, "todos").unwrap())
         .unwrap();
     let deletion_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted),
+        )
         .unwrap();
     accept_global(&mut core, deletion_tx, 2);
     reader
@@ -5112,7 +5347,9 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
     );
 
     let restore_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Restored))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Restored),
+        )
         .unwrap();
     accept_global(&mut core, restore_tx, 3);
     let restored = peer.current_rows_update(&mut core, "todos").unwrap();
@@ -5159,7 +5396,9 @@ fn incremental_query_result_set_tracks_identical_cell_rewrite_tx_id() {
     let (_dir, mut core) = open_node_with_uuid(node(9));
     let row_uuid = row(1);
     let first_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("same")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("same")),
+        )
         .unwrap();
     accept_global(&mut core, first_tx, 1);
     let shape = Query::from("todos")
@@ -5189,7 +5428,9 @@ fn incremental_query_result_set_tracks_identical_cell_rewrite_tx_id() {
     );
 
     let second_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("same")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("same")),
+        )
         .unwrap();
     accept_global(&mut core, second_tx, 2);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -5234,7 +5475,9 @@ fn incremental_query_result_set_drops_enter_then_leave_same_drain_cycle() {
         .unwrap();
 
     let match_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("match")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("match")),
+        )
         .unwrap();
     accept_global(&mut core, match_tx, 1);
     let unmatch_tx = core
@@ -5276,7 +5519,9 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let row_uuid = row(1);
     let first_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("match")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("match")),
+        )
         .unwrap();
     accept_global(&mut core, first_tx, 1);
     let (shape, binding) = title_shape_binding("match");
@@ -5550,7 +5795,6 @@ fn incremental_query_result_sets_match_full_rehydrate_after_seeded_commits() {
     }
 }
 
-
 #[test]
 fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
     let (_dir, mut core) = open_node_with_uuid(node(0x93));
@@ -5628,16 +5872,11 @@ fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
     peer.set_subscription_policy_binding(target, policy_binding);
     let target_reset = peer
         .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
-            &mut core,
-            canonical,
-            target,
-            &shape,
-            reconciled,
+            &mut core, canonical, target, &shape, reconciled,
         )
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        ..
+        result_member_adds, ..
     }) = target_reset
     else {
         panic!("expected target view update");

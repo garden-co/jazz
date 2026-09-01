@@ -113,7 +113,6 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations: Vec::new(),
             program_fact_adds,
             program_fact_removes,
         }])
@@ -166,7 +165,6 @@ fn complete_parent_receiver_update(
             tx_id,
         ))],
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     }
@@ -387,7 +385,6 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -409,7 +406,6 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -481,7 +477,6 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -507,7 +502,6 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -614,7 +608,6 @@ fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
             tx_id,
         ))],
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -701,7 +694,6 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         };
@@ -792,7 +784,6 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         opening_pending: false,
         result_member_adds,
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -965,7 +956,6 @@ fn reset_accepts_identical_annotated_duplicates() {
                 tx_id,
             ))],
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         };
@@ -999,7 +989,6 @@ fn reset_accepts_identical_annotated_duplicates() {
                 row(1),
                 tx_id,
             ))],
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         };
@@ -1323,7 +1312,6 @@ fn reset_scope_update(
             .then(|| ResultMemberEntry::row(("todos".to_owned().into(), row(9), tx_id)))
             .into_iter()
             .collect(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     }
@@ -1336,9 +1324,6 @@ fn assert_reset_authored_columns_conflict(
 ) {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let binding_view_key = reader
-        .binding_view_key_for_subscription(subscription)
-        .unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
         tx_id,
@@ -1379,22 +1364,11 @@ fn assert_reset_authored_columns_conflict(
         .expect("two valid bundles form a packed carrier");
 
     reader.set_initial_sync_flush_cadence(2).unwrap();
-    reader
-        .query
-        .pending_terminal_operations_by_binding_view
-        .insert(
-            binding_view_key,
-            vec![reset_conflict_terminal_operation(1)],
-        );
     let cadence_before = (
         reader.initial_sync_flush_active,
         reader.initial_sync_flush_completed,
     );
     let hydration_before = reader.query.initial_hydration_binding_views.clone();
-    let pending_terminal_before = reader
-        .query
-        .pending_terminal_operations_by_binding_view
-        .clone();
     let deferred_before = reader.query.deferred_publication_binding_views.clone();
 
     let update = ViewUpdateParts {
@@ -1417,7 +1391,6 @@ fn assert_reset_authored_columns_conflict(
             })
             .into_iter()
             .collect(),
-        terminal_operations: vec![reset_conflict_terminal_operation(2)],
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -1454,24 +1427,9 @@ fn assert_reset_authored_columns_conflict(
         hydration_before
     );
     assert_eq!(
-        reader.query.pending_terminal_operations_by_binding_view,
-        pending_terminal_before
-    );
-    assert_eq!(
         reader.query.deferred_publication_binding_views,
         deferred_before
     );
-}
-
-fn reset_conflict_terminal_operation(marker: u8) -> groove::ivm::TerminalOperation {
-    groove::ivm::TerminalOperation {
-        root_descriptor: groove::records::RecordDescriptor::default(),
-        root_key: vec![marker],
-        path: Vec::new(),
-        edit: groove::ivm::TerminalEdit::Remove {
-            key: vec![marker],
-        },
-    }
 }
 
 // This stays internal because it directly exercises the protocol receiver's
@@ -1603,7 +1561,6 @@ fn partial_exclusive_view_update(
             tx_id,
         ))],
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     }
@@ -1703,7 +1660,6 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
                 new_tx,
             ))],
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }])
@@ -1759,7 +1715,6 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -1794,7 +1749,6 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -1845,7 +1799,6 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -1871,7 +1824,6 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
