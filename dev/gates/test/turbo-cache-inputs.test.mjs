@@ -123,25 +123,17 @@ function configuredCargoInputs(definition) {
   assert.deepEqual(actual, expected, `${config} diverges from its Cargo dependency closure`);
 }
 
-function affectedTasks(crate) {
-  const dependency = `crates/${crate}`;
-  return new Set(
-    taskDefinitions
-      .filter((definition) => dependencyInputs(definition).includes(dependency))
-      .map(({ task }) => task),
-  );
-}
-
-const closures = ["jazz", "groove", "jazz-native-transport", "benchmark-guard"].map((name) => ({
+const expectedAffectedTasks = new Map([
+  ["jazz", new Set(tasks)],
+  ["groove", new Set(tasks)],
+  ["jazz-native-transport", new Set(["@jazz/rust#build:crates", "jazz-napi#build"])],
+  ["benchmark-guard", new Set(["@jazz/rust#build:crates", "jazz-napi#build"])],
+]);
+const closures = [...expectedAffectedTasks].map(([name, affected]) => ({
   name,
   file: resolve(root, `crates/${name}/src/lib.rs`),
-  affected: affectedTasks(name),
+  affected,
 }));
-assert.deepEqual(
-  [...affectedTasks("jazz-native-transport")].sort(),
-  ["@jazz/rust#build:crates", "jazz-napi#build"],
-  "native transport must affect CLI and NAPI but not WASM",
-);
 const unrelated = resolve(root, "crates/jazz-sim/src/lib.rs");
 const originals = new Map(closures.map(({ file }) => [file, readFileSync(file, "utf8")]));
 const unrelatedOriginal = readFileSync(unrelated, "utf8");
