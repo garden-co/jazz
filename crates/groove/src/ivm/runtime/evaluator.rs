@@ -75,13 +75,23 @@ mod collect_by_state_tests {
     use super::*;
 
     #[test]
-    fn collect_by_snapshot_clone_shares_payload_until_first_write() {
-        let original = CollectByIncrementalState::default();
+    fn collect_by_snapshot_clone_shares_group_base_until_touched_group_write() {
+        let mut original = CollectByIncrementalState::default();
+        original.groups.update(vec![1], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"one")), 1);
+        });
+        original.groups.update(vec![2], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"two")), 1);
+        });
         let mut prepared = original.clone();
-        assert!(Rc::ptr_eq(&original.payload, &prepared.payload));
+        assert!(Rc::ptr_eq(&original.groups.base, &prepared.groups.base));
 
-        prepared.groups.clear();
-        assert!(!Rc::ptr_eq(&original.payload, &prepared.payload));
+        prepared.groups.update(vec![1], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"updated")), 1);
+        });
+        assert!(Rc::ptr_eq(&original.groups.base, &prepared.groups.base));
+        assert_eq!(original.groups.get(&[1]), prepared.groups.base.get(&[1]));
+        assert_ne!(original.groups.get(&[1]), prepared.groups.get(&[1]));
     }
 }
 
