@@ -3582,6 +3582,255 @@ mod tests {
             })
         }
     }
+    #[derive(Clone, Copy)]
+    enum DriverTransportBehavior {
+        Idle,
+        ClosedPump,
+    }
+
+    struct DriverConnectorState {
+        behavior: DriverTransportBehavior,
+        block_reconnect: bool,
+        connect_calls: std::sync::atomic::AtomicUsize,
+        send_attempted: tokio::sync::Notify,
+        reconnect_started: tokio::sync::Notify,
+        release_reconnect: tokio::sync::Notify,
+    }
+
+    #[derive(Clone)]
+    struct DriverConnector {
+        state: Arc<DriverConnectorState>,
+    }
+
+    struct DriverWireTransport {
+        state: Arc<DriverConnectorState>,
+    }
+
+    impl DriverConnector {
+        fn new(behavior: DriverTransportBehavior, block_reconnect: bool) -> Self {
+            Self {
+                state: Arc::new(DriverConnectorState {
+                    behavior,
+                    block_reconnect,
+                    connect_calls: std::sync::atomic::AtomicUsize::new(0),
+                    send_attempted: tokio::sync::Notify::new(),
+                    reconnect_started: tokio::sync::Notify::new(),
+                    release_reconnect: tokio::sync::Notify::new(),
+                }),
+            }
+        }
+
+        fn idle() -> Self {
+            Self::new(DriverTransportBehavior::Idle, false)
+        }
+
+        fn closed_pump(block_reconnect: bool) -> Self {
+            Self::new(DriverTransportBehavior::ClosedPump, block_reconnect)
+        }
+    }
+
+    impl crate::wire::WireTransport for DriverWireTransport {
+        fn send_frame(
+            &mut self,
+            _frame: Vec<u8>,
+        ) -> std::result::Result<(), crate::wire::TransportError> {
+            self.state.send_attempted.notify_one();
+            match self.state.behavior {
+                DriverTransportBehavior::Idle => Ok(()),
+                DriverTransportBehavior::ClosedPump => Err(crate::wire::TransportError::Failed(
+                    "websocket pump is closed".to_owned(),
+                )),
+            }
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    impl NativeTransportConnector for DriverConnector {
+        fn connect(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> crate::tools::native_transport_connector::NativeTransportFuture {
+            let state = Arc::clone(&self.state);
+            let call = state
+                .connect_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if call > 0 && state.block_reconnect {
+                    state.reconnect_started.notify_one();
+                    state.release_reconnect.notified().await;
+                }
+                Ok(
+                    crate::tools::native_transport_connector::ConnectedNativeTransport {
+                        transport: Box::new(DriverWireTransport {
+                            state: Arc::clone(&state),
+                        }),
+                        protocol_version: 1,
+                        features: 0,
+                        session_context: None,
+                        terminal: Box::pin(std::future::pending()),
+                    },
+                )
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> crate::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
+            Box::pin(async {
+                Err(
+                    crate::tools::native_transport_connector::NativeTransportError(
+                        "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
+                    ),
+                )
+            })
+        }
+    }
+
+    fn make_online_context(
+        app_id: AppId,
+        data_dir: std::path::PathBuf,
+        schema: Schema,
+    ) -> AppContext {
+        let mut context = make_offline_context(app_id, data_dir, schema);
+        context.server_url = "https://example.invalid".to_owned();
+        context.jwt_token = Some(make_test_jwt("driver-user", json!({})));
+        context
+    }
+
+    // These internal lifecycle tests are necessary because a detached
+    // spawn_local task and a late connection installation have no direct
+    // public observation once the client has consumed its core facade.
+    #[tokio::test(flavor = "current_thread")]
+    async fn online_shutdown_releases_idle_tick_driver() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let connector = DriverConnector::idle();
+                let client = JazzClient::connect_with_native_transport(
+                    make_online_context(
+                        AppId::from_name("online-shutdown-idle-driver"),
+                        TempDir::new().expect("tempdir").keep(),
+                        declared_todo_schema(),
+                    ),
+                    Arc::new(connector),
+                )
+                .await
+                .expect("connect online client");
+                let scheduler = Rc::downgrade(&client.db.inner.borrow().scheduler);
+
+                client
+                    .shutdown()
+                    .await
+                    .expect("shutdown idle online client");
+
+                assert!(
+                    scheduler.upgrade().is_none(),
+                    "shutdown must join the idle tick driver instead of retaining its scheduler"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_cancels_tick_driver_recovery_delay() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let connector = DriverConnector::closed_pump(false);
+                let client = JazzClient::connect_with_native_transport(
+                    make_online_context(
+                        AppId::from_name("shutdown-recovery-delay"),
+                        TempDir::new().expect("tempdir").keep(),
+                        declared_todo_schema(),
+                    ),
+                    Arc::new(connector.clone()),
+                )
+                .await
+                .expect("connect online client");
+                let scheduler = Rc::clone(&client.db.inner.borrow().scheduler);
+                let scheduler_weak = Rc::downgrade(&scheduler);
+                let send_attempted = connector.state.send_attempted.notified();
+
+                client
+                    .insert(
+                        "todos",
+                        crate::row_input!("title" => "recovery", "completed" => false),
+                    )
+                    .expect("stage a write for the closed pump");
+                scheduler.schedule_tick(TickUrgency::Immediate);
+                drop(scheduler);
+                send_attempted.await;
+
+                client
+                    .shutdown()
+                    .await
+                    .expect("shutdown during recovery delay");
+
+                assert!(
+                    scheduler_weak.upgrade().is_none(),
+                    "shutdown must cancel and join a driver waiting to retry"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_racing_recovery_connect_prevents_late_installation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let connector = DriverConnector::closed_pump(true);
+                let client = JazzClient::connect_with_native_transport(
+                    make_online_context(
+                        AppId::from_name("shutdown-recovery-connect"),
+                        TempDir::new().expect("tempdir").keep(),
+                        declared_todo_schema(),
+                    ),
+                    Arc::new(connector.clone()),
+                )
+                .await
+                .expect("connect online client");
+                let inner = Rc::clone(&client.db.inner);
+                let send_attempted = connector.state.send_attempted.notified();
+                let reconnect_started = connector.state.reconnect_started.notified();
+
+                client
+                    .insert(
+                        "todos",
+                        crate::row_input!("title" => "reconnect", "completed" => false),
+                    )
+                    .expect("stage a write for recovery");
+                client
+                    .db
+                    .inner
+                    .borrow()
+                    .scheduler
+                    .schedule_tick(TickUrgency::Immediate);
+                send_attempted.await;
+                reconnect_started.await;
+
+                let shutdown = tokio::task::spawn_local(client.shutdown());
+                tokio::task::yield_now().await;
+                let driver_retained_during_shutdown = Rc::strong_count(&inner) > 1;
+                connector.state.release_reconnect.notify_one();
+                shutdown
+                    .await
+                    .expect("join shutdown task")
+                    .expect("shutdown racing reconnect");
+                tokio::task::yield_now().await;
+
+                assert!(
+                    inner.borrow().upstream.is_none(),
+                    "a reconnect that completes after shutdown must not be installed"
+                );
+                assert!(
+                    !driver_retained_during_shutdown,
+                    "shutdown must not return while recovery retains the driver task"
+                );
+            })
+            .await;
+    }
 
     #[test]
     fn query_runtime_waker_enqueues_one_immediate_owner_turn() {
