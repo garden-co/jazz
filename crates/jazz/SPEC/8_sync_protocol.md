@@ -58,9 +58,13 @@ determined by its role, not by a separate wire language (ch. 1, principle 2).
 Roles include relay links (`PeerRole::Relay`), edge-client links
 (`PeerRole::ClientLink { identity }`), fate authority, durability, and eviction.
 
-A relay link represents the system author (`AuthorSubject::SYSTEM`) and performs no
-read narrowing. An edge-client link carries the terminated peer identity and
-narrows reads under that identity (ch. 7, ch. 9).
+A relay link is an authenticated transport capability with no permission
+subject. It neither implies `AuthorSubject::SYSTEM` nor independently narrows
+reads. An edge-client link carries the terminated peer identity and narrows
+reads under that identity. A scope-isolated client relay may carry only the
+foreground binding admitted for that exact relay scope and attachment; the
+upstream authority, not the relay, evaluates policy under that binding (ch. 7,
+ch. 9).
 
 **Implementation status (2026-07-27).** Relay aggregation onto a shared upstream
 shape is intended, but the current implementation does not guarantee it. Its
@@ -101,15 +105,25 @@ derived on decode), replacing postcard's former field-by-field representation.
 **Decision, 2026-08-31 — relay-delegated policy snapshots are v1 fields.**
 `Subscribe` now ends with `delegated_session` and `FetchRowVersions` ends with
 `delegated_session`; each is an optional `(identity, claims)` snapshot. `None`
-is the ordinary direct-session form. `Some` is accepted only on an admitted
-`TrustedBackend` link whose authenticated transport identity is `SYSTEM`; a
-session/client link carrying it is rejected before shape admission or repair
-serving. A relay sends this immutable snapshot for each upstream coverage or
-repair request it owns, so two sessions with equal query bindings but distinct
-claims cannot share an evaluator or repair authorization. The receiver scopes
-both initial evaluation and row-version repair to that snapshot. `SYSTEM` is
-never a delegated subject. This is a deliberate redefinition of the sole,
-unreleased v1 layout: there is no old-shape decoder or compatibility path.
+is the ordinary direct-session form. `Some` has two admitted sources:
+
+- an admitted `TrustedBackend` link may deliberately attribute work to an
+  explicit backend session; or
+- a scope-isolated client-relay link may carry the immutable foreground binding
+  issued for its exact durable authentication scope and current admission
+  epoch.
+
+The receiver validates the snapshot against the link's server-issued
+capability before shape admission or repair serving. An ordinary session/client
+link, an unscoped relay, a mismatched scope, a stale admission epoch, or a raw
+client-supplied binding MUST be rejected. A scope-isolated relay sends the
+validated immutable snapshot for each upstream coverage or repair request it
+owns, so two sessions with equal query bindings but distinct claims cannot
+share an evaluator or repair authorization. The upstream authority scopes both
+initial evaluation and row-version repair to that snapshot; the relay does not
+evaluate policy. `SYSTEM` is never a relay transport identity or delegated
+subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
+there is no old-shape decoder or compatibility path.
 
 ### 8.1.1 Frozen wire-protocol v1 byte contract
 
