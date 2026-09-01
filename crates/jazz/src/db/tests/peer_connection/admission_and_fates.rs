@@ -2462,11 +2462,12 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     let scope = server
         .node()
         .borrow()
-        .authorization_support_scope(
+        .authorization_support_scope_for_session(
             alice,
+            Some(&a_claims),
             &PermissionAdviceAction::Insert {
                 table: "todos".to_owned(),
-                cells: candidate_cells,
+                cells: candidate_cells.clone(),
             },
         )
         .expect("editor policy has a support clause");
@@ -2475,7 +2476,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         .into_iter()
         .next()
         .expect("editor policy produces one support subscription");
-    let subscription = SubscriptionKey {
+    let a_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: scope.options.read_view_key(),
@@ -2495,7 +2496,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("A terminal proof remains valid after B updates the legacy cache");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims.clone())),
             "the maintained terminal support receiver retains A rather than B's sibling snapshot"
         );
@@ -2506,6 +2507,28 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     a_subscriber
         .borrow_mut()
         .update_authenticated_session_claims(b_claims.clone());
+    let b_scope = server
+        .node()
+        .borrow()
+        .authorization_support_scope_for_session(
+            alice,
+            Some(&b_claims),
+            &PermissionAdviceAction::Insert {
+                table: "todos".to_owned(),
+                cells: candidate_cells.clone(),
+            },
+        )
+        .expect("viewer policy has the same support clause under its own snapshot");
+    let (b_shape, b_binding) = b_scope
+        .subscriptions
+        .into_iter()
+        .next()
+        .expect("viewer policy produces one support subscription");
+    let b_subscription = SubscriptionKey {
+        shape_id: b_shape.shape_id(),
+        binding_id: b_binding.binding_id(),
+        read_view: b_scope.options.read_view_key(),
+    };
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
@@ -2520,7 +2543,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("a refreshed terminal proof replaces the stale support receiver");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(b_subscription),
             Some((alice, b_claims)),
             "terminal support reuse is keyed by exact immutable claims, not just its query key"
         );
@@ -2542,7 +2565,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("the next refreshed terminal proof replaces the stale support receiver");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims)),
             "each claim revision receives a fresh terminal support receiver"
         );

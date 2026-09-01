@@ -2036,13 +2036,14 @@ fn served_table_rows_via_relay(
         },
     )));
     // A relay sends its downstream session's immutable policy binding to its
-    // upstream. Only the dedicated trusted-backend link may carry that
-    // delegated binding; an ordinary SYSTEM session must not be able to
-    // self-assert another subject's claims.
-    let core_subscriber = server.accept_subscriber_with_trust(
+    // upstream. Model the same scope-isolated admission that the serving
+    // boundary performs in production: a generic SYSTEM/trusted link cannot
+    // self-assert this subject's claims.
+    let core_subscriber = server.server.accept_scope_isolated_relay_subscriber(
         core_transport,
-        AuthorSubject::SYSTEM,
-        CommitUnitTrust::TrustedBackend,
+        author,
+        downstream_claims.clone(),
+        1,
     );
     let (client_transport, relay_sub_transport) = duplex();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
