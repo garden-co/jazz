@@ -498,6 +498,10 @@ async fn top_by_distinguishes_finite_max_from_unbounded_limit() {
 }
 
 fn recursive_reach_graph() -> GraphBuilder {
+    recursive_reach_graph_with_limit(16)
+}
+
+fn recursive_reach_graph_with_limit(max_iters: usize) -> GraphBuilder {
     let seed = GraphBuilder::table("edges").project(["src", "dst"]);
     let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
     let frontier = GraphBuilder::frontier_source("frontier", reach_descriptor());
@@ -505,7 +509,66 @@ fn recursive_reach_graph() -> GraphBuilder {
         crate::ivm::ProjectField::renamed("left.src", "src"),
         crate::ivm::ProjectField::renamed("right.dst", "dst"),
     ]);
-    GraphBuilder::recursive(seed, step, "frontier", 16)
+    GraphBuilder::recursive(seed, step, "frontier", max_iters)
+}
+
+async fn write_edge_rows(
+    storage: &impl OrderedKvStorage,
+    edges: &RecordDescriptor,
+    rows: &[(u64, u64, u64)],
+) {
+    let store = RecordStore::new(storage, "edges", edges);
+    let operations = rows
+        .iter()
+        .map(|(id, src, dst)| {
+            let record = edges
+                .create(&[Value::U64(*id), Value::U64(*src), Value::U64(*dst)])
+                .unwrap();
+            let encoded = crate::records::encode_variant_record(0, &record);
+            let key = id.to_be_bytes();
+            store.set(&key, &encoded)
+        })
+        .collect();
+    store.write_many(operations).await.unwrap();
+}
+
+fn edge_table_delta(edges: RecordDescriptor, rows: &[(u64, u64, u64)]) -> TableDelta {
+    TableDelta {
+        variant_tag: 0,
+        table: "edges".to_owned(),
+        descriptor: edges,
+        deltas: rows
+            .iter()
+            .map(|(id, src, dst)| RecordDelta {
+                record: edges
+                    .create(&[Value::U64(*id), Value::U64(*src), Value::U64(*dst)])
+                    .unwrap()
+                    .into(),
+                weight: 1,
+            })
+            .collect(),
+    }
+}
+
+fn recursive_state_snapshot(
+    runtime: &IvmRuntime,
+    node: NodeId,
+) -> (Vec<RecordDelta>, bool, Option<u64>) {
+    let key = OperatorStateKey {
+        scope: ScopeId::root(),
+        node,
+    };
+    let Some(OperatorState::Recursive(state)) = runtime.operator_states.get(&key) else {
+        panic!("recursive state missing for {node:?}");
+    };
+    let state = state.value();
+    let mut accumulated = state.accumulated_deltas();
+    accumulated.sort_by(|left, right| left.record.cmp(&right.record));
+    (
+        accumulated,
+        state.step_arrangements_hydrated(),
+        state.hydrated_input_generation(),
+    )
 }
 
 fn recursive_reach_from_graph(src: u64) -> GraphBuilder {
@@ -2150,6 +2213,151 @@ async fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_ch
             .all(|key| key.scope == ScopeId::root()),
         "recursive recomputation should not leave per-context child state in runtime"
     );
+}
+
+/// A positive recursive update is visible only once the tick is ready.  The
+/// public subscription receives the seed edge and its newly derived path as a
+/// single committed delta, with no duplicate delivery.
+#[futures_test::test]
+async fn recursive_positive_tick_commits_new_facts_exactly_once() {
+    let schema = edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+    let edges = schema.table("edges").unwrap().record_schema();
+    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+
+    let subscription = runtime
+        .subscribe_one_sink(recursive_reach_graph_with_limit(16), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+
+    let metrics = runtime
+        .tick(vec![edge_table_delta(edges, &[(2, 2, 3)])], &storage)
+        .await
+        .unwrap();
+    assert_eq!(metrics.table_delta_records, 1);
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ]
+    );
+    assert!(
+        subscription.try_recv().is_err(),
+        "one positive recursive tick must publish exactly one notification"
+    );
+}
+
+/// The positive path accepts new facts before discovering that the next
+/// iteration exceeds its safety bound.  A semantic failure must not commit
+/// that partial closure, advance the tick/frontier counters, or retain
+/// changed arrangement/memo accounting.
+#[futures_test::test]
+async fn recursive_iteration_limit_rolls_back_partial_positive_tick() {
+    // This runtime-level seam is intentional: Database fail-stop makes the
+    // post-error operator state inaccessible, while rollback must cover the
+    // closure, arrangement, memo, and logical-time state together.
+    let schema = edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+    let edges = schema.table("edges").unwrap().record_schema();
+    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+
+    let subscription = runtime
+        .subscribe_one_sink(recursive_reach_graph_with_limit(1), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+
+    let output = runtime.subscription_output_node(subscription.id()).unwrap();
+    let before_state = recursive_state_snapshot(&runtime, output);
+    let before_stats = runtime.stats();
+    let before_tick = runtime.current_tick;
+    let before_table_frontiers = runtime.table_frontiers.clone();
+
+    let error = runtime
+        .tick(
+            vec![edge_table_delta(edges, &[(2, 2, 3), (3, 3, 4)])],
+            &storage,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        IvmRuntimeError::RecursiveIterationLimit { max_iters: 1, .. }
+    ));
+
+    assert_eq!(
+        recursive_state_snapshot(&runtime, output),
+        before_state,
+        "failed recursion must retain the last committed closure and arrangement state"
+    );
+    assert_eq!(
+        runtime.stats(),
+        before_stats,
+        "failed recursion must not retain staged arrangement or memo accounting"
+    );
+    assert_eq!(
+        runtime.current_tick, before_tick,
+        "a failed recursive tick must not advance logical time"
+    );
+    assert_eq!(
+        runtime.table_frontiers, before_table_frontiers,
+        "a failed recursive tick must not advance input frontiers"
+    );
+    assert!(
+        subscription.try_recv().is_err(),
+        "a failed recursive tick must not expose staged facts"
+    );
+}
+
+/// A large existing closure is a scale canary for the positive path: adding an
+/// isolated edge must process only the new frontier, not feed every old fact
+/// back through the recursive step.
+#[futures_test::test]
+async fn recursive_positive_tick_does_not_reprocess_full_existing_closure() {
+    let schema = edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+    let edges = schema.table("edges").unwrap().record_schema();
+    let rows = (1..=48).map(|id| (id, id, id + 1)).collect::<Vec<_>>();
+    write_edge_rows(&storage, &edges, &rows).await;
+
+    let subscription = runtime
+        .subscribe_one_sink(recursive_reach_graph_with_limit(64), &storage)
+        .await
+        .unwrap();
+    let initial = subscription.recv().unwrap();
+    assert!(
+        initial.deltas.len() > 100,
+        "fixture must establish a meaningfully large recursive closure"
+    );
+
+    let metrics = runtime
+        .tick(
+            vec![edge_table_delta(edges, &[(10_000, 10_000, 10_001)])],
+            &storage,
+        )
+        .await
+        .unwrap();
+    assert!(
+        metrics.records_processed < 128,
+        "isolated positive edge should not reprocess the full closure: {} records",
+        metrics.records_processed
+    );
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(10_000), Value::U64(10_001)], 1)]
+    );
+    assert!(subscription.try_recv().is_err());
 }
 
 #[futures_test::test]
