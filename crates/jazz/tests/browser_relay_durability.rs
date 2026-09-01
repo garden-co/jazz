@@ -119,10 +119,12 @@ use common::{compile_schema, exists, outer_eq, session_eq};
 /// a relay receipt is not allowed to serve a downstream subscription in the
 /// same turn in which it received its authority update.
 macro_rules! pump_two_browser_relays {
-    ($owner_foreground:expr, $owner_worker:expr, $core:expr, $guest_worker:expr, $guest_foreground:expr, $label:expr) => {{
+    ($owner_foreground:expr, $owner_worker:expr, $owner_edge:expr, $core:expr, $guest_edge:expr, $guest_worker:expr, $guest_foreground:expr, $label:expr) => {{
         $owner_foreground.tick().expect($label);
         $owner_worker.tick().expect($label);
+        $owner_edge.tick().expect($label);
         $core.tick().expect($label);
+        $guest_edge.tick().expect($label);
         $guest_worker.tick().expect($label);
         $guest_foreground.tick().expect($label);
     }};
@@ -2183,8 +2185,8 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
 /// complete browser path, rather than a direct client/core shortcut:
 ///
 /// ```text
-/// owner foreground -> owner worker -> Edge -> Core -> Edge -> guest worker -> guest foreground
-/// guest foreground -> guest worker -> Edge -> Core -> Edge -> owner worker -> owner foreground
+/// owner foreground -> owner worker -> owner edge -> Core -> guest edge -> guest worker -> guest foreground
+/// guest foreground -> guest worker -> guest edge -> Core -> owner edge -> owner worker -> owner foreground
 /// ```
 ///
 /// In particular, the owner's live message subscription must be refreshed by
@@ -2196,27 +2198,49 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
     let guest = AuthorSubject::for_test_bytes([0xc2; 16]);
     let owner_foreground = open_db(0x61, owner, &schema);
     let owner_worker = open_db(0x62, owner, &schema);
-    let guest_worker = open_db(0x63, guest, &schema);
-    let guest_foreground = open_db(0x64, guest, &schema);
-    let core = open_core(0x65, &schema);
+    let owner_edge = open_db(0x63, AuthorSubject::SYSTEM, &schema);
+    let guest_edge = open_db(0x64, AuthorSubject::SYSTEM, &schema);
+    let guest_worker = open_db(0x65, guest, &schema);
+    let guest_foreground = open_db(0x66, guest, &schema);
+    let core = open_core(0x67, &schema);
     owner_foreground.set_non_durable_client();
     guest_foreground.set_non_durable_client();
     owner_worker.set_relay_authority_session_owner_for_test();
     guest_worker.set_relay_authority_session_owner_for_test();
+    owner_edge.set_relay_authority_session_owner_for_test();
+    guest_edge.set_relay_authority_session_owner_for_test();
 
-    let (owner_foreground_transport, owner_worker_transport) = duplex();
+    let (owner_foreground_transport, owner_worker_downstream_transport) = duplex();
     let _owner_foreground_upstream =
         block_on(owner_foreground.connect_upstream(owner_foreground_transport));
-    let _owner_worker_subscriber = owner_worker.accept_subscriber(owner_worker_transport, owner);
-    let (_owner_worker_upstream, _owner_core_subscriber) =
-        connect_scope_isolated_worker_to_core!(owner_worker, core, owner);
+    let _owner_worker_subscriber =
+        owner_worker.accept_subscriber(owner_worker_downstream_transport, owner);
+    let (owner_worker_transport, owner_edge_transport) = duplex();
+    let _owner_worker_upstream = block_on(owner_worker.connect_upstream(owner_worker_transport));
+    let _owner_edge_subscriber = owner_edge.accept_scope_isolated_relay_subscriber_for_test(
+        owner_edge_transport,
+        owner,
+        BTreeMap::new(),
+        1,
+    );
+    let (_owner_edge_upstream, _owner_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(owner_edge, core, owner);
 
-    let (guest_foreground_transport, guest_worker_transport) = duplex();
+    let (guest_foreground_transport, guest_worker_downstream_transport) = duplex();
     let _guest_foreground_upstream =
         block_on(guest_foreground.connect_upstream(guest_foreground_transport));
-    let _guest_worker_subscriber = guest_worker.accept_subscriber(guest_worker_transport, guest);
-    let (_guest_worker_upstream, _guest_core_subscriber) =
-        connect_scope_isolated_worker_to_core!(guest_worker, core, guest);
+    let _guest_worker_subscriber =
+        guest_worker.accept_subscriber(guest_worker_downstream_transport, guest);
+    let (guest_worker_transport, guest_edge_transport) = duplex();
+    let _guest_worker_upstream = block_on(guest_worker.connect_upstream(guest_worker_transport));
+    let _guest_edge_subscriber = guest_edge.accept_scope_isolated_relay_subscriber_for_test(
+        guest_edge_transport,
+        guest,
+        BTreeMap::new(),
+        1,
+    );
+    let (_guest_edge_upstream, _guest_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(guest_edge, core, guest);
 
     let room = owner_foreground
         .insert(
@@ -2232,7 +2256,9 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
         pump_two_browser_relays!(
             owner_foreground,
             owner_worker,
+            owner_edge,
             core,
+            guest_edge,
             guest_worker,
             guest_foreground,
             "settle room"
@@ -2256,7 +2282,9 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
             pump_two_browser_relays!(
                 owner_foreground,
                 owner_worker,
+                owner_edge,
                 core,
+                guest_edge,
                 guest_worker,
                 guest_foreground,
                 "settle room membership"
@@ -2279,7 +2307,9 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
         pump_two_browser_relays!(
             owner_foreground,
             owner_worker,
+            owner_edge,
             core,
+            guest_edge,
             guest_worker,
             guest_foreground,
             "establish owner message coverage"
@@ -2304,7 +2334,9 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
         pump_two_browser_relays!(
             owner_foreground,
             owner_worker,
+            owner_edge,
             core,
+            guest_edge,
             guest_worker,
             guest_foreground,
             "deliver guest message to owner foreground"
