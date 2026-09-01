@@ -265,7 +265,6 @@ struct ServerSessionState {
     connection: ShellPeerConnection,
     transport: SharedWireTransport,
     auxiliary_pump: crate::db::PeerIoPump,
-    negotiated_features: crate::wire::WireFeatures,
     identity: AuthorSubject,
     epoch: u64,
     resume_status: ServerResumeStatus,
@@ -297,8 +296,6 @@ pub(super) struct ServerUpstreamIo {
     pub(super) transport: SharedWireTransport,
     pub(super) pump: crate::db::PeerIoPump,
     pub(super) connection_id: u64,
-    pub(super) protocol_version: u16,
-    pub(super) features: crate::wire::WireFeatures,
 }
 
 impl WireTransport for SharedWireTransport {
@@ -1220,7 +1217,6 @@ impl InMemoryServerShell {
             connection,
             transport,
             auxiliary_pump,
-            negotiated_features,
             identity,
             epoch: 1,
             resume_status: ServerResumeStatus::Fresh,
@@ -1267,8 +1263,6 @@ impl InMemoryServerShell {
             transport,
             pump,
             connection_id,
-            protocol_version,
-            features,
         }
     }
 
@@ -1340,7 +1334,6 @@ impl InMemoryServerShell {
             connection,
             transport,
             auxiliary_pump,
-            negotiated_features: crate::wire::current_wire_features(),
             identity: resume.identity,
             epoch: resume.resume_token.saturating_add(1),
             resume_status: ServerResumeStatus::Resumed,
@@ -1429,12 +1422,9 @@ impl InMemoryServerShell {
             self.metrics.frames_received += 1;
             self.metrics.bytes_received += frame.len() as u64;
             let state = self.session_state(session)?;
-            let canonical = crate::db::block_on(
-                state
-                    .auxiliary_pump
-                    .route_incoming_wire_frame(frame, state.negotiated_features),
-            )
-            .map_err(ShellError::Transport)?;
+            let canonical =
+                crate::db::block_on(state.auxiliary_pump.route_incoming_wire_frame(frame))
+                    .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
                 state.transport.queues.borrow_mut().inbound.push_back(frame);
             }
@@ -1456,7 +1446,7 @@ impl InMemoryServerShell {
             let state = self.session_state(session)?;
             let canonical = state
                 .auxiliary_pump
-                .route_incoming_wire_frame(frame, state.negotiated_features)
+                .route_incoming_wire_frame(frame)
                 .await
                 .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
@@ -1517,11 +1507,7 @@ impl InMemoryServerShell {
             .collect::<Vec<_>>();
         while let Some(frame) = state
             .auxiliary_pump
-            .take_outbound_wire_frame(
-                crate::wire::WIRE_PROTOCOL_VERSION,
-                state.negotiated_features,
-                None,
-            )
+            .take_outbound_wire_frame()
             .map_err(ShellError::Transport)?
         {
             frames.push(frame);

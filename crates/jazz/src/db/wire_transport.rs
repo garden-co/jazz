@@ -16,9 +16,9 @@ use crate::protocol_limits::{
 };
 use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
-    WireErrorCode, WireFeatures, WireFrame, WireMessageFragment, WireRetry, WireSession,
-    WireStreamDecoder, WireStreamEncoder, WireTransport, current_wire_features, decode_frame,
-    decode_sync_message_for_features, encode_frame, encode_sync_message_for_features,
+    WireErrorCode, WireFeatures, WireFrame, WireInboundContext, WireMessageFragment, WireRetry,
+    WireSession, WireStreamDecoder, WireStreamEncoder, WireTransport, admit_complete_envelope,
+    current_wire_features, decode_frame, encode_frame, encode_sync_message_for_features,
 };
 
 const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
@@ -238,9 +238,7 @@ impl LogicalMessageReassembler {
 /// Converts logical sync messages to negotiated bounded wire frames and back.
 pub struct WireTransportAdapter<T> {
     inner: T,
-    protocol_version: u16,
-    features: WireFeatures,
-    session: Option<WireSession>,
+    inbound_context: WireInboundContext,
     session_context: Option<ConnectionSessionContext>,
     outbound_stream: WireStreamEncoder,
     inbound_stream: WireStreamDecoder,
@@ -284,9 +282,7 @@ where
             .expect("negotiated wire compression must be compiled into this binary");
         Self {
             inner,
-            protocol_version,
-            features,
-            session,
+            inbound_context: WireInboundContext::new(protocol_version, features, session),
             session_context,
             outbound_stream,
             inbound_stream,
@@ -349,99 +345,11 @@ where
         Ok(())
     }
 
-    fn validate_inbound_session(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
-        let Some(expected) = &self.session else {
-            return Ok(());
-        };
-        let Some(actual) = &envelope.session else {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterAuth,
-                "missing wire session metadata",
-            ));
-        };
-        if actual.session_id != expected.session_id {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterResume,
-                "wire session id does not match this connection",
-            ));
-        }
-        if actual.identity != expected.identity {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterAuth,
-                "wire session identity does not match this connection",
-            ));
-        }
-        if actual.epoch < expected.epoch {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterResume,
-                "stale wire session epoch",
-            ));
-        }
-        if actual.epoch != expected.epoch {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterResume,
-                "wire session epoch does not match this connection",
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_inbound_metadata(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
-        if envelope.protocol_version != self.protocol_version {
-            return Err(WireError::new(
-                WireErrorCode::UnsupportedProtocolVersion,
-                WireRetry::AfterResume,
-                format!(
-                    "wire message protocol version {} does not match negotiated {}",
-                    envelope.protocol_version, self.protocol_version
-                ),
-            ));
-        }
-        let unnegotiated = envelope.features & !self.features;
-        if unnegotiated != 0 {
-            return Err(WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::AfterResume,
-                format!("wire message declares unnegotiated features {unnegotiated:#x}"),
-            ));
-        }
-        Ok(())
-    }
-
     fn decode_inbound_envelope(
         &mut self,
         envelope: WireEnvelope,
     ) -> Result<SyncMessage, WireError> {
-        self.validate_inbound_metadata(&envelope)?;
-        self.validate_inbound_session(&envelope)?;
-        let payload = self
-            .inbound_stream
-            .decode_message_borrowed(&envelope.payload, envelope.features)
-            .map_err(|message| {
-                WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
-            })?;
-        validate_logical_message_len(payload.len()).map_err(|message| {
-            WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
-        })?;
-        let message =
-            decode_sync_message_for_features(&payload, self.features).map_err(|error| {
-                WireError::new(
-                    error.code,
-                    error.retry,
-                    format!(
-                        "{}; payload_bytes={}; payload_hex={}",
-                        error.message,
-                        payload.len(),
-                        hex_diagnostic(&payload)
-                    ),
-                )
-            })?;
-        Ok(message)
+        admit_complete_envelope(&self.inbound_context, &mut self.inbound_stream, envelope)
     }
 
     /// Strict receive mode for bootstrap-only exchanges. Unlike a live peer,
@@ -471,15 +379,9 @@ where
                 }
                 WireFrame::MessageFragment(fragment) => {
                     let fragment_message_id = fragment.message_id;
-                    let metadata = WireEnvelope {
-                        protocol_version: fragment.protocol_version,
-                        features: fragment.features,
-                        session: fragment.session.clone(),
-                        payload: Vec::new(),
-                    };
-                    self.validate_inbound_metadata(&metadata)?;
-                    self.validate_inbound_session(&metadata)?;
-                    if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0
+                    self.inbound_context.validate_fragment_metadata(&fragment)?;
+                    if self.inbound_context.negotiated_features() & FEATURE_MESSAGE_FRAGMENTATION
+                        == 0
                         || fragment.features & FEATURE_MESSAGE_FRAGMENTATION == 0
                     {
                         return Err(WireError::new(
@@ -530,7 +432,8 @@ where
         // until that bounded backlog flushes: callers retain/retry an
         // `Err(Backpressure)` message at their semantic boundary.
         self.flush_pending_outbound()?;
-        let payload = match encode_sync_message_for_features(&message, self.features) {
+        let negotiated_features = self.inbound_context.negotiated_features();
+        let payload = match encode_sync_message_for_features(&message, negotiated_features) {
             Ok(payload) => payload,
             Err(error) => {
                 self.send_wire_error(error);
@@ -544,18 +447,22 @@ where
             Ok(payload) => payload,
             Err(message) => return Err(TransportError::Failed(message)),
         };
-        let active_features = (self.features
+        let active_features = (negotiated_features
             & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD))
             | self.outbound_stream.active_feature();
-        let mut envelope = WireEnvelope::new(self.protocol_version, active_features, payload);
-        if let Some(session) = self.session.clone() {
+        let mut envelope = WireEnvelope::new(
+            self.inbound_context.expected_protocol_version(),
+            active_features,
+            payload,
+        );
+        if let Some(session) = self.inbound_context.expected_session().cloned() {
             envelope = envelope.with_session(session);
         }
         match encode_frame(&WireFrame::Message(envelope.clone())) {
             Ok(frame) if frame.len() <= WIRE_FRAGMENT_PAYLOAD_BYTES => {
                 self.send_encoded_frames(vec![frame])
             }
-            Ok(_) if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0 => {
+            Ok(_) if negotiated_features & FEATURE_MESSAGE_FRAGMENTATION == 0 => {
                 Err(TransportError::Failed(
                     "peer did not negotiate logical-message fragmentation".to_owned(),
                 ))
@@ -643,21 +550,12 @@ where
                 },
                 WireFrame::MessageFragment(fragment) => {
                     let fragment_message_id = fragment.message_id;
-                    let metadata = WireEnvelope {
-                        protocol_version: fragment.protocol_version,
-                        features: fragment.features,
-                        session: fragment.session.clone(),
-                        payload: Vec::new(),
-                    };
-                    if let Err(error) = self.validate_inbound_metadata(&metadata) {
+                    if let Err(error) = self.inbound_context.validate_fragment_metadata(&fragment) {
                         self.send_wire_error(error);
                         continue;
                     }
-                    if let Err(error) = self.validate_inbound_session(&metadata) {
-                        self.send_wire_error(error);
-                        continue;
-                    }
-                    if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0
+                    if self.inbound_context.negotiated_features() & FEATURE_MESSAGE_FRAGMENTATION
+                        == 0
                         || fragment.features & FEATURE_MESSAGE_FRAGMENTATION == 0
                     {
                         self.send_wire_error(WireError::new(
@@ -695,23 +593,11 @@ where
         None
     }
 
+    fn wire_inbound_context(&self) -> Option<WireInboundContext> {
+        Some(self.inbound_context.clone())
+    }
+
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
         self.session_context
     }
-}
-
-fn hex_diagnostic(bytes: &[u8]) -> String {
-    if bytes.len() <= 128 {
-        return hex_prefix(bytes, bytes.len());
-    }
-    hex_prefix(bytes, 16)
-}
-
-fn hex_prefix(bytes: &[u8], max: usize) -> String {
-    bytes
-        .iter()
-        .take(max)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
 }

@@ -80,6 +80,14 @@ fn retained_relay_obligations(state: &ChunkDemandState) -> usize {
     state.relay_chunk_obligations
 }
 
+fn test_wire_inbound_context() -> Option<Rc<crate::wire::WireInboundContext>> {
+    Some(Rc::new(crate::wire::WireInboundContext::new(
+        WIRE_PROTOCOL_VERSION,
+        crate::wire::current_wire_features(),
+        None,
+    )))
+}
+
 #[test]
 fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tick() {
     crate::db::block_on(async {
@@ -115,12 +123,14 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
             destination_database.local_chunk_reader(),
             1,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let upstream = PeerIoPump::new(
             resolver.clone(),
             source_database.local_chunk_reader(),
             2,
             PeerIoPumpRole::Subscriber,
+            test_wire_inbound_context(),
         );
         let provider = groove::chunks::StorageChunkProvider::with_resolver(
             destination.clone(),
@@ -138,37 +148,16 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
             Poll::Pending
         ));
 
-        let features = crate::wire::current_wire_features();
         assert!(
             upstream
-                .route_incoming_wire_frame(
-                    downstream
-                        .take_outbound_wire_frame(
-                            crate::wire::WIRE_PROTOCOL_VERSION,
-                            features,
-                            None,
-                        )
-                        .unwrap()
-                        .unwrap(),
-                    features,
-                )
+                .route_incoming_wire_frame(downstream.take_outbound_wire_frame().unwrap().unwrap(),)
                 .await
                 .unwrap()
                 .is_none()
         );
         assert!(
             downstream
-                .route_incoming_wire_frame(
-                    upstream
-                        .take_outbound_wire_frame(
-                            crate::wire::WIRE_PROTOCOL_VERSION,
-                            features,
-                            None,
-                        )
-                        .unwrap()
-                        .unwrap(),
-                    features,
-                )
+                .route_incoming_wire_frame(upstream.take_outbound_wire_frame().unwrap().unwrap(),)
                 .await
                 .unwrap()
                 .is_none()
@@ -203,6 +192,7 @@ fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_wire_frame() {
         database.local_chunk_reader(),
         23,
         PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
     );
     let response_count = 10;
     let chunk_bytes = vec![0x5a; groove::large_values::LEAF_MAX_BYTES];
@@ -224,7 +214,7 @@ fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_wire_frame() {
     let mut observed_request_ids = Vec::new();
     for _ in 0..response_count {
         let frame = subscriber
-            .take_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+            .take_outbound_wire_frame()
             .unwrap()
             .expect("each queued response has its own wire frame");
         assert!(
@@ -249,12 +239,7 @@ fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_wire_frame() {
         observed_request_ids,
         (0..response_count).collect::<Vec<_>>()
     );
-    assert!(
-        subscriber
-            .take_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
-            .unwrap()
-            .is_none()
-    );
+    assert!(subscriber.take_outbound_wire_frame().unwrap().is_none());
 }
 
 #[test]
@@ -272,6 +257,7 @@ fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() 
         database.local_chunk_reader(),
         24,
         PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
     );
     let response_count = 32_u64;
     let chunk_bytes = vec![0x3c; groove::large_values::LEAF_MAX_BYTES];
@@ -294,13 +280,7 @@ fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() 
     let mut observed_request_ids = Vec::new();
     loop {
         let frames = subscriber
-            .take_outbound_wire_frames(
-                crate::wire::WIRE_PROTOCOL_VERSION,
-                features,
-                None,
-                8,
-                byte_budget,
-            )
+            .take_outbound_wire_frames(8, byte_budget)
             .unwrap();
         if frames.is_empty() {
             break;
@@ -352,6 +332,7 @@ fn dropping_the_last_suspended_consumer_cancels_unsent_chunk_demand() {
         database.local_chunk_reader(),
         9,
         PeerIoPumpRole::Upstream,
+        test_wire_inbound_context(),
     );
     let request = groove::chunks::ChunkRequest {
         object_hash: [4; 32],
@@ -383,6 +364,7 @@ fn failed_send_restore_keeps_its_relay_reservation_across_later_admission() {
         database.local_chunk_reader(),
         40,
         PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
     );
     let shared = ChunkRequestEntry {
         request_id: 0,
@@ -454,6 +436,7 @@ fn reserved_wire_chunk_request_retries_after_backpressure_without_changing_its_i
             database.local_chunk_reader(),
             47,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let mut pending = resolver.resolve(groove::chunks::ChunkRequest {
             object_hash: [47; 32],
@@ -468,14 +451,14 @@ fn reserved_wire_chunk_request_retries_after_backpressure_without_changing_its_i
 
         let features = crate::wire::current_wire_features();
         let mut first = pump
-            .reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+            .reserve_outbound_wire_frame()
             .unwrap()
             .expect("chunk request is reserved for the first send");
         let first_frame = first.take_frame();
         drop(first);
 
         let mut retry = pump
-            .reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+            .reserve_outbound_wire_frame()
             .unwrap()
             .expect("backpressured request remains reserved for retry");
         let retry_frame = retry.take_frame();
@@ -502,9 +485,7 @@ fn reserved_wire_chunk_request_retries_after_backpressure_without_changing_its_i
             "backpressure retries the exact same chunk request once"
         );
         assert!(
-            pump.reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
-                .unwrap()
-                .is_none(),
+            pump.reserve_outbound_wire_frame().unwrap().is_none(),
             "committing the retry consumes the request exactly once"
         );
         drop(pending);
@@ -527,6 +508,7 @@ fn reserved_wire_chunk_response_restores_its_relay_obligation_after_backpressure
         database.local_chunk_reader(),
         48,
         PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
     );
     let response = ChunkResponseEntry {
         request_id: 48,
@@ -538,9 +520,8 @@ fn reserved_wire_chunk_response_restores_its_relay_obligation_after_backpressure
         state.relay_chunk_obligations = 1;
     }
 
-    let features = crate::wire::current_wire_features();
     let mut first = pump
-        .reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+        .reserve_outbound_wire_frame()
         .unwrap()
         .expect("chunk response is reserved for the first send");
     let first_frame = first.take_frame();
@@ -552,7 +533,7 @@ fn reserved_wire_chunk_response_restores_its_relay_obligation_after_backpressure
     );
 
     let mut retry = pump
-        .reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+        .reserve_outbound_wire_frame()
         .unwrap()
         .expect("backpressured response remains reserved for retry");
     let retry_frame = retry.take_frame();
@@ -568,9 +549,7 @@ fn reserved_wire_chunk_response_restores_its_relay_obligation_after_backpressure
         "committing the retry releases the relay claim exactly once"
     );
     assert!(
-        pump.reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
-            .unwrap()
-            .is_none(),
+        pump.reserve_outbound_wire_frame().unwrap().is_none(),
         "the committed response is not replayed"
     );
 }
@@ -590,12 +569,14 @@ fn partial_drain_then_disconnect_releases_only_that_connections_obligations() {
         database.local_chunk_reader(),
         41,
         PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
     );
     let second = PeerIoPump::new(
         resolver.clone(),
         database.local_chunk_reader(),
         42,
         PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
     );
     for (connection, request_id) in [(41, 1), (41, 2), (42, 3), (42, 4)] {
         resolver.enqueue_relay(
@@ -689,6 +670,7 @@ fn completion_transfers_a_relay_reservation_until_the_response_is_acknowledged()
         database.local_chunk_reader(),
         46,
         PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
     );
     resolver.enqueue_relay(
         46,
@@ -731,6 +713,7 @@ fn disconnect_mid_batch_stops_later_lookup_and_drops_the_resumed_result() {
         local_chunks,
         subscriber.borrow().connection_epoch,
         PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
     );
     subscriber.borrow_mut().auxiliary_pump = pump.clone();
     let requests = [44_u64, 45]
@@ -883,12 +866,14 @@ fn five_concurrent_chunk_demands_are_delivered_in_two_decodable_batches() {
             destination_database.local_chunk_reader(),
             1,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let upstream = PeerIoPump::new(
             resolver.clone(),
             source_database.local_chunk_reader(),
             2,
             PeerIoPumpRole::Subscriber,
+            test_wire_inbound_context(),
         );
         let provider =
             groove::chunks::StorageChunkProvider::with_resolver(destination, Rc::new(resolver));
@@ -945,6 +930,7 @@ fn retryable_chunk_response_preserves_retry_delay_and_allows_a_later_fulfillment
             database.local_chunk_reader(),
             41,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let request = groove::chunks::ChunkRequest {
             object_hash: [0x41; 32],
@@ -1010,12 +996,14 @@ fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_deman
             database.local_chunk_reader(),
             10,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let successor = PeerIoPump::new(
             resolver.clone(),
             database.local_chunk_reader(),
             11,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let request = groove::chunks::ChunkRequest {
             object_hash: [6; 32],
@@ -1089,6 +1077,7 @@ fn a_later_registered_upstream_retries_demand_drained_by_a_disconnected_predeces
             database.local_chunk_reader(),
             12,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let request = groove::chunks::ChunkRequest {
             object_hash: [7; 32],
@@ -1112,6 +1101,7 @@ fn a_later_registered_upstream_retries_demand_drained_by_a_disconnected_predeces
             database.local_chunk_reader(),
             13,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let retried_id = match successor.take_outbound(64).unwrap() {
             SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
@@ -1166,6 +1156,7 @@ fn complete_auxiliary_response_with_wrong_protocol_version_is_rejected_without_r
             database.local_chunk_reader(),
             51,
             PeerIoPumpRole::Upstream,
+            test_wire_inbound_context(),
         );
         let mut pending = resolver.resolve(groove::chunks::ChunkRequest {
             object_hash: [0x51; 32],
@@ -1192,7 +1183,7 @@ fn complete_auxiliary_response_with_wrong_protocol_version_is_rejected_without_r
         )))
         .unwrap();
 
-        let route = pump.route_incoming_wire_frame(frame, features).await;
+        let route = pump.route_incoming_wire_frame(frame).await;
         let waker = futures::task::noop_waker();
         let mut context = Context::from_waker(&waker);
         let pending_is_unchanged =
@@ -1201,6 +1192,89 @@ fn complete_auxiliary_response_with_wrong_protocol_version_is_rejected_without_r
         assert!(
             route.is_err() && pending_is_unchanged,
             "a response from another protocol version must be rejected before resolving its chunk"
+        );
+    });
+}
+
+// This stays at the pump seam because bindings clone the connection's pump and
+// route auxiliary frames without re-entering the database's semantic interface.
+#[test]
+fn paired_wire_context_governs_auxiliary_frames_in_both_directions() {
+    crate::db::block_on(async {
+        let author = AuthorSubject::for_test_bytes([0x52; 16]);
+        let database = open_db(0x52, author, &schema());
+        let (client_bytes, _server_bytes) = super::byte_duplex_raw();
+        let features = FEATURE_SYNC_MESSAGE_PAYLOAD
+            | crate::wire::FEATURE_SESSION_FRAME
+            | crate::wire::FEATURE_AUXILIARY_CHUNKS;
+        let session = crate::wire::WireSession {
+            session_id: "auxiliary-context-session".to_owned(),
+            epoch: 7,
+            identity: Some(author),
+        };
+        let connection = database
+            .connect_upstream(Box::new(WireTransportAdapter::new(
+                client_bytes,
+                WIRE_PROTOCOL_VERSION,
+                features,
+                Some(session.clone()),
+            )))
+            .await;
+        let pump = connection.lock().await.io_pump();
+        let resolver = database.node.chunk_resolver.clone();
+        let mut pending = resolver.resolve(groove::chunks::ChunkRequest {
+            object_hash: [0x52; 32],
+            locator: groove::large_values::Locator::random(),
+        });
+
+        let outbound = pump
+            .take_outbound_wire_frame()
+            .unwrap()
+            .expect("pending chunk demand produces an auxiliary frame");
+        let WireFrame::Message(outbound_envelope) = crate::wire::decode_frame(&outbound).unwrap()
+        else {
+            panic!("auxiliary output must use a complete message envelope");
+        };
+        assert_eq!(outbound_envelope.protocol_version, WIRE_PROTOCOL_VERSION);
+        assert_eq!(outbound_envelope.features, features);
+        assert_eq!(outbound_envelope.session.as_ref(), Some(&session));
+        let request_id = match crate::wire::decode_sync_message_for_features(
+            &outbound_envelope.payload,
+            features,
+        )
+        .unwrap()
+        {
+            SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
+            message => panic!("expected auxiliary chunk request, got {message:?}"),
+        };
+
+        let payload = crate::wire::encode_sync_message_for_features(
+            &SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
+                responses: vec![ChunkResponseEntry {
+                    request_id,
+                    result: ChunkResponse::Found(vec![0x52]),
+                }],
+            }),
+            features,
+        )
+        .unwrap();
+        let mismatched_session = crate::wire::WireSession {
+            session_id: "different-auxiliary-session".to_owned(),
+            ..session
+        };
+        let inbound = encode_frame(&WireFrame::Message(
+            WireEnvelope::new(WIRE_PROTOCOL_VERSION, features, payload)
+                .with_session(mismatched_session),
+        ))
+        .unwrap();
+
+        let route = pump.route_incoming_wire_frame(inbound).await;
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(route.is_err(), "a mismatched wire session must be rejected");
+        assert!(
+            matches!(Pin::new(&mut pending).poll(&mut context), Poll::Pending),
+            "rejected session metadata must not resolve the pending chunk"
         );
     });
 }

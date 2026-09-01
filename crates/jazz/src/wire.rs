@@ -280,6 +280,128 @@ impl WireEnvelope {
     }
 }
 
+/// Immutable admission requirements for complete inbound envelopes.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct WireInboundContext {
+    expected_protocol_version: u16,
+    negotiated_features: WireFeatures,
+    expected_session: Option<WireSession>,
+}
+
+impl WireInboundContext {
+    pub(crate) fn new(
+        expected_protocol_version: u16,
+        negotiated_features: WireFeatures,
+        expected_session: Option<WireSession>,
+    ) -> Self {
+        Self {
+            expected_protocol_version,
+            negotiated_features,
+            expected_session,
+        }
+    }
+
+    pub(crate) fn expected_protocol_version(&self) -> u16 {
+        self.expected_protocol_version
+    }
+
+    pub(crate) fn negotiated_features(&self) -> WireFeatures {
+        self.negotiated_features
+    }
+
+    pub(crate) fn expected_session(&self) -> Option<&WireSession> {
+        self.expected_session.as_ref()
+    }
+
+    pub(crate) fn validate_envelope_metadata(
+        &self,
+        envelope: &WireEnvelope,
+    ) -> Result<(), WireError> {
+        self.validate_metadata(
+            envelope.protocol_version,
+            envelope.features,
+            envelope.session.as_ref(),
+        )
+    }
+
+    pub(crate) fn validate_fragment_metadata(
+        &self,
+        fragment: &WireMessageFragment,
+    ) -> Result<(), WireError> {
+        self.validate_metadata(
+            fragment.protocol_version,
+            fragment.features,
+            fragment.session.as_ref(),
+        )
+    }
+
+    fn validate_metadata(
+        &self,
+        protocol_version: u16,
+        features: WireFeatures,
+        session: Option<&WireSession>,
+    ) -> Result<(), WireError> {
+        if protocol_version != self.expected_protocol_version {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedProtocolVersion,
+                WireRetry::AfterResume,
+                format!(
+                    "wire message protocol version {protocol_version} does not match negotiated {}",
+                    self.expected_protocol_version
+                ),
+            ));
+        }
+        let unnegotiated = features & !self.negotiated_features;
+        if unnegotiated != 0 {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedFeature,
+                WireRetry::AfterResume,
+                format!("wire message declares unnegotiated features {unnegotiated:#x}"),
+            ));
+        }
+        let Some(expected) = &self.expected_session else {
+            return Ok(());
+        };
+        let Some(actual) = session else {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterAuth,
+                "missing wire session metadata",
+            ));
+        };
+        if actual.session_id != expected.session_id {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "wire session id does not match this connection",
+            ));
+        }
+        if actual.identity != expected.identity {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterAuth,
+                "wire session identity does not match this connection",
+            ));
+        }
+        if actual.epoch < expected.epoch {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "stale wire session epoch",
+            ));
+        }
+        if actual.epoch != expected.epoch {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "wire session epoch does not match this connection",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Structured wire error code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -334,6 +456,51 @@ impl WireError {
     }
 }
 
+/// Admit one decoded complete envelope through the canonical wire checks.
+pub(crate) fn admit_complete_envelope(
+    context: &WireInboundContext,
+    decoder: &mut WireStreamDecoder,
+    envelope: WireEnvelope,
+) -> Result<SyncMessage, WireError> {
+    context.validate_envelope_metadata(&envelope)?;
+    let payload = decoder
+        .decode_message_borrowed(&envelope.payload, envelope.features)
+        .map_err(|message| {
+            WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
+        })?;
+    validate_logical_message_len(payload.len()).map_err(|message| {
+        WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
+    })?;
+    decode_sync_message_for_features(&payload, context.negotiated_features).map_err(|error| {
+        WireError::new(
+            error.code,
+            error.retry,
+            format!(
+                "{}; payload_bytes={}; payload_hex={}",
+                error.message,
+                payload.len(),
+                hex_diagnostic(&payload)
+            ),
+        )
+    })
+}
+
+fn hex_diagnostic(bytes: &[u8]) -> String {
+    if bytes.len() <= 128 {
+        return hex_prefix(bytes, bytes.len());
+    }
+    hex_prefix(bytes, 16)
+}
+
+fn hex_prefix(bytes: &[u8], max: usize) -> String {
+    bytes
+        .iter()
+        .take(max)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// Serialize a wire frame with the canonical Jazz frame codec.
 pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, postcard::Error> {
     to_allocvec(frame)
@@ -366,21 +533,9 @@ pub fn validate_frame_for_artifact_corpus(
             .map(|_| ())
             .map_err(|error| format!("hello negotiation rejected: {}", error.message)),
         WireFrame::Message(envelope) => {
-            if envelope.protocol_version != WIRE_PROTOCOL_VERSION {
-                return Err(format!(
-                    "message protocol version {} does not match v{}",
-                    envelope.protocol_version, WIRE_PROTOCOL_VERSION
-                ));
-            }
-            let unnegotiated = envelope.features & !negotiated_features;
-            if unnegotiated != 0 {
-                return Err(format!(
-                    "message declares unnegotiated features {unnegotiated:#x}"
-                ));
-            }
+            let context = WireInboundContext::new(WIRE_PROTOCOL_VERSION, negotiated_features, None);
             let mut decoder = WireStreamDecoder::new(negotiated_features)?;
-            let payload = decoder.decode_message(&envelope.payload, envelope.features)?;
-            decode_sync_message_for_features(&payload, negotiated_features)
+            admit_complete_envelope(&context, &mut decoder, envelope)
                 .map(|_| ())
                 .map_err(|error| format!("semantic payload rejected: {}", error.message))
         }
