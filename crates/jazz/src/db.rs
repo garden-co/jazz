@@ -4405,6 +4405,35 @@ impl SubscriptionStream {
         }
     }
 
+    /// Return the receiver-local maintained snapshot after a settled event.
+    ///
+    /// This is intentionally crate-private: it is the one-shot counterpart to
+    /// consuming a public subscription stream, not another query evaluator.
+    /// A remote one-shot first owns a transient subscription, waits for its
+    /// exact authority-covered inputs to drive the local maintained graph to
+    /// settlement, then takes this snapshot before finalizing that owner.
+    ///
+    /// The authority may never provide a link/result snapshot here.  Its role
+    /// is limited to admitting the covered source closure; the receiver's
+    /// maintained graph remains the sole producer of application output.
+    #[allow(dead_code)] // The native public facade is feature-gated in the core-only build.
+    pub(crate) fn settled_receiver_local_snapshot(&self) -> Result<RelationSnapshot, Error> {
+        let state = self._state.borrow();
+        if !state.settled {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "remote one-shot attempted to materialize before subscription settlement",
+            ));
+        }
+        if state.snapshot_source != SubscriptionSnapshotSource::LocalMaintained {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "remote one-shot attempted to materialize a non-local maintained snapshot",
+            ));
+        }
+        Ok(state.snapshot.clone())
+    }
+
     /// Return the next queued materialized subscription event without waiting.
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         if self.terminated {
