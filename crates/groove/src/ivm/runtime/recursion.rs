@@ -21,7 +21,7 @@ use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
     RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, VariantProjection,
     VariantProjectionKey, consolidate_deltas, plan_expr_names, project_binding_source_deltas,
-    scan_bounds,
+    scan_bounds, touched_join_keys,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -607,15 +607,20 @@ pub(super) async fn recursive_delta(
     emitted.extend(seed_frontier.clone());
 
     let mut frontier = if has_table_delta {
-        // Table-side positive deltas must probe the existing recursive closure
-        // as well as any newly accepted seed rows. Step arrangements usually
-        // provide that old closure, but maintained routed graphs can have
-        // sibling recursive nodes whose arrangements are not populated on this
-        // exact path. Feeding the accumulated set is conservative: duplicate
-        // derivations are filtered by `accept_positive`.
+        // A changed table can extend paths which end at the changed row's
+        // join key. Select only those already-known paths; replaying every
+        // accumulated fact would turn an isolated edge into a full closure
+        // recomputation.
+        let mut deltas = seed_frontier.clone();
+        deltas.extend(affected_recursive_frontier(
+            &runtime,
+            recursive,
+            &recursive_state.accumulated_deltas(),
+            step,
+        )?);
         RecordDeltas {
             descriptor: output_desc,
-            deltas: recursive_state.accumulated_deltas(),
+            deltas: consolidate_deltas(deltas),
         }
     } else {
         RecordDeltas {
@@ -656,6 +661,174 @@ pub(super) async fn recursive_delta(
     }
 
     Ok(RecursiveDeltaProgress::Ready(consolidate_deltas(emitted)))
+}
+fn affected_recursive_frontier(
+    runtime: &GraphRuntimeView<'_>,
+    recursive: &RecursiveOp,
+    accumulated: &[RecordDelta],
+    step: NodeId,
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    let mut selected = HashSet::<Bytes>::default();
+    let mut pending = vec![step];
+    let mut seen = HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let graph_node = runtime
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        match &graph_node.descriptor.operator {
+            OpType::Join(join) => {
+                let [left, right] = graph_node.descriptor.inputs.as_slice() else {
+                    return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                };
+                let left_frontier = contains_frontier(runtime.graph, *left, &recursive.frontier)?;
+                let right_frontier = contains_frontier(runtime.graph, *right, &recursive.frontier)?;
+                if left_frontier != right_frontier {
+                    let (changed_input, changed_fields, frontier_fields, frontier_desc) =
+                        if left_frontier
+                            && contains_changed_table(runtime.graph, *right, runtime.table_deltas)?
+                        {
+                            (
+                                *right,
+                                plan_expr_names(&join.right_key),
+                                plan_expr_names(&join.left_key),
+                                join.left_descriptor,
+                            )
+                        } else if right_frontier
+                            && contains_changed_table(runtime.graph, *left, runtime.table_deltas)?
+                        {
+                            (
+                                *left,
+                                plan_expr_names(&join.left_key),
+                                plan_expr_names(&join.right_key),
+                                join.right_descriptor,
+                            )
+                        } else {
+                            pending.extend([*left, *right]);
+                            continue;
+                        };
+                    let mut touched = HashSet::<Vec<u8>>::default();
+                    collect_changed_join_keys(
+                        runtime.graph,
+                        changed_input,
+                        runtime.table_deltas,
+                        &changed_fields,
+                        join.comparison,
+                        &mut touched,
+                    )?;
+                    for delta in accumulated {
+                        for key in
+                            super::join::join_keys(&frontier_desc, delta.raw(), &frontier_fields)?
+                        {
+                            if touched.contains(key.as_slice()) {
+                                selected.insert(delta.record.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+                pending.extend([*left, *right]);
+            }
+            _ => pending.extend(graph_node.descriptor.inputs.iter().copied()),
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .map(|record| RecordDelta { record, weight: 1 })
+        .collect())
+}
+
+fn contains_frontier(
+    graph: &IvmGraph,
+    root: NodeId,
+    binding: &super::FrontierName,
+) -> Result<bool, IvmRuntimeError> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let graph_node = graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        if matches!(
+            &graph_node.descriptor.operator,
+            OpType::FrontierSource(source) if source.binding == *binding
+        ) {
+            return Ok(true);
+        }
+        pending.extend(graph_node.descriptor.inputs.iter().copied());
+    }
+    Ok(false)
+}
+
+fn contains_changed_table(
+    graph: &IvmGraph,
+    root: NodeId,
+    table_deltas: &[TableDelta],
+) -> Result<bool, IvmRuntimeError> {
+    let changed = table_deltas
+        .iter()
+        .filter(|delta| !delta.deltas.is_empty())
+        .map(|delta| delta.table.as_str())
+        .collect::<HashSet<_>>();
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let graph_node = graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        if matches!(
+            &graph_node.descriptor.operator,
+            OpType::TableSource(source) if changed.contains(source.table.as_str())
+        ) {
+            return Ok(true);
+        }
+        pending.extend(graph_node.descriptor.inputs.iter().copied());
+    }
+    Ok(false)
+}
+
+fn collect_changed_join_keys(
+    graph: &IvmGraph,
+    root: NodeId,
+    table_deltas: &[TableDelta],
+    fields: &[String],
+    comparison: crate::ivm::ValueComparison,
+    keys: &mut HashSet<Vec<u8>>,
+) -> Result<(), IvmRuntimeError> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let graph_node = graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        if let OpType::TableSource(source) = &graph_node.descriptor.operator {
+            for delta in table_deltas
+                .iter()
+                .filter(|delta| delta.table == source.table && !delta.deltas.is_empty())
+            {
+                keys.extend(touched_join_keys(
+                    &delta.descriptor,
+                    fields,
+                    &delta.deltas,
+                    comparison,
+                )?);
+            }
+        }
+        pending.extend(graph_node.descriptor.inputs.iter().copied());
+    }
+    Ok(())
 }
 
 fn has_table_delta_for_cached_tables(

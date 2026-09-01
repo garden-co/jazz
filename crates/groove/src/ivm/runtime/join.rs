@@ -43,13 +43,32 @@ pub(super) fn touched_join_keys(
 pub(super) struct JoinState;
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct AntiJoinState;
+pub(super) struct ArrangementState {
+    /// Immutable base buckets are shared between evaluator snapshots. Updates
+    /// retain only touched buckets in the overlay, rather than cloning the
+    /// complete join index.
+    index: Rc<JoinIndex>,
+    overlay: Rc<HashMap<JoinKey, Option<JoinBucket>>>,
+}
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct ArrangementState {
-    /// key -> record multiset. Records are kept as encoded bytes so probing can
-    /// build output records without rehydrating whole tables.
-    index: Rc<JoinIndex>,
+pub(super) struct AntiJoinState;
+
+enum JoinLookup<'a> {
+    Arrangement(&'a ArrangementState),
+    Index(&'a JoinIndex),
+}
+
+impl JoinLookup<'_> {
+    fn bucket(&self, key: &JoinKey) -> Option<&JoinBucket> {
+        match self {
+            Self::Arrangement(arrangement) => match arrangement.overlay.get(key) {
+                Some(bucket) => bucket.as_ref(),
+                None => arrangement.index.get(key),
+            },
+            Self::Index(index) => index.get(key),
+        }
+    }
 }
 
 impl JoinState {
@@ -169,7 +188,7 @@ impl JoinState {
                 &mut output,
                 &context,
                 &keyed_left_delta,
-                &right_arrangement.value().index,
+                &JoinLookup::Arrangement(right_arrangement.value()),
                 JoinProbeSide::LeftDelta,
                 1,
             )?;
@@ -190,7 +209,7 @@ impl JoinState {
             &mut output,
             &context,
             &keyed_left_delta,
-            &right_arrangement.value().index,
+            &JoinLookup::Arrangement(right_arrangement.value()),
             JoinProbeSide::LeftDelta,
             1,
         )?;
@@ -198,7 +217,7 @@ impl JoinState {
             &mut output,
             &context,
             &keyed_right_delta,
-            &left_arrangement.value().index,
+            &JoinLookup::Arrangement(left_arrangement.value()),
             JoinProbeSide::RightDelta,
             1,
         )?;
@@ -210,7 +229,7 @@ impl JoinState {
             &mut output,
             &context,
             &keyed_right_delta,
-            &left_delta_index,
+            &JoinLookup::Index(&left_delta_index),
             JoinProbeSide::RightDelta,
             -1,
         )?;
@@ -455,43 +474,50 @@ impl ArrangementState {
         let mut index = HashMap::default();
         for key in keys {
             let key = JoinKey::from_slice(key);
-            if let Some(bucket) = self.index.get(&key) {
+            if let Some(bucket) = self.bucket(&key) {
                 index.insert(key, bucket.clone());
             }
         }
         Self {
             index: Rc::new(index),
+            overlay: Rc::default(),
         }
     }
 
     pub(super) fn replace_keys<'a>(
         &mut self,
         keys: impl IntoIterator<Item = &'a Vec<u8>>,
-        mut replacement: Self,
+        replacement: Self,
     ) {
+        let overlay = Rc::make_mut(&mut self.overlay);
         for key in keys {
             let key = JoinKey::from_slice(key);
-            if let Some(bucket) = Rc::make_mut(&mut replacement.index).remove(&key) {
-                Rc::make_mut(&mut self.index).insert(key, bucket);
-            } else {
-                Rc::make_mut(&mut self.index).remove(&key);
-            }
+            overlay.insert(key.clone(), replacement.bucket(&key).cloned());
         }
     }
 
     pub(super) fn row_count(&self) -> usize {
-        self.index
-            .values()
+        let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
+        keys.extend(self.overlay.keys().cloned());
+        keys.into_iter()
+            .filter_map(|key| self.bucket(&key))
             .map(|bucket| bucket.values().filter(|weight| **weight != 0).count())
             .sum()
     }
 
     pub(super) fn encoded_bytes(&self) -> usize {
-        self.index
-            .iter()
-            .map(|(key, bucket)| {
-                key.len() + bucket.keys().map(|record| record.len()).sum::<usize>()
+        let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
+        keys.extend(self.overlay.keys().cloned());
+        keys.into_iter()
+            .filter_map(|key| {
+                self.bucket(&key).map(|bucket| {
+                    (
+                        key.len(),
+                        bucket.keys().map(|record| record.len()).sum::<usize>(),
+                    )
+                })
             })
+            .map(|(key_len, record_bytes)| key_len + record_bytes)
             .sum()
     }
 
@@ -502,23 +528,43 @@ impl ArrangementState {
     ) {
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
-                apply_join_delta_to_index(Rc::make_mut(&mut self.index), deltas);
+                let mut buckets = HashMap::<JoinKey, JoinBucket>::default();
+                for delta in deltas {
+                    let bucket = buckets
+                        .entry(delta.key.clone())
+                        .or_insert_with(|| self.bucket(&delta.key).cloned().unwrap_or_default());
+                    let next_weight = bucket.get(&delta.delta.record).copied().unwrap_or_default()
+                        + delta.delta.weight;
+                    if next_weight == 0 {
+                        bucket.remove(&delta.delta.record);
+                    } else {
+                        bucket.insert(delta.delta.record.clone(), next_weight);
+                    }
+                }
+                let overlay = Rc::make_mut(&mut self.overlay);
+                for (key, bucket) in buckets {
+                    overlay.insert(key, (!bucket.is_empty()).then_some(bucket));
+                }
             }
             ArrangementUpdateMode::Replace => {
                 self.index = Rc::new(build_join_delta_index(deltas));
+                self.overlay = Rc::default();
             }
         }
     }
 
     fn key_count(&self, key: &[u8]) -> i64 {
-        self.index
-            .get(key)
+        self.bucket(key)
             .map(|bucket| bucket.values().sum())
             .unwrap_or_default()
     }
 
     fn bucket(&self, key: &[u8]) -> Option<&JoinBucket> {
-        self.index.get(key)
+        let key = JoinKey::from_slice(key);
+        match self.overlay.get(&key) {
+            Some(bucket) => bucket.as_ref(),
+            None => self.index.get(&key),
+        }
     }
 
     pub(super) fn apply_record_deltas(
@@ -534,8 +580,7 @@ impl ArrangementState {
     }
 
     pub(super) fn records_for_key(&self, key: &[u8]) -> Vec<(Bytes, i64)> {
-        self.index
-            .get(key)
+        self.bucket(key)
             .into_iter()
             .flat_map(|bucket| bucket.iter())
             .filter_map(|(record, weight)| (*weight > 0).then_some((record.clone(), *weight)))
@@ -600,16 +645,11 @@ struct JoinChangeContext<'a> {
 struct JoinOutputBuffer {
     /// All encoded joined rows, stored one after another.
     bytes: BytesMut,
+    deltas: Vec<(Range<usize>, i64)>,
     /// Where each row is inside `bytes`, together with its weight.
     ///
     /// For example, `(0..20, 1)` means “the row in bytes `0..20` has weight
     /// `+1`.”
-    deltas: Vec<(Range<usize>, i64)>,
-    /// Temporary work area for fields such as strings, bytes, and arrays.
-    ///
-    /// Each item stores which input row owns the field (`0` for left, `1` for
-    /// right) and where the field's bytes are in that row. The encoder clears
-    /// and reuses this vector for every joined row.
     variable_scratch: Vec<(usize, Range<usize>)>,
 }
 
@@ -627,7 +667,7 @@ fn append_join_deltas(
     output: &mut JoinOutputBuffer,
     context: &JoinChangeContext<'_>,
     delta_records: &[KeyedRecordDelta<'_>],
-    stored: &JoinIndex,
+    stored: &JoinLookup<'_>,
     side: JoinProbeSide,
     sign: i64,
 ) -> Result<(), IvmRuntimeError> {
@@ -635,7 +675,7 @@ fn append_join_deltas(
         if delta.delta.weight == 0 {
             continue;
         }
-        let Some(bucket) = stored.get(&delta.key) else {
+        let Some(bucket) = stored.bucket(&delta.key) else {
             continue;
         };
         for (stored_record, right_weight) in bucket {
@@ -1087,6 +1127,7 @@ mod tests {
         index.insert(JoinKey::from_slice(b"one"), bucket);
         let original = ArrangementState {
             index: Rc::new(index),
+            overlay: Rc::default(),
         };
 
         let mut prepared = original.clone();
@@ -1097,8 +1138,10 @@ mod tests {
 
         let mut second_bucket = HashMap::default();
         second_bucket.insert(Bytes::from_static(b"row-two"), 1);
-        Rc::make_mut(&mut prepared.index).insert(JoinKey::from_slice(b"two"), second_bucket);
-        assert!(!Rc::ptr_eq(&original.index, &prepared.index));
+        Rc::make_mut(&mut prepared.overlay)
+            .insert(JoinKey::from_slice(b"two"), Some(second_bucket));
+        assert!(Rc::ptr_eq(&original.index, &prepared.index));
+        assert!(!Rc::ptr_eq(&original.overlay, &prepared.overlay));
         assert_eq!(original.row_count(), 1);
         assert_eq!(prepared.row_count(), 2);
     }
