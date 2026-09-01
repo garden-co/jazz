@@ -46,8 +46,6 @@ use crate::node::{
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
-#[cfg(feature = "sync-autopsy")]
-use crate::protocol::expand_version_carriers;
 use crate::protocol::{
     AuthorizationScopeReceipt, BindingSource, BindingViewKey, BranchSelector, BranchViewBase,
     ChunkRequestBatch, ChunkRequestEntry, ChunkResponse, ChunkResponseBatch, ChunkResponseEntry,
