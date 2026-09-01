@@ -477,6 +477,30 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
 
+    // Simulate a competing first-head materialization winning before this
+    // unit reaches authority. The descriptor is otherwise valid, but its
+    // promised absent head is no longer true and must not be reclassified as
+    // a safe view copy.
+    let (race_tx, race_versions) = make_unit(
+        TxId::new(TxTime::from(23), node(0x5a)),
+        allowed,
+        source_tx,
+        head_key.clone(),
+        head_value,
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    let race_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        race_tx.clone(),
+        race_versions,
+        23,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, race_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(race_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+
     // Planted sensitive negative: a raw sender cannot erase the operation
     // intent and have this first-head inherited copy reclassified as an
     // ordinary insert. If the mandatory-intent check is removed, this becomes
