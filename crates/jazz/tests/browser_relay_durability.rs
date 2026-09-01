@@ -78,6 +78,44 @@ impl Transport for ScriptedAuthorityTransport {
     }
 }
 
+/// Transparent wire tap used by black-box topology receipts. It observes what
+/// the authority actually sends without giving the test an alternate message
+/// application path.
+struct RecordingTransport {
+    inner: Box<dyn Transport>,
+    sent: Rc<RefCell<Vec<SyncMessage>>>,
+    drop_commits: bool,
+}
+
+impl Transport for RecordingTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), jazz::wire::TransportError> {
+        self.sent.borrow_mut().push(message.clone());
+        if self.drop_commits && matches!(message, SyncMessage::CommitUnit { .. }) {
+            return Ok(());
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
+fn recording_transport(
+    inner: Box<dyn Transport>,
+    drop_commits: bool,
+) -> (Box<dyn Transport>, Rc<RefCell<Vec<SyncMessage>>>) {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    (
+        Box::new(RecordingTransport {
+            inner,
+            sent: Rc::clone(&sent),
+            drop_commits,
+        }),
+        sent,
+    )
+}
+
 fn scripted_authority(
     rejection: Option<SubscribeRejectReason>,
 ) -> (Box<dyn Transport>, Rc<RefCell<AuthorityTransportState>>) {
@@ -2434,6 +2472,236 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     );
 }
 
+/// INV-SYNC-36: peer sync carries the authorized input closure, not the
+/// authority's presentation-layer terminal. The receiving Db must still
+/// materialize the nested result by running its own maintained graph.
+#[test]
+fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() {
+    let schema = included_relation_schema();
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let receiver = open_db(0xd2, alice, &schema);
+    let core = open_core(0xd3, &schema);
+    let seeder = open_db(0xd4, alice, &schema);
+
+    let (seed_transport, core_seed_transport) = duplex();
+    let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
+    let _seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let profile = seeder
+        .insert(
+            "profiles",
+            BTreeMap::from([("name".to_owned(), Value::String("Ada".to_owned()))]),
+            Default::default(),
+        )
+        .expect("seed nested profile");
+    let message = seeder
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("author".to_owned(), Value::Uuid(profile.row_uuid().0)),
+                (
+                    "body".to_owned(),
+                    Value::String("receiver derived".to_owned()),
+                ),
+                ("created".to_owned(), Value::U64(1)),
+            ]),
+            Default::default(),
+        )
+        .expect("seed nested root");
+    for _ in 0..8 {
+        seeder.tick().expect("upload nested fixture");
+        core.tick().expect("accept nested fixture");
+        seeder.tick().expect("settle nested fixture");
+    }
+
+    let (receiver_transport, core_transport) = duplex();
+    let (recorded_core_transport, authority_messages) = recording_transport(core_transport, false);
+    let _receiver_upstream = block_on(receiver.connect_upstream(receiver_transport));
+    let _core_subscriber = core.accept_subscriber(recorded_core_transport, alice);
+    let query = receiver
+        .prepare_query(
+            &Query::from("messages")
+                .array_subquery(ArraySubquery::new("sender", "profiles", "id", "author"))
+                .order_by("created", OrderDirection::Desc),
+        )
+        .expect("prepare nested remote query");
+    let mut subscription = block_on(receiver.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe to nested remote query");
+    assert!(subscription.try_next_event().is_none());
+    for _ in 0..12 {
+        receiver.tick().expect("send nested subscription");
+        core.tick().expect("serve nested closure");
+        receiver.tick().expect("derive nested terminal locally");
+    }
+
+    let authority_updates = authority_messages
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update.clone()),
+            SyncMessage::AuthorizationScopeView { view, .. } => Some(view.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !authority_updates.is_empty(),
+        "authority sent no covered input closure"
+    );
+    assert!(
+        authority_updates
+            .iter()
+            .all(|update| update.terminal_operations.is_empty()),
+        "INV-SYNC-36 forbids authority-produced terminal operations: {authority_updates:?}",
+    );
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    let nested = events.iter().find_map(|event| match event {
+        SubscriptionEvent::Delta {
+            added,
+            settled: true,
+            ..
+        } => added
+            .iter()
+            .find(|row| row.row.row_uuid() == message.row_uuid()),
+        _ => None,
+    });
+    let nested = nested.expect("receiver-local IVM did not publish the nested root");
+    let (descriptor, raw) = nested.row.encoded_record();
+    let record = BorrowedRecord::new(raw, descriptor);
+    let Value::Array(sender) = record.get("sender").expect("nested sender") else {
+        panic!("sender must be materialized as an array")
+    };
+    assert!(matches!(
+        sender.as_slice(),
+        [Value::Record(sender)] if matches!(sender.get("name"), Ok(Value::String(name)) if name == "Ada")
+    ));
+}
+
+/// INV-SYNC-36: Local and strict remote are two input selections for the same
+/// maintained program. Local may include a pending row and order it against
+/// authority rows; strict remote must exclude that unadmitted row and must not
+/// publish before its exact authority usage site settles.
+#[test]
+fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let receiver = open_db(0xd6, alice, &schema);
+    let core = open_core(0xd7, &schema);
+    let seeder = open_db(0xd8, alice, &schema);
+
+    let (seed_transport, core_seed_transport) = duplex();
+    let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
+    let _seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let mut authority_rows = Vec::new();
+    for title in ["A", "C"] {
+        authority_rows.push(
+            seeder
+                .insert(
+                    "todos",
+                    BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                    Default::default(),
+                )
+                .expect("seed authority row")
+                .row_uuid(),
+        );
+    }
+    for _ in 0..8 {
+        seeder.tick().expect("upload authority rows");
+        core.tick().expect("accept authority rows");
+        seeder.tick().expect("settle authority rows");
+    }
+    let pending = receiver
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("B".to_owned()))]),
+            Default::default(),
+        )
+        .expect("insert receiver-local pending row");
+
+    let (receiver_transport, core_transport) = duplex();
+    let (receiver_transport, _receiver_messages) = recording_transport(receiver_transport, true);
+    let _receiver_upstream = block_on(receiver.connect_upstream(receiver_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let query = receiver
+        .prepare_query(&Query::from("todos").order_by("title", OrderDirection::Asc))
+        .expect("prepare ordered input-selection query");
+    let mut local = block_on(receiver.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe local-first");
+    let mut strict = block_on(receiver.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe strict remote");
+    assert!(
+        strict.try_next_event().is_none(),
+        "strict remote must wait for its fresh exact authority closure"
+    );
+    for _ in 0..12 {
+        receiver.tick().expect("send exact usage sites");
+        core.tick().expect("serve authority closures");
+        receiver.tick().expect("reconcile receiver inputs");
+    }
+
+    let ordered_ids = |events: &[SubscriptionEvent]| {
+        let mut rows = Vec::new();
+        for event in events {
+            let SubscriptionEvent::Delta {
+                reset,
+                added,
+                removed,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if *reset {
+                rows.clear();
+            }
+            for removal in removed {
+                rows.retain(|row| *row != removal.row_uuid);
+            }
+            for addition in added {
+                rows.retain(|row| *row != addition.row.row_uuid());
+                rows.insert(addition.index.min(rows.len()), addition.row.row_uuid());
+            }
+        }
+        rows
+    };
+    let local_events =
+        std::iter::from_fn(|| local.try_next_event()).collect::<Vec<SubscriptionEvent>>();
+    let strict_events =
+        std::iter::from_fn(|| strict.try_next_event()).collect::<Vec<SubscriptionEvent>>();
+    let local_ids = ordered_ids(&local_events);
+    let strict_ids = ordered_ids(&strict_events);
+    assert_eq!(
+        local_ids,
+        vec![authority_rows[0], pending.row_uuid(), authority_rows[1]],
+        "local-first must order authority A, pending B, authority C: {local_events:?}"
+    );
+    assert!(
+        !strict_ids.contains(&pending.row_uuid()),
+        "strict remote must not supplement its authority closure from unrelated pending state: {strict_events:?}"
+    );
+    assert_eq!(
+        strict_ids, authority_rows,
+        "strict remote contains authority A and C only"
+    );
+}
+
 /// A BandChat room owner's foreground keeps a maintained Edge subscription
 /// while a separately scoped guest foreground writes a message.  This is the
 /// complete browser path, rather than a direct client/core shortcut:
@@ -3058,8 +3326,17 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let _reopened_connection = block_on(reopened_tab.connect_upstream(reopened_transport));
     let _reopened_worker_connection =
         reopened_worker.accept_subscriber(reopened_worker_transport, alice);
-    let (_reopened_upstream, _reopened_core_subscriber) =
-        connect_scope_isolated_worker_to_core!(reopened_worker, core, alice);
+    let (reopened_upstream_transport, reopened_core_transport) = duplex();
+    let (reopened_core_transport, reopened_authority_messages) =
+        recording_transport(reopened_core_transport, false);
+    let _reopened_upstream =
+        block_on(reopened_worker.connect_upstream(reopened_upstream_transport));
+    let _reopened_core_subscriber = core.accept_scope_isolated_relay_subscriber_for_test(
+        reopened_core_transport,
+        alice,
+        BTreeMap::new(),
+        1,
+    );
     let reopened_query = reopened_tab
         .prepare_query(&exact_query)
         .expect("prepare reopened Edge query");
@@ -3113,6 +3390,54 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         .expect("read fresh revoked Edge membership")
         .is_empty(),
         "fresh empty authority membership must not expose the recovered row",
+    );
+    assert!(
+        reopened_authority_messages
+            .borrow()
+            .iter()
+            .all(|message| match message {
+                SyncMessage::ViewUpdate(update) => update.terminal_operations.is_empty(),
+                SyncMessage::AuthorizationScopeView { view, .. } => {
+                    view.terminal_operations.is_empty()
+                }
+                _ => true,
+            }),
+        "reconnect must derive its empty reset locally from a terminal-free authority closure",
+    );
+
+    let regranted = seeder
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("regranted after reconnect".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("regrant bounded authority membership");
+    for _ in 0..12 {
+        seeder.tick().expect("upload regranted row");
+        core.tick().expect("accept regranted row");
+        reopened_worker.tick().expect("relay regranted closure");
+        reopened_tab
+            .tick()
+            .expect("derive regranted bounded window");
+    }
+    let regranted_rows = block_on(reopened_tab.all(
+        &reopened_query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("read regranted bounded authority membership");
+    assert_eq!(
+        regranted_rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![regranted.row_uuid()],
+        "revocation, reconnect, and regrant must transition the receiver-local bounded terminal",
     );
 
     assert!(seeder.detach_connection(&seeder_connection));
