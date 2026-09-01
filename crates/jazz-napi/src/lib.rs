@@ -4902,11 +4902,6 @@ fn core_claims_from_json(
     ))
 }
 
-/// The public NAPI claim ingress deliberately does not trust an application
-/// supplied `authMode`. It is a property of the already-admitted identity:
-/// verified Jazz-owned issuers carry their matching mode and every other
-/// public subject is external.
-
 fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
     Ok(match value {
         JsonValue::Null => CoreValue::Nullable(None),

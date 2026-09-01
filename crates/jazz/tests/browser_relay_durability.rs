@@ -13,7 +13,7 @@ use jazz::db::{
 use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::node::CurrentRow;
+use jazz::node::{CommitUnitTrust, CurrentRow};
 use jazz::protocol::{
     RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
