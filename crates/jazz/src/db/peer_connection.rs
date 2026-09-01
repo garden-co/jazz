@@ -3264,7 +3264,7 @@ where
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
                     let scope_purpose: Option<crate::protocol::AuthorizationScopePurpose> = None;
-                    if subscriber_inbound_message_is_authority_only(&message, ingest_context.trust)
+                    if subscriber_inbound_message_is_authority_only(&message, *ingest_context)
                     {
                         drop_peer_request(&self.node);
                         continue;
@@ -3417,8 +3417,7 @@ where
                                 &opts,
                                 *local_receiver,
                                 peer.role(),
-                                !*local_receiver
-                                    && matches!(peer.role(), PeerRole::ClientLink { .. }),
+                                delegated_session_capability(*ingest_context),
                             ) {
                                 shape_registrations.insert(
                                     registration_key,
@@ -3702,8 +3701,7 @@ where
                                 &opts,
                                 *local_receiver,
                                 peer.role(),
-                                !*local_receiver
-                                    && matches!(peer.role(), PeerRole::ClientLink { .. }),
+                                delegated_session_capability(*ingest_context),
                             )
                             .is_err()
                             {

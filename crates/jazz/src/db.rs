@@ -2788,15 +2788,14 @@ fn ensure_supported_register_shape_options(
     opts: &RegisterShapeOptions,
     local_receiver: bool,
     peer_role: PeerRole,
-    relay_authority_session_admitted: bool,
+    delegated_session_capability: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
-    if opts.binding_source == BindingSource::RelayAuthoritySession
-        && !relay_authority_session_admitted
+    if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
             ErrorCode::Query,
-            "relay authority-session bindings may only be registered by an admitted upstream relay",
+            "relay authority-session bindings require an authenticated SYSTEM trusted-backend relay",
         ));
     }
     let supported = match (local_receiver, peer_role) {
@@ -2928,7 +2927,7 @@ fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust)
 /// the direction or authenticated link role after dispatch.
 fn subscriber_inbound_message_is_authority_only(
     message: &SyncMessage,
-    trust: CommitUnitTrust,
+    ingest: CommitUnitIngestContext,
 ) -> bool {
     matches!(
         message,
@@ -2944,7 +2943,16 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
             | SyncMessage::AuthorizationScopeUnavailable { .. }
             | SyncMessage::AuthorizationScopeDecision { .. }
-    ) || (trust == CommitUnitTrust::Session && matches!(message, SyncMessage::SessionClaims { .. }))
+    ) || (matches!(message, SyncMessage::SessionClaims { .. })
+        && !delegated_session_capability(ingest))
+}
+
+/// Only the host-admitted core-facing relay may carry another session's
+/// immutable policy binding.  This is a connection capability, not a field a
+/// wire caller can grant itself by choosing a registration option or message
+/// variant.
+fn delegated_session_capability(ingest: CommitUnitIngestContext) -> bool {
+    ingest.trust == CommitUnitTrust::TrustedBackend && ingest.identity == AuthorSubject::SYSTEM
 }
 
 fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorSubject {

@@ -1,6 +1,7 @@
 //! Shape-registration ownership, retention, and hostile-cardinality boundaries.
 
 use super::*;
+use std::collections::BTreeMap;
 
 const EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER: usize = 1024;
 const EXPECTED_MAX_RETAINED_PEER_SHAPES: usize = 1024;
@@ -46,6 +47,120 @@ fn shape_unsubscribe(shape: &ValidatedQuery) -> SyncMessage {
             read_view: RegisterShapeOptions::default().read_view_key(),
         },
     }
+}
+
+// This is intentionally an internal hostile-wire test: public query APIs do
+// not expose `BindingSource`, but a peer can still encode the private enum
+// variant on the wire.  The receiving topology, rather than an untrusted
+// caller's registration options, owns that internal authority-result source.
+#[test]
+fn session_peer_cannot_choose_relay_authority_binding_source() {
+    let schema = schema();
+    let server = open_core(0x69, AuthorSubject::SYSTEM, &schema);
+    let shape = distinct_shape(&schema, 69);
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server
+        .server
+        .accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x6a; 16]));
+    let mut opts = RegisterShapeOptions::default();
+    opts.binding_source = crate::protocol::BindingSource::RelayAuthoritySession;
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts,
+        })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::SubscribeRejected {
+            reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+            ..
+        }) if detail.contains("authenticated SYSTEM trusted-backend relay")
+    ));
+    assert!(
+        server
+            .node()
+            .borrow()
+            .registered_shape(shape.shape_id())
+            .is_none(),
+        "a rejected caller-owned internal source must not reach shared shape retention"
+    );
+}
+
+// This remains internal because only the peer admission seam sees both raw
+// wire messages and the host-authenticated backend identity.  It proves that
+// `TrustedBackend` alone is insufficient: the dedicated delegation capability
+// is the authenticated SYSTEM backend link, for both claim seeding and
+// delegated-policy consumption.
+#[test]
+fn non_system_trusted_backend_cannot_seed_or_consume_delegated_claims() {
+    let schema = schema();
+    let server = open_core(0x6b, AuthorSubject::SYSTEM, &schema);
+    let backend = AuthorSubject::for_test_bytes([0x6c; 16]);
+    let delegated = AuthorSubject::for_test_bytes([0x6d; 16]);
+    let shape = distinct_shape(&schema, 70);
+    let binding = shape
+        .bind(BTreeMap::from([(
+            String::from("shape_70"),
+            Value::String("shared".into()),
+        )]))
+        .unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_subscriber_with_trust(
+        server_transport,
+        backend,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let hostile_claims = BTreeMap::from([("hostile".to_owned(), Value::Bool(true))]);
+
+    relay_transport
+        .send(SyncMessage::SessionClaims {
+            identity: delegated,
+            claims: hostile_claims.clone(),
+        })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_ne!(
+        server.node().borrow().session_claims_for(delegated),
+        hostile_claims,
+        "a non-SYSTEM backend must not seed a delegated session map"
+    );
+
+    relay_transport
+        .send(register_shape_message(&shape))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    relay_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: vec![Value::String("shared".to_owned())],
+            known_state: None,
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity: delegated,
+                claims: hostile_claims,
+            }),
+        }))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!("accepted peer remains a subscriber link");
+    };
+    assert!(
+        state.served.is_empty(),
+        "a non-SYSTEM backend must not consume a caller-supplied delegated policy binding"
+    );
 }
 
 // This stays internal because installed query-program retention and peer ownership
