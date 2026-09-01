@@ -323,7 +323,8 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
                      subject: AuthorSubject,
                      source_version: TxId,
                      target_key: BranchKey,
-                     target_value: uuid::Uuid| {
+                     target_value: uuid::Uuid,
+                     copy_base: crate::tx::BranchViewCopyBase| {
         let version = VersionRecord::from_cells(
             table,
             schema.version_id(),
@@ -345,7 +346,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         let evidence = crate::tx::BranchViewCopyEvidence {
             version: 1,
             head: target_key,
-            base: crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+            base: copy_base,
             table: "todos".to_owned(),
             row_uuid: source_row,
             source_version,
@@ -385,6 +386,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         source_tx,
         head_key.clone(),
         head_value,
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
     );
     let allowed_outcome =
         crate::db::block_on(authority.ingest_commit_unit(allowed_tx.clone(), allowed_versions, 20))
@@ -392,6 +394,42 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
     settle_outcome(&mut authority, allowed_outcome).unwrap();
     assert!(matches!(
         authority.transaction_state_settled(allowed_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    // The frozen variant proves the exact source at its declared frontier,
+    // rather than silently falling back to the authority's current schema or
+    // current base winner.
+    let snapshot_head = branch_selector(0x58);
+    let snapshot_head_key = schema
+        .project_branch_view_selector(table, &snapshot_head)
+        .unwrap()
+        .0;
+    let (snapshot_tx, snapshot_versions) = make_unit(
+        TxId::new(TxTime::from(22), node(0x59)),
+        allowed,
+        source_tx,
+        snapshot_head_key,
+        uuid::Uuid::from_bytes([0x58; 16]),
+        crate::tx::BranchViewCopyBase::Snapshot {
+            branch: base_key.clone(),
+            snapshot: crate::protocol::SnapshotRef {
+                owner: NodeUuid::from_bytes([0x4a; 16]),
+                global_base: GlobalTime(0),
+                local_base: source_tx.time,
+                dots: Vec::new(),
+            },
+        },
+    );
+    let snapshot_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        snapshot_tx.clone(),
+        snapshot_versions,
+        22,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, snapshot_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(snapshot_tx.tx_id),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
 
@@ -410,6 +448,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         source_tx,
         omitted_head_key,
         uuid::Uuid::from_bytes([0x56; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
     );
     omitted_tx.contribution_merge = None;
     let omitted_outcome = crate::db::block_on(authority.ingest_commit_unit(
@@ -435,6 +474,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         source_tx,
         denied_head_key,
         uuid::Uuid::from_bytes([0x51; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
     );
     let denied_outcome =
         crate::db::block_on(authority.ingest_commit_unit(denied_tx.clone(), denied_versions, 30))
@@ -461,6 +501,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         source_tx,
         tampered_head_key,
         uuid::Uuid::from_bytes([0x53; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
     );
     tampered_tx
         .contribution_merge
