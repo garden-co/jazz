@@ -2628,6 +2628,10 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     let core = open_core(0x3c, &schema);
     let writer = open_db(0x4c, alice, &schema);
     main_thread.set_non_durable_client();
+    // The production broker marks its persistent worker as the authority
+    // session owner, so downstream Edge pages re-publish the received window
+    // rather than applying its absolute offset to the worker's local overlay.
+    worker.set_relay_authority_session_owner();
 
     let (writer_transport, core_writer_transport) = duplex();
     let _writer_connection = block_on(writer.connect_upstream(writer_transport));
@@ -2945,6 +2949,10 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
     let core = open_core(0x3d, &schema);
     let writer = open_db(0x4d, alice, &schema);
     main_thread.set_non_durable_client();
+    // Match the persistent browser worker: every bounded one-shot page is
+    // re-published from its own authority-session membership and retains its
+    // independent detach lifetime.
+    worker.set_relay_authority_session_owner();
 
     let (writer_transport, core_writer_transport) = duplex();
     let _writer_connection = block_on(writer.connect_upstream(writer_transport));
