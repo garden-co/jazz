@@ -340,19 +340,38 @@ test("workspace dependency inputs require the exact root manifest", () => {
   }
 });
 
+test("workspace dependency inputs reject a package at the supplied repository root", () => {
+  const root = mkdtempSync(join(tmpdir(), "jazz-artifact-root-package-"));
+  try {
+    mkdirSync(join(root, "src"));
+    writeFileSync(
+      join(root, "Cargo.toml"),
+      "[package]\nname = 'root'\nversion = '0.0.0'\nedition = '2021'\n",
+    );
+    writeFileSync(join(root, "src/lib.rs"), "// root\n");
+    assert.throws(
+      () => workspaceDependencyInputs(root, "Cargo.toml"),
+      /workspace dependency has no repository-relative path/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace dependency inputs reject packages outside the supplied repository root", () => {
   const workspace = mkdtempSync(join(tmpdir(), "jazz-artifact-closure-"));
-  const root = join(workspace, "root");
+  const repositoryRoot = join(workspace, "repository");
+  const root = join(repositoryRoot, "root");
   const outside = join(workspace, "outside");
   try {
     for (const directory of [root, outside]) mkdirSync(join(directory, "src"), { recursive: true });
     writeFileSync(
       join(workspace, "Cargo.toml"),
-      "[workspace]\nmembers = ['root', 'outside']\nresolver = '2'\n",
+      "[workspace]\nmembers = ['repository/root', 'outside']\nresolver = '2'\n",
     );
     writeFileSync(
       join(root, "Cargo.toml"),
-      "[package]\nname = 'root'\nversion = '0.0.0'\nedition = '2021'\n[dependencies]\noutside = { path = '../outside' }\n",
+      "[package]\nname = 'root'\nversion = '0.0.0'\nedition = '2021'\n[dependencies]\noutside = { path = '../../outside' }\n",
     );
     writeFileSync(join(root, "src/lib.rs"), "// root\n");
     writeFileSync(
@@ -362,7 +381,7 @@ test("workspace dependency inputs reject packages outside the supplied repositor
     writeFileSync(join(outside, "src/lib.rs"), "// outside\n");
 
     assert.throws(
-      () => workspaceDependencyInputs(root, "Cargo.toml"),
+      () => workspaceDependencyInputs(repositoryRoot, "root/Cargo.toml"),
       /workspace dependency escapes repository root/,
     );
   } finally {
@@ -374,6 +393,7 @@ test("workspace dependency inputs use Turbo repository path syntax", () => {
   const root = fixture();
   try {
     for (const path of workspaceDependencyInputs(root, "crates/jazz-napi/Cargo.toml")) {
+      assert.notEqual(path, "");
       assert.doesNotMatch(path, /\\/);
       assert.equal(path === ".." || path.startsWith("../"), false);
     }
