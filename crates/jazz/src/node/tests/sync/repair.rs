@@ -355,6 +355,135 @@ fn scope_relay_repair_requires_a_live_scope_capability() {
     assert!(version_bundles.is_empty());
 }
 
+/// A stale repair payload may legitimately fill the relay's local history,
+/// but it was not selected authority evidence and must not become durable
+/// same-scope disclosure authority.
+#[test]
+fn stale_repair_payload_is_cached_without_granting_scope_ledger_access() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    relay_node.set_relay_authority_session_owner_for_test();
+    let alice = user(0xa1);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    let row_uuid = row(0x30);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", row_uuid, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "stale repair payload")),
+    );
+    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+        panic!("expected authority view update");
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let bundle = bundles.into_iter().find(|bundle| bundle.tx.tx_id == tx_id).unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(bundle.versions[0].schema_version(), "todos")
+        .unwrap();
+    relay_node
+        .record_scope_relay_authoritative_repair_payloads(&[bundle], false)
+        .resolve()
+        .unwrap();
+    assert!(
+        !relay_node.row_history("todos", row_uuid).unwrap().is_empty(),
+        "stale payload may still leave a locally cached row version"
+    );
+    assert!(
+        !relay_node
+            .scope_relay_repair_ledger_contains(
+                table_id,
+                &crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id),
+            )
+            .resolve()
+            .unwrap(),
+        "stale payload never grants future same-scope repair"
+    );
+}
+
+/// A repair frame may contain a valid but unsolicited version. It can even be
+/// locally resident already; only the exact requested-and-applied subset may
+/// enter the durable disclosure ledger.
+#[test]
+fn repair_ledger_ignores_unsolicited_resident_payload_versions() {
+    let schema = schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(3), schema);
+    relay_node.set_relay_authority_session_owner_for_test();
+    let requested_row = row(0x31);
+    let requested_tx = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", requested_row, 10).cells(title_cells("requested")),
+    );
+    let unsolicited_row = row(0x32);
+    let unsolicited_tx = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", unsolicited_row, 11).cells(title_cells("unsolicited")),
+    );
+    let requested = crate::protocol::RowVersionRef::new("todos", requested_row, requested_tx);
+    let unsolicited =
+        crate::protocol::RowVersionRef::new("todos", unsolicited_row, unsolicited_tx);
+    let response = PeerState::client_link(AuthorSubject::SYSTEM)
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: vec![requested.clone(), unsolicited.clone()],
+                delegated_session: None,
+            },
+        )
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = response.as_slice()
+    else {
+        panic!("expected repair payload frame");
+    };
+    let table_id = relay_node
+        .physical_table_id_for_schema(version_bundles[0].versions[0].schema_version(), "todos")
+        .unwrap();
+    // First cache B through a legitimate one-ref repair without granting it
+    // durable authority. The next frame carries B again but requests only A.
+    relay_node
+        .apply_row_version_payloads_for_requests(
+            std::slice::from_ref(&unsolicited),
+            version_bundles.clone(),
+        )
+        .resolve()
+        .unwrap();
+    assert!(
+        !relay_node.row_history("todos", unsolicited_row).unwrap().is_empty(),
+        "setup: unsolicited version is locally resident"
+    );
+    let applied = relay_node
+        .apply_row_version_payloads_for_requests(
+            std::slice::from_ref(&requested),
+            version_bundles.clone(),
+        )
+        .resolve()
+        .unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].tx.tx_id, requested_tx);
+    relay_node
+        .record_scope_relay_authoritative_repair_payloads(&applied, true)
+        .resolve()
+        .unwrap();
+    assert!(
+        relay_node
+            .scope_relay_repair_ledger_contains(table_id, &requested)
+            .resolve()
+            .unwrap()
+    );
+    assert!(
+        !relay_node
+            .scope_relay_repair_ledger_contains(table_id, &unsolicited)
+            .resolve()
+            .unwrap(),
+        "unsolicited locally resident B never becomes repairable"
+    );
+}
+
 /// A repaired version is durable knowledge for exactly the host-attested
 /// scope that received it. Reopening that scope retains the closure; opening
 /// the same physical database under a different admitted subject does not.

@@ -39,6 +39,21 @@ where
         Ok(())
     }
 
+    /// A row-version payload is durable same-scope disclosure evidence only
+    /// when its pending repair still belongs to the selected authority
+    /// receipt. Stale/fallback payloads can be ingested as cache data but are
+    /// never repair authority.
+    pub(crate) async fn record_scope_relay_authoritative_repair_payloads(
+        &self,
+        bundles: &[VersionBundle],
+        authority_receipt_eligible: bool,
+    ) -> Result<(), Error> {
+        if authority_receipt_eligible {
+            self.record_scope_relay_authoritative_bundles(bundles).await?;
+        }
+        Ok(())
+    }
+
     /// Record a foreground transaction once this exact scope's durable relay
     /// has accepted it locally. Its caller establishes the live admitted
     /// session and author ownership; this helper only persists the immutable

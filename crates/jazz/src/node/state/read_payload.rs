@@ -378,7 +378,7 @@ where
         &mut self,
         requests: &[RowVersionRef],
         version_bundles: Vec<VersionBundle>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<VersionBundle>, Error> {
         for bundle in &version_bundles {
             crate::protocol::validate_version_records(&bundle.versions)
                 .map_err(|_| Error::MalformedViewUpdate("malformed version receipt"))?;
@@ -461,17 +461,19 @@ where
             bundle.versions = versions;
             prevalidated_bundles.push(bundle);
         }
+        let mut applied_bundles = Vec::with_capacity(prevalidated_bundles.len());
         for bundle in prevalidated_bundles {
             self.ingest_known_transaction(
-                bundle.tx,
-                bundle.versions,
-                bundle.fate,
+                bundle.tx.clone(),
+                bundle.versions.clone(),
+                bundle.fate.clone(),
                 bundle.global_time,
                 bundle.durability,
             )
             .await?;
+            applied_bundles.push(bundle);
         }
-        Ok(())
+        Ok(applied_bundles)
     }
 
     #[allow(dead_code)]

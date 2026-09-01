@@ -2426,17 +2426,20 @@ where
                                 };
                                 {
                                     let mut node = self.node.lock().await;
-                                    node.apply_row_version_payloads_for_requests(
+                                    let applied_bundles = node.apply_row_version_payloads_for_requests(
                                         &repair.requests,
-                                        version_bundles.clone(),
+                                        version_bundles,
                                     )
                                     .await?;
-                                    // A successful authority repair can later be served to the
-                                    // same durable foreground scope without consulting current
-                                    // policy. Keep the immutable carrier identities, rather than
-                                    // inferring them from the current view result.
-                                    node.record_scope_relay_authoritative_bundles(&version_bundles)
-                                        .await?;
+                                    // Only the still-selected authority receipt can later be
+                                    // served to this durable foreground scope without a fresh
+                                    // policy check. A stale/fallback repair may populate the
+                                    // local cache, but never grants durable disclosure authority.
+                                    node.record_scope_relay_authoritative_repair_payloads(
+                                        &applied_bundles,
+                                        repair.authority_receipt_eligible,
+                                    )
+                                    .await?;
                                 }
                                 let (subscription, settled_through) = match &repair.update {
                                     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -4294,13 +4297,26 @@ where
                                 continue;
                             }
                             let repair_context = if *local_receiver {
-                                // A local foreground can repair from the
-                                // topology-owned worker only when that worker
-                                // has an admitted durable scope. Generic relay
-                                // paths remain fail-closed/forward upstream.
-                                if delegated_session.is_some()
-                                    || self.node.borrow().client_relay_scope().is_none()
-                                {
+                                // This path is exclusively for the direct,
+                                // topology-attested foreground attachment.
+                                // `local_receiver` alone also describes local
+                                // generic relays, which must never turn cache
+                                // contents into scope-ledger authority.
+                                let Some(binding) = peer.admitted_scope_relay_binding() else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let scope_matches = self
+                                    .node
+                                    .borrow()
+                                    .client_relay_scope()
+                                    .is_some_and(|scope| {
+                                        scope.admits_session(binding.identity)
+                                            && session_claim_binding.as_ref().is_some_and(
+                                                |(identity, _)| binding.identity == *identity,
+                                            )
+                                    });
+                                if delegated_session.is_some() || !scope_matches {
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
