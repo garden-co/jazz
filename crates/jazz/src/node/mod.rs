@@ -2121,24 +2121,48 @@ fn select_all(table: &str) -> Query {
     ))
 }
 
-fn known_state_fact_key(binding_view_key: BindingViewKey) -> [Value; 3] {
-    [
-        Value::Uuid(binding_view_key.shape_id.0),
-        Value::Uuid(binding_view_key.binding_id.0),
-        Value::Uuid(binding_view_key.read_view.id),
-    ]
+/// Durable v1 identity for authority-selected results.
+///
+/// This intentionally uses normal Groove values, not postcard or a digest:
+/// `[shape, binding, read-view, policy-absent-or-present, subject, claims]`.
+/// Claims are an ordered array of `(name, value)` Groove tuples, so two claim
+/// snapshots cannot collide or become indistinguishable after recovery.
+fn authority_result_store_prefix(authority_result_key: &AuthorityResultKey) -> Vec<Value> {
+    let binding_view = authority_result_key.binding_view;
+    let mut key = vec![
+        Value::Uuid(binding_view.shape_id.0),
+        Value::Uuid(binding_view.binding_id.0),
+        Value::Uuid(binding_view.read_view.id),
+    ];
+    match &authority_result_key.policy_binding {
+        None => key.push(Value::EnumTag(0)),
+        Some(policy) => {
+            key.push(Value::EnumTag(1));
+            key.push(Value::String(policy.identity.canonical().to_owned()));
+            key.push(Value::Array(
+                policy
+                    .claims()
+                    .iter()
+                    .map(|(name, value)| {
+                        Value::Tuple(vec![Value::String(name.clone()), value.clone()])
+                    })
+                    .collect(),
+            ));
+        }
+    }
+    key
 }
 
-fn binding_view_store_prefix(binding_view_key: BindingViewKey) -> Vec<Value> {
-    known_state_fact_key(binding_view_key).to_vec()
+fn known_state_fact_key(authority_result_key: &AuthorityResultKey) -> Vec<Value> {
+    authority_result_store_prefix(authority_result_key)
 }
 
 fn settled_result_member_key(
-    binding_view_key: BindingViewKey,
+    authority_result_key: &AuthorityResultKey,
     member: &ResultMemberEntry,
 ) -> Result<Vec<Value>, Error> {
     let member_bytes = codec::result_member_storage_bytes(member)?;
-    let mut key = binding_view_store_prefix(binding_view_key);
+    let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_result_member_digest(&member_bytes).to_vec(),
     ));
@@ -2157,11 +2181,11 @@ fn settled_result_member_digest(member_bytes: &[u8]) -> [u8; 32] {
 }
 
 fn settled_result_member_storage_write(
-    binding_view_key: BindingViewKey,
+    authority_result_key: &AuthorityResultKey,
     member: &ResultMemberEntry,
 ) -> Result<groove::db::DirectRecordStoreWrite, Error> {
     let member_bytes = codec::result_member_storage_bytes(member)?;
-    let mut key = binding_view_store_prefix(binding_view_key);
+    let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_result_member_digest(&member_bytes).to_vec(),
     ));
@@ -2172,10 +2196,10 @@ fn settled_result_member_storage_write(
 }
 
 fn settled_program_fact_key(
-    binding_view_key: BindingViewKey,
+    authority_result_key: &AuthorityResultKey,
     fact: &ViewFactEntry,
 ) -> Result<Vec<Value>, Error> {
-    let mut key = binding_view_store_prefix(binding_view_key);
+    let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_program_fact_digest(&codec::program_fact_storage_bytes(fact)?).to_vec(),
     ));
@@ -2193,11 +2217,11 @@ fn settled_program_fact_digest(fact_bytes: &[u8]) -> [u8; 32] {
 }
 
 fn settled_program_fact_storage_write(
-    binding_view_key: BindingViewKey,
+    authority_result_key: &AuthorityResultKey,
     fact: &ViewFactEntry,
 ) -> Result<groove::db::DirectRecordStoreWrite, Error> {
     let fact_bytes = codec::program_fact_storage_bytes(fact)?;
-    let mut key = binding_view_store_prefix(binding_view_key);
+    let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_program_fact_digest(&fact_bytes).to_vec(),
     ));
@@ -2207,26 +2231,53 @@ fn settled_program_fact_storage_write(
     })
 }
 
-fn binding_view_key_from_store_key(
+fn authority_result_key_from_store_prefix(
     key: &[Value],
     context: &'static str,
-) -> Result<BindingViewKey, Error> {
-    if key.len() < 3 {
+) -> Result<AuthorityResultKey, Error> {
+    if key.len() != 4 && key.len() != 6 {
         return Err(Error::InvalidStoredValue(context));
     }
-    let shape_id = match &key[0] {
-        Value::Uuid(uuid) => ShapeId(*uuid),
-        _ => return Err(Error::InvalidStoredValue(context)),
+    let (Value::Uuid(shape_id), Value::Uuid(binding_id), Value::Uuid(read_view)) =
+        (&key[0], &key[1], &key[2])
+    else {
+        return Err(Error::InvalidStoredValue(context));
     };
-    let binding_id = match &key[1] {
-        Value::Uuid(uuid) => BindingId(*uuid),
-        _ => return Err(Error::InvalidStoredValue(context)),
-    };
-    let read_view = match &key[2] {
-        Value::Uuid(uuid) => ReadViewKey { id: *uuid },
-        _ => return Err(Error::InvalidStoredValue(context)),
-    };
-    Ok(BindingViewKey::new(shape_id, binding_id, read_view))
+    let binding_view = BindingViewKey::new(
+        ShapeId(*shape_id),
+        BindingId(*binding_id),
+        ReadViewKey { id: *read_view },
+    );
+    match (&key[3], key.len()) {
+        (Value::EnumTag(0), 4) => Ok(AuthorityResultKey::unscoped(binding_view)),
+        (Value::EnumTag(1), 6) => {
+            let Value::String(subject) = &key[4] else {
+                return Err(Error::InvalidStoredValue(context));
+            };
+            let identity = AuthorSubject::from_canonical(subject)
+                .map_err(|_| Error::InvalidStoredValue(context))?;
+            let Value::Array(entries) = &key[5] else {
+                return Err(Error::InvalidStoredValue(context));
+            };
+            let mut claims = BTreeMap::new();
+            for entry in entries {
+                let Value::Tuple(pair) = entry else {
+                    return Err(Error::InvalidStoredValue(context));
+                };
+                let [Value::String(name), value] = pair.as_slice() else {
+                    return Err(Error::InvalidStoredValue(context));
+                };
+                if claims.insert(name.clone(), value.clone()).is_some() {
+                    return Err(Error::InvalidStoredValue(context));
+                }
+            }
+            Ok(AuthorityResultKey::policy_scoped(
+                binding_view,
+                crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims),
+            ))
+        }
+        _ => Err(Error::InvalidStoredValue(context)),
+    }
 }
 
 /// Details of a persisted current row that could not be decoded at the point of use.
@@ -2424,4 +2475,35 @@ fn query_errors_keep_display_source_and_matching_after_node_conversion() {
         error,
         Error::Query(source) if matches!(*source, QueryError::UnknownTable(ref table) if table == "missing")
     ));
+}
+
+#[cfg(test)]
+#[test]
+fn authority_result_store_prefix_round_trips_complete_policy_identity() {
+    let binding_view = BindingViewKey::new(
+        ShapeId(uuid::Uuid::from_u128(1)),
+        BindingId(uuid::Uuid::from_u128(2)),
+        ReadViewKey {
+            id: uuid::Uuid::from_u128(3),
+        },
+    );
+    let mut claims = BTreeMap::new();
+    claims.insert("role".to_owned(), Value::String("editor".to_owned()));
+    claims.insert("team".to_owned(), Value::U64(7));
+    let key = AuthorityResultKey::policy_scoped(
+        binding_view,
+        crate::protocol::PolicyBindingKey::from_canonical_parts(
+            AuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
+            claims,
+        ),
+    );
+
+    let prefix = authority_result_store_prefix(&key);
+    assert_eq!(prefix[3], Value::EnumTag(1));
+    assert!(matches!(prefix[4], Value::String(_)));
+    assert!(matches!(prefix[5], Value::Array(_)));
+    assert_eq!(
+        authority_result_key_from_store_prefix(&prefix, "test").unwrap(),
+        key
+    );
 }

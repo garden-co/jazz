@@ -1706,8 +1706,9 @@ where
             }
         }
         if !defer_settlement {
-            self.persist_settled_result_state_delta(
-                binding_view_key,
+            let authority_result_key = self.authority_result_key_for_subscription(subscription)?;
+            self.persist_settled_result_state_delta_for_authority_result(
+                authority_result_key.clone(),
                 reset_cleared_shared_state,
                 &persisted_member_adds,
                 &persisted_member_removes,
@@ -1717,8 +1718,11 @@ where
                 fact_rewrite.as_ref(),
             )
             .await?;
-            self.persist_known_state_fact(binding_view_key, settled_through)
-                .await?;
+            self.persist_known_state_fact_for_authority_result(
+                authority_result_key,
+                settled_through,
+            )
+            .await?;
         }
         if self
             .query

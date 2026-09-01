@@ -439,21 +439,21 @@ where
         ))
     }
 
-    pub(crate) async fn persist_known_state_fact(
+    pub(crate) async fn persist_known_state_fact_for_authority_result(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         settled_through: GlobalTime,
     ) -> Result<(), Error> {
         self.database
             .direct_record_store(KNOWN_STATE_FACTS_STORE)?
             .set(
-                &known_state_fact_key(binding_view_key),
+                &known_state_fact_key(&authority_result_key),
                 &[
                     Value::U64(settled_through.0),
                     Value::U64(
                         self.query
                             .authorization_progress_by_binding_view
-                            .get(&binding_view_key)
+                            .get(&authority_result_key.binding_view)
                             .copied()
                             .unwrap_or(u64::MAX),
                     ),
@@ -467,8 +467,9 @@ where
         &mut self,
         binding_view_key: BindingViewKey,
     ) -> Result<Option<GlobalTime>, Error> {
+        let authority_result_key = AuthorityResultKey::unscoped(binding_view_key);
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        let Some(record) = store.get(&known_state_fact_key(binding_view_key)).await? else {
+        let Some(record) = store.get(&known_state_fact_key(&authority_result_key)).await? else {
             return Ok(None);
         };
         let settled_through = match record.get_idx(0)? {
@@ -509,9 +510,9 @@ where
         Ok(())
     }
 
-    pub(crate) async fn persist_settled_result_state_delta(
+    pub(crate) async fn persist_settled_result_state_delta_for_authority_result(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         cleared: bool,
         member_adds: &[ResultMemberEntry],
         member_removes: &[ResultMemberEntry],
@@ -521,7 +522,7 @@ where
         fact_rewrite: Option<&BTreeSet<ViewFactEntry>>,
     ) -> Result<(), Error> {
         self.persist_settled_result_members_delta(
-            binding_view_key,
+            authority_result_key.clone(),
             cleared,
             member_adds,
             member_removes,
@@ -529,7 +530,7 @@ where
         )
         .await?;
         self.persist_settled_program_facts_delta(
-            binding_view_key,
+            authority_result_key,
             cleared,
             fact_adds,
             fact_removes,
@@ -541,7 +542,7 @@ where
 
     async fn persist_settled_result_members_delta(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         cleared: bool,
         adds: &[ResultMemberEntry],
         removes: &[ResultMemberEntry],
@@ -551,7 +552,7 @@ where
             .database
             .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
         if cleared || rewrite.is_some() {
-            let prefix = binding_view_store_prefix(binding_view_key);
+            let prefix = authority_result_store_prefix(&authority_result_key);
             let keys = store
                 .prefix_entries(&prefix)
                 .await?
@@ -564,11 +565,11 @@ where
                 .collect::<Vec<_>>();
             if let Some(members) = rewrite {
                 for member in members {
-                    operations.push(settled_result_member_storage_write(binding_view_key, member)?);
+                    operations.push(settled_result_member_storage_write(&authority_result_key, member)?);
                 }
             } else {
                 for member in adds {
-                    operations.push(settled_result_member_storage_write(binding_view_key, member)?);
+                    operations.push(settled_result_member_storage_write(&authority_result_key, member)?);
                 }
             }
             store.write_many(&operations).await?;
@@ -578,11 +579,11 @@ where
         let mut operations = Vec::with_capacity(removes.len() + adds.len());
         for member in removes {
             operations.push(DirectRecordStoreWrite::Delete {
-                key: settled_result_member_key(binding_view_key, member)?,
+                key: settled_result_member_key(&authority_result_key, member)?,
             });
         }
         for member in adds {
-            operations.push(settled_result_member_storage_write(binding_view_key, member)?);
+            operations.push(settled_result_member_storage_write(&authority_result_key, member)?);
         }
         if !operations.is_empty() {
             store.write_many(&operations).await?;
@@ -592,7 +593,7 @@ where
 
     async fn persist_settled_program_facts_delta(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         cleared: bool,
         adds: &[ViewFactEntry],
         removes: &[ViewFactEntry],
@@ -602,7 +603,7 @@ where
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
         if cleared || rewrite.is_some() {
-            let prefix = binding_view_store_prefix(binding_view_key);
+            let prefix = authority_result_store_prefix(&authority_result_key);
             let keys = store
                 .prefix_entries(&prefix)
                 .await?
@@ -615,11 +616,11 @@ where
                 .collect::<Vec<_>>();
             if let Some(facts) = rewrite {
                 for fact in facts {
-                    operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
+                    operations.push(settled_program_fact_storage_write(&authority_result_key, fact)?);
                 }
             } else {
                 for fact in adds {
-                    operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
+                    operations.push(settled_program_fact_storage_write(&authority_result_key, fact)?);
                 }
             }
             store.write_many(&operations).await?;
@@ -629,11 +630,11 @@ where
         let mut operations = Vec::with_capacity(removes.len() + adds.len());
         for fact in removes {
             operations.push(DirectRecordStoreWrite::Delete {
-                key: settled_program_fact_key(binding_view_key, fact)?,
+                key: settled_program_fact_key(&authority_result_key, fact)?,
             });
         }
         for fact in adds {
-            operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
+            operations.push(settled_program_fact_storage_write(&authority_result_key, fact)?);
         }
         if !operations.is_empty() {
             store.write_many(&operations).await?;
@@ -682,35 +683,10 @@ where
         let mut authorization_progress_by_binding_view = BTreeMap::new();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         for entry in store.prefix_entries(&[]).await? {
-            if entry.key.len() != 3 {
-                return Err(Error::InvalidStoredValue(
-                    "known-state fact key must have three columns",
-                ));
-            }
-            let shape_id = match &entry.key[0] {
-                Value::Uuid(uuid) => ShapeId(*uuid),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state shape id must be uuid",
-                    ));
-                }
-            };
-            let binding_id = match &entry.key[1] {
-                Value::Uuid(uuid) => BindingId(*uuid),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state binding id must be uuid",
-                    ));
-                }
-            };
-            let read_view = match &entry.key[2] {
-                Value::Uuid(uuid) => ReadViewKey { id: *uuid },
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state read view must be uuid",
-                    ));
-                }
-            };
+            let authority_result_key = authority_result_key_from_store_prefix(
+                &entry.key,
+                "known-state authority result key must be valid",
+            )?;
             let settled_through = match entry.value.get_idx(0)? {
                 Value::U64(value) => GlobalTime(value),
                 _ => {
@@ -719,7 +695,7 @@ where
                     ));
                 }
             };
-            let binding_view_key = BindingViewKey::new(shape_id, binding_id, read_view);
+            let binding_view_key = authority_result_key.binding_view;
             settled_through_by_binding_view.insert(binding_view_key, settled_through);
             match entry.value.get_idx(1)? {
                 Value::U64(progress) if progress != u64::MAX => {
@@ -738,16 +714,14 @@ where
             .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
         let mut recovered_members = Vec::new();
         for entry in store.prefix_entries(&[]).await? {
-            if entry.key.len() != 4 {
-                return Err(Error::InvalidStoredValue(
-                    "settled result member key must have four columns",
-                ));
-            }
-            let binding_view_key = binding_view_key_from_store_key(
-                &entry.key,
+            let Some((member_digest, prefix)) = entry.key.split_last() else {
+                return Err(Error::InvalidStoredValue("settled result member key is empty"));
+            };
+            let authority_result_key = authority_result_key_from_store_prefix(
+                prefix,
                 "settled result member binding key must be valid",
             )?;
-            let member_digest = match &entry.key[3] {
+            let member_digest = match member_digest {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -774,7 +748,7 @@ where
                 ));
             }
             let member = result_member_from_storage_bytes(&member_bytes)?;
-            recovered_members.push((binding_view_key, member));
+            recovered_members.push((authority_result_key.binding_view, member));
         }
         let mut settled_result_sets =
             BTreeMap::<BindingViewKey, BTreeSet<ResultMemberEntry>>::new();
@@ -798,16 +772,14 @@ where
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
         let mut settled_program_facts = BTreeMap::<BindingViewKey, BTreeSet<ViewFactEntry>>::new();
         for entry in store.prefix_entries(&[]).await? {
-            if entry.key.len() != 4 {
-                return Err(Error::InvalidStoredValue(
-                    "settled program fact key must have four columns",
-                ));
-            }
-            let binding_view_key = binding_view_key_from_store_key(
-                &entry.key,
+            let Some((fact_digest, prefix)) = entry.key.split_last() else {
+                return Err(Error::InvalidStoredValue("settled program fact key is empty"));
+            };
+            let authority_result_key = authority_result_key_from_store_prefix(
+                prefix,
                 "settled program fact binding key must be valid",
             )?;
-            let fact_digest = match &entry.key[3] {
+            let fact_digest = match fact_digest {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -835,7 +807,7 @@ where
             }
             let fact = codec::program_fact_from_storage_bytes(&fact_bytes)?;
             settled_program_facts
-                .entry(binding_view_key)
+                .entry(authority_result_key.binding_view)
                 .or_default()
                 .insert(fact);
         }

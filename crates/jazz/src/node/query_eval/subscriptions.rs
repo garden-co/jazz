@@ -341,6 +341,23 @@ where
         self.apply_known_shape_subscribe(&shape, subscribe)
     }
 
+    /// Return the exact policy-scoped durable identity fixed at subscription
+    /// admission. Wire updates contain only the usage handle and cannot choose
+    /// or reconstruct this identity themselves.
+    pub(crate) fn authority_result_key_for_subscription(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Result<AuthorityResultKey, Error> {
+        self.query
+            .registered_bindings
+            .get(&subscription.shape_id)
+            .and_then(|bindings| bindings.get(&(subscription.binding_id, subscription.read_view)))
+            .map(|binding| binding.authority_result_key.clone())
+            .ok_or(Error::InvalidStoredValue(
+                "subscription referenced unregistered binding",
+            ))
+    }
+
     fn drain_parked_binding_deltas_for_shape(&mut self, shape_id: ShapeId) -> Result<(), Error> {
         let Some(deltas) = self.parking.parked_binding_deltas.remove(&shape_id) else {
             return Ok(());

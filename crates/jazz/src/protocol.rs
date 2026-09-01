@@ -1812,6 +1812,22 @@ impl PolicyBindingKey {
             canonical_claims: CanonicalPolicyClaims::new(session.claims.clone()),
         }
     }
+
+    /// Rebuild an exact policy key from ordinary durable components.
+    pub(crate) fn from_canonical_parts(
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Self {
+        Self {
+            identity,
+            canonical_claims: CanonicalPolicyClaims::new(claims),
+        }
+    }
+
+    /// Named claims in their durable canonical ordering.
+    pub(crate) fn claims(&self) -> &BTreeMap<String, Value> {
+        self.canonical_claims.claims()
+    }
 }
 
 /// Versioned query AST carried by shape registration.
