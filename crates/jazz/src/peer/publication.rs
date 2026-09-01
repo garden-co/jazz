@@ -146,8 +146,45 @@ impl PeerState {
     pub fn relay() -> Self {
         Self {
             role: PeerRole::Relay,
+            transport_capability: RelayTransportCapability::MultiplexedRelay,
             ..Self::default()
         }
+    }
+
+    /// Construct a subjectless scope-isolated relay with its one
+    /// handshake-admitted foreground session. This is topology-private:
+    /// callers on the wire never select this value.
+    pub(crate) fn scope_isolated_relay(
+        identity: AuthorSubject,
+        claims: BTreeMap<String, groove::records::Value>,
+        admission_epoch: u64,
+    ) -> Self {
+        Self {
+            role: PeerRole::Relay,
+            transport_capability: RelayTransportCapability::ScopeIsolatedClientRelay {
+                binding: DelegatedSessionBinding { identity, claims },
+                admission_epoch,
+            },
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn admits_relay_binding(
+        &self,
+        binding: &(AuthorSubject, BTreeMap<String, groove::records::Value>),
+    ) -> bool {
+        matches!(
+            &self.transport_capability,
+            RelayTransportCapability::ScopeIsolatedClientRelay { binding: admitted, .. }
+                if admitted.identity == binding.0 && admitted.claims == binding.1
+        ) || matches!(self.transport_capability, RelayTransportCapability::MultiplexedRelay)
+    }
+
+    pub(crate) fn rejects_raw_session_claims(&self) -> bool {
+        matches!(
+            self.transport_capability,
+            RelayTransportCapability::ScopeIsolatedClientRelay { .. }
+        )
     }
 
     /// Construct a peer link that terminates one client author identity.

@@ -59,6 +59,25 @@ pub struct ServerSession {
     identity: AuthorSubject,
 }
 
+/// Capability selected by the server only after authenticating a WebSocket
+/// session and negotiating its transport features.
+///
+/// `WirePeerRole` is deliberately not used here: it is a peer advertisement,
+/// whereas this value controls what the server has admitted the link to do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerLinkAdmission {
+    /// A normal session or backend link.
+    #[default]
+    OrdinarySession,
+    /// A durable relay for exactly the one session authenticated by this
+    /// connection. The epoch is freshly minted at admission and invalidated
+    /// on reconnect.
+    ScopeIsolatedClientRelay {
+        /// Fresh server-issued capability epoch for this accepted connection.
+        admission_epoch: u64,
+    },
+}
+
 impl ServerSession {
     fn transport(self) -> usize {
         self.transport
@@ -624,6 +643,33 @@ impl ShellDb {
         }
     }
 
+    fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn crate::db::Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> ShellPeerConnection {
+        match self {
+            Self::Memory(db) => {
+                ShellPeerConnection::Memory(db.accept_scope_isolated_relay_subscriber(
+                    transport,
+                    identity,
+                    claims,
+                    admission_epoch,
+                ))
+            }
+            Self::Durable(db) => {
+                ShellPeerConnection::Durable(db.accept_scope_isolated_relay_subscriber(
+                    transport,
+                    identity,
+                    claims,
+                    admission_epoch,
+                ))
+            }
+        }
+    }
+
     fn accept_edge_authority_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn crate::db::Transport>,
@@ -1168,6 +1214,7 @@ impl InMemoryServerShell {
             trust,
             crate::wire::current_wire_features(),
             None,
+            ServerLinkAdmission::OrdinarySession,
         )
     }
 
@@ -1180,6 +1227,7 @@ impl InMemoryServerShell {
         trust: CommitUnitTrust,
         negotiated_features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
+        link_admission: ServerLinkAdmission,
     ) -> ShellResult<ServerSession> {
         if self.is_draining() {
             self.metrics.rejected_sessions += 1;
@@ -1198,7 +1246,19 @@ impl InMemoryServerShell {
         // Only public sessions are Edge authority writes. Trusted native and
         // backend links retain ordinary local Edge admission, which remains
         // available while the Core authority is disconnected.
-        let connection = if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
+        let connection = if let ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch } =
+            link_admission
+        {
+            // The WebSocket admission boundary has already authenticated this
+            // one external session. Relay frames remain subjectless, while
+            // Subscribe/repair can use only this stored immutable binding.
+            self.db.accept_scope_isolated_relay_subscriber(
+                transport_adapter,
+                identity,
+                claims,
+                admission_epoch,
+            )
+        } else if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
             self.db
                 .accept_edge_authority_subscriber_with_claims_and_trust(
                     transport_adapter,

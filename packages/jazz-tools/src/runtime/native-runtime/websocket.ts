@@ -46,6 +46,8 @@ export type WebSocketCarrierOptions = {
   /** Features supported by the native runtime that will receive this link. */
   features?: number;
   authJson?: string;
+  /** Requested only by the durable, scope-admitted browser relay host. */
+  requestedLink?: "scope_isolated_client_relay";
   onFrame: WebSocketFrameHandler;
   onError?: WebSocketErrorHandler;
   onTerminal?: WebSocketTerminalHandler;
@@ -245,7 +247,13 @@ export class WebSocketCarrier {
     });
     void waitForOpen(this.socket).then(
       () => {
-        this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
+        this.socket.send(
+          encodeWebSocketPrelude(
+            options.authJson ?? "{}",
+            options.peerIdentity,
+            options.requestedLink,
+          ),
+        );
         this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
       },
       (error) => {
@@ -457,7 +465,11 @@ function websocketCloseDetails(event: unknown): { code?: number; reason?: string
   };
 }
 
-export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {
+export function encodeWebSocketPrelude(
+  authJson: string,
+  peerIdentity: Uint8Array,
+  requestedLink?: "scope_isolated_client_relay",
+): string {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
   const peerAuthor = new TextDecoder().decode(peerIdentity);
   const sub = authSub(auth) ?? canonicalAuthorSubjectPart(peerAuthor) ?? peerAuthor;
@@ -466,6 +478,7 @@ export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Arra
     ...auth,
     auth: { ...auth, sub },
     sub,
+    ...(requestedLink ? { requested_link: requestedLink } : {}),
   });
 }
 

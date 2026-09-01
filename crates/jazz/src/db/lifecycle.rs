@@ -906,6 +906,23 @@ where
         self.node.accept_relay_subscriber(transport)
     }
 
+    /// Server/host-only scope-relay admission after authenticated handshake.
+    #[doc(hidden)]
+    pub(crate) fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_scope_isolated_relay_subscriber(
+            transport,
+            identity,
+            claims,
+            admission_epoch,
+        )
+    }
+
     /// Accept a subscriber connection served under `identity` with auth claims.
     pub fn accept_subscriber_with_claims(
         &self,

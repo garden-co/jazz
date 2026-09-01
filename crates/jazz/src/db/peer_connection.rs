@@ -3281,7 +3281,7 @@ where
                     if subscriber_inbound_message_is_authority_only(
                         &message,
                         *ingest_context,
-                        peer.role(),
+                        peer,
                     )
                     {
                         drop_peer_request(&self.node);
@@ -3620,7 +3620,7 @@ where
                             let subscription_has_delegated_session = subscribe.delegated_session.is_some();
                             let session_claim_binding = admitted_request_policy_binding(
                                 *ingest_context,
-                                peer.role(),
+                                peer,
                                 session_claim_binding.clone(),
                                 subscribe.delegated_session.clone(),
                             );
@@ -4196,7 +4196,7 @@ where
                             }
                             let repair_policy_binding = admitted_request_policy_binding(
                                 *ingest_context,
-                                peer.role(),
+                                peer,
                                 session_claim_binding.clone(),
                                 delegated_session,
                             );

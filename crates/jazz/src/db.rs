@@ -2930,7 +2930,7 @@ fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust)
 fn subscriber_inbound_message_is_authority_only(
     message: &SyncMessage,
     ingest: CommitUnitIngestContext,
-    peer_role: PeerRole,
+    peer: &crate::peer::PeerState,
 ) -> bool {
     matches!(
         message,
@@ -2947,7 +2947,8 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeUnavailable { .. }
             | SyncMessage::AuthorizationScopeDecision { .. }
     ) || (matches!(message, SyncMessage::SessionClaims { .. })
-        && !delegated_session_capability(ingest, peer_role))
+        && (peer.rejects_raw_session_claims()
+            || !delegated_session_capability(ingest, peer.role())))
 }
 
 /// Only the host-admitted core-facing relay may carry another session's
@@ -2965,7 +2966,7 @@ fn delegated_session_capability(ingest: CommitUnitIngestContext, peer_role: Peer
 /// relay's transport identity as a permission subject.
 fn admitted_request_policy_binding(
     ingest: CommitUnitIngestContext,
-    peer_role: PeerRole,
+    peer: &crate::peer::PeerState,
     direct: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     delegated: Option<crate::protocol::DelegatedSessionBinding>,
 ) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
@@ -2974,10 +2975,11 @@ fn admitted_request_policy_binding(
         // may contain an opaque host identity for lifecycle purposes, but it
         // is never a fallback permission subject for an application query or
         // repair.
-        None if peer_role == PeerRole::Relay => None,
+        None if peer.role() == PeerRole::Relay => None,
         None => direct,
-        Some(delegated) if delegated_session_capability(ingest, peer_role) => {
-            Some((delegated.identity, delegated.claims))
+        Some(delegated) if delegated_session_capability(ingest, peer.role()) => {
+            let binding = (delegated.identity, delegated.claims);
+            peer.admits_relay_binding(&binding).then_some(binding)
         }
         Some(_) => None,
     }

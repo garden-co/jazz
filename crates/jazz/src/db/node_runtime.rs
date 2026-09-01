@@ -1993,6 +1993,27 @@ where
         )
     }
 
+    /// Admit the one immutable session selected during a scope-isolated relay
+    /// handshake. This is crate-private so a host must not turn application
+    /// claims or raw frames into a relay capability.
+    pub(crate) fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_subscriber_with_peer(
+            transport,
+            identity,
+            CommitUnitTrust::Relay,
+            BTreeMap::new(),
+            None,
+            PeerState::scope_isolated_relay(identity, claims, admission_epoch),
+            false,
+        )
+    }
+
     /// Accept a subscriber connection with explicit auth claims and upload trust mode.
     pub fn accept_subscriber_with_claims_and_trust(
         &self,

@@ -735,6 +735,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
   private readonly selfSignedClientProof: NativeSelfSignedClientProof | undefined;
+  private readonly scopeIsolatedRelay: boolean;
   private readonly schemaHash: string;
   private readonly trustedBackend: boolean;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
@@ -831,12 +832,13 @@ export class NativeRuntimeAdapter implements Runtime {
     historyComplete: boolean,
     opts?: Pick<
       NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[6]>,
-      "selfSignedClientProof"
+      "selfSignedClientProof" | "scopeIsolatedRelay"
     >,
   ): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, {
       db,
       selfSignedClientProof: opts?.selfSignedClientProof,
+      scopeIsolatedRelay: opts?.scopeIsolatedRelay,
     });
   }
 
@@ -864,6 +866,7 @@ export class NativeRuntimeAdapter implements Runtime {
       db?: NativeDb;
       initialSyncFlushEvery?: number;
       selfSignedClientProof?: NativeSelfSignedClientProof;
+      scopeIsolatedRelay?: boolean;
       readAuthorizationHost?: ReadAuthorizationHost;
       backendMode?: boolean;
       owner?: NativeRuntimeAdapter;
@@ -883,6 +886,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.schemaBytes = encodeSchema(schema);
     this.trustedBackend = (opts?.owner?.trustedBackend ?? opts?.backendMode) === true;
     this.selfSignedClientProof = opts?.selfSignedClientProof;
+    this.scopeIsolatedRelay = opts?.scopeIsolatedRelay === true;
     this.configBytes = openConfig(
       node,
       author,
@@ -2189,6 +2193,7 @@ export class NativeRuntimeAdapter implements Runtime {
       peerIdentity: transportIdentity,
       features: this.nativeWireFeatures(),
       authJson: normalizedAuthJson,
+      requestedLink: this.scopeIsolatedRelay ? "scope_isolated_client_relay" : undefined,
       onFrame: (frame) => {
         if (generation !== this.serverConnectionGeneration) return;
         this.pendingInboundServerFrames.push(frame);
