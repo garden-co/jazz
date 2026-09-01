@@ -2142,7 +2142,38 @@ where
             contribution_merge,
             ..
         } = stored_tx.tx.clone();
-        let scope = if usize::try_from(n_total_writes).ok() == Some(tx_versions.len()) {
+        // A structured result can reach the same immutable version through
+        // more than one retained fact (for example, a root's nested relation
+        // and the relation's sender witness). A wire bundle describes a set of
+        // row versions, not those traversal paths: canonicalize it before
+        // deriving its declared view-scoped cardinality.
+        let mut versions = BTreeMap::new();
+        for version in tx_versions {
+            // A maintained terminal may use a current-row source projected for
+            // query evaluation, but a VersionRecord is replicated history, not
+            // query output. Resolve its identity back to the stored authored
+            // row before crossing the wire boundary (INV-DATA-16/18,
+            // INV-SYNC-16, and C.3's byte-fidelity rule).
+            let canonical = if source == MaintainedBundleVersionSource::ExactStorage {
+                version.clone()
+            } else {
+                self.canonical_history_version_for_maintained_witness(version)
+                    .await?
+            };
+            let record = self.version_record_from_row(&canonical)?;
+            let key = version_bundle_record_key(&record);
+            match versions.get(&key) {
+                Some(existing) if existing != &record => {
+                    return Err(Error::ConflictingCommitUnit(tx_id));
+                }
+                Some(_) => {}
+                None => {
+                    versions.insert(key, record);
+                }
+            }
+        }
+        let versions = versions.into_values().collect::<Vec<_>>();
+        let scope = if usize::try_from(n_total_writes).ok() == Some(versions.len()) {
             crate::protocol::VersionBundleScope::CompleteTransaction
         } else {
             crate::protocol::VersionBundleScope::ViewScoped
@@ -2152,7 +2183,7 @@ where
             kind,
             n_total_writes: match scope {
                 crate::protocol::VersionBundleScope::CompleteTransaction => n_total_writes,
-                crate::protocol::VersionBundleScope::ViewScoped => tx_versions
+                crate::protocol::VersionBundleScope::ViewScoped => versions
                     .len()
                     .try_into()
                     .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?,
@@ -2166,21 +2197,6 @@ where
             user_metadata_json,
             contribution_merge,
         };
-        let mut versions = Vec::with_capacity(tx_versions.len());
-        for version in tx_versions {
-            // A maintained terminal may use a current-row source projected for
-            // query evaluation, but a VersionRecord is replicated history, not
-            // query output. Resolve its identity back to the stored authored
-            // row before crossing the wire boundary (INV-DATA-16/18,
-            // INV-SYNC-16, and C.3's byte-fidelity rule).
-            let canonical = if source == MaintainedBundleVersionSource::ExactStorage {
-                version.clone()
-            } else {
-                self.canonical_history_version_for_maintained_witness(version)
-                    .await?
-            };
-            versions.push(self.version_record_from_row(&canonical)?);
-        }
         Ok(VersionBundle {
             tx: tx_payload,
             versions,
