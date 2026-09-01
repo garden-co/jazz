@@ -1337,8 +1337,7 @@ impl PeerState {
                 &hydrated_published_members,
             );
         }
-        if self.role == PeerRole::Relay
-            && result_table_filter.is_none()
+        if source_authority_result.is_some()
             && let Some(settled) = node.settled_result_transitions_for_subscription(
                 subscription,
                 source_authority_result,

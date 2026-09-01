@@ -13,7 +13,7 @@ use jazz::db::{
 use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::node::{CommitUnitTrust, CurrentRow};
+use jazz::node::CurrentRow;
 use jazz::protocol::{
     RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
@@ -2393,14 +2393,8 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let (first_transport, first_worker_transport) = duplex();
     let first_connection = block_on(first_tab.connect_upstream(first_transport));
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
-    let (worker_upstream_transport, core_worker_transport) = duplex();
-    let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_worker_subscriber = core.accept_subscriber_with_claims_and_trust(
-        core_worker_transport,
-        AuthorSubject::SYSTEM,
-        BTreeMap::new(),
-        CommitUnitTrust::TrustedBackend,
-    );
+    let (worker_upstream, core_worker_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let exact_query = Query::from("todos")
         .order_by("title", OrderDirection::Asc)
         .offset(1);
@@ -2486,15 +2480,8 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let _reopened_connection = block_on(reopened_tab.connect_upstream(reopened_transport));
     let _reopened_worker_connection =
         reopened_worker.accept_subscriber(reopened_worker_transport, alice);
-    let (reopened_upstream_transport, reopened_core_transport) = duplex();
-    let _reopened_upstream =
-        block_on(reopened_worker.connect_upstream(reopened_upstream_transport));
-    let _reopened_core_subscriber = core.accept_subscriber_with_claims_and_trust(
-        reopened_core_transport,
-        AuthorSubject::SYSTEM,
-        BTreeMap::new(),
-        CommitUnitTrust::TrustedBackend,
-    );
+    let (_reopened_upstream, _reopened_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(reopened_worker, core, alice);
     let reopened_query = reopened_tab
         .prepare_query(&exact_query)
         .expect("prepare reopened Edge query");

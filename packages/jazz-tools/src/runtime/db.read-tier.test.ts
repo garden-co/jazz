@@ -131,7 +131,7 @@ async function settle(): Promise<void> {
 }
 
 describe("Db ReadTier.RemoteIfPossible", () => {
-  it("keeps explicit Local reads local-only whether connected or explicitly offline", async () => {
+  it("keeps explicit Local reads propagating whether connected or explicitly offline", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {
@@ -144,17 +144,13 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
 
     await db.all(query(), { tier: ReadTier.LocalFirst });
-    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({
-      tier: ReadTier.LocalFirst,
-      propagation: "local-only",
-    });
+    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: ReadTier.LocalFirst });
+    expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
 
     await db.disconnect();
     await db.all(query(), { tier: "local" });
-    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({
-      tier: "local",
-      propagation: "local-only",
-    });
+    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: "local" });
+    expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
 
     await db.reconnect();
     await db.all(query(), { tier: ReadTier.Remote });
@@ -162,7 +158,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
   });
 
-  it("keeps explicit Local subscriptions local-only without changing connected Edge", async () => {
+  it("keeps explicit Local subscriptions propagating without changing connected Edge", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {
@@ -175,10 +171,8 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
 
     const stopLocal = db.subscribe(query(), () => undefined, { tier: ReadTier.LocalFirst });
-    expect(client.subscribe.mock.calls.at(-1)?.[2]).toMatchObject({
-      tier: ReadTier.LocalFirst,
-      propagation: "local-only",
-    });
+    expect(client.subscribe.mock.calls.at(-1)?.[2]).toMatchObject({ tier: ReadTier.LocalFirst });
+    expect(client.subscribe.mock.calls.at(-1)?.[2]).not.toHaveProperty("propagation");
 
     const stopRemote = db.subscribe(query(), () => undefined, { tier: ReadTier.Remote });
     expect(client.subscribe.mock.calls.at(-1)?.[2]).toMatchObject({ tier: ReadTier.Remote });

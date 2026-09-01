@@ -468,7 +468,7 @@ where
     pub(super) mutation_errors: SharedMutationErrors,
     pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(super) fail_next_subscription_refresh: Cell<bool>,
     pub(super) observed_subscriber_dirty_epoch: Cell<u64>,
     pub(super) observed_session_claim_revision: Cell<u64>,
@@ -1560,49 +1560,42 @@ where
         {
             let group_subscription = coverage_group_subscription_key(&coverage);
             peer.set_subscription_policy_binding(group_subscription, policy_binding);
-            let authority_result_source = self
-                .node
-                .borrow()
-                .authority_result_key_for_subscription(authority_result_subscription)
-                .ok();
             let scope_relay = self.node.borrow().client_relay_scope().is_some();
-            let Some(authority_result_source) = authority_result_source else {
-                // A strict scope relay may not rehydrate from its overlay or
-                // guess a sibling's receipt. Its separately admitted U source
-                // must be registered first, then a later owner-loop turn will
-                // rehydrate this group.
-                if scope_relay {
+            if awaiting_upstream_settlement {
+                let authority_result_source = self
+                    .node
+                    .borrow()
+                    .authority_result_key_for_subscription(authority_result_subscription)
+                    .ok();
+                let Some(authority_result_source) = authority_result_source else {
+                    // A strict scope relay may not rehydrate from its overlay
+                    // or guess a sibling's receipt. Its separately admitted U
+                    // source must be registered first.
                     *serve_dirty = true;
                     continue;
                 };
-                continue;
-            };
-            if scope_relay
-                && awaiting_upstream_settlement
-                && !self
-                    .node
-                    .borrow()
-                    .has_settled_authority_result(&authority_result_source)
-            {
-                // Rehydration is an owner-loop recovery path, not an
-                // authority result.  A scope-isolated relay must preserve the
-                // downstream opening state until its selected upstream usage
-                // has delivered a live reset.  Rehydrating against the local
-                // overlay would otherwise emit an ordinary empty D update;
-                // the foreground correctly treats that as definitive strict
-                // Edge coverage and releases D (thereby retiring U) before
-                // the actual authority result arrives.
-                *serve_dirty = true;
-                continue;
+                if scope_relay
+                    && !self
+                        .node
+                        .borrow()
+                        .has_settled_authority_result(&authority_result_source)
+                {
+                    // Recovery cannot turn an unsettled strict relay read into
+                    // a definitive empty result. Wait for the selected U.
+                    *serve_dirty = true;
+                    continue;
+                }
+                peer.set_subscription_authority_result_source(
+                    group_subscription,
+                    authority_result_source,
+                );
+                peer.set_subscription_awaiting_selected_authority_source(
+                    group_subscription,
+                    scope_relay,
+                );
+            } else {
+                peer.set_subscription_awaiting_selected_authority_source(group_subscription, false);
             }
-            peer.set_subscription_authority_result_source(
-                group_subscription,
-                authority_result_source.clone(),
-            );
-            peer.set_subscription_awaiting_selected_authority_source(
-                group_subscription,
-                scope_relay && awaiting_upstream_settlement,
-            );
             let update = {
                 let mut node = self.node.lock().await;
                 let mut node = node.scoped_active_session_claims(
@@ -3260,7 +3253,7 @@ where
                         // returning it would discard this tick's progress receipt
                         // and make the already-consumed batch eligible for replay.
                         let refresh_result = {
-                            #[cfg(test)]
+                            #[cfg(any(test, feature = "testing"))]
                             {
                                 if self.fail_next_subscription_refresh.replace(false) {
                                     Err(Error::new(
@@ -3277,7 +3270,7 @@ where
                                     .await
                                 }
                             }
-                            #[cfg(not(test))]
+                            #[cfg(not(any(test, feature = "testing")))]
                             {
                                 refresh_subscriptions_in(
                                     &self.node,
@@ -4046,7 +4039,10 @@ where
                             // authority, by contrast, evaluates the incoming
                             // downstream usage itself and therefore owns D.
                             let scope_relay = self.node.borrow().client_relay_scope().is_some();
-                            let authority_result_subscription = if scope_relay {
+                            let waits_for_selected_authority = opts.propagate_upstream
+                                && opts.tier > DurabilityTier::Local
+                                && (local_subscriber || scope_relay);
+                            let authority_result_subscription = if waits_for_selected_authority {
                                 upstream_subscription
                             } else {
                                 subscription
@@ -4105,7 +4101,8 @@ where
                                 binding_id: binding.binding_id(),
                                 read_view: upstream_opts.read_view_key(),
                             };
-                            let selected_authority_result_key = scope_relay.then(|| {
+                            let selected_authority_result_key =
+                                (scope_relay && waits_for_selected_authority).then(|| {
                                 crate::protocol::AuthorityResultKey::policy_scoped(
                                     upstream_binding_view,
                                     crate::protocol::PolicyBindingKey::from_canonical_parts(
@@ -4123,7 +4120,7 @@ where
                             // boundary preserve opening provenance instead of
                             // accidentally publishing D's empty local overlay
                             // as a final strict result.
-                            if scope_relay && opts.propagate_upstream {
+                            if scope_relay && waits_for_selected_authority {
                                 let selected_authority_result_key = selected_authority_result_key
                                     .clone()
                                     .expect("scope relay selects an exact authority result");
@@ -4183,8 +4180,7 @@ where
                             // so it deliberately does not take this handoff
                             // path.
                             let waiting_for_selected_authority_settlement =
-                                opts.propagate_upstream
-                                    && (local_subscriber || scope_relay)
+                                waits_for_selected_authority
                                     && {
                                         // This usage site owns a distinct
                                         // receipt. A same-shaped sibling must
@@ -4747,17 +4743,19 @@ where
                         // subscription here: that can collapse a scoped U
                         // into a sibling/unscoped cache entry between
                         // registration and first publication.
-                        let upstream_authority_result_key = peer
-                            .subscription_authority_result_source(group_subscription)
-                            .cloned()
-                            .or_else(|| {
-                                self.node
-                                    .borrow()
-                                    .authority_result_key_for_subscription(
-                                        group.authority_result_subscription,
-                                    )
-                                    .ok()
-                            });
+                        let upstream_authority_result_key =
+                            group.awaiting_upstream_settlement.then(|| {
+                                peer.subscription_authority_result_source(group_subscription)
+                                    .cloned()
+                                    .or_else(|| {
+                                        self.node
+                                            .borrow()
+                                            .authority_result_key_for_subscription(
+                                                group.authority_result_subscription,
+                                            )
+                                            .ok()
+                                    })
+                            }).flatten();
                         let upstream_authority_is_settled = {
                             let node = self.node.borrow();
                             upstream_authority_result_key

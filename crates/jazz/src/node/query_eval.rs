@@ -1567,15 +1567,6 @@ where
             .map(|view| view.key)
     }
 
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn relay_edge_query_requires_authority_source(
-        &self,
-        _shape: &ValidatedQuery,
-        _binding: &Binding,
-    ) -> bool {
-        self.client_relay_scope().is_some()
-    }
-
     fn client_settled_binding_view_for_query(
         &self,
         shape: &ValidatedQuery,

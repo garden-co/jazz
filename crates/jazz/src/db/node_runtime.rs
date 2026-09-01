@@ -1859,7 +1859,7 @@ where
             mutation_errors: Rc::clone(&self.mutation_errors),
             browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
@@ -2192,7 +2192,7 @@ where
             mutation_errors: Rc::clone(&self.mutation_errors),
             browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
