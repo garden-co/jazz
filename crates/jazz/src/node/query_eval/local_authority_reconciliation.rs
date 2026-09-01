@@ -47,12 +47,17 @@ impl LocalAuthorityReconciliation {
     }
 
     pub(crate) fn replace_source(&mut self, source: AuthorityResultKey, generation: u64) {
-        if self.source.as_ref() != Some(&source) {
-            self.confirmed_members.clear();
-            self.confirmed_facts.clear();
-            self.deferred = false;
-            self.deferred_row_keys.clear();
+        if self.source.as_ref() == Some(&source) {
+            // Re-registering the same immutable source cannot make an older
+            // authority snapshot current again. Callers commonly install a
+            // source before they have observed its current generation.
+            self.generation = self.generation.max(generation);
+            return;
         }
+        self.confirmed_members.clear();
+        self.confirmed_facts.clear();
+        self.deferred = false;
+        self.deferred_row_keys.clear();
         self.source = Some(source);
         self.generation = generation;
     }
@@ -164,6 +169,63 @@ mod tests {
                     BTreeSet::new(),
                 )
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn same_source_replacement_never_lowers_generation_watermark() {
+        let key = source(4);
+        let mut state = LocalAuthorityReconciliation::default();
+        state.replace_source(key.clone(), 10);
+        state.replace_source(key.clone(), 0);
+        assert_eq!(state.generation(), 10);
+        assert!(
+            state
+                .reconcile(
+                    &key,
+                    5,
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                )
+                .is_none(),
+            "an older generation must remain stale after same-source registration",
+        );
+    }
+
+    #[test]
+    fn actual_source_replacement_resets_generation_and_confirmation() {
+        let confirmed = member(5);
+        let old = source(6);
+        let fresh = source(7);
+        let mut state = LocalAuthorityReconciliation::default();
+        state.replace_source(old.clone(), 10);
+        state
+            .reconcile(
+                &old,
+                10,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                BTreeSet::from([confirmed.clone()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        state.replace_source(fresh.clone(), 0);
+        assert_eq!(state.generation(), 0);
+        let delta = state
+            .reconcile(
+                &fresh,
+                1,
+                &BTreeSet::from([confirmed]),
+                &BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(
+            delta.member_removes.is_empty(),
+            "a new source must not retract membership confirmed only by the old source",
         );
     }
 }
