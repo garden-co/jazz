@@ -809,6 +809,7 @@ fn validate_server_config(
         _ => {}
     }
 
+
     if topology.is_edge() && auth_config.admin_secret.is_none() {
         return Err("edge mode requires --admin-secret / JAZZ_ADMIN_SECRET when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
     }
@@ -1660,6 +1661,93 @@ mod tests {
         assert!(built.state.topology.is_edge());
         assert!(built.state.upstream_http_url.is_some());
     }
+    #[tokio::test]
+    async fn builder_omitted_secrets_preserve_unconfigured_auth() {
+        let built = ServerBuilder::new(AppId::from_name("builder-omitted-secrets"))
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("builder accepts omitted credentials");
+
+        assert!(built.state.auth_config.admin_secret.is_none());
+        assert!(built.state.auth_config.backend_secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_empty_and_whitespace_only_admin_and_backend_secrets() {
+        for (field, expected_error, value) in [
+            ("admin_secret", "admin secret cannot be empty", ""),
+            ("admin_secret", "admin secret cannot be empty", " \t\n"),
+            ("backend_secret", "backend secret cannot be empty", ""),
+            ("backend_secret", "backend secret cannot be empty", " \t\n"),
+        ] {
+            let mut auth_config = AuthConfig::default();
+            match field {
+                "admin_secret" => auth_config.admin_secret = Some(value.to_owned()),
+                "backend_secret" => auth_config.backend_secret = Some(value.to_owned()),
+                _ => unreachable!("test field is known"),
+            }
+
+            let result = ServerBuilder::new(AppId::from_name("builder-blank-secrets"))
+                .with_auth_config(auth_config)
+                .with_storage(StorageBackend::InMemory)
+                .build()
+                .await;
+            let error = result
+                .err()
+                .expect("blank credentials must be rejected during build");
+
+            assert_eq!(error, expected_error);
+            if !value.is_empty() {
+                assert!(
+                    !error.contains(value),
+                    "validation error must not expose the configured credential"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_blank_edge_admin_without_exposing_credential() {
+        for value in ["", " \t\n"] {
+            let result = ServerBuilder::new(AppId::from_name("builder-blank-edge-admin"))
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some(value.to_owned()),
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::InMemory)
+                .with_upstream_url("ws://127.0.0.1:9")
+                .build()
+                .await;
+            let error = result
+                .err()
+                .expect("blank edge admin credential must be rejected during build");
+
+            assert_eq!(error, "admin secret cannot be empty");
+            if !value.is_empty() {
+                assert!(
+                    !error.contains(value),
+                    "validation error must not expose the configured credential"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_accepts_nonblank_admin_and_backend_secrets() {
+        let result = ServerBuilder::new(AppId::from_name("builder-nonblank-secrets"))
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("configured-admin".to_owned()),
+                backend_secret: Some("configured-backend".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await;
+
+        assert!(result.is_ok());
+    }
+
 
     #[tokio::test]
     async fn builder_uses_global_tier_without_upstream() {
