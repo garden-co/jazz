@@ -517,6 +517,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         authority.transaction_state_settled(batch_tx.tx_id),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
+    let batch_versions_for_reopen = batch_versions.clone();
     let replay_outcome = crate::db::block_on(authority.ingest_commit_unit(
         batch_tx.clone(),
         batch_versions,
@@ -753,6 +754,31 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
     assert!(matches!(
         authority.transaction_state_settled(tampered_tx.tx_id),
         Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+
+    // Durable authority state retains the exact descriptor. A reopened
+    // authority therefore keeps the accepted outcome and treats a relayed
+    // retry of the same unit as idempotent rather than losing its source proof.
+    drop(authority);
+    let mut reopened = reopen_history_complete_node_at(
+        &_dir,
+        NodeUuid::from_bytes([0x4a; 16]),
+        schema.clone(),
+    );
+    assert_eq!(
+        reopened.transaction_record(batch_tx.tx_id).unwrap().contribution_merge,
+        batch_tx.contribution_merge
+    );
+    let reopened_outcome = crate::db::block_on(reopened.ingest_commit_unit(
+        batch_tx.clone(),
+        batch_versions_for_reopen,
+        41,
+    ))
+    .unwrap();
+    settle_outcome(&mut reopened, reopened_outcome).unwrap();
+    assert!(matches!(
+        reopened.transaction_state_settled(batch_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
 }
 
