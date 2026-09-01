@@ -1450,23 +1450,17 @@ fn lower_join_keys(
         ));
     };
 
-    let left_match = resolve_column(left_fields, &left_column.qualifier, &left_column.name);
-    let right_match = resolve_column(right_fields, &right_column.qualifier, &right_column.name);
-    if let (Ok(left_field), Ok(right_field)) = (left_match, right_match) {
-        if left_field.value_type != right_field.value_type {
-            return Err(PlannerError::TypeMismatch {
-                left: left_field.value_type.clone(),
-                right: right_field.value_type.clone(),
-            });
+    let left_column = resolve_join_column(left_fields, right_fields, left_column)?;
+    let right_column = resolve_join_column(left_fields, right_fields, right_column)?;
+    let (left_field, right_field) = match (left_column.side, right_column.side) {
+        (JoinSide::Left, JoinSide::Right) => (left_column.field, right_column.field),
+        (JoinSide::Right, JoinSide::Left) => (right_column.field, left_column.field),
+        (JoinSide::Left, JoinSide::Left) | (JoinSide::Right, JoinSide::Right) => {
+            return Err(PlannerError::UnsupportedExpression(
+                "join keys must reference opposite join inputs",
+            ));
         }
-        return Ok((
-            vec![left_field.source_name.clone()],
-            vec![right_field.source_name.clone()],
-        ));
-    }
-
-    let left_field = resolve_column(left_fields, &right_column.qualifier, &right_column.name)?;
-    let right_field = resolve_column(right_fields, &left_column.qualifier, &left_column.name)?;
+    };
     if left_field.value_type != right_field.value_type {
         return Err(PlannerError::TypeMismatch {
             left: left_field.value_type.clone(),
@@ -1477,6 +1471,47 @@ fn lower_join_keys(
         vec![left_field.source_name.clone()],
         vec![right_field.source_name.clone()],
     ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JoinSide {
+    Left,
+    Right,
+}
+
+struct ResolvedJoinColumn<'a> {
+    side: JoinSide,
+    field: &'a LogicalField,
+}
+
+fn resolve_join_column<'a>(
+    left_fields: &'a [LogicalField],
+    right_fields: &'a [LogicalField],
+    column: &crate::queries::ColumnRef,
+) -> Result<ResolvedJoinColumn<'a>, PlannerError> {
+    let qualifier = (!column.qualifier.is_empty()).then(|| column.qualifier.join("."));
+    let mut resolved = None;
+    let mut count = 0;
+    for (side, fields) in [
+        (JoinSide::Left, left_fields),
+        (JoinSide::Right, right_fields),
+    ] {
+        for field in fields {
+            if field.name == column.name
+                && qualifier
+                    .as_ref()
+                    .is_none_or(|qualifier| field.qualifier.as_deref() == Some(qualifier))
+            {
+                count += 1;
+                resolved = Some(ResolvedJoinColumn { side, field });
+            }
+        }
+    }
+    match (count, resolved) {
+        (1, Some(resolved)) => Ok(resolved),
+        (0, None) => Err(PlannerError::ColumnNotFound(column.name.clone())),
+        (_, _) => Err(PlannerError::AmbiguousColumn(column.name.clone())),
+    }
 }
 
 fn join_fields(left: &[LogicalField], right: &[LogicalField]) -> Vec<LogicalField> {
