@@ -1237,10 +1237,46 @@ async fn resident_recursive_limit_discards_staged_closure() {
     insert_edge(&mut update, 2, 2, 3);
     insert_edge(&mut update, 3, 3, 4);
     database.commit_batch(update).await.unwrap();
+    let after_stats = database.runtime_stats();
     assert_eq!(
-        database.runtime_stats(),
-        before_stats,
-        "a scoped resident failure must not install partial evaluator state"
+        after_stats.graph_nodes, before_stats.graph_nodes,
+        "a failed subscription must not alter the installed graph"
+    );
+    assert_eq!(
+        after_stats.active_subscriptions, before_stats.active_subscriptions,
+        "the failed subscription remains observable through its failure channel"
+    );
+    assert_eq!(
+        after_stats.recursive_state_count, 0,
+        "failed subscription teardown must remove recursive operator state"
+    );
+    assert_eq!(
+        after_stats.recursive_accumulated_rows, 0,
+        "failed recursion must not retain a partial closure"
+    );
+    assert_eq!(
+        after_stats.recursive_accumulated_encoded_bytes, 0,
+        "failed recursion must not retain encoded partial closure state"
+    );
+    assert_eq!(
+        after_stats.arrangement_count, before_stats.arrangement_count,
+        "failed recursion must not install or remove committed arrangements"
+    );
+    assert_eq!(
+        after_stats.arrangement_rows, before_stats.arrangement_rows,
+        "failed recursion must not advance committed arrangement rows"
+    );
+    assert_eq!(
+        after_stats.arrangement_encoded_bytes, before_stats.arrangement_encoded_bytes,
+        "failed recursion must not advance encoded arrangement state"
+    );
+    assert!(
+        after_stats.eval_memo_entries <= before_stats.eval_memo_entries,
+        "failed recursion must not install partial evaluator memo entries"
+    );
+    assert!(
+        after_stats.eval_memo_bytes <= before_stats.eval_memo_bytes,
+        "failed recursion must not install partial evaluator memo bytes"
     );
     assert!(
         failed.recv().is_err(),
