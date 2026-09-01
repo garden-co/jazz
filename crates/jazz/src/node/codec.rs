@@ -4406,10 +4406,7 @@ fn program_fact_member(
     result_member_from_storage_bytes(&reader.bytes()?)
 }
 fn program_fact_put_source(bytes: &mut Vec<u8>, value: &ProgramSourceId) -> Result<(), Error> {
-    if value.table.is_empty()
-        || value.path.is_empty()
-        || value.path.len() > MAX_PROGRAM_FACT_NESTING
-    {
+    if !value.is_wire_valid() || value.path.len() > MAX_PROGRAM_FACT_NESTING {
         return Err(Error::InvalidStoredValue(
             "settled program fact source identity is invalid",
         ));
@@ -4449,7 +4446,7 @@ fn program_fact_source(
     let table: groove::Intern<String> = reader.string()?.into();
     let len = usize::try_from(reader.u32()?)
         .map_err(|_| Error::InvalidStoredValue("settled program fact source path is too large"))?;
-    if table.is_empty() || len == 0 || len > MAX_PROGRAM_FACT_NESTING {
+    if len == 0 || len > MAX_PROGRAM_FACT_NESTING {
         return Err(Error::InvalidStoredValue(
             "settled program fact source identity is invalid",
         ));
@@ -4470,7 +4467,13 @@ fn program_fact_source(
             }
         });
     }
-    Ok(ProgramSourceId { table, path })
+    let source = ProgramSourceId { table, path };
+    if !source.is_wire_valid() || source.path.len() > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact source identity is invalid",
+        ));
+    }
+    Ok(source)
 }
 fn program_fact_put_version(bytes: &mut Vec<u8>, value: &RowVersionRefEntry) -> Result<(), Error> {
     program_fact_put_tx(bytes, value.tx);
@@ -4688,6 +4691,11 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
             })?;
         }
         ProgramFactEntry::CoveredInput(v) => {
+            if !v.is_wire_valid() {
+                return Err(Error::InvalidStoredValue(
+                    "settled covered input identity is invalid",
+                ));
+            }
             bytes.push(14);
             program_fact_put_source(&mut bytes, &v.source)?;
             program_fact_put_string(&mut bytes, v.version_table.as_str())?;
@@ -4902,12 +4910,20 @@ pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramF
             version: program_fact_version(&mut r)?,
             member: program_fact_option(&mut r, |r| program_fact_member(r, 1))?,
         }),
-        14 => ProgramFactEntry::CoveredInput(CoveredInputEntry {
-            source: program_fact_source(&mut r)?,
-            version_table: r.string()?.into(),
-            source_row: RowUuid(r.uuid()?),
-            version: program_fact_version(&mut r)?,
-        }),
+        14 => {
+            let input = CoveredInputEntry {
+                source: program_fact_source(&mut r)?,
+                version_table: r.string()?.into(),
+                source_row: RowUuid(r.uuid()?),
+                version: program_fact_version(&mut r)?,
+            };
+            if !input.is_wire_valid() {
+                return Err(Error::InvalidStoredValue(
+                    "settled covered input identity is invalid",
+                ));
+            }
+            ProgramFactEntry::CoveredInput(input)
+        }
         9 => ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
             protected: program_fact_member(&mut r, 1)?,
             policy_path: r.string()?,
@@ -6349,6 +6365,20 @@ mod result_member_storage_codec_tests {
         }
     }
 
+    fn fixture_source_with_all_roles() -> ProgramSourceId {
+        ProgramSourceId {
+            table: "tasks".to_owned().into(),
+            path: vec![
+                ProgramSourceRole::Root,
+                ProgramSourceRole::Alias("self".to_owned()),
+                ProgramSourceRole::RecursiveSeed("seed".to_owned()),
+                ProgramSourceRole::RecursiveStep("step".to_owned()),
+                ProgramSourceRole::CorrelatedChild("items".to_owned()),
+                ProgramSourceRole::Policy("read".to_owned()),
+            ],
+        }
+    }
+
     // This is necessarily an internal test: raw durable keys are an engine
     // boundary.  It locks every permanent fact/source/value tag to a fixture;
     // restart behavior exercises those keys through the public node lifecycle.
@@ -6422,10 +6452,7 @@ mod result_member_storage_codec_tests {
                 member: Some(member.clone()),
             }),
             ProgramFactEntry::CoveredInput(CoveredInputEntry {
-                source: crate::protocol::ProgramSourceId {
-                    table: "a".to_owned().into(),
-                    path: vec![crate::protocol::ProgramSourceRole::Root],
-                },
+                source: fixture_source_with_all_roles(),
                 version_table: "a".to_owned().into(),
                 source_row: RowUuid::from_bytes([38; 16]),
                 version: version.clone(),
@@ -6494,7 +6521,7 @@ mod result_member_storage_codec_tests {
                 "90b3bda57c07eeda03fc389e0287f93627085ab0dfc2db66ea30eea9d7352a44",
                 "2d1ae58110da67261105647b85d16b2cd0eed8e0ad602a2393a49dcd20e1e307",
                 "f19b832022c7623e85f35a321908882ac8d54d685ecdd7b892c041c217b467b9",
-                "fb564f29e166cb50b8ef729a121dfeb5113f717737fbe1bec9d78f6291d17cb0",
+                "6f3af744b862a1da729a60506be303af633493fa0ba9987b759cbd33b46fe812",
                 "0e3395f68049bf529f1e5014170d4aa5f55ac6d45daf6998e9f3376fefce4a47",
                 "67e1ab722ba171d14ab66f5fc31bc948344a75f936865330aebb222c10161be6",
                 "cd7baa59c57b431ceb32580a74541393890e69af5c6587d4a16dfacf4ff10482",
@@ -6502,6 +6529,48 @@ mod result_member_storage_codec_tests {
                 "73b584cebffb48801a204b0c1e5d57e7b1dddc1c40180ffa5497d8981ad5d1b1",
             ]
         );
+    }
+
+    #[test]
+    fn covered_input_source_codec_pins_every_role_and_rejects_malformed_paths() {
+        let fact = ProgramFactEntry::CoveredInput(CoveredInputEntry {
+            source: fixture_source_with_all_roles(),
+            version_table: "tasks".to_owned().into(),
+            source_row: RowUuid::from_bytes([0x38; 16]),
+            version: fixture_version(),
+        });
+        let encoded = program_fact_storage_bytes(&fact).unwrap();
+        assert_eq!(
+            hex::encode(&encoded),
+            "4a50464b010e050000007461736b730600000000010400000073656c6602040000007365656403040000007374657004050000006974656d73050400000072656164050000007461736b73383838383838383838383838383838381f000000000000003333333333333333333333333333333301343434343434343434343434343434340201200000000000000035353535353535353535353535353535010100000036010100000037"
+        );
+        assert_eq!(program_fact_from_storage_bytes(&encoded).unwrap(), fact);
+
+        let source_offset = 6 + 4 + "tasks".len() + 4;
+        let mut unknown_role = encoded.clone();
+        unknown_role[source_offset] = 0xff;
+        assert!(program_fact_from_storage_bytes(&unknown_role).is_err());
+
+        let mut empty_path = encoded.clone();
+        let path_len_offset = 6 + 4 + "tasks".len();
+        empty_path[path_len_offset..path_len_offset + 4].copy_from_slice(&0_u32.to_le_bytes());
+        empty_path.remove(source_offset);
+        assert!(program_fact_from_storage_bytes(&empty_path).is_err());
+
+        let empty_alias = ProgramFactEntry::CoveredInput(CoveredInputEntry {
+            source: ProgramSourceId {
+                table: "tasks".to_owned().into(),
+                path: vec![ProgramSourceRole::Alias(String::new())],
+            },
+            version_table: "tasks".to_owned().into(),
+            source_row: RowUuid::from_bytes([0x39; 16]),
+            version: fixture_version(),
+        });
+        assert!(program_fact_storage_bytes(&empty_alias).is_err());
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(program_fact_from_storage_bytes(&trailing).is_err());
     }
 
     #[test]

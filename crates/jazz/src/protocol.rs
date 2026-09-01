@@ -596,6 +596,25 @@ impl SyncMessage {
         }
     }
 
+    /// Validate peer-wire facts whose meaning must be fixed before a receiver
+    /// attaches them to a compiled maintained program.
+    pub fn validate_wire_contract(&self) -> Result<(), WireContractError> {
+        self.validate_version_carriers()
+            .map_err(WireContractError::VersionCarrier)?;
+        let Some(view) = self.carried_view_update() else {
+            return Ok(());
+        };
+        if view
+            .program_fact_adds
+            .iter()
+            .chain(&view.program_fact_removes)
+            .any(|fact| matches!(fact, ProgramFactEntry::CoveredInput(input) if !input.is_wire_valid()))
+        {
+            return Err(WireContractError::InvalidCoveredInput);
+        }
+        Ok(())
+    }
+
     fn carried_view_update(&self) -> Option<&ViewUpdatePayload> {
         match self {
             Self::ViewUpdate(view) | Self::AuthorizationScopeView { view, .. } => Some(view),
@@ -603,6 +622,26 @@ impl SyncMessage {
         }
     }
 }
+
+/// A semantic value violates the frozen peer-wire contract.
+#[derive(Debug)]
+pub enum WireContractError {
+    /// A version carrier is structurally malformed.
+    VersionCarrier(VersionBundleRunError),
+    /// A covered source input has no canonical source identity.
+    InvalidCoveredInput,
+}
+
+impl std::fmt::Display for WireContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VersionCarrier(error) => error.fmt(f),
+            Self::InvalidCoveredInput => write!(f, "covered input source identity is invalid"),
+        }
+    }
+}
+
+impl std::error::Error for WireContractError {}
 
 fn validate_version_carrier_runs(
     version_carriers: &[VersionCarrier],
@@ -3488,6 +3527,16 @@ pub struct CoveredInputEntry {
     pub version: RowVersionRefEntry,
 }
 
+impl CoveredInputEntry {
+    /// Validate the frozen peer-wire identity without consulting local state.
+    ///
+    /// The subsequent receiver lookup is intentionally stricter: it must find
+    /// this complete `source` value among sources compiled for the subscription.
+    pub fn is_wire_valid(&self) -> bool {
+        self.source.is_wire_valid() && !self.version_table.is_empty()
+    }
+}
+
 /// Canonical, wire-safe identity of one logical source occurrence in a
 /// normalized maintained program.
 ///
@@ -3500,6 +3549,33 @@ pub struct ProgramSourceId {
     pub table: groove::Intern<String>,
     /// Ordered normalized-role path from the query root to this occurrence.
     pub path: Vec<ProgramSourceRole>,
+}
+
+/// Maximum normalized source-path depth admitted on the v1 peer wire.
+pub const MAX_PROGRAM_SOURCE_PATH_SEGMENTS: usize = 32;
+
+impl ProgramSourceId {
+    /// Whether this is a syntactically valid frozen source occurrence key.
+    ///
+    /// A receiver resolves this key only by complete equality against a source
+    /// occurrence compiled from its registered shape. Matching the table,
+    /// result member, collector position, or any path prefix is forbidden:
+    /// self-joins and repeated relation paths can share all of those weaker
+    /// properties. A missing exact occurrence therefore parks/rejects the
+    /// authority update rather than falling back to another source.
+    pub fn is_wire_valid(&self) -> bool {
+        !self.table.is_empty()
+            && !self.path.is_empty()
+            && self.path.len() <= MAX_PROGRAM_SOURCE_PATH_SEGMENTS
+            && self.path.iter().all(|role| match role {
+                ProgramSourceRole::Root => true,
+                ProgramSourceRole::Alias(name)
+                | ProgramSourceRole::RecursiveSeed(name)
+                | ProgramSourceRole::RecursiveStep(name)
+                | ProgramSourceRole::CorrelatedChild(name)
+                | ProgramSourceRole::Policy(name) => !name.is_empty(),
+            })
+    }
 }
 
 /// One component of a [`ProgramSourceId`] path.

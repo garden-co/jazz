@@ -464,7 +464,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             }),
         ),
         (
-            "view_update_covered_input_closure",
+            "view_update_covered_input_all_source_roles",
             "ViewUpdate",
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
@@ -477,7 +477,14 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 program_fact_adds: vec![ProgramFactEntry::CoveredInput(CoveredInputEntry {
                     source: ProgramSourceId {
                         table: "todos".to_owned().into(),
-                        path: vec![ProgramSourceRole::Root],
+                        path: vec![
+                            ProgramSourceRole::Root,
+                            ProgramSourceRole::Alias("self".to_owned()),
+                            ProgramSourceRole::RecursiveSeed("seed".to_owned()),
+                            ProgramSourceRole::RecursiveStep("step".to_owned()),
+                            ProgramSourceRole::CorrelatedChild("items".to_owned()),
+                            ProgramSourceRole::Policy("read".to_owned()),
+                        ],
                     },
                     version_table: "todos".to_owned().into(),
                     source_row: RowUuid::from_bytes([0x79; 16]),
@@ -953,6 +960,50 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
             "{name}: a canonical payload must reject a suffix"
         );
     }
+}
+
+#[test]
+fn covered_input_source_paths_require_an_exact_valid_v1_identity() {
+    let (_, _, message) = wire_fixture_messages()
+        .into_iter()
+        .find(|(name, _, _)| *name == "view_update_covered_input_all_source_roles")
+        .expect("covered-input source-role corpus exists");
+    let encoded = encode_sync_message(&message).expect("frozen source-role message encodes");
+    assert_eq!(
+        decode_sync_message(&encoded).expect("frozen source-role message decodes"),
+        message
+    );
+
+    // Alias is postcard enum tag 1 followed by the uniquely named `self`
+    // component. A future role can never silently decode as an existing one.
+    let alias_marker = [1, 4, b's', b'e', b'l', b'f'];
+    let alias_offset = encoded
+        .windows(alias_marker.len())
+        .position(|window| window == alias_marker)
+        .expect("frozen source-role corpus contains its alias tag");
+    let mut unknown_role = encoded.clone();
+    unknown_role[alias_offset] = 6;
+    assert!(
+        decode_sync_message(&unknown_role).is_err(),
+        "an unknown source role cannot fall back to the same-table or collector source"
+    );
+
+    let SyncMessage::ViewUpdate(mut invalid) = message else {
+        panic!("covered-input corpus is a view update");
+    };
+    let ProgramFactEntry::CoveredInput(input) = &mut invalid.program_fact_adds[0] else {
+        panic!("covered-input corpus carries the fact");
+    };
+    input.source.path = vec![ProgramSourceRole::Alias(String::new())];
+    assert!(
+        encode_sync_message(&SyncMessage::ViewUpdate(invalid.clone())).is_err(),
+        "the producer rejects malformed source paths rather than encoding a default"
+    );
+    let noncanonical_invalid = postcard::to_allocvec(&SyncMessage::ViewUpdate(invalid)).unwrap();
+    assert!(
+        decode_sync_message(&noncanonical_invalid).is_err(),
+        "the decoder rejects a syntactically complete but malformed source path"
+    );
 }
 
 #[test]

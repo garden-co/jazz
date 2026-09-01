@@ -402,7 +402,7 @@ pub fn validate_frame_for_artifact_corpus(
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
 pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
     message
-        .validate_version_carriers()
+        .validate_wire_contract()
         .map_err(|_| postcard::Error::SerdeSerCustom)?;
     to_allocvec(message)
 }
@@ -435,7 +435,7 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     }
     let message: SyncMessage = decode_postcard_exact(bytes)?;
     message
-        .validate_version_carriers()
+        .validate_wire_contract()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
     // Wire receipts and replay fixtures name bytes, not only deserialized
     // values.  Do not accept an alternate postcard representation for the
