@@ -21,7 +21,7 @@ use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
     RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, VariantProjection,
     VariantProjectionKey, consolidate_deltas, plan_expr_names, project_binding_source_deltas,
-    scan_bounds, touched_join_keys,
+    scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -31,6 +31,10 @@ pub(super) struct RecursiveState {
     /// at weight 1. Bag recursion can diverge on cycles, and non-monotone
     /// recursion needs a DRed/DBSP design before we accept negative frontiers.
     accumulated: Rc<HashMap<Bytes, i64>>,
+    /// Positive additions are staged until the owning tick reaches Ready.
+    /// The pending map is deliberately separate from `accumulated`: a
+    /// prepared tick shares the latter with the committed runtime state.
+    staged_positive: Rc<HashMap<Bytes, i64>>,
     /// Positive incremental ticks rely on step-side arrangements already
     /// containing the full base/accumulated state after a recompute.
     step_arrangements_hydrated: bool,
@@ -227,6 +231,7 @@ impl RecursiveState {
             .collect()
     }
 
+    #[cfg(test)]
     fn accept_positive(
         &mut self,
         deltas: Vec<RecordDelta>,
@@ -250,6 +255,41 @@ impl RecursiveState {
             });
         }
         Ok(consolidate_deltas(accepted))
+    }
+
+    fn accept_positive_staged(
+        &mut self,
+        deltas: Vec<RecordDelta>,
+    ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        reject_non_positive_frontier_deltas(&deltas)?;
+        let mut accepted = Vec::new();
+        let staged = Rc::make_mut(&mut self.staged_positive);
+        for delta in consolidate_deltas(deltas) {
+            if delta.weight <= 0 {
+                return Err(IvmRuntimeError::UnsupportedNonMonotoneRecursion);
+            }
+            if self.accumulated.contains_key(&delta.record) || staged.contains_key(&delta.record) {
+                continue;
+            }
+            staged.insert(delta.record.clone(), 1);
+            accepted.push(RecordDelta {
+                record: delta.record,
+                weight: 1,
+            });
+        }
+        Ok(consolidate_deltas(accepted))
+    }
+
+    /// Install staged positive facts after the committed operator entry has
+    /// been removed. At that point the COW map is uniquely owned, so folding
+    /// only the new facts does not copy the complete closure.
+    pub(super) fn commit_staged_positive(&mut self) {
+        if self.staged_positive.is_empty() {
+            return;
+        }
+        let staged = std::mem::take(&mut self.staged_positive);
+        let staged = Rc::try_unwrap(staged).unwrap_or_else(|staged| (*staged).clone());
+        Rc::make_mut(&mut self.accumulated).extend(staged);
     }
 
     pub(super) fn replace_with(&mut self, next: HashMap<Bytes, i64>) -> Vec<RecordDelta> {
@@ -276,6 +316,7 @@ impl RecursiveState {
         self.accumulated = Rc::new(next);
         self.step_arrangements_hydrated = false;
         self.pending_hydration = None;
+        self.staged_positive = Rc::default();
         consolidate_deltas(deltas)
     }
 }
@@ -497,7 +538,6 @@ pub(super) async fn recursive_delta(
     step: NodeId,
 ) -> Result<RecursiveDeltaProgress, IvmRuntimeError> {
     let has_recompute_table_delta = has_recompute_table_delta_for_recursion(&runtime, seed, step)?;
-    let has_table_delta = has_table_delta_for_cached_tables(&runtime, recursive);
     let has_recompute_binding_delta =
         has_recompute_binding_delta_for_recursion(&runtime, seed, step)?;
     let has_binding_deltas = !runtime.binding_deltas.is_empty();
@@ -513,7 +553,7 @@ pub(super) async fn recursive_delta(
         }
         if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
             eprintln!(
-                "CLOSURE_TRACE event=recursive_recompute node={node:?} scope={:?} has_recompute_table_delta={has_recompute_table_delta} has_table_delta={has_table_delta} has_recompute_binding_delta={has_recompute_binding_delta} has_binding_deltas={has_binding_deltas} state_empty={} step_hydrated={} total_recomputes={}",
+                "CLOSURE_TRACE event=recursive_recompute node={node:?} scope={:?} has_recompute_table_delta={has_recompute_table_delta} has_recompute_binding_delta={has_recompute_binding_delta} has_binding_deltas={has_binding_deltas} state_empty={} step_hydrated={} total_recomputes={}",
                 runtime.scope,
                 recursive_state.is_empty(),
                 recursive_state.step_arrangements_hydrated(),
@@ -595,10 +635,10 @@ pub(super) async fn recursive_delta(
     if seed_delta.descriptor != output_desc {
         return Err(IvmRuntimeError::GraphOutputMismatch);
     }
-    let seed_frontier = recursive_state.accept_positive(seed_delta.deltas)?;
+    let seed_frontier = recursive_state.accept_positive_staged(seed_delta.deltas)?;
     if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
         eprintln!(
-            "CLOSURE_TRACE event=recursive_positive node={node:?} scope={:?} seed_delta={} seed_frontier={} has_table_delta={has_table_delta} has_binding_deltas={has_binding_deltas}",
+            "CLOSURE_TRACE event=recursive_positive node={node:?} scope={:?} seed_delta={} seed_frontier={} has_binding_deltas={has_binding_deltas}",
             runtime.scope,
             seed_delta_count,
             seed_frontier.len(),
@@ -606,27 +646,12 @@ pub(super) async fn recursive_delta(
     }
     emitted.extend(seed_frontier.clone());
 
-    let mut frontier = if has_table_delta {
-        // A changed table can extend paths which end at the changed row's
-        // join key. Select only those already-known paths; replaying every
-        // accumulated fact would turn an isolated edge into a full closure
-        // recomputation.
-        let mut deltas = seed_frontier.clone();
-        deltas.extend(affected_recursive_frontier(
-            &runtime,
-            recursive,
-            &recursive_state.accumulated_deltas(),
-            step,
-        )?);
-        RecordDeltas {
-            descriptor: output_desc,
-            deltas: consolidate_deltas(deltas),
-        }
-    } else {
-        RecordDeltas {
-            descriptor: output_desc,
-            deltas: seed_frontier,
-        }
+    // Always run the step once with the actual seed frontier. Its child graph
+    // owns table transforms (filters/projects/renames), so deriving a frontier
+    // by inspecting raw table deltas is both incomplete and descriptor-unsafe.
+    let mut frontier = RecordDeltas {
+        descriptor: output_desc,
+        deltas: seed_frontier,
     };
     let mut sub_tick = 1;
     let mut must_run_step = true;
@@ -648,7 +673,7 @@ pub(super) async fn recursive_delta(
         if step_delta.descriptor != output_desc {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
-        let accepted = recursive_state.accept_positive(step_delta.deltas)?;
+        let accepted = recursive_state.accept_positive_staged(step_delta.deltas)?;
         if accepted.is_empty() {
             break;
         }
@@ -661,184 +686,6 @@ pub(super) async fn recursive_delta(
     }
 
     Ok(RecursiveDeltaProgress::Ready(consolidate_deltas(emitted)))
-}
-fn affected_recursive_frontier(
-    runtime: &GraphRuntimeView<'_>,
-    recursive: &RecursiveOp,
-    accumulated: &[RecordDelta],
-    step: NodeId,
-) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
-    let mut selected = HashSet::<Bytes>::default();
-    let mut pending = vec![step];
-    let mut seen = HashSet::default();
-    while let Some(node) = pending.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        let graph_node = runtime
-            .graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        match &graph_node.descriptor.operator {
-            OpType::Join(join) => {
-                let [left, right] = graph_node.descriptor.inputs.as_slice() else {
-                    return Err(IvmRuntimeError::GraphInputArityMismatch(node));
-                };
-                let left_frontier = contains_frontier(runtime.graph, *left, &recursive.frontier)?;
-                let right_frontier = contains_frontier(runtime.graph, *right, &recursive.frontier)?;
-                if left_frontier != right_frontier {
-                    let (changed_input, changed_fields, frontier_fields, frontier_desc) =
-                        if left_frontier
-                            && contains_changed_table(runtime.graph, *right, runtime.table_deltas)?
-                        {
-                            (
-                                *right,
-                                plan_expr_names(&join.right_key),
-                                plan_expr_names(&join.left_key),
-                                join.left_descriptor,
-                            )
-                        } else if right_frontier
-                            && contains_changed_table(runtime.graph, *left, runtime.table_deltas)?
-                        {
-                            (
-                                *left,
-                                plan_expr_names(&join.left_key),
-                                plan_expr_names(&join.right_key),
-                                join.right_descriptor,
-                            )
-                        } else {
-                            pending.extend([*left, *right]);
-                            continue;
-                        };
-                    let mut touched = HashSet::<Vec<u8>>::default();
-                    collect_changed_join_keys(
-                        runtime.graph,
-                        changed_input,
-                        runtime.table_deltas,
-                        &changed_fields,
-                        join.comparison,
-                        &mut touched,
-                    )?;
-                    for delta in accumulated {
-                        for key in
-                            super::join::join_keys(&frontier_desc, delta.raw(), &frontier_fields)?
-                        {
-                            if touched.contains(key.as_slice()) {
-                                selected.insert(delta.record.clone());
-                                break;
-                            }
-                        }
-                    }
-                }
-                pending.extend([*left, *right]);
-            }
-            _ => pending.extend(graph_node.descriptor.inputs.iter().copied()),
-        }
-    }
-    Ok(selected
-        .into_iter()
-        .map(|record| RecordDelta { record, weight: 1 })
-        .collect())
-}
-
-fn contains_frontier(
-    graph: &IvmGraph,
-    root: NodeId,
-    binding: &super::FrontierName,
-) -> Result<bool, IvmRuntimeError> {
-    let mut pending = vec![root];
-    let mut seen = HashSet::default();
-    while let Some(node) = pending.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        let graph_node = graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        if matches!(
-            &graph_node.descriptor.operator,
-            OpType::FrontierSource(source) if source.binding == *binding
-        ) {
-            return Ok(true);
-        }
-        pending.extend(graph_node.descriptor.inputs.iter().copied());
-    }
-    Ok(false)
-}
-
-fn contains_changed_table(
-    graph: &IvmGraph,
-    root: NodeId,
-    table_deltas: &[TableDelta],
-) -> Result<bool, IvmRuntimeError> {
-    let changed = table_deltas
-        .iter()
-        .filter(|delta| !delta.deltas.is_empty())
-        .map(|delta| delta.table.as_str())
-        .collect::<HashSet<_>>();
-    let mut pending = vec![root];
-    let mut seen = HashSet::default();
-    while let Some(node) = pending.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        let graph_node = graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        if matches!(
-            &graph_node.descriptor.operator,
-            OpType::TableSource(source) if changed.contains(source.table.as_str())
-        ) {
-            return Ok(true);
-        }
-        pending.extend(graph_node.descriptor.inputs.iter().copied());
-    }
-    Ok(false)
-}
-
-fn collect_changed_join_keys(
-    graph: &IvmGraph,
-    root: NodeId,
-    table_deltas: &[TableDelta],
-    fields: &[String],
-    comparison: crate::ivm::ValueComparison,
-    keys: &mut HashSet<Vec<u8>>,
-) -> Result<(), IvmRuntimeError> {
-    let mut pending = vec![root];
-    let mut seen = HashSet::default();
-    while let Some(node) = pending.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        let graph_node = graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        if let OpType::TableSource(source) = &graph_node.descriptor.operator {
-            for delta in table_deltas
-                .iter()
-                .filter(|delta| delta.table == source.table && !delta.deltas.is_empty())
-            {
-                keys.extend(touched_join_keys(
-                    &delta.descriptor,
-                    fields,
-                    &delta.deltas,
-                    comparison,
-                )?);
-            }
-        }
-        pending.extend(graph_node.descriptor.inputs.iter().copied());
-    }
-    Ok(())
-}
-
-fn has_table_delta_for_cached_tables(
-    runtime: &GraphRuntimeView<'_>,
-    recursive: &RecursiveOp,
-) -> bool {
-    runtime
-        .table_deltas
-        .iter()
-        .any(|table_delta| recursive.read_tables.contains(&table_delta.table))
 }
 
 fn has_recompute_table_delta_for_recursion(

@@ -512,6 +512,24 @@ fn recursive_reach_graph_with_limit(max_iters: usize) -> GraphBuilder {
     GraphBuilder::recursive(seed, step, "frontier", max_iters)
 }
 
+fn recursive_reach_with_renamed_inputs_graph() -> GraphBuilder {
+    let descriptor = RecordDescriptor::new([("from", ColumnType::U64), ("to", ColumnType::U64)]);
+    let seed = GraphBuilder::table("edges").project_fields([
+        crate::ivm::ProjectField::renamed("src", "from"),
+        crate::ivm::ProjectField::renamed("dst", "to"),
+    ]);
+    let edge_pairs = GraphBuilder::table("edges").project_fields([
+        crate::ivm::ProjectField::renamed("src", "edge_from"),
+        crate::ivm::ProjectField::renamed("dst", "edge_to"),
+    ]);
+    let frontier = GraphBuilder::frontier_source("frontier", descriptor);
+    let step = GraphBuilder::join(frontier, edge_pairs, ["to"], ["edge_from"]).project_fields([
+        crate::ivm::ProjectField::renamed("left.from", "from"),
+        crate::ivm::ProjectField::renamed("right.edge_to", "to"),
+    ]);
+    GraphBuilder::recursive(seed, step, "frontier", 16)
+}
+
 async fn write_edge_rows(
     storage: &impl OrderedKvStorage,
     edges: &RecordDescriptor,
@@ -2136,6 +2154,39 @@ async fn recursive_positive_tick_commits_new_facts_exactly_once() {
         subscription.try_recv().is_err(),
         "one positive recursive tick must publish exactly one notification"
     );
+}
+
+/// Positive recursive maintenance must let the step graph transform both the
+/// frontier and table inputs before the join computes new paths.
+#[futures_test::test]
+async fn recursive_positive_tick_applies_transforms_before_join() {
+    let schema = edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+    let edges = schema.table("edges").unwrap().record_schema();
+    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+
+    let subscription = runtime
+        .subscribe_one_sink(recursive_reach_with_renamed_inputs_graph(), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+
+    runtime
+        .tick(vec![edge_table_delta(edges, &[(2, 2, 3)])], &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ]
+    );
+    assert!(subscription.try_recv().is_err());
 }
 
 /// The positive path accepts new facts before discovering that the next
