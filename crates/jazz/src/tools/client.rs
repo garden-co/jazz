@@ -3638,10 +3638,24 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
-    struct NoopNativeWireTransport;
+    #[derive(Default)]
+    struct ControlledWireState {
+        fail_sends: AtomicBool,
+        send_count: AtomicUsize,
+    }
 
-    impl WireTransport for NoopNativeWireTransport {
+    struct ControlledNativeWireTransport {
+        state: Arc<ControlledWireState>,
+    }
+
+    impl WireTransport for ControlledNativeWireTransport {
         fn send_frame(&mut self, _frame: Vec<u8>) -> std::result::Result<(), TransportError> {
+            self.state.send_count.fetch_add(1, Ordering::AcqRel);
+            if self.state.fail_sends.load(Ordering::Acquire) {
+                return Err(TransportError::Failed(
+                    "websocket pump is closed".to_owned(),
+                ));
+            }
             Ok(())
         }
 
@@ -3654,6 +3668,7 @@ mod tests {
         sender: Option<oneshot::Sender<NativeTransportTerminal>>,
         observed: Arc<AtomicBool>,
     }
+
     impl ControlledTerminal {
         fn send(&mut self, terminal: NativeTransportTerminal) {
             let _ = self
@@ -3664,18 +3679,57 @@ mod tests {
         }
     }
 
+    enum ControlledAdmissionResult {
+        Connected {
+            terminal: oneshot::Receiver<NativeTransportTerminal>,
+            terminal_observed: Arc<AtomicBool>,
+            wire: Arc<ControlledWireState>,
+        },
+        Refused(String),
+    }
+
+    struct ControlledAdmission {
+        sender: Option<oneshot::Sender<ControlledAdmissionResult>>,
+    }
+
+    impl ControlledAdmission {
+        fn succeed(&mut self) -> (ControlledTerminal, Arc<ControlledWireState>) {
+            let (terminal, terminal_receiver) = controlled_terminal();
+            let terminal_observed = Arc::clone(&terminal.observed);
+            let wire = Arc::new(ControlledWireState::default());
+            let _ = self
+                .sender
+                .take()
+                .expect("controlled admission completes once")
+                .send(ControlledAdmissionResult::Connected {
+                    terminal: terminal_receiver,
+                    terminal_observed,
+                    wire: Arc::clone(&wire),
+                });
+            (terminal, wire)
+        }
+
+        fn refuse(&mut self, error: impl Into<String>) {
+            let _ = self
+                .sender
+                .take()
+                .expect("controlled admission completes once")
+                .send(ControlledAdmissionResult::Refused(error.into()));
+        }
+    }
+
+    type ControlledAdmissionReceiver = oneshot::Receiver<ControlledAdmissionResult>;
+
     struct ControlledNativeConnector {
         connect_count: AtomicUsize,
-        terminals: Mutex<VecDeque<(oneshot::Receiver<NativeTransportTerminal>, Arc<AtomicBool>)>>,
+        admissions: Mutex<VecDeque<ControlledAdmissionReceiver>>,
     }
 
     impl ControlledNativeConnector {
-        fn new(
-            terminals: Vec<(oneshot::Receiver<NativeTransportTerminal>, Arc<AtomicBool>)>,
-        ) -> Self {
+        fn new(admissions: Vec<ControlledAdmissionReceiver>) -> Self {
             Self {
                 connect_count: AtomicUsize::new(0),
-                terminals: Mutex::new(terminals.into()),
+                admissions: Mutex::new(admissions.into()),
             }
         }
 
@@ -3687,27 +3741,39 @@ mod tests {
     impl NativeTransportConnector for ControlledNativeConnector {
         fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
             self.connect_count.fetch_add(1, Ordering::AcqRel);
-            let (receiver, observed) = self
-                .terminals
+            let admission = self
+                .admissions
                 .lock()
-                .expect("take controlled terminal")
+                .expect("take controlled admission")
                 .pop_front()
-                .expect("test connector has a terminal for every connection");
-            let terminal: NativeTransportTerminalFuture = Box::pin(async move {
-                observed.store(true, Ordering::Release);
-                receiver
-                    .await
-                    .expect("controlled terminal sender remains alive")
-            });
+                .expect("test connector has an admission for every connection");
             Box::pin(async move {
-                Ok(ConnectedNativeTransport {
-                    transport: Box::new(NoopNativeWireTransport),
-                    protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
-                    features: crate::wire::FEATURE_NONE,
-                    session_context: None,
-                    permits_delegated_sessions: false,
-                    terminal,
-                })
+                match admission
+                    .await
+                    .expect("controlled admission sender remains alive")
+                {
+                    ControlledAdmissionResult::Connected {
+                        terminal,
+                        terminal_observed,
+                        wire,
+                    } => {
+                        let terminal: NativeTransportTerminalFuture = Box::pin(async move {
+                            terminal_observed.store(true, Ordering::Release);
+                            terminal
+                                .await
+                                .expect("controlled terminal sender remains alive")
+                        });
+                        Ok(ConnectedNativeTransport {
+                            transport: Box::new(ControlledNativeWireTransport { state: wire }),
+                            protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+                            features: crate::wire::FEATURE_NONE,
+                            session_context: None,
+                            permits_delegated_sessions: false,
+                            terminal,
+                        })
+                    }
+                    ControlledAdmissionResult::Refused(error) => Err(NativeTransportError(error)),
+                }
             })
         }
 
@@ -3738,24 +3804,71 @@ mod tests {
         )
     }
 
-    async fn wait_for_connect_count(connector: &ControlledNativeConnector, expected: usize) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while connector.connect_count() < expected {
-                tokio::task::yield_now().await;
+    fn controlled_admission() -> (ControlledAdmission, ControlledAdmissionReceiver) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            ControlledAdmission {
+                sender: Some(sender),
+            },
+            receiver,
+        )
+    }
+
+    fn successful_controlled_admission() -> (
+        ControlledTerminal,
+        Arc<ControlledWireState>,
+        ControlledAdmissionReceiver,
+    ) {
+        let (mut admission, receiver) = controlled_admission();
+        let (terminal, wire) = admission.succeed();
+        (terminal, wire, receiver)
+    }
+
+    fn refused_controlled_admission(error: impl Into<String>) -> ControlledAdmissionReceiver {
+        let (mut admission, receiver) = controlled_admission();
+        admission.refuse(error);
+        receiver
+    }
+
+    async fn yield_until(mut predicate: impl FnMut() -> bool, failure: &str) {
+        for _ in 0..256 {
+            if predicate() {
+                return;
             }
-        })
-        .await
-        .expect("connection replacement must not deadlock");
+            tokio::task::yield_now().await;
+        }
+        assert!(predicate(), "{failure}");
+    }
+
+    async fn wait_for_connect_count(connector: &ControlledNativeConnector, expected: usize) {
+        yield_until(
+            || connector.connect_count() >= expected,
+            "connection replacement must not deadlock",
+        )
+        .await;
     }
 
     async fn wait_for_terminal_observation(observed: &AtomicBool) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !observed.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("terminal watcher must poll the controlled terminal future");
+        yield_until(
+            || observed.load(Ordering::Acquire),
+            "terminal watcher must poll the controlled terminal future",
+        )
+        .await;
+    }
+
+    async fn wait_for_send_count(state: &ControlledWireState, expected: usize) {
+        yield_until(
+            || state.send_count.load(Ordering::Acquire) >= expected,
+            "tick driver must poll the controlled wire transport",
+        )
+        .await;
+    }
+
+    fn tick_reconnect_error() -> CoreDbError {
+        CoreDbError {
+            code: CoreDbErrorCode::Protocol,
+            message: "websocket pump is closed".to_owned(),
+        }
     }
 
     fn make_native_context(name: &str) -> AppContext {
@@ -4687,12 +4800,13 @@ mod tests {
     async fn idle_peer_closed_terminal_reconnects_without_semantic_traffic() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (mut first, first_receiver) = controlled_terminal();
+                let (mut first, _first_wire, first_admission) = successful_controlled_admission();
                 let first_observed = Arc::clone(&first.observed);
-                let (_replacement, replacement_receiver) = controlled_terminal();
+                let (_replacement, _replacement_wire, replacement_admission) =
+                    successful_controlled_admission();
                 let connector = Arc::new(ControlledNativeConnector::new(vec![
-                    (first_receiver, first_observed.clone()),
-                    (replacement_receiver, Arc::new(AtomicBool::new(false))),
+                    first_admission,
+                    replacement_admission,
                 ]));
                 let client = JazzClient::connect_with_native_transport(
                     make_native_context("idle-peer-closed-reconnect"),
@@ -4717,12 +4831,9 @@ mod tests {
     async fn owner_dropped_terminal_does_not_reconnect() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (mut terminal, receiver) = controlled_terminal();
+                let (mut terminal, _wire, admission) = successful_controlled_admission();
                 let observed = Arc::clone(&terminal.observed);
-                let connector = Arc::new(ControlledNativeConnector::new(vec![(
-                    receiver,
-                    observed.clone(),
-                )]));
+                let connector = Arc::new(ControlledNativeConnector::new(vec![admission]));
                 let client = JazzClient::connect_with_native_transport(
                     make_native_context("owner-dropped-no-reconnect"),
                     connector.clone(),
@@ -4748,10 +4859,8 @@ mod tests {
     async fn shutdown_does_not_reconnect_after_terminal() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (mut terminal, receiver) = controlled_terminal();
-                let observed = Arc::clone(&terminal.observed);
-                let connector =
-                    Arc::new(ControlledNativeConnector::new(vec![(receiver, observed)]));
+                let (mut terminal, _wire, admission) = successful_controlled_admission();
+                let connector = Arc::new(ControlledNativeConnector::new(vec![admission]));
                 let client = JazzClient::connect_with_native_transport(
                     make_native_context("shutdown-no-reconnect"),
                     connector.clone(),
@@ -4769,6 +4878,352 @@ mod tests {
                     1,
                     "shutdown must prevent terminal-triggered reconnection"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn recoverable_native_terminals_retry_refused_replacement() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for (name, outcome) in [
+                    (
+                        "peer-closed",
+                        NativeTransportTerminal::PeerClosed("closed".to_owned()),
+                    ),
+                    (
+                        "failed",
+                        NativeTransportTerminal::Failed(NativeTransportError("failed".to_owned())),
+                    ),
+                ] {
+                    let (mut first, _wire, first_admission) = successful_controlled_admission();
+                    let observed = Arc::clone(&first.observed);
+                    let refused = refused_controlled_admission("refused");
+                    let (replacement_terminal, _wire, replacement) =
+                        successful_controlled_admission();
+                    let replacement_observed = Arc::clone(&replacement_terminal.observed);
+                    let connector = Arc::new(ControlledNativeConnector::new(vec![
+                        first_admission,
+                        refused,
+                        replacement,
+                    ]));
+                    let client = JazzClient::connect_with_native_transport(
+                        make_native_context(&format!("{name}-retry")),
+                        connector.clone(),
+                    )
+                    .await
+                    .expect("connect");
+
+                    first.send(outcome);
+                    wait_for_terminal_observation(&observed).await;
+                    wait_for_connect_count(&connector, 2).await;
+                    tokio::time::advance(TICK_DRIVER_RETRY_BASE_DELAY).await;
+                    wait_for_connect_count(&connector, 3).await;
+                    wait_for_terminal_observation(&replacement_observed).await;
+                    client.shutdown().await.expect("shutdown");
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn tick_error_and_terminal_coalesce_to_one_recovery_owner() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut first, _wire, first_admission) = successful_controlled_admission();
+                let observed = Arc::clone(&first.observed);
+                let (_replacement, replacement) = controlled_admission();
+                let (_duplicate, duplicate) = controlled_admission();
+                let connector = Arc::new(ControlledNativeConnector::new(vec![
+                    first_admission,
+                    replacement,
+                    duplicate,
+                ]));
+                let client = JazzClient::connect_with_native_transport(
+                    make_native_context("coalesced-recovery"),
+                    connector.clone(),
+                )
+                .await
+                .expect("connect");
+                let inner = Rc::clone(&client.db.inner);
+                let scheduler = Rc::clone(&inner.borrow().scheduler);
+                let recovery = tokio::task::spawn_local(async move {
+                    let mut attempts = 0;
+                    recover_tick_driver_error(
+                        &inner,
+                        &scheduler,
+                        TickDriverErrorClass::Reconnect,
+                        &tick_reconnect_error(),
+                        &mut attempts,
+                    )
+                    .await
+                });
+                tokio::task::yield_now().await;
+
+                first.send(NativeTransportTerminal::PeerClosed("closed".to_owned()));
+                wait_for_terminal_observation(&observed).await;
+                wait_for_connect_count(&connector, 2).await;
+                tokio::time::advance(TICK_DRIVER_RETRY_BASE_DELAY).await;
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    connector.connect_count(),
+                    2,
+                    "one generation may own only one replacement admission"
+                );
+                recovery.abort();
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_admission_completion_cannot_install_after_newer_generation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_first, _wire, first) = successful_controlled_admission();
+                let (mut stale, stale_receiver) = controlled_admission();
+                let (mut newer, newer_receiver) = controlled_admission();
+                let connector = Arc::new(ControlledNativeConnector::new(vec![
+                    first,
+                    stale_receiver,
+                    newer_receiver,
+                ]));
+                let client = JazzClient::connect_with_native_transport(
+                    make_native_context("stale-admission"),
+                    connector.clone(),
+                )
+                .await
+                .expect("connect");
+                client.db.inner.borrow_mut().disconnect_upstream();
+
+                let inner = Rc::clone(&client.db.inner);
+                let stale_task = tokio::task::spawn_local(async move {
+                    ClientDbInner::reconnect_upstream(&inner).await
+                });
+                wait_for_connect_count(&connector, 2).await;
+                let inner = Rc::clone(&client.db.inner);
+                let newer_task = tokio::task::spawn_local(async move {
+                    ClientDbInner::reconnect_upstream(&inner).await
+                });
+                wait_for_connect_count(&connector, 3).await;
+                let (_terminal, _wire) = newer.succeed();
+                assert!(
+                    newer_task.await.expect("task").expect("admission"),
+                    "newer generation installs"
+                );
+                client.db.inner.borrow_mut().disconnect_upstream();
+                let generation = client.db.inner.borrow().upstream_generation;
+
+                let (_terminal, _wire) = stale.succeed();
+                assert!(
+                    !stale_task.await.expect("task").expect("admission"),
+                    "stale completion must not install"
+                );
+                let state = client.db.inner.borrow();
+                assert!(state.upstream.is_none());
+                assert_eq!(state.upstream_generation, generation);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn ownership_loss_during_retry_prevents_installation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for shutdown in [false, true] {
+                    let (mut first, _wire, first_admission) = successful_controlled_admission();
+                    let observed = Arc::clone(&first.observed);
+                    let (_replacement, _wire, replacement) = successful_controlled_admission();
+                    let connector = Arc::new(ControlledNativeConnector::new(vec![
+                        first_admission,
+                        replacement,
+                    ]));
+                    let client = JazzClient::connect_with_native_transport(
+                        make_native_context(if shutdown {
+                            "shutdown-during-retry"
+                        } else {
+                            "owner-drop-during-retry"
+                        }),
+                        connector.clone(),
+                    )
+                    .await
+                    .expect("connect");
+                    let inner = Rc::clone(&client.db.inner);
+                    let scheduler = Rc::clone(&inner.borrow().scheduler);
+                    let recovery = tokio::task::spawn_local(async move {
+                        let mut attempts = 0;
+                        recover_tick_driver_error(
+                            &inner,
+                            &scheduler,
+                            TickDriverErrorClass::Reconnect,
+                            &tick_reconnect_error(),
+                            &mut attempts,
+                        )
+                        .await
+                    });
+                    tokio::task::yield_now().await;
+
+                    if shutdown {
+                        client.shutdown().await.expect("shutdown");
+                        tokio::time::advance(TICK_DRIVER_RETRY_BASE_DELAY).await;
+                        recovery.await.expect("recovery task");
+                        assert_eq!(connector.connect_count(), 1);
+                    } else {
+                        first.send(NativeTransportTerminal::OwnerDropped);
+                        wait_for_terminal_observation(&observed).await;
+                        yield_until(
+                            || client.db.inner.borrow().upstream.is_none(),
+                            "OwnerDropped must detach",
+                        )
+                        .await;
+                        tokio::time::advance(TICK_DRIVER_RETRY_BASE_DELAY).await;
+                        recovery.await.expect("recovery task");
+                        assert_eq!(connector.connect_count(), 1);
+                        client.shutdown().await.expect("shutdown");
+                    }
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn stale_exhaustion_does_not_poison_current_generation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_first, _wire, first) = successful_controlled_admission();
+                let (_replacement, _wire, replacement) = successful_controlled_admission();
+                let stale_reconnect =
+                    refused_controlled_admission("stale recovery must not reconnect");
+                let connector = Arc::new(ControlledNativeConnector::new(vec![
+                    first,
+                    replacement,
+                    stale_reconnect,
+                ]));
+                let client = JazzClient::connect_with_native_transport(
+                    make_native_context("stale-exhaustion"),
+                    connector,
+                )
+                .await
+                .expect("connect");
+                let inner = Rc::clone(&client.db.inner);
+                let stale_generation = inner.borrow().upstream_generation;
+                let scheduler = Rc::clone(&inner.borrow().scheduler);
+                let (recovery_started, recovery_started_rx) = oneshot::channel();
+                let stale_inner = Rc::clone(&inner);
+                let stale_recovery = tokio::task::spawn_local(async move {
+                    let mut attempts = MAX_TICK_DRIVER_RECOVERY_ATTEMPTS - 1;
+                    recovery_started
+                        .send(())
+                        .expect("stale recovery owner remains observed");
+                    recover_tick_driver_error(
+                        &stale_inner,
+                        &scheduler,
+                        TickDriverErrorClass::Reconnect,
+                        &tick_reconnect_error(),
+                        &mut attempts,
+                    )
+                    .await;
+                    recover_tick_driver_error(
+                        &stale_inner,
+                        &scheduler,
+                        TickDriverErrorClass::Reconnect,
+                        &tick_reconnect_error(),
+                        &mut attempts,
+                    )
+                    .await;
+                });
+                recovery_started_rx
+                    .await
+                    .expect("stale recovery owner starts");
+                assert!(
+                    !stale_recovery.is_finished(),
+                    "old-generation recovery must be pending before replacement installation"
+                );
+
+                inner.borrow_mut().disconnect_upstream();
+                assert!(
+                    ClientDbInner::reconnect_upstream(&inner)
+                        .await
+                        .expect("replacement admission"),
+                    "newer replacement installs"
+                );
+                let current_generation = inner.borrow().upstream_generation;
+                assert_ne!(current_generation, stale_generation);
+                assert!(
+                    inner.borrow().upstream.is_some(),
+                    "newer replacement must be installed before stale exhaustion"
+                );
+
+                tokio::time::advance(tick_driver_retry_delay(MAX_TICK_DRIVER_RECOVERY_ATTEMPTS))
+                    .await;
+                stale_recovery.await.expect("stale recovery task");
+
+                let state = inner.borrow();
+                assert!(
+                    state.upstream.is_some(),
+                    "stale exhaustion must retain the newer upstream"
+                );
+                assert_eq!(
+                    state.upstream_generation, current_generation,
+                    "stale exhaustion must not advance the current generation"
+                );
+                assert!(
+                    state.tick_driver_error.is_none(),
+                    "stale exhaustion must not stop the current generation"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn local_tick_work_remains_responsive_during_retry_delay() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_first, wire, first) = successful_controlled_admission();
+                let (_replacement, _wire, replacement) = successful_controlled_admission();
+                let connector = Arc::new(ControlledNativeConnector::new(vec![first, replacement]));
+                let client = JazzClient::connect_with_native_transport(
+                    make_native_context("responsive-during-retry"),
+                    connector,
+                )
+                .await
+                .expect("connect");
+                wire.fail_sends.store(true, Ordering::Release);
+                let sends = wire.send_count.load(Ordering::Acquire);
+                client
+                    .db
+                    .inner
+                    .borrow()
+                    .scheduler
+                    .wake(TickUrgency::Immediate);
+                wait_for_send_count(&wire, sends + 1).await;
+                wire.fail_sends.store(false, Ordering::Release);
+
+                let (_, _, transaction) = client
+                    .insert(
+                        "todos",
+                        crate::row_input!("title" => "local", "completed" => false),
+                    )
+                    .expect("insert");
+                let transaction = transaction.expect("committed transaction");
+                let retained = client.clone();
+                let local_wait = tokio::task::spawn_local(async move {
+                    retained
+                        .wait_for_transaction(transaction, DurabilityTier::Local)
+                        .await
+                });
+                for _ in 0..256 {
+                    if local_wait.is_finished() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    local_wait.is_finished(),
+                    "local tick work must not wait for retry delay"
+                );
+                local_wait.await.expect("task").expect("local durability");
             })
             .await;
     }
