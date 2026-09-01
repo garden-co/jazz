@@ -182,7 +182,9 @@ impl PeerState {
                 "relay row-version repair requires an explicit immutable policy binding",
             ));
         }
-        let identity = self.identity();
+        let identity = self.permission_subject().ok_or(Error::InvalidStoredValue(
+            "direct repair is missing a terminated permission subject",
+        ))?;
         let claims = node.session_claims_for(identity);
         self.serve_row_versions(node, &requests, (identity, claims)).await
     }

@@ -582,8 +582,14 @@ where
         self.upstream_durability_floor.set(DurabilityTier::Local);
     }
 
-    pub(super) fn set_relay_authority_session_owner(&self) {
-        self.node.borrow_mut().set_relay_authority_session_owner();
+    pub(super) fn configure_scope_isolated_client_relay(
+        &self,
+        scope: crate::db::ClientRelayScope,
+    ) -> Result<(), Error> {
+        Ok(self
+            .node
+            .borrow_mut()
+            .configure_scope_isolated_client_relay(scope)?)
     }
 
     pub(super) fn set_deferred_local_persistence(&self, deferred: bool) {
@@ -1805,7 +1811,12 @@ where
                                     shape: group.shape.clone(),
                                     binding: group.binding.clone(),
                                     opts: group.upstream_opts.clone(),
-                                    identity: subscriber.peer.link_identity(),
+                                    // This usage is forwarded under the
+                                    // subscription's topology-admitted
+                                    // policy binding, never the relay
+                                    // transport. A relay has no link
+                                    // permission subject to fall back to.
+                                    identity: group.policy_binding.0,
                                     policy_binding: Some(group.policy_binding.clone()),
                                 })
                         })
@@ -1945,6 +1956,43 @@ where
         )
     }
 
+    /// Accept an authenticated relay transport. A relay has no policy subject;
+    /// requests needing policy composition must carry a separately admitted
+    /// delegated session binding.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn accept_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_relay_subscriber_internal(transport)
+    }
+
+    #[cfg(not(feature = "testing"))]
+    #[allow(dead_code)]
+    pub(crate) fn accept_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_relay_subscriber_internal(transport)
+    }
+
+    fn accept_relay_subscriber_internal(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_subscriber_with_peer(
+            transport,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::Relay,
+            BTreeMap::new(),
+            None,
+            PeerState::relay(),
+            false,
+        )
+    }
+
     /// Accept a subscriber connection with explicit auth claims and upload trust mode.
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
@@ -1987,6 +2035,7 @@ where
                 PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
             CommitUnitTrust::Session => PeerState::edge_client(identity),
+            CommitUnitTrust::Relay => PeerState::relay(),
         };
         self.accept_subscriber_with_peer(transport, identity, trust, claims, None, peer, true)
     }
@@ -2015,15 +2064,17 @@ where
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        let peer = if self.receives_commits_as_local() {
-            PeerState::relay()
-        } else {
-            match trust {
-                CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
-                    PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
-                }
-                CommitUnitTrust::Session => PeerState::client_link(identity),
+        // Local/pending ingestion describes durability, not authorization.
+        // A scope-isolated worker receives foreground commits as local, but
+        // that downstream link still terminates one authenticated foreground
+        // session. Only the worker's *upstream* Relay transport is subjectless
+        // and therefore requires a per-request delegated binding.
+        let peer = match trust {
+            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
+                PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
+            CommitUnitTrust::Session => PeerState::client_link(identity),
+            CommitUnitTrust::Relay => PeerState::relay(),
         };
         self.accept_subscriber_with_peer(transport, identity, trust, claims, cursor, peer, false)
     }
@@ -2068,9 +2119,24 @@ where
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         let downstream_fates = Rc::new(RefCell::new(Vec::new()));
-        let startup_error = local_receiver
-            .then(|| self.restore_local_subscriber(identity, &downstream_fates))
-            .and_then(Result::err);
+        let scope_mismatch = self
+            .node
+            .borrow()
+            .client_relay_scope()
+            .is_some_and(|scope| {
+                trust == CommitUnitTrust::Session && !scope.admits_session(identity)
+            })
+            .then(|| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    "foreground session is outside this scope-isolated relay ownership scope",
+                )
+            });
+        let startup_error = scope_mismatch.or_else(|| {
+            local_receiver
+                .then(|| self.restore_local_subscriber(identity, &downstream_fates))
+                .and_then(Result::err)
+        });
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),

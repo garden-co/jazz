@@ -2487,7 +2487,9 @@ mod peer_connection;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
 mod config;
-pub use config::{DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource};
+pub use config::{
+    ClientRelayScope, DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource,
+};
 
 /// One-shot read options.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2795,7 +2797,7 @@ fn ensure_supported_register_shape_options(
     {
         return Err(Error::new(
             ErrorCode::Query,
-            "relay authority-session bindings require an authenticated SYSTEM trusted-backend relay",
+            "relay authority-session bindings require an authenticated relay transport",
         ));
     }
     let supported = match (local_receiver, peer_role) {
@@ -2928,6 +2930,7 @@ fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust)
 fn subscriber_inbound_message_is_authority_only(
     message: &SyncMessage,
     ingest: CommitUnitIngestContext,
+    peer_role: PeerRole,
 ) -> bool {
     matches!(
         message,
@@ -2944,21 +2947,49 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeUnavailable { .. }
             | SyncMessage::AuthorizationScopeDecision { .. }
     ) || (matches!(message, SyncMessage::SessionClaims { .. })
-        && !delegated_session_capability(ingest))
+        && !delegated_session_capability(ingest, peer_role))
 }
 
 /// Only the host-admitted core-facing relay may carry another session's
 /// immutable policy binding.  This is a connection capability, not a field a
 /// wire caller can grant itself by choosing a registration option or message
 /// variant.
-fn delegated_session_capability(ingest: CommitUnitIngestContext) -> bool {
-    ingest.trust == CommitUnitTrust::TrustedBackend && ingest.identity == AuthorSubject::SYSTEM
+fn delegated_session_capability(ingest: CommitUnitIngestContext, peer_role: PeerRole) -> bool {
+    ingest.trust == CommitUnitTrust::Relay && peer_role == PeerRole::Relay
 }
 
-fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorSubject {
+/// Select the immutable session snapshot permitted for one request. Direct
+/// links use their host-admitted session; only an explicit relay transport can
+/// carry a topology-assigned delegated snapshot. Keeping Subscribe and repair
+/// on this one admission rule prevents one path from accidentally treating a
+/// relay's transport identity as a permission subject.
+fn admitted_request_policy_binding(
+    ingest: CommitUnitIngestContext,
+    peer_role: PeerRole,
+    direct: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    delegated: Option<crate::protocol::DelegatedSessionBinding>,
+) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+    match delegated {
+        // A relay transport is deliberately unbound. Its connection context
+        // may contain an opaque host identity for lifecycle purposes, but it
+        // is never a fallback permission subject for an application query or
+        // repair.
+        None if peer_role == PeerRole::Relay => None,
+        None => direct,
+        Some(delegated) if delegated_session_capability(ingest, peer_role) => {
+            Some((delegated.identity, delegated.claims))
+        }
+        Some(_) => None,
+    }
+}
+
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> Option<AuthorSubject> {
     match ingest.trust {
-        CommitUnitTrust::Session => ingest.identity,
-        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorSubject::SYSTEM,
+        CommitUnitTrust::Session => Some(ingest.identity),
+        CommitUnitTrust::Relay => None,
+        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
+            Some(AuthorSubject::SYSTEM)
+        }
     }
 }
 

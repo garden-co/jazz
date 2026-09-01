@@ -61,7 +61,9 @@ impl PeerState {
             }
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
-        let permission_identity = self.identity();
+        let permission_identity = self.permission_subject().ok_or(Error::InvalidStoredValue(
+            "edge fate authority is missing a terminated permission subject",
+        ))?;
         if let Some(scope_subscriptions) = self.unsettled_authority_scope_subscriptions(
             node,
             permission_identity,

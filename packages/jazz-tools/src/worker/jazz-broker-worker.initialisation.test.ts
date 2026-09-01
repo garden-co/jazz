@@ -40,12 +40,11 @@ const mocks = vi.hoisted(() => {
     canonicalReplicaNode: Uint8Array;
     readonly replicaNode: Uint8Array;
   }> = [];
-  const browserDbs: Array<{ close: Mock; setRelayAuthoritySessionOwner: Mock }> = [];
+  const browserDbs: Array<{ close: Mock }> = [];
   const runtimes: Array<Record<string, Mock>> = [];
   const createBrowserDb = () => {
     const db = {
       close: vi.fn(async () => true),
-      setRelayAuthoritySessionOwner: vi.fn(),
     };
     browserDbs.push(db);
     return db;
@@ -1187,6 +1186,9 @@ describe("broker worker context initialization", () => {
     ]);
     expect(mocks.openBrowser.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);
+    // Only the worker's physical-owner admission may grant relay serving.
+    // It carries the exact admitted owner into the host-only WASM open.
+    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.storageOwner);
     // NativeRuntimeAdapter is the final runtime boundary. It must receive the
     // persisted physical-replica identity, not a process constant or a node
     // intended for a different open attempt.
@@ -1243,9 +1245,9 @@ describe("broker worker context initialization", () => {
       selfSignedClientProof.token,
       selfSignedClientProof.appId,
       selfSignedClientProof.claimedAuthor,
+      initOptions.storageOwner,
     );
     expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
-    expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
   });
 
   it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
@@ -1318,7 +1320,6 @@ describe("broker worker context initialization", () => {
       owner: exactStorageOwner,
     });
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
-    expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
     expect(mocks.fromDb).toHaveBeenCalledOnce();
   });
 

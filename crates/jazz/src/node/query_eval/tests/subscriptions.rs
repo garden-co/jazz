@@ -747,7 +747,7 @@ fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_sour
     );
     assert_eq!(ordinary_direct, expected_ordinary);
 
-    node.set_relay_authority_session_owner();
+    node.set_relay_authority_session_owner_for_test();
     assert_eq!(
         node.client_settled_binding_view_key_for_query(
             &shape,
@@ -783,7 +783,7 @@ fn relay_authority_source_selection_requires_authority_session_owner() {
         let (_dir, mut node) =
             open_node_with_uuid(NodeUuid::from_bytes([0x35; 16]), schema.clone());
         if owner {
-            node.set_relay_authority_session_owner();
+            node.set_relay_authority_session_owner_for_test();
         }
         let shape = Query::from("docs")
             .filter(eq(col("id"), lit(Value::Uuid(row(0x36).0))))
@@ -825,7 +825,7 @@ fn relay_authority_source_selection_requires_authority_session_owner() {
 #[test]
 fn relay_authority_source_selection_includes_limit_only_windows() {
     let (_dir, mut node) = open_node();
-    node.set_relay_authority_session_owner();
+    node.set_relay_authority_session_owner_for_test();
 
     let unbounded = Query::from("issues")
         .validate(&node.catalogue.schema)

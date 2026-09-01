@@ -91,16 +91,61 @@ fn session_peer_cannot_choose_relay_authority_binding_source() {
     );
 }
 
-// This remains internal because only the peer admission seam sees both raw
-// wire messages and the host-authenticated backend identity.  It proves that
-// `TrustedBackend` alone is insufficient: the dedicated delegation capability
-// is the authenticated SYSTEM backend link, for both claim seeding and
-// delegated-policy consumption.
+// A relay's authenticated transport capability deliberately carries no
+// application principal. This internal admission test proves that ordinary
+// query traffic cannot regain the old SYSTEM fallback by merely omitting the
+// delegated-session field.
 #[test]
-fn non_system_trusted_backend_cannot_seed_or_consume_delegated_claims() {
+fn unbound_relay_cannot_subscribe_as_system() {
+    let schema = schema();
+    let server = open_core(0x6e, AuthorSubject::SYSTEM, &schema);
+    let shape = distinct_shape(&schema, 71);
+    let binding = shape
+        .bind(BTreeMap::from([(
+            String::from("shape_71"),
+            Value::String("shared".into()),
+        )]))
+        .unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_relay_subscriber(server_transport);
+    relay_transport
+        .send(register_shape_message(&shape))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    relay_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: vec![Value::String("shared".to_owned())],
+            known_state: None,
+            delegated_session: None,
+        }))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!("accepted relay remains a subscriber link");
+    };
+    assert!(
+        state.served.is_empty(),
+        "unbound relay traffic must not be evaluated as SYSTEM or any other principal"
+    );
+}
+
+// This remains internal because only the peer admission seam sees both raw
+// wire messages and the topology-authenticated relay capability. It proves
+// that raw relay frames cannot mutate globally cached session claims or select
+// a policy subject; any delegated binding is request-local and host-admitted.
+#[test]
+fn relay_cannot_seed_or_consume_delegated_claims() {
     let schema = schema();
     let server = open_core(0x6b, AuthorSubject::SYSTEM, &schema);
-    let backend = AuthorSubject::for_test_bytes([0x6c; 16]);
     let delegated = AuthorSubject::for_test_bytes([0x6d; 16]);
     let shape = distinct_shape(&schema, 70);
     let binding = shape
@@ -115,11 +160,7 @@ fn non_system_trusted_backend_cannot_seed_or_consume_delegated_claims() {
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
     let (mut relay_transport, server_transport) = duplex();
-    let subscriber = server.server.accept_subscriber_with_trust(
-        server_transport,
-        backend,
-        CommitUnitTrust::TrustedBackend,
-    );
+    let subscriber = server.server.accept_relay_subscriber(server_transport);
     let hostile_claims = BTreeMap::from([("hostile".to_owned(), Value::Bool(true))]);
 
     relay_transport
@@ -132,23 +173,24 @@ fn non_system_trusted_backend_cannot_seed_or_consume_delegated_claims() {
     assert_ne!(
         server.node().borrow().session_claims_for(delegated),
         hostile_claims,
-        "a non-SYSTEM backend must not seed a delegated session map"
+        "a subjectless relay must not seed a delegated session map"
     );
 
     relay_transport
         .send(register_shape_message(&shape))
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
+    let delegated_session = crate::protocol::DelegatedSessionBinding {
+        identity: delegated,
+        claims: hostile_claims,
+    };
     relay_transport
         .send(SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
             subscription,
             values: vec![Value::String("shared".to_owned())],
             known_state: None,
-            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
-                identity: delegated,
-                claims: hostile_claims,
-            }),
+            delegated_session: Some(delegated_session.clone()),
         }))
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
@@ -160,6 +202,26 @@ fn non_system_trusted_backend_cannot_seed_or_consume_delegated_claims() {
     assert!(
         state.served.is_empty(),
         "a non-SYSTEM backend must not consume a caller-supplied delegated policy binding"
+    );
+    drop(connection);
+    while relay_transport.try_recv().is_some() {
+        // The rejected Subscribe may have raced an unrelated control flush;
+        // the repair assertion below concerns only the hostile fetch.
+    }
+
+    relay_transport
+        .send(SyncMessage::FetchRowVersions {
+            requests: Vec::new(),
+            delegated_session: Some(delegated_session),
+        })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        !matches!(
+            relay_transport.try_recv(),
+            Some(SyncMessage::RowVersionPayloads { .. })
+        ),
+        "a non-relay backend must not consume a caller-supplied delegated repair binding"
     );
 }
 

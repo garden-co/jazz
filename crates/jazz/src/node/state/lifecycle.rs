@@ -623,7 +623,7 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
-            relay_authority_session_owner: false,
+            relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
             ahead_current_keys: FxHashSet::default(),
@@ -768,12 +768,39 @@ where
     /// Mark this process as the durable half of a browser client/worker relay.
     /// The marker only selects an internal upstream binding identity for Edge
     /// coverage; it is neither persisted nor an authorization policy input.
-    pub(crate) fn set_relay_authority_session_owner(&mut self) {
-        self.relay_authority_session_owner = true;
+    pub(crate) fn configure_scope_isolated_client_relay(
+        &mut self,
+        scope: crate::db::ClientRelayScope,
+    ) -> Result<(), Error> {
+        if let Some(current) = &self.relay_authority_session_owner
+            && !current.same_owner(&scope)
+        {
+            return Err(Error::InvalidBranchKey(
+                "a relay cannot be rebound to a different storage ownership scope".into(),
+            ));
+        }
+        self.relay_authority_session_owner = Some(scope);
+        Ok(())
     }
 
     pub(crate) fn is_relay_authority_session_owner(&self) -> bool {
-        self.relay_authority_session_owner
+        self.relay_authority_session_owner.is_some()
+    }
+
+    /// The immutable host-admitted scope carried by this relay. Downstream
+    /// relay/repair setup may observe its presence, but never manufacture one.
+    pub(crate) fn client_relay_scope(&self) -> Option<&crate::db::ClientRelayScope> {
+        self.relay_authority_session_owner.as_ref()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_relay_authority_session_owner_for_test(&mut self) {
+        // SAFETY: direct node tests model the host-admitted scope with a fixed
+        // synthetic owner; production code has no toggle-shaped API.
+        let scope = crate::db::ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
+        self.configure_scope_isolated_client_relay(scope)
+            .expect("test scope is stable");
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.

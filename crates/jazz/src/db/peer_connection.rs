@@ -394,6 +394,12 @@ where
                 // policy predicates under SYSTEM after a relayed commit.
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
+                    CommitUnitTrust::Relay => {
+                        return Err(Error::new(
+                            ErrorCode::Protocol,
+                            "relay transport cannot prove terminal authorization without an admitted session",
+                        ));
+                    }
                     CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => ingest_context.identity,
                 };
@@ -1392,7 +1398,10 @@ where
         else {
             return None;
         };
-        let replacement = PeerState::client_link(peer.link_identity());
+        let replacement = match peer.role() {
+            PeerRole::Relay => PeerState::relay(),
+            PeerRole::ClientLink { identity } => PeerState::client_link(identity),
+        };
         Some(ResumeCursor {
             peer: std::mem::replace(peer, replacement),
             ingest_context: *ingest_context,
@@ -1565,7 +1574,12 @@ where
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker());
         let connection_epoch = self.connection_epoch;
-        let permits_delegated_sessions = self.transport.permits_delegated_sessions();
+        // The host-admitted scope-isolated worker owns one immutable foreground
+        // session and may forward that binding upstream. A separately admitted
+        // privileged relay transport may likewise multiplex request-local
+        // bindings. Raw wire input cannot enable either path.
+        let permits_delegated_sessions = self.transport.permits_delegated_sessions()
+            || self.node.borrow().client_relay_scope().is_some();
         self.observe_shared_subscriber_dirty_epoch();
         let session_claim_binding = self.subscriber_session_claim_binding();
         self.bind_subscriber_session_claims();
@@ -3264,7 +3278,11 @@ where
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
                     let scope_purpose: Option<crate::protocol::AuthorizationScopePurpose> = None;
-                    if subscriber_inbound_message_is_authority_only(&message, *ingest_context)
+                    if subscriber_inbound_message_is_authority_only(
+                        &message,
+                        *ingest_context,
+                        peer.role(),
+                    )
                     {
                         drop_peer_request(&self.node);
                         continue;
@@ -3417,7 +3435,7 @@ where
                                 &opts,
                                 *local_receiver,
                                 peer.role(),
-                                delegated_session_capability(*ingest_context),
+                                delegated_session_capability(*ingest_context, peer.role()),
                             ) {
                                 shape_registrations.insert(
                                     registration_key,
@@ -3471,7 +3489,10 @@ where
                                 // side-effecting preflight until Subscribe,
                                 // where the authenticated branch gate is
                                 // available.
-                                if shape.params().is_empty() {
+                                if shape.params().is_empty()
+                                    && let Some(permission_subject) =
+                                        subscriber_permission_subject(*ingest_context)
+                                {
                                     let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
                                     let binding = match binding {
                                         Ok(binding) => binding,
@@ -3490,7 +3511,7 @@ where
                                             shape,
                                             &binding,
                                             opts.tier,
-                                            subscriber_permission_subject(*ingest_context),
+                                            permission_subject,
                                             &opts.read_view,
                                             QueryAuthorizationMode::TrustedServing,
                                         )
@@ -3597,22 +3618,19 @@ where
                             // inactive Subscribe arm on a normal two-megabyte executor stack.
                             let should_continue = Box::pin(async {
                             let subscription_has_delegated_session = subscribe.delegated_session.is_some();
-                            let session_claim_binding = match subscribe.delegated_session.clone() {
-                                None => session_claim_binding.clone(),
-                                Some(delegated) => {
-                                    let delegated_link_is_trusted = ingest_context.trust
-                                        == CommitUnitTrust::TrustedBackend
-                                        && ingest_context.identity == AuthorSubject::SYSTEM;
-                                    if !delegated_link_is_trusted {
-                                        // A session must be authenticated by its transport unless
-                                        // this is the dedicated core-facing relay link. Never let
-                                        // a client self-assert a broader query policy context.
-                                        drop_peer_request(&self.node);
-                                        return Ok::<bool, Error>(true);
-                                    }
-                                    Some((delegated.identity, delegated.claims))
-                                }
-                            };
+                            let session_claim_binding = admitted_request_policy_binding(
+                                *ingest_context,
+                                peer.role(),
+                                session_claim_binding.clone(),
+                                subscribe.delegated_session.clone(),
+                            );
+                            if session_claim_binding.is_none() {
+                                // A relay's transport is not a user. It may
+                                // only carry the topology-assigned immutable
+                                // session snapshot for this request.
+                                drop_peer_request(&self.node);
+                                return Ok::<bool, Error>(true);
+                            }
                             if let Err(message) =
                                 validate_known_state_declaration(&subscribe.known_state)
                             {
@@ -3701,7 +3719,7 @@ where
                                 &opts,
                                 *local_receiver,
                                 peer.role(),
-                                delegated_session_capability(*ingest_context),
+                                delegated_session_capability(*ingest_context, peer.role()),
                             )
                             .is_err()
                             {
@@ -3840,7 +3858,7 @@ where
                                     DurabilityTier::Global,
                                     opts.propagate_upstream,
                                 );
-                                if self.node.borrow().is_relay_authority_session_owner() {
+                                if self.node.borrow().client_relay_scope().is_some() {
                                     opts.binding_source = BindingSource::RelayAuthoritySession;
                                 }
                                 opts
@@ -4176,28 +4194,22 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
-                            let repair_policy_binding = match delegated_session {
-                                None => session_claim_binding.clone(),
-                                Some(delegated) => {
-                                    let delegated_link_is_trusted = ingest_context.trust
-                                        == CommitUnitTrust::TrustedBackend
-                                        && ingest_context.identity == AuthorSubject::SYSTEM;
-                                    if !delegated_link_is_trusted {
-                                        drop_peer_request(&self.node);
-                                        continue;
-                                    }
-                                    Some((delegated.identity, delegated.claims))
-                                }
+                            let repair_policy_binding = admitted_request_policy_binding(
+                                *ingest_context,
+                                peer.role(),
+                                session_claim_binding.clone(),
+                                delegated_session,
+                            );
+                            let Some(repair_policy_binding) = repair_policy_binding else {
+                                drop_peer_request(&self.node);
+                                continue;
                             };
                             let responses = {
                                 let mut node = self.node.lock().await;
                                 peer.serve_row_versions(
                                     &mut node,
                                     &requests,
-                                    repair_policy_binding.ok_or_else(|| Error::new(
-                                        ErrorCode::Protocol,
-                                        "row-version repair has no direct session policy binding",
-                                    ))?,
+                                    repair_policy_binding,
                                 )
                                 .await?
                             };
@@ -4214,11 +4226,15 @@ where
                         }
                         other => {
                             if matches!(other, SyncMessage::SessionClaims { .. })
-                                && ingest_context.trust == CommitUnitTrust::Session
+                                && matches!(
+                                    ingest_context.trust,
+                                    CommitUnitTrust::Session | CommitUnitTrust::Relay
+                                )
                             {
-                                // Claims are fixed when the host admits or resumes this
-                                // connection. A subscriber can otherwise self-assert a
-                                // broader policy context after authentication.
+                                // Claims are fixed at host admission. A session cannot
+                                // broaden itself, and a subjectless relay cannot mutate
+                                // the node-wide claim cache; delegated bindings are
+                                // request-local and topology-admitted instead.
                                 drop_peer_request(&self.node);
                                 continue;
                             }
@@ -5080,7 +5096,7 @@ where
         .map(|update| update.parts.settled_through)
         .max();
     let node_ref = node.borrow();
-    let relay_authority_session_owner = node_ref.is_relay_authority_session_owner();
+    let relay_authority_session_owner = node_ref.client_relay_scope().is_some();
     let confirmed_binding_views = confirmed_subscriptions
         .iter()
         .filter_map(|(subscription, settled_through)| {

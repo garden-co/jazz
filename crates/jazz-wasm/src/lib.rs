@@ -1698,6 +1698,7 @@ impl WasmDb {
         page_store: JsValue,
         schema: Vec<u8>,
         config: Vec<u8>,
+        storage_owner: String,
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
@@ -1707,7 +1708,7 @@ impl WasmDb {
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config)
+        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
             .await
             .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
@@ -1729,6 +1730,7 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
+        storage_owner: String,
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, mut config) = decode_open_args(&schema, &config)?;
@@ -1739,7 +1741,7 @@ impl WasmDb {
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config)
+        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
             .await
             .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
@@ -2745,18 +2747,6 @@ impl WasmDb {
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = setRelayAuthoritySessionOwner)]
-    pub fn set_relay_authority_session_owner(&self) -> Result<(), JsValue> {
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => db.set_relay_authority_session_owner(),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db.set_relay_authority_session_owner(),
-            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-        }
-        Ok(())
-    }
-
     #[wasm_bindgen(js_name = connectUpstream)]
     pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();
@@ -3642,6 +3632,37 @@ where
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     }
+}
+
+/// Browser page stores are opened only after the worker has admitted their
+/// durable ownership marker. Bind the relay capability during construction so
+/// application-facing `WasmDb` instances never gain a post-open toggle for
+/// authority-result serving.
+#[cfg(target_arch = "wasm32")]
+async fn open_scope_isolated_relay_db(
+    schema: JazzSchema,
+    storage: BrowserStorage,
+    config: WasmOpenDbConfig,
+    storage_owner: String,
+) -> Result<Db<BrowserStorage>, jazz::db::Error> {
+    let mut db_config = DbConfig::new(schema, storage, config.identity.into());
+    if let Some(seed) = config.row_id_seed {
+        db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
+    }
+    let initial_sync_flush_every = config.initial_sync_flush_every;
+    // SAFETY: this helper is reachable only from the worker-owned Browser
+    // open path after its physical auth-scope owner marker is admitted.
+    // SAFETY: `storage_owner` is produced by the worker's durable ownership
+    // admission before it enters this host-only constructor.
+    let scope = unsafe {
+        jazz::db::ClientRelayScope::from_admitted_storage_owner(
+            storage_owner,
+            config.identity.author,
+        )
+    };
+    let db = unsafe { Db::open_scope_isolated_client_relay(db_config, scope).await? };
+    configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+    Ok(db)
 }
 
 async fn open_backend_db<S>(

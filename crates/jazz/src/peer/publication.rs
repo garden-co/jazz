@@ -183,15 +183,29 @@ impl PeerState {
         self.role
     }
 
-    /// Return the wire/session identity for this peer link.
-    pub fn link_identity(&self) -> AuthorSubject {
-        self.role.identity()
+    /// Return the principal terminated by this peer link, if it terminates
+    /// one. A relay is an explicit transport capability, never a synthetic
+    /// SYSTEM session.
+    pub fn link_identity(&self) -> Option<AuthorSubject> {
+        self.role.permission_subject()
     }
 
-    /// Return the identity used to evaluate reads on this peer link.
+    /// Compatibility accessor for direct client links. Relay callers must use
+    /// an admitted per-request binding rather than treating transport as a
+    /// principal.
     pub fn identity(&self) -> AuthorSubject {
-        self.permission_identity
-            .unwrap_or_else(|| self.role.identity())
+        self.link_identity()
+            .expect("relay transport has no identity; use an admitted policy binding")
+    }
+
+    /// Return the principal that may be used for policy composition.
+    ///
+    /// A trusted serving client link may deliberately carry an explicit
+    /// internal principal such as SYSTEM. Relay transport itself never has a
+    /// permission subject, so callers must bind an admitted session per usage
+    /// site instead of falling back to a synthetic identity.
+    pub fn permission_subject(&self) -> Option<AuthorSubject> {
+        self.permission_identity.or(self.role.permission_subject())
     }
 
     /// Bind the authorization snapshot selected at subscriber admission to one
@@ -259,7 +273,9 @@ impl PeerState {
         // state.  The snapshot is intentionally installed only when the
         // usage site is first opened: later claim changes are handled by
         // the owner loop rebuilding its explicitly bound views.
-        let identity = self.identity();
+        let identity = self.permission_subject().ok_or(Error::InvalidStoredValue(
+            "direct subscription is missing a terminated permission subject",
+        ))?;
         self.set_subscription_policy_binding(
             subscription,
             (identity, node.session_claims_for(identity)),
@@ -2124,6 +2140,7 @@ impl PeerState {
         } else {
             current_result_member_set.iter().cloned().collect()
         };
+        let (policy_identity, _) = self.served_subscription_policy_binding(target_subscription)?;
         let target_reset = {
             let maintained = &self
                 .publication_states
@@ -2163,7 +2180,7 @@ impl PeerState {
                     // attachment races their first update.
                     program_fact_adds: current_program_fact_set.iter().cloned().collect(),
                     program_fact_removes: Vec::new(),
-                    identity: self.identity(),
+                    identity: policy_identity,
                     tier,
                     maintained_facts: maintained,
                     allow_storage_witness_fallback,

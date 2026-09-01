@@ -226,7 +226,6 @@ type NativeDb = {
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
-  setRelayAuthoritySessionOwner?(): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
   attachQueryForBackend?(query: PreparedQuery, opts: unknown): unknown;

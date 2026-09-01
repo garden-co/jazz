@@ -349,7 +349,8 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         &served_shape,
         &served_binding,
         DurabilityTier::Global,
-        peer.identity(),
+        peer.permission_subject()
+            .expect("standalone peer terminates SYSTEM"),
     )
     .unwrap();
     let update = peer.current_rows_update(&mut core, "notes").unwrap();

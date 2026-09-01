@@ -106,6 +106,36 @@ where
         })
     }
 
+    /// Open the durable, scope-admitted half of a client relay.
+    ///
+    /// # Safety
+    /// The host must already bind this storage root to exactly one durable
+    /// authentication scope and expose the resulting Db only to that scope's
+    /// foregrounds. This is deliberately an open-time host capability, not a
+    /// mutable Db method that an application can acquire after attaching
+    /// arbitrary storage or peers.
+    #[doc(hidden)]
+    pub async unsafe fn open_scope_isolated_client_relay(
+        config: DbConfig<S>,
+        scope: ClientRelayScope,
+    ) -> Result<Self, Error> {
+        let db = Self::open(config).await?;
+        db.node.configure_scope_isolated_client_relay(scope)?;
+        Ok(db)
+    }
+
+    /// Test-only hook for topology fixtures. Production hosts must use the
+    /// scope-admitted constructor above; no public binding exposes this toggle.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn set_relay_authority_session_owner_for_test(&self) {
+        // SAFETY: test fixtures use a fixed synthetic host-admitted scope.
+        let scope = ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
+        self.node
+            .configure_scope_isolated_client_relay(scope)
+            .expect("test scope is stable");
+    }
+
     /// Open a Db allowed to record external provenance while preserving this
     /// Db's identity for permission admission.
     ///
@@ -604,13 +634,6 @@ where
         }
     }
 
-    /// Configure this durable process as the internal browser relay that owns
-    /// fresh upstream authority sessions for client Edge reads.
-    #[doc(hidden)]
-    pub fn set_relay_authority_session_owner(&self) {
-        self.node.set_relay_authority_session_owner();
-    }
-
     /// Restore unsettled writes relayed from a browser client sharing this
     /// worker's author. Browser workers persist main-thread transactions whose
     /// node differs from the worker node, so ordinary local-origin recovery
@@ -869,6 +892,18 @@ where
         identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.accept_subscriber(transport, identity)
+    }
+
+    /// Test-only topology admission for a subjectless relay transport.
+    /// Production servers must derive this capability from their authenticated
+    /// handshake, never from a caller-selected identity or wire frame.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn accept_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_relay_subscriber(transport)
     }
 
     /// Accept a subscriber connection served under `identity` with auth claims.

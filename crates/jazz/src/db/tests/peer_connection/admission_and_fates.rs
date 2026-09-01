@@ -1783,12 +1783,7 @@ fn delegated_subscription_binding_survives_relay_claim_refresh() {
         Value::Uuid(AuthorSubject::for_test_bytes([0xb1; 16]).test_uuid()),
     )]);
     let (mut relay_transport, server_transport) = duplex();
-    let subscriber = server.server.accept_subscriber_with_claims_and_trust(
-        server_transport,
-        AuthorSubject::SYSTEM,
-        BTreeMap::new(),
-        CommitUnitTrust::TrustedBackend,
-    );
+    let subscriber = server.server.accept_relay_subscriber(server_transport);
     relay_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -1945,12 +1940,7 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     let (mut relay_transport, delegated_server_transport) = duplex();
     let delegated_subscriber = delegated_server
         .server
-        .accept_subscriber_with_claims_and_trust(
-            delegated_server_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
+        .accept_relay_subscriber(delegated_server_transport);
     relay_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -2033,7 +2023,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .unwrap()
         .row_uuid();
     let edge = open_db(0xe1, AuthorSubject::SYSTEM, &schema);
-    edge.set_relay_authority_session_owner();
+    edge.set_relay_authority_session_owner_for_test();
     let client = open_db(0xc1, session_subject, &schema);
     let allowed_claims = test_provider_claims(allowed_owner);
     let denied_claims = test_provider_claims(denied_owner);

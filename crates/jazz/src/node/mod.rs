@@ -523,7 +523,7 @@ pub struct NodeState<S> {
     /// This process is the durable browser relay that owns upstream Edge
     /// authority sessions for a non-durable client. This is process-local
     /// topology, never schema policy or persisted state.
-    relay_authority_session_owner: bool,
+    relay_authority_session_owner: Option<crate::db::ClientRelayScope>,
     /// Resident transactions whose Groove persistence receipt has not settled.
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
@@ -951,6 +951,10 @@ pub struct CommitUnitIngestContext {
 pub enum CommitUnitTrust {
     /// Session/client links must honestly set `made_by` to the link identity.
     Session,
+    /// An authenticated relay transport. It has no permission subject and
+    /// may carry a topology-assigned delegated session only for the exact
+    /// request that needs authority-side policy composition.
+    Relay,
     /// Trusted backends may preserve user provenance in `made_by`.
     TrustedBackend,
     /// Administrators may preserve provenance and bypass application write policies.
@@ -959,7 +963,7 @@ pub enum CommitUnitTrust {
 
 impl CommitUnitTrust {
     pub(crate) fn is_trusted(self) -> bool {
-        self != Self::Session
+        matches!(self, Self::TrustedBackend | Self::TrustedAdmin)
     }
 }
 

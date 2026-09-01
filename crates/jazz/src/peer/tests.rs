@@ -1167,8 +1167,8 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
             .is_empty(),
         "the writer's bound claim must authorize the seeded resource"
     );
-    assert_eq!(system_serving_peer.link_identity(), transport_identity);
-    assert_eq!(system_serving_peer.identity(), AuthorSubject::SYSTEM);
+    assert_eq!(system_serving_peer.link_identity(), Some(transport_identity));
+    assert_eq!(system_serving_peer.permission_subject(), Some(AuthorSubject::SYSTEM));
 
     // A present but ill-typed claim remains a real binding error; only an
     // absent claim receives the fail-closed empty-proof treatment.
@@ -1191,8 +1191,8 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
             true,
         )
         .expect_err("present ill-typed claim must remain an error");
-    assert_eq!(wrong_type_peer.link_identity(), transport_identity);
-    assert_eq!(wrong_type_peer.identity(), transport_identity);
+    assert_eq!(wrong_type_peer.link_identity(), Some(transport_identity));
+    assert_eq!(wrong_type_peer.permission_subject(), Some(transport_identity));
 }
 
 /// Deferred edge fates own their support receiver by the exact admission

@@ -4372,19 +4372,6 @@ impl NapiDb {
         Ok(())
     }
 
-    #[napi(js_name = "setRelayAuthoritySessionOwner")]
-    pub fn set_relay_authority_session_owner(&self) -> napi::Result<()> {
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => db.set_relay_authority_session_owner(),
-            NapiDbInnerStorage::Persistent(db) => db.set_relay_authority_session_owner(),
-        }
-        Ok(())
-    }
-
     #[napi(js_name = "connectUpstream")]
     pub fn connect_upstream(&self) -> napi::Result<Transport> {
         let db = self.inner.borrow();

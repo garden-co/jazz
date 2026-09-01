@@ -437,6 +437,11 @@ where
                 }
                 match context.trust {
                     CommitUnitTrust::Session => context.identity,
+                    // Relay transport has no permission subject. A relayed
+                    // write must reach a serving authority through its
+                    // topology-owned admission path; it cannot borrow SYSTEM
+                    // or the transport identity here.
+                    CommitUnitTrust::Relay => return Ok(false),
                     CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }

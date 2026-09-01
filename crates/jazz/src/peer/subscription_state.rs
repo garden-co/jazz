@@ -102,10 +102,13 @@ pub enum PeerRole {
 }
 
 impl PeerRole {
-    pub(super) fn identity(self) -> AuthorSubject {
+    /// The authenticated principal whose policy may be composed for this
+    /// link. A relay is transport only: treating it as `SYSTEM` here would
+    /// turn a topology role into a policy bypass.
+    pub(super) fn permission_subject(self) -> Option<AuthorSubject> {
         match self {
-            Self::Relay => AuthorSubject::SYSTEM,
-            Self::ClientLink { identity } => identity,
+            Self::Relay => None,
+            Self::ClientLink { identity } => Some(identity),
         }
     }
 }
