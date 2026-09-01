@@ -56,6 +56,7 @@ impl IvmRuntime {
         let compiled = match graph {
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::InputSource { .. }
             | GraphBuilder::Index { .. }
             | GraphBuilder::FrontierSource { .. }
             | GraphBuilder::BindingSource { .. }
@@ -132,6 +133,33 @@ impl IvmRuntime {
                     NodeDescriptor::new(
                         OpType::InlineRecords(InlineRecordsOp {
                             records: records.clone(),
+                        }),
+                        [],
+                        *output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode {
+                    output: *output,
+                    node,
+                    root_ordering_node: None,
+                })
+            }
+            GraphBuilder::InputSource { id, output } => {
+                if !id.belongs_to(self.input_source_runtime_namespace) {
+                    return Err(IvmRuntimeError::ForeignInputSource);
+                }
+                if !inferred_output.registry_compatible_with(output) {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        // A mutable input uses the same runtime delta and
+                        // hydration machinery as a prepared binding source;
+                        // only its GraphBuilder/API ownership differs.
+                        OpType::BindingSource(BindingSourceOp {
+                            shape: id.binding_shape(),
                         }),
                         [],
                         *output,

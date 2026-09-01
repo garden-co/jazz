@@ -1,6 +1,38 @@
 use super::*;
 
 impl Database {
+    /// Allocate an opaque mutable input source for graphs maintained by this
+    /// database. The identity is runtime-local and cannot be reused after the
+    /// database closes.
+    pub fn allocate_input_source(&mut self) -> InputSourceId {
+        self.ivm_runtime.allocate_input_source()
+    }
+
+    /// Atomically replace multiple runtime-owned source record sets and drive
+    /// them through the same IVM graph used by ordinary table changes.
+    pub async fn replace_input_sources(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+    ) -> Result<TickMetrics, Error> {
+        self.ensure_not_poisoned()?;
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
+        let metrics = self
+            .ivm_runtime
+            .replace_input_sources(replacements, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
+        self.last_tick_metrics = Some(metrics.clone());
+        self.drive_resident_progress_now()?;
+        Ok(metrics)
+    }
+
     /// Drain continuation turns which the IVM itself has explicitly scheduled
     /// for already-resident work. Stop as soon as a storage/chunk request is
     /// genuinely pending: this direct API has no durable owner waker to retain

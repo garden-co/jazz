@@ -16,22 +16,25 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{
     Arc, Weak,
+    atomic::{AtomicU64, Ordering},
     mpsc::{self, Receiver, RecvError, Sender, TryRecvError},
 };
 
 use rustc_hash::FxHashMap as HashMap;
+
+static NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, ArrangeOp,
     ArrangementDescriptor, BindingSourceOp, CollectByBuilder, CollectByField, CollectByMode,
     CollectByOp, CollectByProjection, CollectBySlot, CollectBySlotBuilder, DurableStorage,
     FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp,
-    InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH,
-    MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput, OpType, PersistOp, PlanExpr,
-    PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr, RecursiveEnumRemaps, RecursiveOp,
-    Retainer, StaticScanSpec, StreamingChecksumOp, TableSourceOp, TopByDirection, TopByLimit,
-    TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison, VariantProjectOp,
-    VariantProjectionTarget,
+    InlineRecordsOp, InputSourceId, IvmGraph, JoinOp, JoinOpKind, LiteralValue,
+    MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput,
+    OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr,
+    RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, StreamingChecksumOp, TableSourceOp,
+    TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
+    ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,
@@ -166,6 +169,12 @@ pub struct IvmRuntime {
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
     binding_sources: HashMap<String, BindingSourceState>,
+    /// Names reserved for [`InputSourceReplacement`] rather than prepared
+    /// binding values. Both source families deliberately share the exact
+    /// incremental delta engine, but never a namespace.
+    input_source_names: HashSet<String>,
+    input_source_runtime_namespace: u64,
+    next_input_source_id: u64,
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
     pending_binding_retractions: Vec<BindingDelta>,
@@ -264,6 +273,10 @@ impl IvmRuntime {
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
             binding_sources: HashMap::default(),
+            input_source_names: HashSet::default(),
+            input_source_runtime_namespace: NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE
+                .fetch_add(1, Ordering::Relaxed),
+            next_input_source_id: 1,
             pending_binding_retractions: Vec::new(),
             deferred_notifications: HashMap::default(),
             durable_notification_publications: HashSet::default(),
@@ -272,6 +285,19 @@ impl IvmRuntime {
         runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;
         Ok(runtime)
+    }
+
+    /// Allocate one opaque, runtime-local mutable input identity.
+    pub fn allocate_input_source(&mut self) -> InputSourceId {
+        let id = InputSourceId::new(
+            self.input_source_runtime_namespace,
+            self.next_input_source_id,
+        );
+        self.next_input_source_id = self
+            .next_input_source_id
+            .checked_add(1)
+            .expect("input source IDs must not wrap within one runtime");
+        id
     }
 
     pub(crate) fn set_chunk_provider(
@@ -415,6 +441,10 @@ pub enum IvmRuntimeError {
     BindingSourceNotFound(String),
     #[error("binding source descriptor mismatch: {0}")]
     BindingSourceDescriptorMismatch(String),
+    #[error("input source name is already reserved by a prepared binding source: {0}")]
+    InputSourceNameInUse(String),
+    #[error("input source belongs to a different IVM runtime")]
+    ForeignInputSource,
     #[error("duplicate schema version {version} for table {table}")]
     DuplicateTableVariant { table: String, version: u64 },
     #[error(transparent)]

@@ -761,6 +761,10 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 output.hash(&mut hasher);
                 records.hash(&mut hasher);
             }
+            GraphBuilder::InputSource { id, output } => {
+                id.hash(&mut hasher);
+                output.hash(&mut hasher);
+            }
             GraphBuilder::Index {
                 table,
                 index,
@@ -947,6 +951,10 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                     output: x,
                     records: y,
                 },
+            ) if a == x && b == y => {}
+            (
+                GraphBuilder::InputSource { id: a, output: b },
+                GraphBuilder::InputSource { id: x, output: y },
             ) if a == x && b == y => {}
             (
                 GraphBuilder::Index {
@@ -1218,6 +1226,18 @@ pub(super) struct BindingDelta {
     pub(super) shape: String,
     pub(super) descriptor: RecordDescriptor,
     pub(super) deltas: Vec<RecordDelta>,
+}
+
+/// One exact replacement in a runtime-owned mutable input source.
+///
+/// IDs are opaque and runtime-local. They intentionally carry no protocol,
+/// tenancy, or authorization meaning; callers select them from their own
+/// scoped identity and pass only already-admitted records here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputSourceReplacement {
+    pub id: InputSourceId,
+    pub descriptor: RecordDescriptor,
+    pub records: Vec<Vec<u8>>,
 }
 
 /// Result of lowering a graph-builder fragment into the deduplicated graph.
@@ -1894,6 +1914,7 @@ fn lift_literal_filter_node(
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. }
@@ -2091,6 +2112,7 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
         let output = match node {
             GraphBuilder::BindingSource { output, .. }
             | GraphBuilder::FrontierSource { output, .. }
+            | GraphBuilder::InputSource { output, .. }
             | GraphBuilder::InlineRecords { output, .. } => {
                 output.field_index(binding_field).is_some()
             }
@@ -2265,6 +2287,7 @@ fn propagate_binding_through_frontier(
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. }
@@ -2445,6 +2468,126 @@ fn replace_binding_shape(graph: &GraphBuilder, shape: &str) -> GraphBuilder {
 }
 
 impl IvmRuntime {
+    /// Atomically replace the complete record multisets of runtime-owned
+    /// mutable inputs and drive one ordinary incremental tick.
+    ///
+    /// The replacement validates every descriptor and encoded record before it
+    /// mutates runtime state. It also preflights every existing source
+    /// descriptor before changing any source. Duplicate input IDs and records are
+    /// canonicalized deterministically; a replay of the same replacement
+    /// produces no delta and does not advance a frontier. Multiple sources
+    /// are committed as one batch, so a collector can observe only the old or
+    /// new cross-source frontier, never an intermediate source mix.
+    pub async fn replace_input_sources<S>(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        let mut canonical = BTreeMap::<InputSourceId, (RecordDescriptor, BTreeSet<Vec<u8>>)>::new();
+        for replacement in replacements {
+            let records = replacement.records.into_iter().collect::<BTreeSet<_>>();
+            for record in &records {
+                let borrowed = BorrowedRecord::new(record, &replacement.descriptor);
+                let _ = borrowed.to_values()?;
+            }
+            match canonical.entry(replacement.id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((replacement.descriptor, records));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (descriptor, existing) = entry.get_mut();
+                    if *descriptor != replacement.descriptor {
+                        return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                            entry.key().binding_shape(),
+                        ));
+                    }
+                    existing.extend(records);
+                }
+            }
+        }
+
+        // Do every failure-prone compatibility check before the first source
+        // changes. A caller must never observe a prefix of a rejected batch.
+        for (id, (descriptor, _)) in &canonical {
+            if !id.belongs_to(self.input_source_runtime_namespace) {
+                return Err(IvmRuntimeError::ForeignInputSource);
+            }
+            let name = id.binding_shape();
+            if self.binding_sources.contains_key(&name) && !self.input_source_names.contains(&name)
+            {
+                return Err(IvmRuntimeError::InputSourceNameInUse(name));
+            }
+            if let Some(source) = self.binding_sources.get(&name)
+                && source.descriptor != *descriptor
+            {
+                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(name));
+            }
+        }
+
+        let mut deltas = Vec::new();
+        for (id, (descriptor, replacement)) in canonical {
+            let name = id.binding_shape();
+            if !self.binding_sources.contains_key(&name) {
+                self.input_source_names.insert(name.clone());
+                self.binding_sources.insert(
+                    name.clone(),
+                    BindingSourceState {
+                        descriptor,
+                        refcounts: HashMap::default(),
+                    },
+                );
+            }
+            let source = self
+                .binding_sources
+                .get_mut(&name)
+                .expect("input source was just installed or already resident");
+            debug_assert_eq!(source.descriptor, descriptor);
+            let previous = source
+                .refcounts
+                .iter()
+                .filter(|(_, count)| **count > 0)
+                .map(|(key, _)| key.0.clone())
+                .collect::<BTreeSet<_>>();
+            let changed = previous != replacement;
+            if !changed {
+                continue;
+            }
+            let records = previous
+                .difference(&replacement)
+                .map(|record| RecordDelta {
+                    record: record.clone().into(),
+                    weight: -1,
+                })
+                .chain(replacement.difference(&previous).map(|record| RecordDelta {
+                    record: record.clone().into(),
+                    weight: 1,
+                }))
+                .collect::<Vec<_>>();
+            source.refcounts = replacement
+                .into_iter()
+                .map(|record| (BindingKey(record), 1))
+                .collect();
+            deltas.push(BindingDelta {
+                shape: name,
+                descriptor,
+                deltas: records,
+            });
+        }
+        if deltas.is_empty() {
+            return Ok(TickMetrics::default());
+        }
+        self.tick_with_params(
+            Vec::new(),
+            deltas,
+            OwnedStorage::new(Rc::clone(storage)),
+            None,
+        )
+        .await
+    }
+
     pub async fn subscribe_one_sink<S>(
         &mut self,
         graph: GraphBuilder,
@@ -2714,6 +2857,9 @@ impl IvmRuntime {
             .map(|terminal| count_builder_nodes(&terminal.graph))
             .sum::<usize>() as u64;
         let shape = binding_source_shape.into();
+        if self.input_source_names.contains(&shape) {
+            return Err(IvmRuntimeError::InputSourceNameInUse(shape));
+        }
         let shape_id = self.next_shape_id();
         match self.binding_sources.entry(shape.clone()) {
             std::collections::hash_map::Entry::Occupied(existing)
@@ -3358,7 +3504,8 @@ impl IvmRuntime {
                 }
                 Ok(table_schema.record_schema())
             }
-            GraphBuilder::InlineRecords { output, .. } => Ok(*output),
+            GraphBuilder::InlineRecords { output, .. }
+            | GraphBuilder::InputSource { output, .. } => Ok(*output),
             GraphBuilder::Index {
                 table,
                 row_projection: Some(target),

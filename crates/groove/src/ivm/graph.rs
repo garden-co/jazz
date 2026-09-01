@@ -157,6 +157,12 @@ pub enum GraphBuilder {
         output: RecordDescriptor,
         records: Vec<Vec<u8>>,
     },
+    /// Runtime-owned mutable records. The input identity is local to the owning
+    /// runtime and receives record replacement batches through its API.
+    InputSource {
+        id: InputSourceId,
+        output: RecordDescriptor,
+    },
     Index {
         table: String,
         index: String,
@@ -267,6 +273,37 @@ pub enum GraphBuilder {
         group_cols: Vec<FieldRef>,
         aggregates: Vec<AggregateExpr>,
     },
+}
+
+/// Opaque identity of one mutable input owned by a single IVM runtime.
+///
+/// It is neither durable nor wire-facing. Callers obtain it from
+/// [`crate::ivm::IvmRuntime::allocate_input_source`] and use it only with that
+/// runtime's graph and replacement APIs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InputSourceId {
+    runtime_namespace: u64,
+    local: u64,
+}
+
+impl InputSourceId {
+    pub(crate) fn new(runtime_namespace: u64, local: u64) -> Self {
+        Self {
+            runtime_namespace,
+            local,
+        }
+    }
+
+    pub(crate) fn belongs_to(self, runtime_namespace: u64) -> bool {
+        self.runtime_namespace == runtime_namespace
+    }
+
+    pub(crate) fn binding_shape(self) -> String {
+        format!(
+            "__groove_input_source_{}_{}",
+            self.runtime_namespace, self.local
+        )
+    }
 }
 
 /// Public builder payload for a terminal [`GraphBuilder::CollectBy`] node.
@@ -451,6 +488,11 @@ impl GraphBuilder {
         }
     }
 
+    /// Build a runtime-owned mutable source with a fixed output descriptor.
+    pub fn input_source(id: InputSourceId, output: RecordDescriptor) -> Self {
+        Self::InputSource { id, output }
+    }
+
     pub fn values(
         output: RecordDescriptor,
         rows: impl IntoIterator<Item = impl AsRef<[Value]>>,
@@ -619,6 +661,7 @@ impl GraphBuilder {
                 }
                 Self::Table { .. }
                 | Self::InlineRecords { .. }
+                | Self::InputSource { .. }
                 | Self::Index { .. }
                 | Self::FrontierSource { .. }
                 | Self::BindingSource { .. } => {}

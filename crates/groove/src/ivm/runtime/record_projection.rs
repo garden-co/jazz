@@ -577,6 +577,7 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
             ),
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::InputSource { .. }
             | GraphBuilder::Index { .. }
             | GraphBuilder::FrontierSource { .. }
             | GraphBuilder::BindingSource { .. } => false,
