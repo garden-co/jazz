@@ -506,6 +506,56 @@ fn scope_relay_authored_pending_repairs_require_exact_author_scope() {
     );
 }
 
+/// Ledger admission follows physical version carriers, not live rows: a
+/// deletion version remains repairable after it leaves the current result.
+#[test]
+fn scope_relay_ledger_records_deletion_history_version_carriers() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    relay_node.set_relay_authority_session_owner_for_test();
+    let row_uuid = row(0x2f);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .made_by(alice)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected deletion commit unit");
+    };
+    relay_node
+        .ingest_relay_commit_unit(tx.clone(), versions.clone())
+        .resolve()
+        .unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(versions[0].schema_version(), "todos")
+        .unwrap();
+    relay_node
+        .record_scope_relay_authoritative_bundles(&[VersionBundle {
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+            tx,
+            versions,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: DurabilityTier::Local,
+        }])
+        .resolve()
+        .unwrap();
+    assert!(
+        relay_node
+            .scope_relay_repair_ledger_contains(
+                table_id,
+                &crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id),
+            )
+            .resolve()
+            .unwrap(),
+        "deletion/history carrier is a durable exact repair ref"
+    );
+}
+
 #[test]
 fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
