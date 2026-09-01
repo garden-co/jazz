@@ -1763,9 +1763,10 @@ fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
     );
 }
 
-/// A delegated usage site is immutable even when its trusted relay transport
-/// refreshes its own admitted snapshot. This deliberately delegates SYSTEM:
-/// provenance comes from the admitted wire form, not identity equality.
+/// A scope-isolated relay usage site retains the immutable session selected by
+/// server admission even when the host refresh hook runs afterward. This
+/// deliberately admits SYSTEM as the foreground session: provenance comes
+/// from the exact admitted binding, not identity equality or the transport.
 #[test]
 fn delegated_subscription_binding_survives_relay_claim_refresh() {
     let schema = owner_read_schema();
@@ -1783,7 +1784,12 @@ fn delegated_subscription_binding_survives_relay_claim_refresh() {
         Value::Uuid(AuthorSubject::for_test_bytes([0xb1; 16]).test_uuid()),
     )]);
     let (mut relay_transport, server_transport) = duplex();
-    let subscriber = server.server.accept_relay_subscriber(server_transport);
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        delegated_identity,
+        delegated_claims.clone(),
+        1,
+    );
     relay_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -1842,8 +1848,8 @@ fn delegated_subscription_binding_survives_relay_claim_refresh() {
 
 /// Closing a subscriber must retire the group-owned maintained receiver, not
 /// merely its concrete wire usage. Direct coverage uses the ordinary binding
-/// key, while a trusted relay's delegated coverage is policy-partitioned; both
-/// ownership forms must leave no Groove work behind after normal detach.
+/// key, while a scope-isolated relay's admitted coverage is policy-partitioned;
+/// both ownership forms must leave no Groove work behind after normal detach.
 #[test]
 fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     let direct_schema = schema();
@@ -1940,7 +1946,12 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     let (mut relay_transport, delegated_server_transport) = duplex();
     let delegated_subscriber = delegated_server
         .server
-        .accept_relay_subscriber(delegated_server_transport);
+        .accept_scope_isolated_relay_subscriber(
+            delegated_server_transport,
+            delegated_identity,
+            delegated_claims.clone(),
+            1,
+        );
     relay_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),

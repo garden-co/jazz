@@ -2948,7 +2948,14 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeDecision { .. }
     ) || (matches!(message, SyncMessage::SessionClaims { .. })
         && (peer.rejects_raw_session_claims()
-            || !delegated_session_capability(ingest, peer.role())))
+            // A trusted backend is the one non-relay transport allowed to
+            // assert a session snapshot. It needs that snapshot to submit a
+            // user-attributed write whose policy reads session claims. The
+            // authenticated server admission selected its trust level; this
+            // must not turn an ordinary client or a subjectless relay into a
+            // claim issuer.
+            || (!ingest.trust.is_trusted()
+                && !delegated_session_capability(ingest, peer.role()))))
 }
 
 /// Only the host-admitted core-facing relay may carry another session's
