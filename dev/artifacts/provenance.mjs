@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -192,14 +192,14 @@ const artifactRoots = {
   napi: "crates/jazz-napi/Cargo.toml",
 };
 
-function workspaceDependencyInputs(root, kind) {
+export function workspaceDependencyInputs(root, rootManifest) {
   const result = spawnSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
     cwd: root,
     encoding: "utf8",
   });
   if (result.status !== 0) {
     throw new Error(
-      `artifact provenance: cargo metadata failed for ${kind}: ${result.stderr.trim() || "unknown error"}`,
+      `artifact provenance: cargo metadata failed for ${rootManifest}: ${result.stderr.trim() || "unknown error"}`,
     );
   }
   let metadata;
@@ -207,16 +207,23 @@ function workspaceDependencyInputs(root, kind) {
     metadata = JSON.parse(result.stdout);
   } catch (error) {
     throw new Error(
-      `artifact provenance: cargo metadata was invalid for ${kind}: ${error.message}`,
+      `artifact provenance: cargo metadata was invalid for ${rootManifest}: ${error.message}`,
     );
   }
-  const packages = new Map(
-    metadata.packages.map((pkg) => [resolve(dirname(pkg.manifest_path)), pkg]),
+  const packagesByManifest = new Map(
+    metadata.packages.map((pkg) => [resolve(pkg.manifest_path), pkg]),
   );
-  const rootDirectory = resolve(root, dirname(artifactRoots[kind]));
-  if (!packages.has(rootDirectory)) {
-    throw new Error(`artifact provenance: cargo metadata omitted ${artifactRoots[kind]}`);
+  const rootManifestPath = resolve(root, rootManifest);
+  if (!packagesByManifest.has(rootManifestPath)) {
+    throw new Error(`artifact provenance: cargo metadata omitted ${rootManifest}`);
   }
+  const packages = new Map(
+    metadata.packages.map((pkg) => [dirname(resolve(pkg.manifest_path)), pkg]),
+  );
+  const rootDirectory = dirname(rootManifestPath);
+  // This is deliberately the conservative declared closure: optional and
+  // target-conditional path dependencies invalidate artifacts even when a
+  // particular build does not enable them.
   const pending = [rootDirectory];
   const visited = new Set();
   while (pending.length) {
@@ -236,7 +243,32 @@ function workspaceDependencyInputs(root, kind) {
       pending.push(dependencyDirectory);
     }
   }
-  return [...visited].map((directory) => relative(root, directory)).sort();
+  return [...visited]
+    .map((directory) => {
+      const repositoryPath = relative(root, directory);
+      if (!repositoryPath) {
+        throw new Error(
+          `artifact provenance: workspace dependency has no repository-relative path: ${directory}`,
+        );
+      }
+      if (
+        repositoryPath === ".." ||
+        repositoryPath.startsWith(`..${sep}`) ||
+        isAbsolute(repositoryPath)
+      ) {
+        throw new Error(
+          `artifact provenance: workspace dependency escapes repository root: ${directory}`,
+        );
+      }
+      const normalizedPath = repositoryPath.split(sep).join("/");
+      if (normalizedPath.includes("\\")) {
+        throw new Error(
+          `artifact provenance: workspace dependency path is not representable: ${directory}`,
+        );
+      }
+      return normalizedPath;
+    })
+    .sort();
 }
 
 const inputsFor = {
@@ -302,7 +334,7 @@ function packageInputsFingerprint(root, kind) {
   if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
   const trackedInputs = trackedFiles(root, [
     ...inputsFor[kind],
-    ...workspaceDependencyInputs(root, kind),
+    ...workspaceDependencyInputs(root, artifactRoots[kind]),
   ]);
   const inputHash = createHash("sha256");
   for (const path of trackedInputs) {

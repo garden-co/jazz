@@ -10,6 +10,7 @@ import {
   nativeArtifactFingerprint,
   verifyManifest,
   verifyPublishedNapiManifest,
+  workspaceDependencyInputs,
   writeManifest,
 } from "./provenance.mjs";
 import { stageNapiManifests } from "./stage-napi-manifests.mjs";
@@ -326,6 +327,80 @@ test("NAPI fingerprint ignores an ignored nested generated index.js", () =>
     );
     rmSync(root, { recursive: true, force: true });
   }));
+
+test("workspace dependency inputs require the exact root manifest", () => {
+  const root = fixture();
+  try {
+    assert.throws(
+      () => workspaceDependencyInputs(root, "crates/jazz-wasm/Typo.toml"),
+      /cargo metadata omitted crates\/jazz-wasm\/Typo\.toml/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace dependency inputs reject a package at the supplied repository root", () => {
+  const root = mkdtempSync(join(tmpdir(), "jazz-artifact-root-package-"));
+  try {
+    mkdirSync(join(root, "src"));
+    writeFileSync(
+      join(root, "Cargo.toml"),
+      "[package]\nname = 'root'\nversion = '0.0.0'\nedition = '2021'\n",
+    );
+    writeFileSync(join(root, "src/lib.rs"), "// root\n");
+    assert.throws(
+      () => workspaceDependencyInputs(root, "Cargo.toml"),
+      /workspace dependency has no repository-relative path/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace dependency inputs reject packages outside the supplied repository root", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "jazz-artifact-closure-"));
+  const repositoryRoot = join(workspace, "repository");
+  const root = join(repositoryRoot, "root");
+  const outside = join(workspace, "outside");
+  try {
+    for (const directory of [root, outside]) mkdirSync(join(directory, "src"), { recursive: true });
+    writeFileSync(
+      join(workspace, "Cargo.toml"),
+      "[workspace]\nmembers = ['repository/root', 'outside']\nresolver = '2'\n",
+    );
+    writeFileSync(
+      join(root, "Cargo.toml"),
+      "[package]\nname = 'root'\nversion = '0.0.0'\nedition = '2021'\n[dependencies]\noutside = { path = '../../outside' }\n",
+    );
+    writeFileSync(join(root, "src/lib.rs"), "// root\n");
+    writeFileSync(
+      join(outside, "Cargo.toml"),
+      "[package]\nname = 'outside'\nversion = '0.0.0'\nedition = '2021'\n",
+    );
+    writeFileSync(join(outside, "src/lib.rs"), "// outside\n");
+
+    assert.throws(
+      () => workspaceDependencyInputs(repositoryRoot, "root/Cargo.toml"),
+      /workspace dependency escapes repository root/,
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("workspace dependency inputs use Turbo repository path syntax", () => {
+  const root = fixture();
+  try {
+    for (const path of workspaceDependencyInputs(root, "crates/jazz-napi/Cargo.toml")) {
+      assert.notEqual(path, "");
+      assert.doesNotMatch(path, /\\/);
+      assert.equal(path === ".." || path.startsWith("../"), false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("NAPI provenance covers every reachable local Cargo dependency", () => {
   const root = fixture();

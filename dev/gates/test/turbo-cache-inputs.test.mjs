@@ -1,22 +1,46 @@
 #!/usr/bin/env node
 /**
  * Turbo's dry graph exposes both the resolved input set and its task hash. Keep
- * this test deliberately build-free: it proves the cache key changes for a
- * shared Rust dependency, but not for a crate outside these artifact closures.
+ * this test deliberately build-free: it proves the cache key changes for direct
+ * and transitive Rust dependencies without invalidating unrelated artifacts.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { workspaceDependencyInputs } from "../../artifacts/provenance.mjs";
 
 const root = resolve(import.meta.dirname, "../../..");
-const tasks = [
-  "@jazz/rust#build:crates",
-  "jazz-wasm#build",
-  "jazz-wasm#build:fast",
-  "jazz-napi#build",
+const taskDefinitions = [
+  {
+    task: "@jazz/rust#build:crates",
+    config: "build:crates",
+    rootManifest: "crates/jazz-cli/Cargo.toml",
+    localRoot: false,
+  },
+  {
+    task: "jazz-wasm#build",
+    config: "jazz-wasm#build",
+    rootManifest: "crates/jazz-wasm/Cargo.toml",
+    localRoot: true,
+  },
+  {
+    task: "jazz-wasm#build:fast",
+    config: "jazz-wasm#build:fast",
+    rootManifest: "crates/jazz-wasm/Cargo.toml",
+    localRoot: true,
+  },
+  {
+    task: "jazz-napi#build",
+    config: "jazz-napi#build",
+    rootManifest: "crates/jazz-napi/Cargo.toml",
+    localRoot: true,
+  },
 ];
+const tasks = taskDefinitions.map(({ task }) => task);
 const uncachedCorrectnessArtifactTasks = tasks.filter((task) => task !== "@jazz/rust#build:crates");
+const turbo = JSON.parse(readFileSync(resolve(root, "turbo.json"), "utf8"));
+const cargoInputs = new Map();
 
 function jazzToolsDryGraph() {
   const output = execFileSync(
@@ -78,10 +102,38 @@ function containsInput(graph, task, suffix) {
   return Object.keys(graph.get(task).inputs).some((path) => path.endsWith(suffix));
 }
 
-const closures = [
-  { name: "jazz", file: resolve(root, "crates/jazz/src/lib.rs") },
-  { name: "groove", file: resolve(root, "crates/groove/src/lib.rs") },
-];
+function dependencyInputs(definition) {
+  const { rootManifest } = definition;
+  if (!cargoInputs.has(rootManifest)) {
+    cargoInputs.set(rootManifest, workspaceDependencyInputs(root, rootManifest));
+  }
+  return cargoInputs.get(rootManifest);
+}
+
+function configuredCargoInputs(definition) {
+  const { config, rootManifest, localRoot } = definition;
+  const rootCrate = rootManifest.slice(0, -"/Cargo.toml".length);
+  const expected = dependencyInputs(definition)
+    .filter((path) => !localRoot || path !== rootCrate)
+    .map((path) => `$TURBO_ROOT$/${path}/**`)
+    .sort();
+  const actual = turbo.tasks[config].inputs
+    .filter((input) => /^\$TURBO_ROOT\$\/crates\/[^/]+\/\*\*$/.test(input))
+    .sort();
+  assert.deepEqual(actual, expected, `${config} diverges from its Cargo dependency closure`);
+}
+
+const expectedAffectedTasks = new Map([
+  ["jazz", new Set(tasks)],
+  ["groove", new Set(tasks)],
+  ["jazz-native-transport", new Set(["@jazz/rust#build:crates", "jazz-napi#build"])],
+  ["benchmark-guard", new Set(["@jazz/rust#build:crates", "jazz-napi#build"])],
+]);
+const closures = [...expectedAffectedTasks].map(([name, affected]) => ({
+  name,
+  file: resolve(root, `crates/${name}/src/lib.rs`),
+  affected,
+}));
 const unrelated = resolve(root, "crates/jazz-sim/src/lib.rs");
 const originals = new Map(closures.map(({ file }) => [file, readFileSync(file, "utf8")]));
 const unrelatedOriginal = readFileSync(unrelated, "utf8");
@@ -100,11 +152,13 @@ try {
   const baseline = dryGraph();
   for (const task of uncachedCorrectnessArtifactTasks)
     assertUncachedCorrectnessArtifactTask(baseline.get(task));
-  for (const { name } of closures)
+  for (const definition of taskDefinitions) configuredCargoInputs(definition);
+  for (const { name, affected } of closures)
     for (const task of tasks)
-      assert(
+      assert.equal(
         containsInput(baseline, task, `${name}/src/lib.rs`),
-        `${task} omits its ${name} dependency`,
+        affected.has(task),
+        `${task} has the wrong ${name} dependency coverage`,
       );
   for (const task of tasks)
     assert(
@@ -113,18 +167,26 @@ try {
     );
 
   const baselineHashes = hashes(baseline);
-  for (const { name, file } of closures) {
+  for (const { name, file, affected } of closures) {
     const original = originals.get(file);
     writeFileSync(file, `${original}\n// turbo cache-input ${name} edit probe\n`);
     const afterEdit = hashes(dryGraph());
     for (const task of tasks)
-      assert.notEqual(afterEdit[task], baselineHashes[task], `${task} missed a ${name} edit`);
+      assert[affected.has(task) ? "notEqual" : "equal"](
+        afterEdit[task],
+        baselineHashes[task],
+        `${task} has the wrong response to a ${name} edit`,
+      );
 
     writeFileSync(file, original);
     rmSync(file);
     const afterRemoval = hashes(dryGraph());
     for (const task of tasks)
-      assert.notEqual(afterRemoval[task], baselineHashes[task], `${task} missed a ${name} removal`);
+      assert[affected.has(task) ? "notEqual" : "equal"](
+        afterRemoval[task],
+        baselineHashes[task],
+        `${task} has the wrong response to a ${name} removal`,
+      );
     writeFileSync(file, original);
   }
 

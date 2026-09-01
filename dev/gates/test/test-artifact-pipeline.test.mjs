@@ -513,7 +513,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
   ]);
 });
 
-test("Turbo invalidates each native artifact only for its Cargo closure", () => {
+test("Turbo native artifact tasks use precise local inputs without task dependencies", () => {
   const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
   const napi = turbo.tasks["jazz-napi#build"];
   const wasm = turbo.tasks["jazz-wasm#build"];
@@ -522,6 +522,8 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
   const cli = turbo.tasks["build:crates"];
   assert.equal(napi.dependsOn, undefined);
   assert.equal(wasm.dependsOn, undefined);
+  for (const task of [napi, wasm, fastWasm, cli])
+    assert.equal(task.inputs.includes("$TURBO_ROOT$/crates/**/*.rs"), false);
   for (const [task, inputs] of [
     [
       napi,
@@ -531,31 +533,12 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
         "$TURBO_ROOT$/crates/jazz-napi/build.rs",
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
         "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
-      ].concat(["jazz-otel", "jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`)),
+      ],
     ],
-    [
-      wasm,
-      ["package.json", "Cargo.toml", "src/**/*.rs"].concat(
-        ["jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
-      ),
-    ],
-    [
-      fastWasm,
-      ["package.json", "Cargo.toml", "src/**/*.rs"].concat(
-        ["jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
-      ),
-    ],
-    [
-      cli,
-      ["jazz-cli", "jazz", "groove"].flatMap((crate) => [
-        `$TURBO_ROOT$/crates/${crate}/Cargo.toml`,
-        `$TURBO_ROOT$/crates/${crate}/src/**/*.rs`,
-      ]),
-    ],
-  ]) {
+    [wasm, ["package.json", "Cargo.toml", "src/**/*.rs"]],
+    [fastWasm, ["package.json", "Cargo.toml", "src/**/*.rs"]],
+  ])
     for (const input of inputs) assert.ok(task.inputs.includes(input), input);
-    assert.equal(task.inputs.includes("$TURBO_ROOT$/crates/**/*.rs"), false);
-  }
   for (const generatedInput of [
     "$TURBO_ROOT$/crates/jazz-napi/*.node",
     "$TURBO_ROOT$/crates/jazz-napi/.jazz-artifact-manifest.json",
