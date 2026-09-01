@@ -10,7 +10,9 @@ use bytes::Bytes;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 
-use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
+use crate::ivm::{
+    BindingSourceKey, IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp,
+};
 use crate::records::RecordDescriptor;
 use crate::storage::{OrderedKvStorage, ScanBounds, StorageFuture};
 
@@ -117,7 +119,7 @@ pub(super) struct HydrationRecomputeContext<'a> {
     pub(super) inputs: Option<&'a mut EvaluationInputs>,
     pub(super) table_deltas: Option<&'a [TableDelta]>,
     pub(super) storage: &'a dyn OrderedKvStorage,
-    pub(super) binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     pub(super) scope: ScopeId,
     pub(super) input_generation: u64,
 }
@@ -720,12 +722,12 @@ fn has_recompute_binding_delta(
     seed: NodeId,
     step: NodeId,
 ) -> Result<bool, IvmRuntimeError> {
-    let mut shapes = HashMap::<String, RecordDescriptor>::default();
+    let mut shapes = HashMap::<BindingSourceKey, RecordDescriptor>::default();
     collect_binding_sources(graph, seed, &mut shapes)?;
     collect_binding_sources(graph, step, &mut shapes)?;
     Ok(binding_deltas
         .iter()
-        .filter(|binding_delta| shapes.contains_key(&binding_delta.shape))
+        .filter(|binding_delta| shapes.contains_key(&binding_delta.key))
         .any(|binding_delta| binding_delta.deltas.iter().any(|delta| delta.weight <= 0)))
 }
 
@@ -1005,12 +1007,12 @@ fn collect_table_source_names(
 fn collect_binding_sources(
     graph: &IvmGraph,
     node: NodeId,
-    shapes: &mut HashMap<String, RecordDescriptor>,
+    shapes: &mut HashMap<BindingSourceKey, RecordDescriptor>,
 ) -> Result<(), IvmRuntimeError> {
     walk_input_graph(graph, node, |_, graph_node| {
         if let OpType::BindingSource(binding) = &graph_node.descriptor.operator {
             shapes
-                .entry(binding.shape.clone())
+                .entry(binding.key.clone())
                 .or_insert_with(|| graph_node.descriptor.output.records());
         }
         Ok(())
@@ -1148,7 +1150,7 @@ struct HydrationEvaluator<'a> {
     table_deltas: Option<&'a [TableDelta]>,
     evaluation_inputs: Option<&'a mut EvaluationInputs>,
     storage: &'a dyn OrderedKvStorage,
-    binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     context: EvalContext,
     memo: HashMap<NodeId, RecordDeltas>,
 }
@@ -1235,7 +1237,7 @@ impl HydrationEvaluator<'_> {
                 OpType::BindingSource(binding_source) => {
                     let deltas = self
                         .binding_snapshots
-                        .get(&binding_source.shape)
+                        .get(&binding_source.key)
                         .cloned()
                         .unwrap_or_else(|| RecordDeltas::empty(output_desc));
                     project_binding_source_deltas(&deltas, &output_desc)

@@ -193,7 +193,7 @@ pub(super) struct TickEvaluator<'a> {
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
     pub(super) binding_deltas: &'a [BindingDelta],
-    pub(super) binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     pub(super) current_tick: u64,
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -201,7 +201,7 @@ pub(super) struct TickEvaluator<'a> {
     pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
-    pub(super) binding_frontiers: &'a HashMap<String, u64>,
+    pub(super) binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     pub(super) memo_use_clock: &'a mut u64,
     pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     pub(super) storage: Option<&'a dyn OrderedKvStorage>,
@@ -223,7 +223,7 @@ pub(super) struct GraphRuntimeView<'a> {
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
     pub(super) binding_deltas: &'a [BindingDelta],
-    pub(super) binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     pub(super) current_tick: u64,
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -231,7 +231,7 @@ pub(super) struct GraphRuntimeView<'a> {
     pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
-    pub(super) binding_frontiers: &'a HashMap<String, u64>,
+    pub(super) binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     pub(super) memo_use_clock: &'a mut u64,
     pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     pub(super) storage: &'a dyn OrderedKvStorage,
@@ -247,7 +247,7 @@ fn graph_runtime_view<'a>(
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: &'a [TableDelta],
     binding_deltas: &'a [BindingDelta],
-    binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     current_tick: u64,
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -255,7 +255,7 @@ fn graph_runtime_view<'a>(
     eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     eval_memo_bytes: &'a mut usize,
     table_frontiers: &'a HashMap<String, u64>,
-    binding_frontiers: &'a HashMap<String, u64>,
+    binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     memo_use_clock: &'a mut u64,
     node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     storage: &'a dyn OrderedKvStorage,
@@ -1211,7 +1211,7 @@ impl TickEvaluator<'_> {
                 tables.insert(input.table);
             }
             OpType::BindingSource(input) => {
-                bindings.insert(input.shape);
+                bindings.insert(input.key);
             }
             OpType::FrontierSource(input) => {
                 frontier_bindings.insert(input.binding);

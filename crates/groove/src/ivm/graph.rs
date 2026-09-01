@@ -302,7 +302,22 @@ impl InputSourceId {
         self.belongs_to(runtime_namespace) && self.local < next_local
     }
 
-    pub(crate) fn binding_shape(self) -> String {
+    pub(crate) fn binding_key(self) -> BindingSourceKey {
+        BindingSourceKey::RuntimeInput {
+            runtime_namespace: self.runtime_namespace,
+            local: self.local,
+        }
+    }
+
+    pub(crate) fn diagnostic_name(self) -> String {
+        format!(
+            "runtime input source {}:{}",
+            self.runtime_namespace, self.local
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_binding_shape(self) -> String {
         format!(
             "__groove_input_source_{}_{}",
             self.runtime_namespace, self.local
@@ -1323,7 +1338,8 @@ pub struct IvmGraph {
     /// descriptor, and insertion asserts that collisions do not merge specs.
     nodes: HashMap<NodeId, GraphNode>,
     table_sources: HashMap<String, HashSet<NodeId>>,
-    binding_sources: HashMap<String, HashSet<NodeId>>,
+    binding_sources: HashMap<BindingSourceKey, HashSet<NodeId>>,
+    frontier_sources: HashMap<String, HashSet<NodeId>>,
 }
 
 impl IvmGraph {
@@ -1365,12 +1381,12 @@ impl IvmGraph {
             }
             OpType::BindingSource(source) => {
                 self.binding_sources
-                    .entry(source.shape.clone())
+                    .entry(source.key.clone())
                     .or_default()
                     .insert(id);
             }
             OpType::FrontierSource(source) => {
-                self.binding_sources
+                self.frontier_sources
                     .entry(source.binding.0.clone())
                     .or_default()
                     .insert(id);
@@ -1420,17 +1436,19 @@ impl IvmGraph {
     pub(crate) fn affected_nodes<'a>(
         &self,
         tables: impl IntoIterator<Item = &'a str>,
-        bindings: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
     ) -> std::collections::HashSet<NodeId> {
         let mut affected = std::collections::HashSet::new();
         let mut pending = tables
             .into_iter()
             .filter_map(|table| self.table_sources.get(table))
-            .chain(
-                bindings
-                    .into_iter()
-                    .filter_map(|binding| self.binding_sources.get(binding)),
-            )
+            .chain(bindings.into_iter().flat_map(|binding| {
+                self.binding_sources.get(binding).into_iter().chain(
+                    binding
+                        .prepared_name()
+                        .and_then(|name| self.frontier_sources.get(name)),
+                )
+            }))
             .flat_map(|nodes| nodes.iter().copied())
             .collect::<Vec<_>>();
         while let Some(node) = pending.pop() {
@@ -1477,17 +1495,20 @@ impl IvmGraph {
                 remove_source_node(&mut self.table_sources, &source.table, id);
             }
             OpType::BindingSource(source) => {
-                remove_source_node(&mut self.binding_sources, &source.shape, id);
+                remove_source_node(&mut self.binding_sources, &source.key, id);
             }
             OpType::FrontierSource(source) => {
-                remove_source_node(&mut self.binding_sources, &source.binding.0, id);
+                remove_source_node(&mut self.frontier_sources, &source.binding.0, id);
             }
             _ => {}
         }
     }
 }
 
-fn remove_source_node(sources: &mut HashMap<String, HashSet<NodeId>>, source: &str, node: NodeId) {
+fn remove_source_node<K>(sources: &mut HashMap<K, HashSet<NodeId>>, source: &K, node: NodeId)
+where
+    K: Eq + std::hash::Hash,
+{
     let remove_source = sources.get_mut(source).is_some_and(|nodes| {
         nodes.remove(&node);
         nodes.is_empty()

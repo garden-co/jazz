@@ -36,7 +36,7 @@ struct EvaluationSession<'a> {
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
-    binding_frontiers: HashMap<String, u64>,
+    binding_frontiers: HashMap<BindingSourceKey, u64>,
     storage: OwnedStorage<'a>,
     requests: EvaluationRequests<'a>,
     evaluation_inputs: EvaluationInputs,
@@ -46,9 +46,9 @@ struct EvaluationSession<'a> {
 pub(super) struct IncrementalEvaluation<'a> {
     table_deltas: Vec<TableDelta>,
     binding_deltas: Vec<BindingDelta>,
-    binding_snapshots: HashMap<String, RecordDeltas>,
+    binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
     table_frontiers: HashMap<String, u64>,
-    binding_frontiers: HashMap<String, u64>,
+    binding_frontiers: HashMap<BindingSourceKey, u64>,
     current_tick: u64,
     metrics: TickMetrics,
     storage: OwnedStorage<'a>,
@@ -190,7 +190,7 @@ struct PendingSubscriptionHydration {
     outputs: BTreeMap<String, CompiledNode>,
     initial: Arc<Mutex<Option<MultisinkDeltas>>>,
     session: EvaluationSession<'static>,
-    binding_snapshots: HashMap<String, RecordDeltas>,
+    binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
     hydrate_arrangements: bool,
     metrics: TickMetrics,
 }
@@ -1099,9 +1099,10 @@ impl<'a> EvaluationSession<'a> {
     }
 
     fn advance_binding_input(&mut self, graph: &IvmGraph, shape: &str) {
-        *self.binding_frontiers.entry(shape.to_owned()).or_default() += 1;
+        let key = BindingSourceKey::prepared(shape);
+        *self.binding_frontiers.entry(key.clone()).or_default() += 1;
         let affected = graph
-            .affected_nodes(std::iter::empty(), std::iter::once(shape))
+            .affected_nodes(std::iter::empty(), std::iter::once(&key))
             .intersection(&self.relevant_nodes)
             .copied()
             .collect::<HashSet<_>>();
@@ -1114,7 +1115,7 @@ impl<'a> EvaluationSession<'a> {
     fn poll(
         &mut self,
         runtime: &IvmRuntime,
-        binding_snapshots: &HashMap<String, RecordDeltas>,
+        binding_snapshots: &HashMap<BindingSourceKey, RecordDeltas>,
         hydrate_arrangements: bool,
         metrics: &mut TickMetrics,
         cx: &mut Context<'_>,
@@ -1326,7 +1327,7 @@ impl IvmRuntime {
         subscription_id: SubscriptionId,
         outputs: BTreeMap<String, CompiledNode>,
         storage: OwnedStorage<'static>,
-        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
         binding_frontier_advance: Option<&str>,
         initial: Arc<Mutex<Option<MultisinkDeltas>>>,
     ) -> Result<(), IvmRuntimeError> {
@@ -1985,7 +1986,7 @@ impl IvmRuntime {
             .collect::<HashSet<_>>();
         let changed_bindings = binding_deltas
             .iter()
-            .map(|delta| delta.shape.as_str())
+            .map(|delta| &delta.key)
             .collect::<HashSet<_>>();
         let affected_nodes = self.graph.affected_nodes(
             changed_tables.iter().copied(),
@@ -2096,11 +2097,8 @@ impl IvmRuntime {
             .iter()
             .filter(|delta| !delta.deltas.is_empty())
         {
-            *self
-                .binding_frontiers
-                .entry(delta.shape.clone())
-                .or_default() += 1;
-            changed_bindings.push(delta.shape.as_str());
+            *self.binding_frontiers.entry(delta.key.clone()).or_default() += 1;
+            changed_bindings.push(&delta.key);
         }
         if changed_tables.is_empty() && changed_bindings.is_empty() {
             return;
@@ -2211,7 +2209,7 @@ impl IvmRuntime {
         roots: impl IntoIterator<Item = NodeId>,
         owned_storage: OwnedStorage<'a>,
         mode: HydrationMode,
-        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
         binding_frontier_advance: Option<&str>,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
@@ -2263,7 +2261,7 @@ impl IvmRuntime {
         outputs: &BTreeMap<String, CompiledNode>,
         storage: &S,
         mode: HydrationMode,
-        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
         binding_frontier_advance: Option<&str>,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where

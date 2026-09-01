@@ -26,10 +26,10 @@ static NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, ArrangeOp,
-    ArrangementDescriptor, BindingSourceOp, CollectByBuilder, CollectByField, CollectByMode,
-    CollectByOp, CollectByProjection, CollectBySlot, CollectBySlotBuilder, DurableStorage,
-    FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp,
-    InlineRecordsOp, InputSourceId, IvmGraph, JoinOp, JoinOpKind, LiteralValue,
+    ArrangementDescriptor, BindingSourceKey, BindingSourceOp, CollectByBuilder, CollectByField,
+    CollectByMode, CollectByOp, CollectByProjection, CollectBySlot, CollectBySlotBuilder,
+    DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
+    IndexSourceOp, InlineRecordsOp, InputSourceId, IvmGraph, JoinOp, JoinOpKind, LiteralValue,
     MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput,
     OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr,
     RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, StreamingChecksumOp, TableSourceOp,
@@ -168,11 +168,7 @@ pub struct IvmRuntime {
     pending_incremental: runtime_tick::PendingIncrementalEvaluation,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
-    binding_sources: HashMap<String, BindingSourceState>,
-    /// Names reserved for [`InputSourceReplacement`] rather than prepared
-    /// binding values. Both source families deliberately share the exact
-    /// incremental delta engine, but never a namespace.
-    input_source_names: HashSet<String>,
+    binding_sources: HashMap<BindingSourceKey, BindingSourceState>,
     input_source_runtime_namespace: u64,
     next_input_source_id: u64,
     /// Binding retractions discovered while routing notifications cannot tick
@@ -194,7 +190,7 @@ pub struct IvmRuntime {
     /// frontier counters before reuse; operator state remains owned separately.
     eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
     table_frontiers: HashMap<String, u64>,
-    binding_frontiers: HashMap<String, u64>,
+    binding_frontiers: HashMap<BindingSourceKey, u64>,
     memo_use_clock: u64,
     eval_memo_bytes: usize,
     hydration_memo_hits: u64,
@@ -273,7 +269,6 @@ impl IvmRuntime {
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
             binding_sources: HashMap::default(),
-            input_source_names: HashSet::default(),
             input_source_runtime_namespace: NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE
                 .fetch_add(1, Ordering::Relaxed),
             next_input_source_id: 1,
@@ -298,21 +293,32 @@ impl IvmRuntime {
             .next_input_source_id
             .checked_add(1)
             .expect("input source IDs must not wrap within one runtime");
-        let shape = id.binding_shape();
-        let was_new = self.input_source_names.insert(shape.clone());
-        debug_assert!(was_new, "fresh input IDs must have fresh binding shapes");
-        let previous = self.binding_sources.insert(
-            shape,
-            BindingSourceState {
-                descriptor,
-                refcounts: HashMap::default(),
-            },
-        );
-        debug_assert!(
-            previous.is_none(),
-            "fresh input IDs must have no source state"
-        );
+        let key = id.binding_key();
+        match self.binding_sources.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(BindingSourceState {
+                    descriptor,
+                    refcounts: HashMap::default(),
+                });
+            }
+            // `next_input_source_id` is checked before this point, so an
+            // existing opaque key is a runtime implementation bug, never a
+            // caller-controlled prepared-name collision. Do not silently
+            // overwrite state in optimized builds.
+            std::collections::hash_map::Entry::Occupied(_) => {
+                unreachable!("fresh input source identity already has state")
+            }
+        }
         id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_input_source_legacy_binding_shape(&self) -> String {
+        InputSourceId::new(
+            self.input_source_runtime_namespace,
+            self.next_input_source_id,
+        )
+        .legacy_binding_shape()
     }
 
     pub(crate) fn set_chunk_provider(
@@ -456,8 +462,6 @@ pub enum IvmRuntimeError {
     BindingSourceNotFound(String),
     #[error("binding source descriptor mismatch: {0}")]
     BindingSourceDescriptorMismatch(String),
-    #[error("input source name is already reserved by a prepared binding source: {0}")]
-    InputSourceNameInUse(String),
     #[error("input source belongs to a different IVM runtime")]
     ForeignInputSource,
     #[error("input source has been retired")]

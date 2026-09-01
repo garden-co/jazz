@@ -36,7 +36,6 @@ impl Database {
             Err(
                 error @ (IvmRuntimeError::RecordEncoding(_)
                 | IvmRuntimeError::ForeignInputSource
-                | IvmRuntimeError::InputSourceNameInUse(_)
                 | IvmRuntimeError::InputSourceRetired
                 | IvmRuntimeError::BindingSourceDescriptorMismatch(_)),
             ) => {

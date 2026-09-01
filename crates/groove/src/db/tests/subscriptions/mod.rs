@@ -1834,6 +1834,83 @@ async fn input_source_replacements_are_atomic_idempotent_and_revoke_cleanly() {
     );
 }
 
+/// Mutable inputs share the binding delta engine with prepared shapes, but
+/// their identity is not a caller-controlled binding name. In particular, a
+/// user may prepare the exact string that older runtimes synthesized for the
+/// next input without stealing its descriptor, records, or lifecycle.
+#[futures_test::test]
+async fn input_source_identity_cannot_collide_with_prepared_binding_name() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let formerly_colliding_name = database
+        .ivm_runtime
+        .next_input_source_legacy_binding_shape();
+
+    let prepared = database
+        .prepare_one_sink(
+            GraphBuilder::binding_source(formerly_colliding_name.clone(), descriptor),
+            formerly_colliding_name.clone(),
+            descriptor,
+            ["id"],
+        )
+        .await
+        .unwrap();
+    let prepared_subscription = database
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(7)])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&prepared_subscription),
+        [(vec![Value::U64(7)], 1)]
+    );
+
+    let input = database.allocate_input_source(descriptor);
+    assert_eq!(input.legacy_binding_shape(), formerly_colliding_name);
+    let input_subscription = database
+        .subscribe_one_sink(GraphBuilder::input_source(input, descriptor))
+        .await
+        .unwrap();
+    assert!(input_subscription.recv().unwrap().is_empty());
+
+    let record = descriptor.create(&[Value::U64(11)]).unwrap();
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: input,
+            descriptor,
+            records: vec![record],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&input_subscription),
+        [(vec![Value::U64(11)], 1)]
+    );
+    assert!(prepared_subscription.try_recv().is_err());
+
+    database.retire_input_sources([input]).await.unwrap();
+    assert_eq!(
+        expect_recv_vals(&input_subscription),
+        [(vec![Value::U64(11)], -1)]
+    );
+
+    // Retiring the mutable source cannot retire or clear the independently
+    // prepared source that happens to use the same historical string.
+    let second_prepared_subscription = database
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(13)])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&second_prepared_subscription),
+        [(vec![Value::U64(13)], 1)]
+    );
+    assert!(prepared_subscription.try_recv().is_err());
+}
+
 #[futures_test::test]
 async fn input_source_batch_rejects_descriptor_conflicts_before_mutating_any_source() {
     let mut database = Database::new(

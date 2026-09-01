@@ -1223,7 +1223,7 @@ pub(super) struct BindingSourceState {
 
 #[derive(Clone, Debug)]
 pub(super) struct BindingDelta {
-    pub(super) shape: String,
+    pub(super) key: BindingSourceKey,
     pub(super) descriptor: RecordDescriptor,
     pub(super) deltas: Vec<RecordDelta>,
 }
@@ -2501,7 +2501,7 @@ impl IvmRuntime {
                     let (descriptor, existing) = entry.get_mut();
                     if *descriptor != replacement.descriptor {
                         return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
-                            entry.key().binding_shape(),
+                            entry.key().diagnostic_name(),
                         ));
                     }
                     existing.extend(records);
@@ -2515,8 +2515,8 @@ impl IvmRuntime {
             if !id.belongs_to(self.input_source_runtime_namespace) {
                 return Err(IvmRuntimeError::ForeignInputSource);
             }
-            let name = id.binding_shape();
-            if !self.input_source_names.contains(&name) {
+            let key = id.binding_key();
+            if !self.binding_sources.contains_key(&key) {
                 return Err(
                     if id.was_allocated_by(
                         self.input_source_runtime_namespace,
@@ -2524,24 +2524,26 @@ impl IvmRuntime {
                     ) {
                         IvmRuntimeError::InputSourceRetired
                     } else {
-                        IvmRuntimeError::InputSourceNameInUse(name)
+                        IvmRuntimeError::ForeignInputSource
                     },
                 );
             }
-            let Some(source) = self.binding_sources.get(&name) else {
+            let Some(source) = self.binding_sources.get(&key) else {
                 return Err(IvmRuntimeError::InputSourceRetired);
             };
             if source.descriptor != *descriptor {
-                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(name));
+                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                    id.diagnostic_name(),
+                ));
             }
         }
 
         let mut deltas = Vec::new();
         for (id, (descriptor, replacement)) in canonical {
-            let name = id.binding_shape();
+            let key = id.binding_key();
             let source = self
                 .binding_sources
-                .get_mut(&name)
+                .get_mut(&key)
                 .expect("preflight retained every active input source");
             debug_assert_eq!(source.descriptor, descriptor);
             let previous = source
@@ -2570,7 +2572,7 @@ impl IvmRuntime {
                 .map(|record| (BindingKey(record), 1))
                 .collect();
             deltas.push(BindingDelta {
-                shape: name,
+                key,
                 descriptor,
                 deltas: records,
             });
@@ -2607,19 +2609,18 @@ impl IvmRuntime {
             if !id.belongs_to(self.input_source_runtime_namespace) {
                 return Err(IvmRuntimeError::ForeignInputSource);
             }
-            let name = id.binding_shape();
-            if !self.input_source_names.contains(&name) || !self.binding_sources.contains_key(&name)
-            {
+            let key = id.binding_key();
+            if !self.binding_sources.contains_key(&key) {
                 return Err(IvmRuntimeError::InputSourceRetired);
             }
         }
 
         let mut deltas = Vec::new();
         for id in &ids {
-            let name = id.binding_shape();
+            let key = id.binding_key();
             let source = self
                 .binding_sources
-                .get_mut(&name)
+                .get_mut(&key)
                 .expect("retirement preflight retained every active input source");
             let records = source
                 .refcounts
@@ -2631,7 +2632,7 @@ impl IvmRuntime {
                 .collect::<Vec<_>>();
             if !records.is_empty() {
                 deltas.push(BindingDelta {
-                    shape: name,
+                    key,
                     descriptor: source.descriptor,
                     deltas: records,
                 });
@@ -2652,17 +2653,19 @@ impl IvmRuntime {
             .await?
         };
         for id in ids {
-            let name = id.binding_shape();
-            self.binding_sources.remove(&name);
-            self.input_source_names.remove(&name);
-            self.binding_frontiers.remove(&name);
+            let key = id.binding_key();
+            self.binding_sources.remove(&key);
+            self.binding_frontiers.remove(&key);
         }
         Ok(metrics)
     }
 
     #[cfg(test)]
     pub(crate) fn active_input_source_state_count(&self) -> usize {
-        self.input_source_names.len()
+        self.binding_sources
+            .keys()
+            .filter(|key| matches!(key, BindingSourceKey::RuntimeInput { .. }))
+            .count()
     }
 
     pub async fn subscribe_one_sink<S>(
@@ -2934,11 +2937,9 @@ impl IvmRuntime {
             .map(|terminal| count_builder_nodes(&terminal.graph))
             .sum::<usize>() as u64;
         let shape = binding_source_shape.into();
-        if self.input_source_names.contains(&shape) {
-            return Err(IvmRuntimeError::InputSourceNameInUse(shape));
-        }
         let shape_id = self.next_shape_id();
-        match self.binding_sources.entry(shape.clone()) {
+        let source_key = BindingSourceKey::prepared(shape.clone());
+        match self.binding_sources.entry(source_key) {
             std::collections::hash_map::Entry::Occupied(existing)
                 if existing.get().descriptor != binding_descriptor =>
             {
@@ -3071,7 +3072,7 @@ impl IvmRuntime {
             let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
             let mut binding_snapshots = runtime.binding_snapshot_deltas();
             let snapshot = binding_snapshots
-                .entry(binding_delta.shape.clone())
+                .entry(binding_delta.key.clone())
                 .or_insert_with(|| RecordDeltas {
                     descriptor: binding_delta.descriptor,
                     deltas: Vec::new(),
@@ -3759,7 +3760,7 @@ impl IvmRuntime {
     fn cancel_pending_binding_retraction(&mut self, shape: &str, binding: &BindingKey) -> bool {
         let mut cancelled = false;
         for pending in &mut self.pending_binding_retractions {
-            if pending.shape != shape {
+            if pending.key != BindingSourceKey::prepared(shape) {
                 continue;
             }
             pending.deltas.retain(|delta| {
@@ -3781,10 +3782,10 @@ impl IvmRuntime {
         let shape = self.binding_source_shape_name(shape_id)?;
         let source = self
             .binding_sources
-            .get(&shape)
+            .get(&BindingSourceKey::prepared(shape.clone()))
             .ok_or_else(|| IvmRuntimeError::BindingSourceNotFound(shape.clone()))?;
         Ok(BindingDelta {
-            shape,
+            key: BindingSourceKey::prepared(shape),
             descriptor: source.descriptor,
             deltas: if source.refcounts.contains_key(binding) {
                 Vec::new()
@@ -3804,12 +3805,12 @@ impl IvmRuntime {
     ) -> Result<BindingDelta, IvmRuntimeError> {
         let source = self
             .binding_sources
-            .get_mut(shape)
+            .get_mut(&BindingSourceKey::prepared(shape))
             .ok_or_else(|| IvmRuntimeError::BindingSourceNotFound(shape.to_owned()))?;
         let count = source.refcounts.entry(binding.clone()).or_default();
         *count += 1;
         Ok(BindingDelta {
-            shape: shape.to_owned(),
+            key: BindingSourceKey::prepared(shape),
             descriptor: source.descriptor,
             deltas: if *count == 1 {
                 vec![RecordDelta {
@@ -3836,19 +3837,21 @@ impl IvmRuntime {
         shape: &str,
         binding: &BindingKey,
     ) -> Option<BindingDelta> {
-        let source = self.binding_sources.get_mut(shape)?;
+        let source = self
+            .binding_sources
+            .get_mut(&BindingSourceKey::prepared(shape))?;
         let count = source.refcounts.get_mut(binding)?;
         *count -= 1;
         if *count > 0 {
             return Some(BindingDelta {
-                shape: shape.to_owned(),
+                key: BindingSourceKey::prepared(shape),
                 descriptor: source.descriptor,
                 deltas: Vec::new(),
             });
         }
         source.refcounts.remove(binding);
         Some(BindingDelta {
-            shape: shape.to_owned(),
+            key: BindingSourceKey::prepared(shape),
             descriptor: source.descriptor,
             deltas: vec![RecordDelta {
                 record: binding.0.clone().into(),
@@ -3867,7 +3870,7 @@ impl IvmRuntime {
         Err(IvmRuntimeError::PreparedShapeNotFound(shape_id))
     }
 
-    pub(super) fn binding_snapshot_deltas(&self) -> HashMap<String, RecordDeltas> {
+    pub(super) fn binding_snapshot_deltas(&self) -> HashMap<BindingSourceKey, RecordDeltas> {
         self.binding_sources
             .iter()
             .map(|(shape, source)| {
@@ -3910,7 +3913,8 @@ impl IvmRuntime {
             .map(|terminal| terminal.output.node)
             .collect::<Vec<_>>();
         self.prepared_shapes.remove(&shape_id);
-        self.binding_sources.remove(&shape_name);
+        self.binding_sources
+            .remove(&BindingSourceKey::prepared(shape_name));
         self.auto_direct_families.remove(&key);
         for output_node in output_nodes {
             self.remove_retainer(

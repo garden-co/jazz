@@ -153,22 +153,21 @@ impl IvmRuntime {
                 if !inferred_output.registry_compatible_with(output) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
-                let shape = id.binding_shape();
-                if !self.input_source_names.contains(&shape) {
-                    return Err(IvmRuntimeError::InputSourceRetired);
-                }
-                let Some(source) = self.binding_sources.get(&shape) else {
+                let key = id.binding_key();
+                let Some(source) = self.binding_sources.get(&key) else {
                     return Err(IvmRuntimeError::InputSourceRetired);
                 };
                 if source.descriptor != *output {
-                    return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(shape));
+                    return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                        id.diagnostic_name(),
+                    ));
                 }
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         // A mutable input uses the same runtime delta and
                         // hydration machinery as a prepared binding source;
                         // only its GraphBuilder/API ownership differs.
-                        OpType::BindingSource(BindingSourceOp { shape }),
+                        OpType::BindingSource(BindingSourceOp { key }),
                         [],
                         *output,
                     ),
@@ -240,7 +239,7 @@ impl IvmRuntime {
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::BindingSource(BindingSourceOp {
-                            shape: shape.clone(),
+                            key: BindingSourceKey::prepared(shape.clone()),
                         }),
                         [],
                         *output,
