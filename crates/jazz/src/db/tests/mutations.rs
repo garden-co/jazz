@@ -2,6 +2,33 @@
 
 use super::*;
 
+/// Test-only capability wrapper for a transport whose remote endpoint was
+/// authenticated and admitted as a trusted backend.  The transport capability
+/// is deliberately separate from `accept_subscriber_with_trust`: accepting a
+/// peer does not let an arbitrary client-side transport self-authorize
+/// delegated session bindings.
+struct TrustedBackendTransport {
+    inner: Box<dyn Transport>,
+}
+
+impl Transport for TrustedBackendTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), crate::wire::TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        true
+    }
+}
+
 /// JSON pointer writes use the RFC 6901 array-index grammar, so a caller
 /// cannot mutate `alice`'s first array member through a leading-zero path that
 /// an equivalent read treats as absent.
@@ -2806,7 +2833,10 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _upstream =
+        crate::db::block_on(backend.connect_upstream(Box::new(TrustedBackendTransport {
+            inner: backend_transport,
+        })));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,
@@ -2887,7 +2917,10 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _upstream =
+        crate::db::block_on(backend.connect_upstream(Box::new(TrustedBackendTransport {
+            inner: backend_transport,
+        })));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,

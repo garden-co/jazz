@@ -1147,7 +1147,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
         )
         .unwrap();
 
-    let (client_transport, server_transport) = duplex();
+    let (client_transport, server_transport, client_sent) = duplex_with_client_outbound_tap();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
     let dropped_before = server
@@ -1156,11 +1156,16 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
         .sync_metrics()
         .dropped_peer_request_messages;
 
-    // This is an unverified wire message from an already admitted session,
-    // not an authenticated host refresh. It must not replace the admission
-    // claim map even though it carries the connection's real identity.
-    client.set_test_provider_claims(reader, self_asserted_invite);
-    client.tick().unwrap();
+    // An ordinary session transport no longer forwards its local provider
+    // claims at all. Inject the malicious frame at the wire boundary instead:
+    // it is an unverified peer assertion from an already admitted session, not
+    // an authenticated host refresh, and must not replace the admission map.
+    client_sent
+        .borrow_mut()
+        .push_back(SyncMessage::SessionClaims {
+            identity: reader,
+            claims: self_asserted_invite,
+        });
     server.tick().unwrap();
     assert_eq!(
         server
