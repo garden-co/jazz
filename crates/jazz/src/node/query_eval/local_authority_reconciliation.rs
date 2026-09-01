@@ -22,6 +22,7 @@ pub(crate) struct LocalAuthorityDelta {
     pub(crate) member_removes: Vec<ResultMemberEntry>,
     pub(crate) fact_adds: Vec<ProgramFactEntry>,
     pub(crate) fact_removes: Vec<ProgramFactEntry>,
+    pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
 }
 
 impl LocalAuthorityReconciliation {
@@ -33,8 +34,8 @@ impl LocalAuthorityReconciliation {
         self.generation
     }
 
-    pub(crate) fn is_deferred(&self) -> bool {
-        self.deferred
+    pub(crate) fn is_due(&self, source: &AuthorityResultKey, generation: u64) -> bool {
+        self.source.as_ref() != Some(source) || self.deferred || generation != self.generation
     }
 
     pub(crate) fn deferred_row_keys(&self) -> &BTreeSet<(String, RowUuid)> {
@@ -72,6 +73,7 @@ impl LocalAuthorityReconciliation {
         visible_facts: &BTreeSet<ProgramFactEntry>,
         exact_members: BTreeSet<ResultMemberEntry>,
         exact_facts: BTreeSet<ProgramFactEntry>,
+        exact_terminal_operations: Vec<groove::ivm::TerminalOperation>,
     ) -> Option<LocalAuthorityDelta> {
         if self.source.as_ref() != Some(source) || generation < self.generation {
             return None;
@@ -89,6 +91,7 @@ impl LocalAuthorityReconciliation {
                 .difference(&exact_facts)
                 .cloned()
                 .collect(),
+            terminal_operations: exact_terminal_operations,
         };
         self.generation = generation;
         self.confirmed_members = exact_members;
@@ -119,6 +122,57 @@ mod tests {
         ))
     }
 
+    fn terminal(byte: u8) -> groove::ivm::TerminalOperation {
+        groove::ivm::TerminalOperation {
+            root_descriptor: groove::records::RecordDescriptor::default(),
+            root_key: vec![byte],
+            path: Vec::new(),
+            edit: groove::ivm::TerminalEdit::Remove { key: vec![byte] },
+        }
+    }
+
+    #[test]
+    fn exact_transition_keeps_members_facts_and_terminal_operations_atomic() {
+        let key = source(10);
+        let remote = member(11);
+        let operation = terminal(12);
+        let mut state = LocalAuthorityReconciliation::default();
+        state.replace_source(key.clone(), 0);
+        let delta = state
+            .reconcile(
+                &key,
+                1,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                BTreeSet::from([remote.clone()]),
+                BTreeSet::new(),
+                vec![operation.clone()],
+            )
+            .unwrap();
+        assert_eq!(delta.member_adds, vec![remote]);
+        assert_eq!(delta.terminal_operations, vec![operation]);
+    }
+
+    #[test]
+    fn stale_transition_cannot_leak_terminal_operations() {
+        let key = source(13);
+        let mut state = LocalAuthorityReconciliation::default();
+        state.replace_source(key.clone(), 2);
+        assert!(
+            state
+                .reconcile(
+                    &key,
+                    1,
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                    vec![terminal(14)],
+                )
+                .is_none()
+        );
+    }
+
     #[test]
     fn authority_echo_deduplicates_then_removal_retires_only_confirmed_member() {
         let local = member(1);
@@ -134,6 +188,7 @@ mod tests {
                 &BTreeSet::new(),
                 BTreeSet::from([local.clone(), remote.clone()]),
                 BTreeSet::new(),
+                Vec::new(),
             )
             .unwrap();
         assert_eq!(first.member_adds, vec![remote.clone()]);
@@ -145,6 +200,7 @@ mod tests {
                 &BTreeSet::new(),
                 BTreeSet::from([local.clone()]),
                 BTreeSet::new(),
+                Vec::new(),
             )
             .unwrap();
         assert_eq!(second.member_removes, vec![remote]);
@@ -167,6 +223,7 @@ mod tests {
                     &BTreeSet::new(),
                     BTreeSet::new(),
                     BTreeSet::new(),
+                    Vec::new(),
                 )
                 .is_none()
         );
@@ -188,6 +245,7 @@ mod tests {
                     &BTreeSet::new(),
                     BTreeSet::new(),
                     BTreeSet::new(),
+                    Vec::new(),
                 )
                 .is_none(),
             "an older generation must remain stale after same-source registration",
@@ -209,6 +267,7 @@ mod tests {
                 &BTreeSet::new(),
                 BTreeSet::from([confirmed.clone()]),
                 BTreeSet::new(),
+                Vec::new(),
             )
             .unwrap();
         state.replace_source(fresh.clone(), 0);
@@ -221,11 +280,23 @@ mod tests {
                 &BTreeSet::new(),
                 BTreeSet::new(),
                 BTreeSet::new(),
+                Vec::new(),
             )
             .unwrap();
         assert!(
             delta.member_removes.is_empty(),
             "a new source must not retract membership confirmed only by the old source",
         );
+    }
+
+    #[test]
+    fn an_unseen_source_is_due_even_when_its_generation_is_zero() {
+        let first = source(8);
+        let replacement = source(9);
+        let mut state = LocalAuthorityReconciliation::default();
+        assert!(state.is_due(&first, 0));
+        state.replace_source(first.clone(), 0);
+        assert!(!state.is_due(&first, 0));
+        assert!(state.is_due(&replacement, 0));
     }
 }

@@ -1370,6 +1370,7 @@ impl PeerState {
                     .as_ref()
                     .expect("local authority reconciliation requires an exact source");
                 state.local_authority.replace_source(source.clone(), generation);
+                let exact_terminal_operations = node.take_pending_terminal_operations(source);
                 let delta = state.local_authority.reconcile(
                     source,
                     generation,
@@ -1377,12 +1378,14 @@ impl PeerState {
                     &previous_program_fact_set,
                     exact_members,
                     exact_facts,
+                    exact_terminal_operations,
                 )
                 .expect("the installed exact source and generation must reconcile");
                 settled.adds = delta.member_adds;
                 settled.removes = delta.member_removes;
                 settled.program_fact_adds = delta.fact_adds;
                 settled.program_fact_removes = delta.fact_removes;
+                terminal_operations.extend(delta.terminal_operations);
             }
             allow_storage_witness_fallback |= settled.allow_storage_witness_fallback;
             for member in settled.adds {
