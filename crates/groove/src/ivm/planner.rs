@@ -1668,7 +1668,7 @@ mod tests {
             Expr::binary(
                 Expr::column("artist_id"),
                 BinaryOp::Eq,
-                Expr::column("name"),
+                Expr::column("id"),
             ),
         );
 
@@ -1676,7 +1676,7 @@ mod tests {
 
         assert_eq!(
             join_keys(&planned),
-            (&["artist_id".to_owned()][..], &["name".to_owned()][..])
+            (&["artist_id".to_owned()][..], &["id".to_owned()][..])
         );
     }
 
