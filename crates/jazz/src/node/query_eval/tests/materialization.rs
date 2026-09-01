@@ -485,19 +485,18 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
         binding_id: binding.binding_id(),
         read_view: Default::default(),
     };
+    let authority_result_key = AuthorityResultKey::unscoped(binding_view);
     node.query
-        .settled_result_sets
-        .insert(binding_view, BTreeSet::new());
-    node.query.settled_program_facts.insert(
-        binding_view,
-        BTreeSet::from([ProgramFactEntry::RelationEdge(edge.clone())]),
-    );
+        .authority_results
+        .entry(authority_result_key.clone())
+        .or_default()
+        .settled_program_facts = BTreeSet::from([ProgramFactEntry::RelationEdge(edge.clone())]);
     let settled_rows = node
         .settled_binding_view_source_rows(
             "members",
             v3.id,
             binding_view,
-            None,
+            Some(authority_result_key),
             SettledBindingRows::ResultMembers,
         )
         .expect("project canonical settled relation source through both lenses");
@@ -771,7 +770,10 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         "maintained v2 flat join must retain the projected source tuple"
     );
     let snapshot = client
-        .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)
+        .authoritative_reset_snapshot_for_authority_result(
+            &shape,
+            &AuthorityResultKey::unscoped(binding_view),
+        )
         .expect("materialize applied flat-join authority snapshot")
         .expect("applied flat-join authority snapshot");
     assert_eq!(snapshot.root_count, 1);
@@ -910,9 +912,10 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         .expect("apply flat tuple replacement");
     let active_contributors = client
         .query
-        .settled_program_facts
-        .get(&binding_view)
+        .authority_results
+        .get(&AuthorityResultKey::unscoped(binding_view))
         .expect("flat tuple facts remain scoped to the binding view")
+        .settled_program_facts
         .iter()
         .filter(|fact| {
             matches!(

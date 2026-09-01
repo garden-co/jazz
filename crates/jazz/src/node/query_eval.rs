@@ -1058,8 +1058,13 @@ where
         else {
             return Ok(Vec::new());
         };
+        // This direct local preview has no usage subscription from which to
+        // recover a delegated scope. It may therefore read only the explicit
+        // unscoped receipt, never whichever scoped authority result happens
+        // to be unique at this instant.
+        let authority_result_key = AuthorityResultKey::unscoped(binding_view);
         let Some(snapshot) = self
-            .authoritative_reset_snapshot_for_binding_view(shape, binding_view)
+            .authoritative_reset_snapshot_for_authority_result(shape, &authority_result_key)
             .await?
         else {
             return Ok(Vec::new());
@@ -1815,10 +1820,9 @@ where
         rows: SettledBindingRows,
     ) -> Result<Vec<CurrentRow>, Error> {
         let authority_result_key = authority_result_key.or_else(|| {
-            // Legacy source construction does not yet carry a subscription
-            // handle. It may consume a receipt only when the binding view is
-            // provably unambiguous; scoped relay paths always supply the
-            // exact registered authority key above.
+            // Compatibility source construction has no usage subscription.
+            // It may consume a receipt only when that binding view is
+            // provably unambiguous; scoped relay paths pass the exact key.
             self.unique_authority_result_key_for_binding_view(binding_view)
         });
         let Some(authority_result_key) = authority_result_key else {

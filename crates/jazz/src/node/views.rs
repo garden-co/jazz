@@ -1772,7 +1772,7 @@ where
         let state = self
             .query
             .authority_results
-            .entry(authority_result_key)
+            .entry(authority_result_key.clone())
             .or_default();
         state.applied_view_update_generation = state.applied_view_update_generation.wrapping_add(1);
         Ok(())

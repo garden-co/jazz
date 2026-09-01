@@ -2747,6 +2747,28 @@ impl Drop for DetachedSubscriptionRefresh {
     }
 }
 
+/// Resolve a public stream's authority lifecycle from its own registered wire
+/// usage site. A canonical binding view is not sufficient here: two delegated
+/// sessions may legitimately share it while receiving independent resets.
+fn authority_result_key_for_stream<S>(
+    node: &NodeState<S>,
+    handles: &[UpstreamCoverageHandle],
+    binding_view: BindingViewKey,
+) -> Option<crate::protocol::AuthorityResultKey>
+where
+    S: OrderedKvStorage,
+{
+    let mut keys = handles
+        .iter()
+        .filter_map(|handle| {
+            node.authority_result_key_for_subscription(handle.subscription)
+                .ok()
+        })
+        .filter(|key| key.binding_view == binding_view);
+    let key = keys.next()?;
+    keys.all(|candidate| candidate == key).then_some(key)
+}
+
 /// Re-evaluate every live subscription against the node and push a delta event
 /// for any whose rows changed. Shared by local writes
 /// ([`Db::refresh_subscriptions`]) and by inbound sync application
@@ -2763,10 +2785,7 @@ where
     let mut retained = Vec::new();
     let mut changed = 0;
     let mut optimistic_row_keys_by_author = BTreeMap::new();
-    let pending_authoritative_resets = node
-        .lock()
-        .await
-        .take_pending_authoritative_reset_binding_views();
+    let pending_authoritative_resets = node.lock().await.take_pending_authoritative_resets();
     let mut consumed_authoritative_resets = BTreeSet::new();
     node.lock()
         .await
@@ -2794,6 +2813,7 @@ where
             author,
             authorization_mode,
             terminal_rows,
+            upstream_subscription_handles,
         ) = {
             let state = state.borrow();
             (
@@ -2807,6 +2827,7 @@ where
                 state.author,
                 state.authorization_mode,
                 state.terminal_rows,
+                state.upstream_subscription_handles.clone(),
             )
         };
         let groove_runtime_token = node.borrow().groove_runtime_token();
@@ -2911,15 +2932,29 @@ where
                 }
                 .read_view_key(),
             };
-            let pending_binding_view = pending_authoritative_resets
-                .contains(&delivered_binding_view)
-                .then_some(delivered_binding_view)
+            let delivered_authority_result = authority_result_key_for_stream(
+                &node.borrow(),
+                &upstream_subscription_handles,
+                delivered_binding_view,
+            );
+            let settled_authority_result = authority_result_key_for_stream(
+                &node.borrow(),
+                &upstream_subscription_handles,
+                settled_binding_view,
+            );
+            let pending_authority_result = delivered_authority_result
+                .as_ref()
+                .filter(|key| pending_authoritative_resets.contains(*key))
+                .cloned()
                 .or_else(|| {
-                    pending_authoritative_resets
-                        .contains(&settled_binding_view)
-                        .then_some(settled_binding_view)
+                    settled_authority_result
+                        .as_ref()
+                        .filter(|key| pending_authoritative_resets.contains(*key))
+                        .cloned()
                 });
-            let authoritative_binding_view = pending_binding_view.unwrap_or(settled_binding_view);
+            let authoritative_result = pending_authority_result
+                .clone()
+                .or(settled_authority_result.clone());
             let local_overlay_row_keys = if authorization_mode
                 == QueryAuthorizationMode::ClientLocal
                 && read_tier == DurabilityTier::Local
@@ -2945,12 +2980,14 @@ where
                     ..
                 } = &state_ref.kind;
                 maintained_subscription.as_ref().is_some_and(|maintained| {
-                    node.borrow()
-                        .local_maintained_authority_reconciliation_conflicts(
-                            maintained,
-                            authoritative_binding_view,
-                            &local_overlay_row_keys,
-                        )
+                    authoritative_result.as_ref().is_some_and(|key| {
+                        node.borrow()
+                            .local_maintained_authority_reconciliation_conflicts(
+                                maintained,
+                                key,
+                                &local_overlay_row_keys,
+                            )
+                    })
                 })
             };
             if authorization_mode == QueryAuthorizationMode::ClientLocal
@@ -2963,18 +3000,17 @@ where
                     ..
                 } = &mut state_ref.kind;
                 if let Some(maintained) = maintained_subscription.as_mut() {
-                    node.borrow()
-                        .seed_local_maintained_authoritative_generation(
-                            maintained,
-                            authoritative_binding_view,
-                        );
+                    if let Some(key) = authoritative_result.as_ref() {
+                        node.borrow()
+                            .seed_local_maintained_authoritative_generation(maintained, key);
+                    }
                     if has_conflicting_local_overlay {
                         node.borrow()
                             .defer_local_maintained_authority_reconciliation(maintained);
                     }
                 }
             }
-            if let Some(binding_view) = pending_binding_view {
+            if let Some(authority_result_key) = pending_authority_result {
                 if has_conflicting_local_overlay {
                     let mut maintained = {
                         let mut state_ref = state.borrow_mut();
@@ -2991,7 +3027,7 @@ where
                         .await
                         .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                             &mut maintained,
-                            Some(binding_view),
+                            Some(authority_result_key.clone()),
                             &local_overlay_row_keys,
                             progress_waker,
                         )
@@ -3026,12 +3062,15 @@ where
                             terminal_layout,
                         )?;
                     }
-                    consumed_authoritative_resets.insert(binding_view);
+                    consumed_authoritative_resets.insert(authority_result_key);
                 } else {
                     let authoritative = node
                         .lock()
                         .await
-                        .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)
+                        .authoritative_reset_snapshot_for_authority_result(
+                            &shape,
+                            &authority_result_key,
+                        )
                         .await?;
                     if let Some(authoritative) = authoritative {
                         let mut maintained = {
@@ -3049,7 +3088,7 @@ where
                             .await
                             .reset_local_maintained_view_subscription_from_binding_view(
                                 &mut maintained,
-                                binding_view,
+                                &authority_result_key,
                             )
                             .await;
                         {
@@ -3062,7 +3101,7 @@ where
                         }
                         reset?;
                         snapshot = authoritative;
-                        consumed_authoritative_resets.insert(binding_view);
+                        consumed_authoritative_resets.insert(authority_result_key);
                     }
                 }
             }
@@ -3105,6 +3144,7 @@ where
                 read_view.clone(),
                 remote_propagate_upstream,
                 requires_authority_receipt,
+                settled_authority_result.as_ref(),
             );
             let mut event = subscription_delta_event_with_reset(
                 read_tier,
@@ -3162,19 +3202,6 @@ where
                 (shape.clone(), binding.clone())
             };
             let has_maintained_subscription = refresh.maintained.is_some();
-            let remote_settled_tier = remote_read_tier.filter(|tier| {
-                node.borrow().has_settled_result_set(BindingViewKey {
-                    shape_id: shape.shape_id(),
-                    binding_id: binding.binding_id(),
-                    read_view: RegisterShapeOptions {
-                        tier: *tier,
-                        read_view: read_view.clone(),
-                        propagate_upstream: remote_propagate_upstream,
-                        ..RegisterShapeOptions::default()
-                    }
-                    .read_view_key(),
-                })
-            });
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
@@ -3197,20 +3224,41 @@ where
                 }
                 .read_view_key(),
             };
-            let authoritative_reset_binding_view =
-                if pending_authoritative_resets.contains(&delivered_binding_view) {
-                    delivered_binding_view
-                } else {
-                    settled_binding_view
-                };
-            let authoritative_reset_pending =
-                pending_authoritative_resets.contains(&authoritative_reset_binding_view);
+            let delivered_authority_result = authority_result_key_for_stream(
+                &node.borrow(),
+                &upstream_subscription_handles,
+                delivered_binding_view,
+            );
+            let settled_authority_result = authority_result_key_for_stream(
+                &node.borrow(),
+                &upstream_subscription_handles,
+                settled_binding_view,
+            );
+            let remote_settled_tier = remote_read_tier.filter(|_| {
+                settled_authority_result
+                    .as_ref()
+                    .is_some_and(|key| node.borrow().has_settled_authority_result(key))
+            });
+            let authoritative_reset_result = delivered_authority_result
+                .as_ref()
+                .filter(|key| pending_authoritative_resets.contains(*key))
+                .cloned()
+                .or_else(|| {
+                    settled_authority_result
+                        .as_ref()
+                        .filter(|key| pending_authoritative_resets.contains(*key))
+                        .cloned()
+                });
+            let authoritative_result = authoritative_reset_result
+                .clone()
+                .or(settled_authority_result.clone());
+            let authoritative_reset_pending = authoritative_reset_result.is_some();
             let authority_reconciliation_due = authoritative_reset_pending
                 || refresh.maintained.as_ref().is_some_and(|maintained| {
-                    node.borrow().local_maintained_authority_reconciliation_due(
-                        maintained,
-                        authoritative_reset_binding_view,
-                    )
+                    authoritative_result.as_ref().is_some_and(|key| {
+                        node.borrow()
+                            .local_maintained_authority_reconciliation_due(maintained, key)
+                    })
                 });
             let local_overlay_row_keys = if authorization_mode
                 == QueryAuthorizationMode::ClientLocal
@@ -3233,35 +3281,32 @@ where
             };
             let has_conflicting_local_overlay =
                 refresh.maintained.as_ref().is_some_and(|maintained| {
-                    node.borrow()
-                        .local_maintained_authority_reconciliation_conflicts(
-                            maintained,
-                            authoritative_reset_binding_view,
-                            &local_overlay_row_keys,
-                        )
+                    authoritative_result.as_ref().is_some_and(|key| {
+                        node.borrow()
+                            .local_maintained_authority_reconciliation_conflicts(
+                                maintained,
+                                key,
+                                &local_overlay_row_keys,
+                            )
+                    })
                 });
-            if authoritative_reset_pending {
-                consumed_authoritative_resets.insert(authoritative_reset_binding_view);
+            if let Some(key) = authoritative_reset_result.as_ref() {
+                consumed_authoritative_resets.insert(key.clone());
             }
-            if node
-                .borrow()
-                .publication_deferred_for_binding_view(settled_binding_view)
-                || node
-                    .borrow()
-                    .publication_deferred_for_binding_view(delivered_binding_view)
+            if authoritative_result
+                .as_ref()
+                .is_some_and(|key| node.borrow().publication_deferred_for_authority_result(key))
             {
-                if authoritative_reset_pending {
-                    node.borrow_mut()
-                        .defer_authoritative_reset_for_binding_view(
-                            authoritative_reset_binding_view,
-                        );
+                if let Some(key) = authoritative_reset_result.as_ref() {
+                    node.borrow_mut().defer_authoritative_reset(key);
                 }
                 retained.push(Rc::downgrade(&state));
                 continue;
             }
-            let peer_terminal_operations = node
-                .borrow_mut()
-                .take_pending_terminal_operations(delivered_binding_view);
+            let peer_terminal_operations = delivered_authority_result
+                .as_ref()
+                .map(|key| node.borrow_mut().take_pending_terminal_operations(key))
+                .unwrap_or_default();
             let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
             // The browser worker owns the durable baseline, while the
             // main Db owns the application subscription and its
@@ -3326,6 +3371,7 @@ where
                     read_view,
                     remote_propagate_upstream,
                     requires_authority_receipt,
+                    settled_authority_result.as_ref(),
                 );
                 (
                     snapshot,
@@ -3335,21 +3381,22 @@ where
                     true,
                 )
             } else if authoritative_reset {
+                let authority_result_key = authoritative_reset_result
+                    .as_ref()
+                    .expect("a reset has an exact authority receipt");
                 let authoritative_snapshot = {
                     let mut node_ref = node.lock().await;
                     match node_ref
-                        .authoritative_reset_snapshot_for_binding_view(
+                        .authoritative_reset_snapshot_for_authority_result(
                             &shape,
-                            authoritative_reset_binding_view,
+                            authority_result_key,
                         )
                         .await
                     {
                         Ok(snapshot) => snapshot,
                         Err(crate::node::Error::MissingTransaction(_)) => {
                             node_ref.record_authoritative_reset_missing_payload_fallback();
-                            node_ref.defer_authoritative_reset_for_binding_view(
-                                authoritative_reset_binding_view,
-                            );
+                            node_ref.defer_authoritative_reset(authority_result_key);
                             None
                         }
                         Err(error) => return Err(error.into()),
@@ -3371,7 +3418,7 @@ where
                                 node_ref
                                     .reset_local_maintained_view_subscription_from_binding_view(
                                         maintained,
-                                        authoritative_reset_binding_view,
+                                        authority_result_key,
                                     )
                                     .await?;
                                 None
@@ -3390,9 +3437,7 @@ where
                             Ok(update) => update,
                             Err(crate::node::Error::MissingTransaction(_)) => {
                                 node_ref.record_authoritative_reset_missing_payload_fallback();
-                                node_ref.defer_authoritative_reset_for_binding_view(
-                                    authoritative_reset_binding_view,
-                                );
+                                node_ref.defer_authoritative_reset(authority_result_key);
                                 retained.push(Rc::downgrade(&state));
                                 continue;
                             }
@@ -3422,9 +3467,9 @@ where
                                 Ok(snapshot) => snapshot,
                                 Err(crate::node::Error::MissingTransaction(_)) => {
                                     node_ref.record_authoritative_reset_missing_payload_fallback();
-                                    node_ref.defer_authoritative_reset_for_binding_view(
-                                        authoritative_reset_binding_view,
-                                    );
+                                    if let Some(key) = authoritative_result.as_ref() {
+                                        node_ref.defer_authoritative_reset(key);
+                                    }
                                     retained.push(Rc::downgrade(&state));
                                     continue;
                                 }
@@ -3458,6 +3503,7 @@ where
                     read_view,
                     remote_propagate_upstream,
                     requires_authority_receipt,
+                    settled_authority_result.as_ref(),
                 );
                 (
                     snapshot,
@@ -3491,6 +3537,7 @@ where
                         read_view.clone(),
                         remote_propagate_upstream,
                         requires_authority_receipt,
+                        settled_authority_result.as_ref(),
                     );
                     let terminal_layout = refresh
                         .maintained
@@ -3529,15 +3576,16 @@ where
                         // restricting the view to only that runtime makes
                         // ordinary Local clients miss a later authority
                         // revoke until a further refresh.
-                        let authoritative_binding_view = (authorization_mode
+                        let authoritative_result_key = (authorization_mode
                             == QueryAuthorizationMode::ClientLocal
                             && remote_read_tier.is_some()
                             && shape.query().aggregate.is_none())
-                        .then_some(settled_binding_view);
+                        .then(|| settled_authority_result.clone())
+                        .flatten();
                         match node_ref
                             .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                                 maintained,
-                                authoritative_binding_view,
+                                authoritative_result_key,
                                 &local_overlay_row_keys,
                                 progress_waker,
                             )
@@ -3546,9 +3594,9 @@ where
                             Ok(update) => update,
                             Err(crate::node::Error::MissingTransaction(_)) => {
                                 node_ref.record_authoritative_reset_missing_payload_fallback();
-                                node_ref.defer_authoritative_reset_for_binding_view(
-                                    authoritative_reset_binding_view,
-                                );
+                                if let Some(key) = authoritative_reset_result.as_ref() {
+                                    node_ref.defer_authoritative_reset(key);
+                                }
                                 retained.push(Rc::downgrade(&state));
                                 continue;
                             }
@@ -3572,6 +3620,7 @@ where
                                     read_view,
                                     remote_propagate_upstream,
                                     requires_authority_receipt,
+                                    settled_authority_result.as_ref(),
                                 );
                                 let terminal_layout = refresh
                                     .maintained
@@ -3624,6 +3673,7 @@ where
                                 read_view,
                                 remote_propagate_upstream,
                                 requires_authority_receipt,
+                                settled_authority_result.as_ref(),
                             );
                             let state_ref = &mut refresh;
                             let previous_root_occurrences = snapshot_root_occurrences(
@@ -3731,6 +3781,7 @@ where
                                 read_view,
                                 remote_propagate_upstream,
                                 requires_authority_receipt,
+                                settled_authority_result.as_ref(),
                             ) && node
                                 .borrow()
                                 .relation_snapshot_has_materialized_required_cells(
@@ -3777,25 +3828,28 @@ where
                     let previous = refresh.snapshot.clone();
                     if previous.root_count == 0
                         && previous.edges.is_empty()
-                        && node
-                            .borrow()
-                            .has_settled_result_set(authoritative_reset_binding_view)
+                        && authoritative_result
+                            .as_ref()
+                            .is_some_and(|key| node.borrow().has_settled_authority_result(key))
                     {
+                        let authority_result_key = authoritative_result
+                            .as_ref()
+                            .expect("settled authority receipt was checked");
                         let authoritative_snapshot = {
                             let mut node_ref = node.lock().await;
                             match node_ref
-                                .authoritative_reset_snapshot_for_binding_view(
+                                .authoritative_reset_snapshot_for_authority_result(
                                     &shape,
-                                    authoritative_reset_binding_view,
+                                    authority_result_key,
                                 )
                                 .await
                             {
                                 Ok(snapshot) => snapshot,
                                 Err(crate::node::Error::MissingTransaction(_)) => {
                                     node_ref.record_authoritative_reset_missing_payload_fallback();
-                                    node_ref.defer_authoritative_reset_for_binding_view(
-                                        authoritative_reset_binding_view,
-                                    );
+                                    if let Some(key) = authoritative_result.as_ref() {
+                                        node_ref.defer_authoritative_reset(key);
+                                    }
                                     None
                                 }
                                 Err(error) => return Err(error.into()),
@@ -3821,9 +3875,7 @@ where
                                     Err(crate::node::Error::MissingTransaction(_)) => {
                                         node_ref
                                             .record_authoritative_reset_missing_payload_fallback();
-                                        node_ref.defer_authoritative_reset_for_binding_view(
-                                            authoritative_reset_binding_view,
-                                        );
+                                        node_ref.defer_authoritative_reset(authority_result_key);
                                         retained.push(Rc::downgrade(&state));
                                         continue;
                                     }
@@ -3849,9 +3901,9 @@ where
                                 Ok(snapshot) => snapshot,
                                 Err(crate::node::Error::MissingTransaction(_)) => {
                                     node_ref.record_authoritative_reset_missing_payload_fallback();
-                                    node_ref.defer_authoritative_reset_for_binding_view(
-                                        authoritative_reset_binding_view,
-                                    );
+                                    if let Some(key) = authoritative_result.as_ref() {
+                                        node_ref.defer_authoritative_reset(key);
+                                    }
                                     retained.push(Rc::downgrade(&state));
                                     continue;
                                 }
@@ -3888,6 +3940,7 @@ where
                     read_view,
                     remote_propagate_upstream,
                     requires_authority_receipt,
+                    settled_authority_result.as_ref(),
                 );
                 (
                     snapshot,
@@ -3984,8 +4037,7 @@ where
         retained.push(Rc::downgrade(&state));
     }
     for pending in pending_authoritative_resets.difference(&consumed_authoritative_resets) {
-        node.borrow_mut()
-            .defer_authoritative_reset_for_binding_view(*pending);
+        node.borrow_mut().defer_authoritative_reset(pending);
     }
     *subscriptions.borrow_mut() = retained;
     Ok(changed)

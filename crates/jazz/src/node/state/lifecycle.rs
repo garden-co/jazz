@@ -1644,7 +1644,17 @@ where
     }
 
     fn clear_settled_result_view(&mut self, authority_result_key: AuthorityResultKey) {
-        self.query.authority_results.remove(&authority_result_key);
+        // A reset replaces receipt contents, not the receipt itself. In
+        // particular, the exact policy-scoped lifecycle generation, opening
+        // marker, deferred-publication bit, and terminal queue must survive
+        // while new membership is installed. Removing the whole state made a
+        // second reset restart its generation at one and let one scoped reset
+        // erase another stream's progress through the binding-only facade.
+        if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+            state.settled_result_set.clear();
+            state.settled_result_row_index.clear();
+            state.settled_program_facts.clear();
+        }
         self.query
             .local_materialized_window_binding_views
             .remove(&authority_result_key.binding_view);

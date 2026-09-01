@@ -659,7 +659,7 @@ where
                 self.query
                     .authority_results
                     .get(&key)
-                    .is_some_and(|state| !state.settled_result_set.is_empty())
+                    .is_some_and(|state| state.settled_through.is_some())
             })
             && !self
                 .query
@@ -667,10 +667,21 @@ where
                 .contains(&binding_view_key)
     }
 
-    pub(crate) fn applied_view_update_generation(&self, binding_view_key: BindingViewKey) -> u64 {
-        self.unique_authority_result_key_for_binding_view(binding_view_key)
-            .map(|key| self.applied_authority_result_generation(&key))
-            .unwrap_or_default()
+    /// Exact receipt variant for a usage subscription that carries delegated
+    /// policy context. Unlike the binding-only compatibility facade, this
+    /// never searches across sessions.
+    pub(crate) fn has_settled_authority_result(
+        &self,
+        authority_result_key: &AuthorityResultKey,
+    ) -> bool {
+        self.query
+            .authority_results
+            .get(authority_result_key)
+            .is_some_and(|state| state.settled_through.is_some())
+            && !self
+                .query
+                .local_materialized_window_binding_views
+                .contains(&authority_result_key.binding_view)
     }
 
     pub(crate) fn applied_authority_result_generation(
@@ -737,16 +748,18 @@ where
             .settled_program_facts = program_facts.into_iter().collect();
     }
 
-    pub(crate) fn take_pending_authoritative_reset_binding_views(
-        &mut self,
-    ) -> BTreeSet<BindingViewKey> {
+    /// Drain exact authority receipts whose next publication must be a reset.
+    ///
+    /// A binding view is merely a local cache address. It cannot represent a
+    /// lifecycle event once different delegated sessions share that view.
+    pub(crate) fn take_pending_authoritative_resets(&mut self) -> BTreeSet<AuthorityResultKey> {
         self.query
             .authority_results
             .iter_mut()
             .filter_map(|(key, state)| {
                 state.pending_authoritative_reset.then(|| {
                     state.pending_authoritative_reset = false;
-                    key.binding_view
+                    key.clone()
                 })
             })
             .collect()
@@ -754,36 +767,24 @@ where
 
     pub(crate) fn take_pending_terminal_operations(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
     ) -> Vec<groove::ivm::TerminalOperation> {
-        let Some(authority_result_key) =
-            self.unique_authority_result_key_for_binding_view(binding_view_key)
-        else {
-            return Vec::new();
-        };
         std::mem::take(
             &mut self
                 .query
                 .authority_results
-                .entry(authority_result_key)
+                .entry(authority_result_key.clone())
                 .or_default()
                 .pending_terminal_operations,
         )
     }
 
-    pub(crate) fn defer_authoritative_reset_for_binding_view(
-        &mut self,
-        binding_view_key: BindingViewKey,
-    ) {
-        if let Some(authority_result_key) =
-            self.unique_authority_result_key_for_binding_view(binding_view_key)
-        {
-            self.query
-                .authority_results
-                .entry(authority_result_key)
-                .or_default()
-                .pending_authoritative_reset = true;
-        }
+    pub(crate) fn defer_authoritative_reset(&mut self, authority_result_key: &AuthorityResultKey) {
+        self.query
+            .authority_results
+            .entry(authority_result_key.clone())
+            .or_default()
+            .pending_authoritative_reset = true;
     }
 
     #[cfg(test)]
@@ -795,19 +796,23 @@ where
             .is_some_and(|state| state.pending_authoritative_reset)
     }
 
-    pub(crate) fn publication_deferred_for_binding_view(
+    pub(crate) fn publication_deferred_for_authority_result(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
     ) -> bool {
-        self.authority_result_state_for_binding_view(binding_view_key)
+        self.query
+            .authority_results
+            .get(authority_result_key)
             .is_some_and(|state| state.deferred_publication)
     }
 
-    pub(crate) fn opening_pending_for_binding_view(
+    pub(crate) fn opening_pending_for_authority_result(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
     ) -> bool {
-        self.authority_result_state_for_binding_view(binding_view_key)
+        self.query
+            .authority_results
+            .get(authority_result_key)
             .is_some_and(|state| state.pending_opening)
     }
 
@@ -925,13 +930,12 @@ where
         ))
     }
 
-    pub(crate) async fn authoritative_reset_snapshot_for_binding_view(
+    pub(crate) async fn authoritative_reset_snapshot_for_authority_result(
         &mut self,
         shape: &ValidatedQuery,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
     ) -> Result<Option<RelationSnapshot>, Error> {
-        let Some(authority_result) = self.authority_result_state_for_binding_view(binding_view_key)
-        else {
+        let Some(authority_result) = self.query.authority_results.get(authority_result_key) else {
             return Ok(None);
         };
         let result_members = authority_result.settled_result_set.clone();

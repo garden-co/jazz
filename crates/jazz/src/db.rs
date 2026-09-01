@@ -5549,6 +5549,7 @@ fn subscription_is_settled<S>(
     read_view: ReadViewSpec,
     propagate_upstream: bool,
     requires_authority_receipt: bool,
+    authority_result_key: Option<&crate::protocol::AuthorityResultKey>,
 ) -> bool
 where
     S: OrderedKvStorage,
@@ -5567,8 +5568,13 @@ where
         }
         .read_view_key(),
     };
-    node.has_settled_result_set(binding_view_key)
-        && !node.opening_pending_for_binding_view(binding_view_key)
+    // Callers without a registered usage-site key are direct/unscoped paths;
+    // they may inspect only that explicit unscoped receipt. They must never
+    // select a unique scoped receipt by binding view.
+    let fallback_unscoped = crate::protocol::AuthorityResultKey::unscoped(binding_view_key);
+    let authority_result_key = authority_result_key.unwrap_or(&fallback_unscoped);
+    node.has_settled_authority_result(authority_result_key)
+        && !node.opening_pending_for_authority_result(authority_result_key)
         && (!requires_authority_receipt
             || active_authority_view_receipts
                 .borrow()

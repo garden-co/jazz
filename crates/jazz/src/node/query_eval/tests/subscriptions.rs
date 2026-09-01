@@ -326,6 +326,168 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
     );
 }
 
+/// Lifecycle bookkeeping follows the exact delegated receipt, rather than
+/// collapsing through the shared query binding view. In particular, an
+/// opening reset for Alice and a deferred reset for Bob can each be consumed,
+/// requeued, and completed without either stream starving the other.
+#[test]
+fn interleaved_policy_scoped_lifecycles_keep_reset_defer_and_terminal_streams_separate() {
+    let (_dir, mut relay) = open_node();
+    let shape = Query::from("issues")
+        .validate(&relay.catalogue.schema)
+        .unwrap();
+    register_query_shape(&mut relay, &shape, RegisterShapeOptions::default());
+
+    let subscription = |byte, identity| Subscribe {
+        shape_id: shape.shape_id(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            read_view: Default::default(),
+        },
+        values: Vec::new(),
+        known_state: None,
+        delegated_session: Some(DelegatedSessionBinding {
+            identity,
+            claims: BTreeMap::new(),
+        }),
+    };
+    let alice_subscribe = subscription(0xa1, author(1));
+    let bob_subscribe = subscription(0xb2, author(2));
+    relay
+        .apply_sync_message_settled(SyncMessage::Subscribe(alice_subscribe.clone()))
+        .unwrap();
+    relay
+        .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
+        .unwrap();
+
+    let terminal = |marker| groove::ivm::TerminalOperation {
+        root_descriptor: groove::records::RecordDescriptor::default(),
+        root_key: vec![marker],
+        path: Vec::new(),
+        edit: groove::ivm::TerminalEdit::Remove { key: vec![marker] },
+    };
+    let update =
+        |subscription, reset_result_set, opening_pending, defer_settlement, marker: Option<u8>| {
+            crate::node::ViewUpdateParts {
+                subscription,
+                settled_through: crate::time::GlobalTime(7),
+                defer_settlement,
+                reset_result_set,
+                version_carriers: Vec::new(),
+                peer_complete_tx_payload_refs: Vec::new(),
+                authorization_progress: Some(3),
+                opening_pending,
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                terminal_operations: marker.into_iter().map(terminal).collect(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            }
+        };
+
+    relay
+        .apply_view_update(update(
+            alice_subscribe.subscription,
+            true,
+            true,
+            false,
+            Some(1),
+        ))
+        .resolve()
+        .unwrap();
+    relay
+        .apply_view_update(update(
+            bob_subscribe.subscription,
+            true,
+            false,
+            false,
+            Some(2),
+        ))
+        .resolve()
+        .unwrap();
+
+    let alice_key = relay
+        .authority_result_key_for_subscription(alice_subscribe.subscription)
+        .unwrap();
+    let bob_key = relay
+        .authority_result_key_for_subscription(bob_subscribe.subscription)
+        .unwrap();
+    assert_eq!(alice_key.binding_view, bob_key.binding_view);
+    assert_ne!(alice_key, bob_key);
+    assert!(relay.opening_pending_for_authority_result(&alice_key));
+    assert!(!relay.publication_deferred_for_authority_result(&alice_key));
+    assert!(!relay.opening_pending_for_authority_result(&bob_key));
+    assert!(!relay.publication_deferred_for_authority_result(&bob_key));
+    assert_eq!(relay.applied_authority_result_generation(&alice_key), 1);
+    assert_eq!(relay.applied_authority_result_generation(&bob_key), 1);
+
+    let pending = relay.take_pending_authoritative_resets();
+    assert_eq!(
+        pending,
+        BTreeSet::from([alice_key.clone(), bob_key.clone()])
+    );
+    assert_eq!(
+        relay.take_pending_terminal_operations(&alice_key)[0].root_key,
+        vec![1],
+        "Alice can consume only her terminal stream"
+    );
+    assert_eq!(
+        relay.take_pending_terminal_operations(&bob_key)[0].root_key,
+        vec![2],
+        "Bob can consume only his terminal stream"
+    );
+
+    // Bob can defer a later publication while Alice's opening continues. That
+    // deferred marker is also exact-policy state, not binding-view state.
+    relay
+        .apply_view_update(update(bob_subscribe.subscription, false, false, true, None))
+        .resolve()
+        .unwrap();
+    assert!(relay.publication_deferred_for_authority_result(&bob_key));
+    assert!(!relay.publication_deferred_for_authority_result(&alice_key));
+
+    for authority_result_key in &pending {
+        relay.defer_authoritative_reset(authority_result_key);
+    }
+    assert_eq!(
+        relay.take_pending_authoritative_resets(),
+        BTreeSet::from([alice_key.clone(), bob_key.clone()]),
+        "each exact reset can be deferred and retried without ambiguity"
+    );
+
+    relay
+        .apply_view_update(update(
+            alice_subscribe.subscription,
+            false,
+            false,
+            false,
+            None,
+        ))
+        .resolve()
+        .unwrap();
+    relay
+        .apply_view_update(update(
+            bob_subscribe.subscription,
+            false,
+            false,
+            false,
+            None,
+        ))
+        .resolve()
+        .unwrap();
+    assert!(!relay.opening_pending_for_authority_result(&alice_key));
+    assert!(!relay.publication_deferred_for_authority_result(&bob_key));
+    assert!(
+        relay.applied_authority_result_generation(&alice_key) > 1,
+        "Alice's lifecycle keeps progressing after her opening reset"
+    );
+    assert!(
+        relay.applied_authority_result_generation(&bob_key) > 1,
+        "Bob's deferred lifecycle keeps progressing independently"
+    );
+}
+
 /// Storage-backed scalar membership ships the exact deletion-register winner
 /// alongside a restored row, so a separate reader's later ordinary lookup
 /// agrees with the subscription.
