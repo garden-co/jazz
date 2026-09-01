@@ -177,6 +177,79 @@ fn public_branch_view_update_and_upsert_relay_to_authority() {
 }
 
 #[test]
+fn branch_view_copy_evidence_storage_is_independent_of_public_write_order() {
+    let schema = branch_sync_schema();
+    let author = AuthorSubject::for_test_bytes([0x68; 16]);
+    let base = branch_sync_selector(0x69);
+    let head = branch_sync_selector(0x6a);
+    let first = row(0x6b);
+    let second = row(0x6c);
+    let build = |reverse: bool| {
+        let db = open_db(0x6d, author, &schema);
+        for (id, title) in [(first, "first base"), (second, "second base")] {
+            db.insert(
+                "todos",
+                BTreeMap::from([
+                    (
+                        "branch_id".to_owned(),
+                        Value::Uuid(uuid::Uuid::from_bytes([0x69; 16])),
+                    ),
+                    ("title".to_owned(), Value::String(title.to_owned())),
+                ]),
+                InsertOptions {
+                    row_id: Some(id),
+                    target: ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let order = if reverse {
+            [second, first]
+        } else {
+            [first, second]
+        };
+        let (_, tx_id) = block_on(db.transaction_for_identity(author, async |tx| {
+            for row in order {
+                tx.update(
+                    "todos",
+                    row,
+                    BTreeMap::from([(
+                        "title".to_owned(),
+                        Value::String(if row == first {
+                            "first head".to_owned()
+                        } else {
+                            "second head".to_owned()
+                        }),
+                    )]),
+                    UpdateOptions {
+                        target: WriteTarget::BranchView {
+                            head: head.clone(),
+                            base: Some(BranchViewBase::Current(base.clone())),
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }))
+        .unwrap();
+        let mut node = db.node.node.borrow_mut();
+        let provenance = node
+            .transaction_record(tx_id)
+            .unwrap()
+            .contribution_merge
+            .expect("branch-view transaction stores operation evidence");
+        provenance
+    };
+
+    let forward_provenance = build(false);
+    let reverse_provenance = build(true);
+    assert_eq!(forward_provenance, reverse_provenance);
+}
+
+#[test]
 fn db_sync_surface_round_trips_subscription_to_client() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
