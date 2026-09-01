@@ -97,7 +97,8 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   `RegisterShape`, `Subscribe`, `Unsubscribe`, `ViewUpdate`, catalogue + content
   messages).
 - **`PeerState` / `PeerRole::{Relay, ClientLink}`** — link-local sync state and
-  role; **relay** (uses `AuthorSubject::SYSTEM`, no fate), **edge** (terminates a
+  role; **relay** (explicit transport capability, no permission subject or
+  fate), **edge** (terminates a
   client identity; mergeable fate authority), **core** (exclusive authority,
   history-complete), **client**. The sync participant type is `Node`: a local
   `NodeState` engine plus connections and serving. Relay, edge, and core are

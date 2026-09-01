@@ -17,7 +17,7 @@ versions merely because it has the payload (`INV-TX-23`).
 
 Invariant digest:
 
-- `INV-EDGE-1`: A `PeerRole::Relay` link MUST use `AuthorSubject::SYSTEM` as its link identity and MUST NOT terminate a client identity.
+- `INV-EDGE-1`: A `PeerRole::Relay` link MUST authenticate as an explicit relay transport capability, MUST carry no permission subject, and MUST NOT terminate a client identity.
 - `INV-EDGE-2`: A relay MUST store/forward `TxKind::Mergeable` and `TxKind::Exclusive` commit units as `Fate::Pending` with `DurabilityTier::Local` and MUST NOT assign an authority fate.
 - `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as `PeerRole::ClientLink { identity }`, and downstream reads on that link MUST use that identity for policy composition.
 - `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST remain outside edge history in in-memory deferred-admission state. Once settled, an authorized transaction is ingested and edge-accepted exactly once; a denied transaction is rejected without ingestion.
@@ -53,7 +53,8 @@ Trust is the axis:
 
 - **client** — untrusted; no fate authority; local preview only.
 - **relay** — semi-trusted passthrough/cache; never assigns fates or enforces
-  per-user permissions; forwards opaquely under `AuthorSubject::SYSTEM`.
+  per-user permissions; forwards under an explicit transport capability with no
+  permission subject.
 - **edge** — operator-trusted; may finally decide _mergeable_ fates and enforces
   read/write policy for the identities it terminates.
 - **core** — operator-trusted; the exclusive-transaction authority and global
@@ -161,12 +162,13 @@ topology, never supplied by an application or accepted from an untrusted wire
 caller. It means “the upstream authority selected these members for this exact
 policy binding”; it does **not** mean that the worker may act as that authority.
 
-The physical worker-to-upstream link remains a Relay/SYSTEM transport, but each
+The physical worker-to-upstream link remains an authenticated relay transport
+with no permission subject, but each
 foreground Edge/Global request on it carries an immutable delegated-session
 binding created from the worker's admitted same-scope foreground. The receiving
 edge/core, not the worker, resolves that binding to trusted claims and performs
 policy composition. A generic relay message without such an admitted binding
-remains SYSTEM/unbound and cannot request a user's narrowed result. The worker
+remains unbound and cannot request a user's narrowed result. The worker
 cannot invent, alter, or refresh delegated claims through application query or
 wire fields (`INV-EDGE-24`).
 
@@ -212,23 +214,24 @@ confirmation atomically replaces the local native subscription; the two are not
 concurrent public query paths (ch. 13).
 
 Every worker-to-foreground read, subscription, and row-version repair uses an
-explicit client-local serving context. `AuthorSubject::SYSTEM` may be used
-inside that context only as the query engine's implementation marker for “no
-local policy filter”; it MUST NOT select trusted serving, manufacture authority,
-or change authorship.
+explicit client-local serving context. Client-local lowering is its own
+policy-free query mode; it MUST NOT impersonate `AuthorSubject::SYSTEM`, select
+trusted serving, manufacture authority, or change authorship.
 
 ### 9.3 Relays
 
 Relays provide unopinionated transport and caching. A relay link uses
-`PeerRole::Relay` with identity `AuthorSubject::SYSTEM` (`INV-EDGE-1`) and forwards
+`PeerRole::Relay` with an explicit relay transport capability and no permission
+subject (`INV-EDGE-1`), and forwards
 both mergeable and exclusive commit units without deciding their outcome: stored
 units remain `Fate::Pending` / `DurabilityTier::Local`, and the relay assigns no
 fate (`INV-EDGE-2`).
 
 A relay may cache read-side data at rest, but it never enforces permissions and
-never accepts or rejects a transaction. `AuthorSubject::SYSTEM` on an internal
-relay link means “do not narrow this transport hop”; it is not the relay's
-authenticated user, row author, or permission identity.
+never accepts or rejects a transaction. Relay transport authority is not an
+authenticated user, row author, or permission identity. `SYSTEM` remains
+reserved for an actual trusted internal principal that deliberately bypasses
+policy; relay transport MUST NOT acquire that bypass merely by carrying data.
 
 A scope-isolated client relay may answer an exactly same-scope foreground repair
 without re-evaluating policy only for a version recorded in that scope's

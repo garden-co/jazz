@@ -24,7 +24,7 @@ Invariant digest:
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
 - `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated ident...
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
-- `INV-RLS-11`: Relay peer links MUST use AuthorSubject::SYSTEM; edge-client peer links MUST use the terminated client AuthorSubject for policy-composed reads.
+- `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; edge-client peer links MUST use the terminated client AuthorSubject for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
@@ -247,7 +247,7 @@ are worth keeping distinct:
 | `made_by` (author)                       | who a mutation is _attributed_ to (`Transaction.made_by`)    | provenance (`$createdBy`); _not_ necessarily the permission subject |
 | authenticated identity (`AuthorSubject`) | who a connection authenticated as                            | the subject read/write policies are evaluated against               |
 | attribution-only                         | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13)                        |
-| `AuthorSubject::SYSTEM`                  | the system identity                                          | bypasses all policies; relay links carry it (§7.3)                  |
+| `AuthorSubject::SYSTEM`                  | a trusted internal system principal                          | bypasses all policies; never implied by relay transport (§7.3)      |
 
 At the facade boundary, attributed writes are core-only unless `made_by ==
 authenticated identity`. This prevents a client from forging another user's
@@ -259,8 +259,9 @@ itself and store user attribution (`INV-RLS-17`, `INV-API-29`).
 Read policy is enforced at the point where data leaves an upstream node. For
 each peer identity, the upstream node narrows what it emits before producing any
 result-row add/remove, version bundle, rehydrate output, or query update
-(`INV-RLS-5`). Generic, unbound relay traffic carries `AuthorSubject::SYSTEM`
-and is not narrowed. A scope-isolated client relay instead forwards an upstream
+(`INV-RLS-5`). Generic, unbound relay traffic has no permission subject and is
+not a user query that can be policy-composed. A scope-isolated client relay
+instead forwards an upstream
 request with a topology-assigned immutable delegated foreground-session binding;
 the edge/core authority narrows under that admitted binding, not under SYSTEM
 and not under claims supplied by the relay. An edge-client link similarly
