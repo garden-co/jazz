@@ -119,21 +119,21 @@ fn public_branch_view_update_and_upsert_relay_to_authority() {
         block_on(write.wait(DurabilityTier::Global)).unwrap();
     }
 
-    let update = block_on(client.update(
-        "todos",
-        first,
-        BTreeMap::from([("title".to_owned(), Value::String("first head".to_owned()))]),
-        UpdateOptions {
-            target: WriteTarget::BranchView {
-                head: head.clone(),
-                base: Some(BranchViewBase::Current(base.clone())),
+    let (_, tx_id) = block_on(client.transaction_for_identity(author, async |tx| {
+        tx.update(
+            "todos",
+            first,
+            BTreeMap::from([("title".to_owned(), Value::String("first head".to_owned()))]),
+            UpdateOptions {
+                target: WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
             },
-            ..Default::default()
-        },
-    ))
-    .unwrap();
-    let upsert = client
-        .upsert(
+        )
+        .await?;
+        tx.upsert(
             "todos",
             second,
             BTreeMap::from([("title".to_owned(), Value::String("second head".to_owned()))]),
@@ -145,13 +145,16 @@ fn public_branch_view_update_and_upsert_relay_to_authority() {
                 ..Default::default()
             },
         )
-        .unwrap();
-    for write in [&update, &upsert] {
-        client.tick().unwrap();
-        server.tick().unwrap();
-        client.tick().unwrap();
-        block_on(write.wait(DurabilityTier::Global)).unwrap();
-    }
+        .await
+    }))
+    .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(matches!(
+        client.write_state(tx_id).unwrap().fate,
+        Fate::Accepted
+    ));
 
     let rows = serving_rows_in_read_view(
         &server,
