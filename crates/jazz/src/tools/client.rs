@@ -249,14 +249,20 @@ enum ShutdownState {
 struct ShutdownCompletion {
     inner: Rc<RefCell<ClientDbInner>>,
     backend: Backend,
+    tick_driver: Option<tokio::task::JoinHandle<()>>,
     finished: bool,
 }
 
 impl ShutdownCompletion {
-    fn new(inner: Rc<RefCell<ClientDbInner>>, backend: Backend) -> Self {
+    fn new(
+        inner: Rc<RefCell<ClientDbInner>>,
+        backend: Backend,
+        tick_driver: Option<tokio::task::JoinHandle<()>>,
+    ) -> Self {
         Self {
             inner,
             backend,
+            tick_driver,
             finished: false,
         }
     }
@@ -283,6 +289,12 @@ impl Drop for ShutdownCompletion {
     fn drop(&mut self) {
         if self.finished {
             return;
+        }
+        // The driver may be holding a clone of `backend` while it is in an
+        // in-flight core operation. Abort it before this guard releases the
+        // backend, so cancellation cannot detach a task that retains storage.
+        if let Some(tick_driver) = self.tick_driver.take() {
+            tick_driver.abort();
         }
         let mut inner = self.inner.borrow_mut();
         inner.shutdown_state = ShutdownState::Failed(
@@ -943,7 +955,8 @@ impl ClientDb {
         // Install the cancellation guard before the first await: forwarder
         // draining is part of shutdown, and cancellation there must still
         // leave every retained facade terminal and wake concurrent shutdowns.
-        let mut completion = ShutdownCompletion::new(Rc::clone(&self.inner), backend);
+        let mut completion =
+            ShutdownCompletion::new(Rc::clone(&self.inner), backend, tick_driver);
         let mut completions = Vec::with_capacity(forwarders.len());
         for SubscriptionForwarder {
             cancellation,
@@ -956,7 +969,7 @@ impl ClientDb {
         for completion in completions {
             let _ = completion.await;
         }
-        if let Some(tick_driver) = tick_driver {
+        if let Some(tick_driver) = completion.tick_driver.as_mut() {
             let _ = tick_driver.await;
             // Let observers of cancellation run before shutdown can finish.
             tokio::task::yield_now().await;
@@ -1636,15 +1649,20 @@ impl ClientDbInner {
             None => config.connector.connect(request).await,
         }
         .map_err(|error| JazzError::Connection(error.to_string()))?;
-        Ok(db
-            .connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
-                connected.transport,
-                connected.protocol_version,
-                connected.features,
-                None,
-                connected.session_context,
-            )))
-            .await)
+        let transport = Box::new(WireTransportAdapter::new_with_session_context(
+            connected.transport,
+            connected.protocol_version,
+            connected.features,
+            None,
+            connected.session_context,
+        ));
+        match cancellation {
+            Some(cancellation) => tokio::select! {
+                _ = cancellation.cancelled() => Err(ClientDbInner::shutdown_error()),
+                connection = db.connect_upstream(transport) => Ok(connection),
+            },
+            None => Ok(db.connect_upstream(transport).await),
+        }
     }
 
     fn ensure_transaction_open(&self, transaction_id: OpenTransactionId) -> Result<()> {
@@ -3804,6 +3822,44 @@ mod tests {
     // These internal lifecycle tests are necessary because a detached
     // spawn_local task and a late connection installation have no direct
     // public observation once the client has consumed its core facade.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_shutdown_aborts_owned_tick_driver() {
+        struct DropMarker(Rc<Cell<bool>>);
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let client = JazzClient::connect(make_offline_context(
+                    AppId::from_name("cancelled-shutdown-driver"),
+                    TempDir::new().expect("tempdir").keep(),
+                    declared_todo_schema(),
+                ))
+                .await
+                .expect("connect offline client");
+                let inner = Rc::clone(&client.db.inner);
+                let backend = inner.borrow().backend_clone().expect("client is open");
+                let dropped = Rc::new(Cell::new(false));
+                let task_dropped = Rc::clone(&dropped);
+                let tick_driver = tokio::task::spawn_local(async move {
+                    let _marker = DropMarker(task_dropped);
+                    std::future::pending::<()>().await;
+                });
+                tokio::task::yield_now().await;
+                drop(ShutdownCompletion::new(inner, backend, Some(tick_driver)));
+                tokio::task::yield_now().await;
+                assert!(
+                    dropped.get(),
+                    "cancelling shutdown must abort its owned tick driver"
+                );
+            })
+            .await;
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_joins_an_idle_tick_driver() {
         tokio::task::LocalSet::new()
@@ -3926,7 +3982,6 @@ mod tests {
             })
             .await;
     }
-
     #[test]
     fn query_runtime_waker_enqueues_one_immediate_owner_turn() {
         let scheduler = TickSchedulerImpl::default();
