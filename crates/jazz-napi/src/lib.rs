@@ -3135,6 +3135,62 @@ impl NapiDb {
         }
     }
 
+    /// Read through the authority identity owned by an explicit backend open.
+    ///
+    /// This deliberately accepts no caller-supplied author. Public NAPI
+    /// identity ingress must continue rejecting `SYSTEM`; only
+    /// `open*AsBackend` mints this capability.
+    #[napi(js_name = "allForBackend")]
+    pub fn all_for_backend(
+        &self,
+        query: &PreparedQuery,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        self.require_trusted_backend()?;
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .all_for_identity(&query, opts, CoreAuthorSubject::SYSTEM)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .all_for_identity(&query, opts, CoreAuthorSubject::SYSTEM)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+        }
+    }
+
     #[napi(js_name = "allRelationSnapshot")]
     pub fn all_relation_snapshot(
         &self,
@@ -3396,6 +3452,36 @@ impl NapiDb {
             NapiDbInnerStorage::Persistent(db) => {
                 db.attach_query_with_opts_for_identity(&query.inner, opts, author)
             }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(QueryAttachment { inner })
+    }
+
+    /// Attach remote coverage using the authority identity of an explicit
+    /// backend open. This has no public author argument by design.
+    #[napi(js_name = "attachQueryForBackend")]
+    pub fn attach_query_for_backend(
+        &self,
+        query: &PreparedQuery,
+        opts: Option<serde_json::Value>,
+    ) -> napi::Result<QueryAttachment> {
+        self.require_trusted_backend()?;
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => db.attach_query_with_opts_for_identity(
+                &query.inner,
+                opts,
+                CoreAuthorSubject::SYSTEM,
+            ),
+            NapiDbInnerStorage::Persistent(db) => db.attach_query_with_opts_for_identity(
+                &query.inner,
+                opts,
+                CoreAuthorSubject::SYSTEM,
+            ),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(QueryAttachment { inner })

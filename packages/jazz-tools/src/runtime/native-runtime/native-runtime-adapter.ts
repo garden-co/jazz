@@ -179,6 +179,7 @@ type NativeDb = {
   attachExclusiveTx?(openTransactionId: string): Tx;
   all(query: PreparedQuery, opts: unknown): NativeReadResult;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
+  allForBackend?(query: PreparedQuery, opts: unknown): NativeReadResult;
   allAsync?(query: PreparedQuery, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allForIdentityAsync?(
     query: PreparedQuery,
@@ -206,6 +207,7 @@ type NativeDb = {
   setRelayAuthoritySessionOwner?(): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
+  attachQueryForBackend?(query: PreparedQuery, opts: unknown): unknown;
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
@@ -2617,7 +2619,10 @@ export class NativeRuntimeAdapter implements Runtime {
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
     const result =
       this.trustedBackend && identity === undefined
-        ? this.db.all(query, opts)
+        ? (this.db.allForBackend?.(query, opts) ??
+          (() => {
+            throw new Error("Native runtime does not support backend authority reads");
+          })())
         : this.readAuthorizationHost === "trusted-serving"
           ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
           : this.db.all(query, opts);
@@ -2633,7 +2638,12 @@ export class NativeRuntimeAdapter implements Runtime {
     identity?: Uint8Array,
   ): Promise<Uint8Array> {
     if (this.trustedBackend && identity === undefined) {
-      return this.awaitNativeRead(this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
+      return this.awaitNativeRead(
+        this.db.allForBackend?.(query, opts) ??
+          (() => {
+            throw new Error("Native runtime does not support backend authority reads");
+          })(),
+      );
     }
     if (this.readAuthorizationHost === "trusted-serving") {
       const author = identity ?? this.peerIdentity;
@@ -2773,7 +2783,12 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
-    if (this.readAuthorizationHost === "trusted-serving") {
+    if (this.trustedBackend && !session) {
+      if (!this.db.attachQueryForBackend) {
+        throw new Error("Native runtime does not support backend authority query coverage");
+      }
+      attachment = this.db.attachQueryForBackend(query, opts);
+    } else if (this.readAuthorizationHost === "trusted-serving") {
       if (!this.db.attachQueryForIdentity) {
         throw new Error("Native runtime does not support trusted-serving query coverage");
       }

@@ -116,6 +116,14 @@ export declare class NapiDb {
   allRelationSnapshotInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Read through the authority identity owned by an explicit backend open.
+   *
+   * This deliberately accepts no caller-supplied author. Public NAPI
+   * identity ingress must continue rejecting `SYSTEM`; only
+   * `open*AsBackend` mints this capability.
+   */
+  allForBackend(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
@@ -123,6 +131,11 @@ export declare class NapiDb {
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
+  /**
+   * Attach remote coverage using the authority identity of an explicit
+   * backend open. This has no public author argument by design.
+   */
+  attachQueryForBackend(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   queryAttachmentIsCovered(attachment: QueryAttachment): boolean
   detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
