@@ -191,6 +191,7 @@ struct ClientDbInner {
     identity: CoreDbIdentity,
     connect_config: Option<ConnectConfig>,
     scheduler: Rc<TickSchedulerImpl>,
+    tick_driver: Option<tokio::task::JoinHandle<()>>,
     upstream: Option<BackendConnection>,
     write_map: HashMap<TransactionId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
@@ -248,14 +249,20 @@ enum ShutdownState {
 struct ShutdownCompletion {
     inner: Rc<RefCell<ClientDbInner>>,
     backend: Backend,
+    tick_driver: Option<tokio::task::JoinHandle<()>>,
     finished: bool,
 }
 
 impl ShutdownCompletion {
-    fn new(inner: Rc<RefCell<ClientDbInner>>, backend: Backend) -> Self {
+    fn new(
+        inner: Rc<RefCell<ClientDbInner>>,
+        backend: Backend,
+        tick_driver: Option<tokio::task::JoinHandle<()>>,
+    ) -> Self {
         Self {
             inner,
             backend,
+            tick_driver,
             finished: false,
         }
     }
@@ -282,6 +289,12 @@ impl Drop for ShutdownCompletion {
     fn drop(&mut self) {
         if self.finished {
             return;
+        }
+        // The driver may be holding a clone of `backend` while it is in an
+        // in-flight core operation. Abort it before this guard releases the
+        // backend, so cancellation cannot detach a task that retains storage.
+        if let Some(tick_driver) = self.tick_driver.take() {
+            tick_driver.abort();
         }
         let mut inner = self.inner.borrow_mut();
         inner.shutdown_state = ShutdownState::Failed(
@@ -337,16 +350,27 @@ async fn recover_tick_driver_error(
     crate::db::sync_autopsy::record(format!(
         "client tick driver retrying {class:?} error attempt {attempts}: {error}"
     ));
-    tokio::time::sleep(tick_driver_retry_delay(*attempts)).await;
+    tokio::select! {
+        _ = scheduler.cancelled() => return false,
+        _ = tokio::time::sleep(tick_driver_retry_delay(*attempts)) => {}
+    }
 
     if class == TickDriverErrorClass::Reconnect {
         inner.borrow_mut().disconnect_upstream();
-        if let Err(_reconnect_error) = ClientDbInner::reconnect_upstream(inner).await {
+        if let Err(_reconnect_error) =
+            ClientDbInner::reconnect_upstream(inner, Some(scheduler)).await
+        {
+            if scheduler.is_cancelled() {
+                return false;
+            }
             #[cfg(feature = "sync-autopsy")]
             crate::db::sync_autopsy::record(format!(
                 "client tick driver reconnect attempt {attempts} failed: {_reconnect_error}"
             ));
         }
+    }
+    if scheduler.is_cancelled() {
+        return false;
     }
     scheduler.wake(TickUrgency::Immediate);
     true
@@ -744,7 +768,25 @@ struct TickState {
     deferred: AtomicBool,
     after_current_turn: AtomicBool,
     delayed: AtomicBool,
+    cancelled: AtomicBool,
+    cancel_notify: tokio::sync::Notify,
     notify: tokio::sync::Notify,
+}
+
+impl TickState {
+    async fn cancelled(&self) {
+        loop {
+            if self.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            self.cancel_notify.notified().await;
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.cancel_notify.notify_waiters();
+    }
 }
 
 /// Thread-safe wake bridge retained by cold Groove storage futures.
@@ -789,6 +831,17 @@ impl TickSchedulerImpl {
         }
         self.state.notify.notify_one();
     }
+    fn cancel(&self) {
+        self.state.cancel();
+    }
+
+    async fn cancelled(&self) {
+        self.state.cancelled().await;
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
+    }
 
     fn wake_handle(&self) -> Arc<TickState> {
         Arc::clone(&self.state)
@@ -803,10 +856,14 @@ impl TickSchedulerImpl {
         }
         let state = Arc::clone(&self.state);
         tokio::task::spawn_local(async move {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            state.delayed.store(false, Ordering::Release);
-            state.deferred.store(true, Ordering::Release);
-            state.notify.notify_one();
+            tokio::select! {
+                _ = state.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {
+                    state.delayed.store(false, Ordering::Release);
+                    state.deferred.store(true, Ordering::Release);
+                    state.notify.notify_one();
+                }
+            }
         });
     }
 }
@@ -853,7 +910,9 @@ impl ClientDb {
         .await?;
         let inner = Rc::new(RefCell::new(inner));
         if has_upstream {
-            Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
+            let driver =
+                Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
+            inner.borrow_mut().tick_driver = Some(driver);
         }
         Ok(Rc::new(Self {
             inner,
@@ -864,7 +923,7 @@ impl ClientDb {
     }
 
     async fn close(&self) -> Result<()> {
-        let (backend, forwarders) = {
+        let (backend, forwarders, tick_driver) = {
             let mut inner = self.inner.borrow_mut();
             match inner.shutdown_state {
                 ShutdownState::Open => {
@@ -873,9 +932,14 @@ impl ClientDb {
                     inner.tick_driver_error = Some("client shut down".to_string());
                     inner.tick_driver_error_notify.notify_waiters();
                     inner.shutdown_state = ShutdownState::Closing;
+                    inner.scheduler.cancel();
                     let backend = inner.db.take().ok_or_else(ClientDbInner::shutdown_error)?;
                     let forwarders = std::mem::take(&mut inner.subscription_forwarders);
-                    (backend, forwarders)
+                    let tick_driver = inner.tick_driver.take();
+                    // Do not retain the cancelled scheduler state on a shared
+                    // facade after its driver has been joined.
+                    inner.scheduler = Rc::new(TickSchedulerImpl::default());
+                    (backend, forwarders, tick_driver)
                 }
                 ShutdownState::Closing | ShutdownState::Closed => {
                     drop(inner);
@@ -891,7 +955,7 @@ impl ClientDb {
         // Install the cancellation guard before the first await: forwarder
         // draining is part of shutdown, and cancellation there must still
         // leave every retained facade terminal and wake concurrent shutdowns.
-        let mut completion = ShutdownCompletion::new(Rc::clone(&self.inner), backend);
+        let mut completion = ShutdownCompletion::new(Rc::clone(&self.inner), backend, tick_driver);
         let mut completions = Vec::with_capacity(forwarders.len());
         for SubscriptionForwarder {
             cancellation,
@@ -903,6 +967,11 @@ impl ClientDb {
         }
         for completion in completions {
             let _ = completion.await;
+        }
+        if let Some(tick_driver) = completion.tick_driver.as_mut() {
+            let _ = tick_driver.await;
+            // Let observers of cancellation run before shutdown can finish.
+            tokio::task::yield_now().await;
         }
         let result = completion
             .backend
@@ -1302,7 +1371,7 @@ impl ClientDb {
 
     #[cfg(feature = "testing")]
     async fn reconnect_upstream(&self) -> Result<bool> {
-        ClientDbInner::reconnect_upstream(&self.inner).await
+        ClientDbInner::reconnect_upstream(&self.inner, None).await
     }
 
     #[cfg(feature = "testing")]
@@ -1317,20 +1386,32 @@ impl ClientDb {
     fn spawn_local_tick_driver(
         inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let state = scheduler.wake_handle();
         tokio::task::spawn_local(async move {
             let mut recovery_attempts = 0;
             loop {
-                state.notify.notified().await;
+                tokio::select! {
+                    _ = scheduler.cancelled() => return,
+                    _ = state.notify.notified() => {}
+                }
                 while let Some(urgency) = scheduler.take() {
+                    if scheduler.is_cancelled() {
+                        return;
+                    }
                     let Some(inner) = inner.upgrade() else {
                         return;
                     };
                     if urgency == TickUrgency::Deferred {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        tokio::select! {
+                            _ = scheduler.cancelled() => return,
+                            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                        }
                     } else if urgency == TickUrgency::AfterCurrentTurn {
                         tokio::task::yield_now().await;
+                        if scheduler.is_cancelled() {
+                            return;
+                        }
                     }
                     let backend = match inner.borrow().backend_clone() {
                         Ok(db) => db,
@@ -1367,7 +1448,7 @@ impl ClientDb {
                     }
                 }
             }
-        });
+        })
     }
 }
 
@@ -1471,6 +1552,7 @@ impl ClientDbInner {
             identity,
             connect_config,
             scheduler,
+            tick_driver: None,
             upstream: None,
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
@@ -1487,7 +1569,10 @@ impl ClientDbInner {
         Ok(inner)
     }
 
-    async fn reconnect_upstream(inner: &Rc<RefCell<Self>>) -> Result<bool> {
+    async fn reconnect_upstream(
+        inner: &Rc<RefCell<Self>>,
+        cancellation: Option<&TickSchedulerImpl>,
+    ) -> Result<bool> {
         let (db, identity, scheduler, config) = {
             let inner = inner.borrow();
             if !matches!(inner.shutdown_state, ShutdownState::Open) {
@@ -1506,7 +1591,8 @@ impl ClientDbInner {
                 config,
             )
         };
-        let connection = Self::connect_with_config(&db, identity, scheduler, config).await?;
+        let connection =
+            Self::connect_with_config(&db, identity, scheduler, config, cancellation).await?;
         let mut inner = inner.borrow_mut();
         if !matches!(inner.shutdown_state, ShutdownState::Open) || inner.upstream.is_some() {
             db.detach_connection(&connection);
@@ -1529,6 +1615,7 @@ impl ClientDbInner {
                 self.identity,
                 Rc::clone(&self.scheduler),
                 config,
+                None,
             )
             .await?,
         );
@@ -1540,31 +1627,43 @@ impl ClientDbInner {
         identity: CoreDbIdentity,
         scheduler: Rc<TickSchedulerImpl>,
         config: ConnectConfig,
+        cancellation: Option<&TickSchedulerImpl>,
     ) -> Result<BackendConnection> {
         let wake = scheduler.wake_handle();
-        let connected = config
-            .connector
-            .connect(NativeTransportRequest {
-                server_url: config.server_url,
-                app_id: config.app_id,
-                peer_identity: identity.author,
-                auth: config.auth,
-                wake: Arc::new(move || {
-                    wake.immediate.store(true, Ordering::Release);
-                    wake.notify.notify_one();
-                }),
-            })
-            .await
-            .map_err(|error| JazzError::Connection(error.to_string()))?;
-        Ok(db
-            .connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
-                connected.transport,
-                connected.protocol_version,
-                connected.features,
-                None,
-                connected.session_context,
-            )))
-            .await)
+        let request = NativeTransportRequest {
+            server_url: config.server_url,
+            app_id: config.app_id,
+            peer_identity: identity.author,
+            auth: config.auth,
+            wake: Arc::new(move || {
+                wake.immediate.store(true, Ordering::Release);
+                wake.notify.notify_one();
+            }),
+        };
+        let connected = match cancellation {
+            Some(cancellation) => tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(ClientDbInner::shutdown_error()),
+                connected = config.connector.connect(request) => connected,
+            },
+            None => config.connector.connect(request).await,
+        }
+        .map_err(|error| JazzError::Connection(error.to_string()))?;
+        let transport = Box::new(WireTransportAdapter::new_with_session_context(
+            connected.transport,
+            connected.protocol_version,
+            connected.features,
+            None,
+            connected.session_context,
+        ));
+        match cancellation {
+            Some(cancellation) => tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(ClientDbInner::shutdown_error()),
+                connection = db.connect_upstream(transport) => Ok(connection),
+            },
+            None => Ok(db.connect_upstream(transport).await),
+        }
     }
 
     fn ensure_transaction_open(&self, transaction_id: OpenTransactionId) -> Result<()> {
@@ -3582,7 +3681,308 @@ mod tests {
             })
         }
     }
+    #[derive(Clone, Copy)]
+    enum DriverTransportBehavior {
+        Idle,
+        ClosedPump,
+    }
 
+    struct DriverConnectorState {
+        behavior: DriverTransportBehavior,
+        block_reconnect: bool,
+        connect_calls: std::sync::atomic::AtomicUsize,
+        send_attempted: tokio::sync::Notify,
+        reconnect_started: tokio::sync::Notify,
+        reconnect_cancelled: tokio::sync::Notify,
+    }
+
+    #[derive(Clone)]
+    struct DriverConnector {
+        state: Arc<DriverConnectorState>,
+    }
+
+    struct DriverWireTransport {
+        state: Arc<DriverConnectorState>,
+    }
+
+    struct DriverConnectAttempt {
+        state: Arc<DriverConnectorState>,
+        reconnect: bool,
+        completed: bool,
+    }
+
+    impl Drop for DriverConnectAttempt {
+        fn drop(&mut self) {
+            if self.reconnect && !self.completed {
+                self.state.reconnect_cancelled.notify_one();
+            }
+        }
+    }
+
+    impl DriverConnector {
+        fn new(behavior: DriverTransportBehavior, block_reconnect: bool) -> Self {
+            Self {
+                state: Arc::new(DriverConnectorState {
+                    behavior,
+                    block_reconnect,
+                    connect_calls: std::sync::atomic::AtomicUsize::new(0),
+                    send_attempted: tokio::sync::Notify::new(),
+                    reconnect_started: tokio::sync::Notify::new(),
+                    reconnect_cancelled: tokio::sync::Notify::new(),
+                }),
+            }
+        }
+
+        fn idle() -> Self {
+            Self::new(DriverTransportBehavior::Idle, false)
+        }
+
+        fn closed_pump(block_reconnect: bool) -> Self {
+            Self::new(DriverTransportBehavior::ClosedPump, block_reconnect)
+        }
+    }
+
+    impl crate::wire::WireTransport for DriverWireTransport {
+        fn send_frame(
+            &mut self,
+            _frame: Vec<u8>,
+        ) -> std::result::Result<(), crate::wire::TransportError> {
+            self.state.send_attempted.notify_one();
+            match self.state.behavior {
+                DriverTransportBehavior::Idle => Ok(()),
+                DriverTransportBehavior::ClosedPump => Err(crate::wire::TransportError::Failed(
+                    "websocket pump is closed".to_owned(),
+                )),
+            }
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    impl NativeTransportConnector for DriverConnector {
+        fn connect(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> crate::tools::native_transport_connector::NativeTransportFuture {
+            let state = Arc::clone(&self.state);
+            let call = state
+                .connect_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                let mut attempt = DriverConnectAttempt {
+                    state: Arc::clone(&state),
+                    reconnect: call > 0,
+                    completed: false,
+                };
+                if call > 0 && state.block_reconnect {
+                    state.reconnect_started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                attempt.completed = true;
+                Ok(
+                    crate::tools::native_transport_connector::ConnectedNativeTransport {
+                        transport: Box::new(DriverWireTransport {
+                            state: Arc::clone(&state),
+                        }),
+                        protocol_version: 1,
+                        features: 0,
+                        session_context: None,
+                        terminal: Box::pin(std::future::pending()),
+                    },
+                )
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> crate::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
+            Box::pin(async {
+                Err(
+                    crate::tools::native_transport_connector::NativeTransportError(
+                        "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
+                    ),
+                )
+            })
+        }
+    }
+
+    fn make_online_context(
+        app_id: AppId,
+        data_dir: std::path::PathBuf,
+        schema: Schema,
+    ) -> AppContext {
+        let mut context = make_offline_context(app_id, data_dir, schema);
+        context.server_url = "https://example.invalid".to_owned();
+        context.jwt_token = Some(make_test_jwt("driver-user", json!({})));
+        context
+    }
+
+    // These internal lifecycle tests are necessary because a detached
+    // spawn_local task and a late connection installation have no direct
+    // public observation once the client has consumed its core facade.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_shutdown_aborts_owned_tick_driver() {
+        struct DropMarker(Rc<Cell<bool>>);
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let client = JazzClient::connect(make_offline_context(
+                    AppId::from_name("cancelled-shutdown-driver"),
+                    TempDir::new().expect("tempdir").keep(),
+                    declared_todo_schema(),
+                ))
+                .await
+                .expect("connect offline client");
+                let inner = Rc::clone(&client.db.inner);
+                let backend = inner.borrow().backend_clone().expect("client is open");
+                let dropped = Rc::new(Cell::new(false));
+                let task_dropped = Rc::clone(&dropped);
+                let tick_driver = tokio::task::spawn_local(async move {
+                    let _marker = DropMarker(task_dropped);
+                    std::future::pending::<()>().await;
+                });
+                tokio::task::yield_now().await;
+                drop(ShutdownCompletion::new(inner, backend, Some(tick_driver)));
+                tokio::task::yield_now().await;
+                assert!(
+                    dropped.get(),
+                    "cancelling shutdown must abort its owned tick driver"
+                );
+            })
+            .await;
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_joins_an_idle_tick_driver() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let connector = DriverConnector::idle();
+                let client = JazzClient::connect_with_native_transport(
+                    make_online_context(
+                        AppId::from_name("shutdown-idle-driver"),
+                        TempDir::new().expect("tempdir").keep(),
+                        declared_todo_schema(),
+                    ),
+                    Arc::new(connector.clone()),
+                )
+                .await
+                .expect("connect online client");
+                let scheduler_state = {
+                    let inner = client.db.inner.borrow();
+                    Arc::downgrade(&inner.scheduler.wake_handle())
+                };
+                let send_attempted = connector.state.send_attempted.notified();
+
+                client
+                    .insert(
+                        "todos",
+                        crate::row_input!("title" => "idle", "completed" => false),
+                    )
+                    .expect("stage a write for the idle driver");
+                client
+                    .db
+                    .inner
+                    .borrow()
+                    .scheduler
+                    .schedule_tick(TickUrgency::Immediate);
+                send_attempted.await;
+
+                client
+                    .shutdown()
+                    .await
+                    .expect("shutdown idle online client");
+
+                assert!(
+                    scheduler_state.upgrade().is_none(),
+                    "shutdown must join the driver after it returns to its idle wait"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_cancels_recovery_connect_and_joins_driver() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let connector = DriverConnector::closed_pump(true);
+                let client = JazzClient::connect_with_native_transport(
+                    make_online_context(
+                        AppId::from_name("shutdown-recovery-connect"),
+                        TempDir::new().expect("tempdir").keep(),
+                        declared_todo_schema(),
+                    ),
+                    Arc::new(connector.clone()),
+                )
+                .await
+                .expect("connect online client");
+                let inner = Rc::clone(&client.db.inner);
+                let scheduler_state = {
+                    let inner = inner.borrow();
+                    Arc::downgrade(&inner.scheduler.wake_handle())
+                };
+                let send_attempted = connector.state.send_attempted.notified();
+                let reconnect_started = connector.state.reconnect_started.notified();
+                let reconnect_cancelled = connector.state.reconnect_cancelled.notified();
+
+                client
+                    .insert(
+                        "todos",
+                        crate::row_input!("title" => "reconnect", "completed" => false),
+                    )
+                    .expect("stage a write for recovery");
+                client
+                    .db
+                    .inner
+                    .borrow()
+                    .scheduler
+                    .schedule_tick(TickUrgency::Immediate);
+                send_attempted.await;
+                reconnect_started.await;
+
+                let mut shutdown = tokio::task::spawn_local(client.shutdown());
+                tokio::select! {
+                    _ = reconnect_cancelled => {
+                        shutdown
+                            .await
+                            .expect("join shutdown task")
+                            .expect("shutdown recovery driver");
+                    }
+                    result = &mut shutdown => {
+                        panic!(
+                            "shutdown returned before cancelling the in-flight reconnect: {result:?}"
+                        );
+                    }
+                }
+
+                assert_eq!(
+                    connector
+                        .state
+                        .connect_calls
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    2,
+                    "shutdown must not start a later reconnect"
+                );
+                assert!(
+                    inner.borrow().upstream.is_none(),
+                    "a cancelled reconnect must not install an upstream"
+                );
+                drop(inner);
+                assert!(
+                    scheduler_state.upgrade().is_none(),
+                    "shutdown must join the recovery driver before returning"
+                );
+            })
+            .await;
+    }
     #[test]
     fn query_runtime_waker_enqueues_one_immediate_owner_turn() {
         let scheduler = TickSchedulerImpl::default();
