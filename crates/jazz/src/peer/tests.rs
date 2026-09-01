@@ -1040,6 +1040,62 @@ fn resource_commit_unit(
 }
 
 #[test]
+fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
+    let schema = session_seed_write_policy_schema();
+    let (_dir, mut node_state) = open_node_with_schema(node(0xa0), schema.clone());
+    let (_, unit) = node_state
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("resources", row(0xa1), 1)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([(
+                    "owner".to_owned(),
+                    Value::Uuid(uuid::Uuid::nil()),
+                )])),
+        )
+        .expect("SYSTEM may create a row protected by a claim-and-join policy");
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("mergeable unit must carry a CommitUnit");
+    };
+
+    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
+    assert!(
+        peer.unsettled_authority_scope_subscriptions(
+            &mut node_state,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            &versions,
+            Some(tx.tx_id),
+            true,
+        )
+        .expect("SYSTEM must not hydrate edge authorization support")
+        .is_none()
+    );
+    peer.prove_terminal_commit_authorization(
+        &mut node_state,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        &versions,
+        tx.tx_id,
+    )
+    .expect("SYSTEM must not bind session claims for a bypassed write");
+    assert_eq!(peer.terminal_authority_scope_proof_count(), 0);
+
+    let denied = crate::db::block_on(node_state.dry_run_mergeable_write_allows_in_schema(
+            schema.version_id(),
+            MergeableCommit::new("resources", row(0xa2), 2)
+                .made_by(AuthorSubject::for_test_bytes([0xa3; 16]))
+                .cells(BTreeMap::from([(
+                    "owner".to_owned(),
+                    Value::Uuid(uuid::Uuid::from_bytes([0xa3; 16])),
+                )])),
+        ));
+    assert!(
+        denied.is_err(),
+        "an unseeded session must not inherit SYSTEM bypass: {denied:?}"
+    );
+}
+
+#[test]
 fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let schema = session_claim_read_policy_schema();
     let writer = AuthorSubject::for_test_bytes([0xa1; 16]);

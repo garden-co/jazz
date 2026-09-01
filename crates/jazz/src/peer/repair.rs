@@ -200,6 +200,13 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        // SYSTEM is the trusted backend policy subject. Row-policy admission
+        // already bypasses it, so it must not try to hydrate an authorization
+        // support proof: claim and join predicates have no SYSTEM session to
+        // bind and are irrelevant to the bypass decision.
+        if writer == AuthorSubject::SYSTEM {
+            return Ok(());
+        }
         for action in node
             .authorization_actions_for_versions_in_transaction(versions, Some(candidate_tx_id))
             .await?
@@ -306,6 +313,9 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        if writer == AuthorSubject::SYSTEM {
+            return Ok(None);
+        }
         let mut unsettled = Vec::new();
         for action in node
             .authorization_actions_for_versions_in_transaction(versions, candidate_tx_id)
