@@ -74,6 +74,105 @@ fn write_deletion_register(server: &CoreDb, table: &str, row: RowUuid, branch: B
     server.server.mark_subscriber_connections_dirty();
 }
 
+/// Public branch-view mutations use the normal client outbox and subscriber
+/// relay. This intentionally exercises both update and existing-target upsert
+/// rather than injecting a handcrafted commit unit at authority.
+#[test]
+fn public_branch_view_update_and_upsert_relay_to_authority() {
+    let schema = branch_sync_schema();
+    let author = AuthorSubject::for_test_bytes([0x61; 16]);
+    let server = open_core(0x62, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x63, author, &schema);
+    let base = branch_sync_selector(0x64);
+    let head = branch_sync_selector(0x65);
+    let first = row(0x66);
+    let second = row(0x67);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber_with_claims(
+        server_transport,
+        author,
+        test_provider_claims(author),
+    );
+
+    for (id, title) in [(first, "first base"), (second, "second base")] {
+        let write = client
+            .insert(
+                "todos",
+                BTreeMap::from([
+                    (
+                        "branch_id".to_owned(),
+                        Value::Uuid(uuid::Uuid::from_bytes([0x64; 16])),
+                    ),
+                    ("title".to_owned(), Value::String(title.to_owned())),
+                ]),
+                InsertOptions {
+                    row_id: Some(id),
+                    target: ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(write.wait(DurabilityTier::Global)).unwrap();
+    }
+
+    let update = block_on(client.update(
+        "todos",
+        first,
+        BTreeMap::from([("title".to_owned(), Value::String("first head".to_owned()))]),
+        UpdateOptions {
+            target: WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let upsert = client
+        .upsert(
+            "todos",
+            second,
+            BTreeMap::from([("title".to_owned(), Value::String("second head".to_owned()))]),
+            UpsertOptions {
+                target: WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for write in [&update, &upsert] {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(write.wait(DurabilityTier::Global)).unwrap();
+    }
+
+    let rows = serving_rows_in_read_view(
+        &server,
+        &schema,
+        &Query::from("todos"),
+        author,
+        &ReadViewSpec::branch_view(head, Some(BranchViewBase::Current(base))),
+    );
+    let titles = rows
+        .iter()
+        .map(|row| match row.cell(&schema.tables[0], "title").unwrap() {
+            Value::String(title) => title,
+            value => panic!("expected text title, got {value:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        titles,
+        BTreeSet::from(["first head".to_owned(), "second head".to_owned()])
+    );
+}
+
 #[test]
 fn db_sync_surface_round_trips_subscription_to_client() {
     let schema = schema();

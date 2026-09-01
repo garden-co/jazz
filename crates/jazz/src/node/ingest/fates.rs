@@ -508,9 +508,13 @@ where
                                 None,
                             )
                             .await?;
-                        if content.contains_key(&version.row_uuid())
-                            || deletions.contains_key(&version.row_uuid())
-                        {
+                        let existing = content
+                            .get(&version.row_uuid())
+                            .into_iter()
+                            .chain(deletions.get(&version.row_uuid()))
+                            .map(|winner| self.version_tx_id(winner))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        if existing.into_iter().any(|winner| winner != tx.tx_id) {
                             return Ok(false);
                         }
                     }

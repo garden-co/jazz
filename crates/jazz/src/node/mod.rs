@@ -50,11 +50,11 @@ use crate::schema::{
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tx::{
-    AbsentRead, ContributionComponent, ContributionCoordinate, ContributionDot,
-    ContributionMergeProvenance, ContributionSubstitution, ContributionSubstitutionIndex,
-    DeletionEvent, DurabilityTier, Fate, HistoryEntry, MergeAspect, PredicateRead,
-    RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot, Transaction,
-    TransactionRecord, TxId, TxKind,
+    AbsentRead, BranchWriteIntent, BranchWriteOperation, ContributionComponent,
+    ContributionCoordinate, ContributionDot, ContributionMergeProvenance, ContributionSubstitution,
+    ContributionSubstitutionIndex, DeletionEvent, DurabilityTier, Fate, HistoryEntry, MergeAspect,
+    PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot,
+    Transaction, TransactionRecord, TxId, TxKind,
 };
 
 fn install_enum_case_ids(

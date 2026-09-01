@@ -317,6 +317,69 @@ where
         for (_, commit) in &commits {
             commit.validate()?;
         }
+        // This is the lowest common local commit construction boundary: direct
+        // inserts, facade update/upsert, open transactions, and batched paths
+        // all pass here before durable/outbox publication. Fill only exact
+        // branch operations not already classified by a higher view-copy path.
+        let mut contribution_merge = contribution_merge.unwrap_or(ContributionMergeProvenance {
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: Vec::new(),
+            branch_write_intents: Vec::new(),
+        });
+        for (schema_version, commit) in &commits {
+            if commit.branch.values.is_empty() {
+                continue;
+            }
+            let schema = &self
+                .catalogue
+                .catalogue_schemas
+                .get(schema_version)
+                .ok_or(Error::InvalidStoredValue("write schema is missing"))?
+                .schema;
+            let table = self.table_in_schema(&commit.table, *schema_version)?;
+            let (head, _) = schema
+                .project_branch_view_selector(&table, &commit.branch)
+                .map_err(Error::InvalidBranchKey)?;
+            let table_id = self.physical_table_id_for_schema(*schema_version, &commit.table)?;
+            if contribution_merge.branch_write_intents.iter().any(|intent| {
+                intent.physical_table_id == table_id
+                    && intent.authored_schema == *schema_version
+                    && intent.row_uuid == commit.row_uuid
+                    && intent.head == head
+            }) {
+                continue;
+            }
+            contribution_merge.branch_write_intents.push(BranchWriteIntent {
+                version: 1,
+                physical_table_id: table_id,
+                authored_schema: *schema_version,
+                row_uuid: commit.row_uuid,
+                head,
+                operation: if commit.parents.is_empty() {
+                    BranchWriteOperation::ExactHeadInsert
+                } else {
+                    BranchWriteOperation::ExactHeadUpdate
+                },
+            });
+        }
+        contribution_merge.branch_write_intents.sort_by(|left, right| {
+            (left.physical_table_id, left.authored_schema, left.row_uuid, &left.head).cmp(&(
+                right.physical_table_id,
+                right.authored_schema,
+                right.row_uuid,
+                &right.head,
+            ))
+        });
+        let contribution_merge = if contribution_merge.substitutions.is_empty()
+            && contribution_merge.branch_view_copies.is_empty()
+            && contribution_merge.branch_write_intents.is_empty()
+        {
+            None
+        } else {
+            Some(contribution_merge)
+        };
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
