@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -320,13 +320,17 @@ export function workspaceDependencyInputs(root, rootManifest) {
     );
   }
   const canonicalRoot = realpathSync(root);
-  const packages = new Map(
-    metadata.packages.map((pkg) => [resolve(dirname(pkg.manifest_path)), pkg]),
+  const packagesByManifest = new Map(
+    metadata.packages.map((pkg) => [resolve(pkg.manifest_path), pkg]),
   );
-  const rootDirectory = resolve(canonicalRoot, dirname(rootManifest));
-  if (!packages.has(rootDirectory)) {
+  const rootManifestPath = resolve(canonicalRoot, rootManifest);
+  if (!packagesByManifest.has(rootManifestPath)) {
     throw new Error(`artifact provenance: cargo metadata omitted ${rootManifest}`);
   }
+  const packages = new Map(
+    metadata.packages.map((pkg) => [dirname(resolve(pkg.manifest_path)), pkg]),
+  );
+  const rootDirectory = dirname(rootManifestPath);
   // This is deliberately the conservative declared closure: optional and
   // target-conditional path dependencies invalidate artifacts even when a
   // particular build does not enable them.
@@ -349,7 +353,27 @@ export function workspaceDependencyInputs(root, rootManifest) {
       pending.push(dependencyDirectory);
     }
   }
-  return [...visited].map((directory) => relative(canonicalRoot, directory)).sort();
+  return [...visited]
+    .map((directory) => {
+      const repositoryPath = relative(canonicalRoot, directory);
+      if (
+        repositoryPath === ".." ||
+        repositoryPath.startsWith(`..${sep}`) ||
+        isAbsolute(repositoryPath)
+      ) {
+        throw new Error(
+          `artifact provenance: workspace dependency escapes repository root: ${directory}`,
+        );
+      }
+      const normalizedPath = repositoryPath.split(sep).join("/");
+      if (normalizedPath.includes("\\")) {
+        throw new Error(
+          `artifact provenance: workspace dependency path is not representable: ${directory}`,
+        );
+      }
+      return normalizedPath;
+    })
+    .sort();
 }
 
 const inputsFor = {
