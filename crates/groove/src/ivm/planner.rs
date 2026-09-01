@@ -1559,6 +1559,221 @@ mod tests {
             ),
         ])
     }
+    fn inner_join_query(left: TableRef, right: TableRef, predicate: Expr) -> Query {
+        Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([
+            TableRef::Join {
+                left: Box::new(left),
+                right: Box::new(right),
+                kind: JoinKind::Inner,
+                constraint: JoinConstraint::On(predicate),
+            },
+        ])))
+    }
+
+    fn join_keys(planned: &PlannedQuery) -> (&[String], &[String]) {
+        let LogicalPlan::Project { input, .. } = &planned.logical else {
+            panic!("expected final project");
+        };
+        let LogicalPlan::Join {
+            left_on, right_on, ..
+        } = input.as_ref()
+        else {
+            panic!("expected join");
+        };
+        (left_on, right_on)
+    }
+
+    #[test]
+    fn rejects_ambiguous_unqualified_join_keys() {
+        let query = inner_join_query(
+            TableRef::named("albums"),
+            TableRef::named("artists"),
+            Expr::binary(Expr::column("id"), BinaryOp::Eq, Expr::column("id")),
+        );
+
+        assert_eq!(
+            plan_query(&query, &schema()),
+            Err(PlannerError::AmbiguousColumn("id".to_owned()))
+        );
+    }
+
+    #[test]
+    fn rejects_mixed_qualified_and_unqualified_ambiguous_join_keys() {
+        let left = TableRef::named("albums").aliased("a");
+        let right = TableRef::named("artists").aliased("r");
+        let qualified_left = Expr::Column(ColumnRef::qualified(["a"], "artist_id"));
+        let unqualified = Expr::column("id");
+
+        let query = inner_join_query(
+            left.clone(),
+            right.clone(),
+            Expr::binary(qualified_left.clone(), BinaryOp::Eq, unqualified.clone()),
+        );
+        assert_eq!(
+            plan_query(&query, &schema()),
+            Err(PlannerError::AmbiguousColumn("id".to_owned()))
+        );
+
+        let reversed = inner_join_query(
+            left,
+            right,
+            Expr::binary(unqualified, BinaryOp::Eq, qualified_left),
+        );
+        assert_eq!(
+            plan_query(&reversed, &schema()),
+            Err(PlannerError::AmbiguousColumn("id".to_owned()))
+        );
+    }
+
+    #[test]
+    fn lowers_unique_unqualified_join_operands() {
+        let query = inner_join_query(
+            TableRef::named("albums"),
+            TableRef::named("artists"),
+            Expr::binary(
+                Expr::column("artist_id"),
+                BinaryOp::Eq,
+                Expr::column("name"),
+            ),
+        );
+
+        let planned = plan_query(&query, &schema()).unwrap();
+
+        assert_eq!(
+            join_keys(&planned),
+            (&["artist_id".to_owned()][..], &["name".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn lowers_fully_qualified_reversed_join_equality() {
+        let query = inner_join_query(
+            TableRef::named("albums").aliased("a"),
+            TableRef::named("artists").aliased("r"),
+            Expr::binary(
+                Expr::Column(ColumnRef::qualified(["r"], "id")),
+                BinaryOp::Eq,
+                Expr::Column(ColumnRef::qualified(["a"], "artist_id")),
+            ),
+        );
+
+        let planned = plan_query(&query, &schema()).unwrap();
+
+        assert_eq!(
+            join_keys(&planned),
+            (&["artist_id".to_owned()][..], &["id".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn lowers_multi_key_and_join_predicate() {
+        let query = inner_join_query(
+            TableRef::named("albums").aliased("a"),
+            TableRef::named("artists").aliased("r"),
+            Expr::binary(
+                Expr::binary(
+                    Expr::Column(ColumnRef::qualified(["a"], "artist_id")),
+                    BinaryOp::Eq,
+                    Expr::Column(ColumnRef::qualified(["r"], "id")),
+                ),
+                BinaryOp::And,
+                Expr::binary(
+                    Expr::Column(ColumnRef::qualified(["a"], "id")),
+                    BinaryOp::Eq,
+                    Expr::Column(ColumnRef::qualified(["r"], "id")),
+                ),
+            ),
+        );
+
+        let planned = plan_query(&query, &schema()).unwrap();
+
+        assert_eq!(
+            join_keys(&planned),
+            (
+                &["artist_id".to_owned(), "id".to_owned()][..],
+                &["id".to_owned(), "id".to_owned()][..]
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_same_side_resolved_join_operands() {
+        let left = TableRef::named("albums").aliased("a");
+        let right = TableRef::named("artists").aliased("r");
+        let first = Expr::Column(ColumnRef::qualified(["a"], "id"));
+        let second = Expr::Column(ColumnRef::qualified(["a"], "artist_id"));
+
+        let query = inner_join_query(
+            left.clone(),
+            right.clone(),
+            Expr::binary(first.clone(), BinaryOp::Eq, second.clone()),
+        );
+        assert_eq!(
+            plan_query(&query, &schema()),
+            Err(PlannerError::UnsupportedExpression(
+                "join keys must reference opposite join inputs"
+            ))
+        );
+
+        let reversed = inner_join_query(left, right, Expr::binary(second, BinaryOp::Eq, first));
+        assert_eq!(
+            plan_query(&reversed, &schema()),
+            Err(PlannerError::UnsupportedExpression(
+                "join keys must reference opposite join inputs"
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_visible_qualifiers_in_join_keys() {
+        let query = inner_join_query(
+            TableRef::named("albums").aliased("x"),
+            TableRef::named("artists").aliased("x"),
+            Expr::binary(
+                Expr::Column(ColumnRef::qualified(["x"], "id")),
+                BinaryOp::Eq,
+                Expr::Column(ColumnRef::qualified(["x"], "name")),
+            ),
+        );
+
+        assert_eq!(
+            plan_query(&query, &schema()),
+            Err(PlannerError::AmbiguousColumn("id".to_owned()))
+        );
+    }
+
+    #[test]
+    fn propagates_join_operand_resolution_and_shape_errors() {
+        let missing = inner_join_query(
+            TableRef::named("albums").aliased("a"),
+            TableRef::named("artists").aliased("r"),
+            Expr::binary(
+                Expr::Column(ColumnRef::qualified(["a"], "missing")),
+                BinaryOp::Eq,
+                Expr::Column(ColumnRef::qualified(["r"], "id")),
+            ),
+        );
+        assert_eq!(
+            plan_query(&missing, &schema()),
+            Err(PlannerError::ColumnNotFound("missing".to_owned()))
+        );
+
+        let non_column = inner_join_query(
+            TableRef::named("albums"),
+            TableRef::named("artists"),
+            Expr::binary(
+                Expr::Literal(Value::U64(1)),
+                BinaryOp::Eq,
+                Expr::column("id"),
+            ),
+        );
+        assert_eq!(
+            plan_query(&non_column, &schema()),
+            Err(PlannerError::UnsupportedExpression(
+                "join keys must be columns"
+            ))
+        );
+    }
 
     #[test]
     fn lowers_select_filter_project_to_logical_plan_and_graph() {
