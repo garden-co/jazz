@@ -26,6 +26,24 @@ use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
 
+/// Mirror the production browser-worker upstream: the client side has already
+/// been admitted to forward one scope binding, and the authority side installs
+/// that exact server-issued capability. A plain duplex or generic relay is not
+/// a substitute for either half.
+macro_rules! connect_scope_isolated_worker_to_core {
+    ($worker:expr, $core:expr, $identity:expr) => {{
+        let (worker_upstream_transport, core_transport) = duplex();
+        let worker_upstream = block_on($worker.connect_upstream(worker_upstream_transport));
+        let core_subscriber = $core.accept_scope_isolated_relay_subscriber_for_test(
+            core_transport,
+            $identity,
+            BTreeMap::new(),
+            1,
+        );
+        (worker_upstream, core_subscriber)
+    }};
+}
+
 #[derive(Default)]
 struct AuthorityTransportState {
     inbound: VecDeque<SyncMessage>,
@@ -511,9 +529,8 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
 
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let write = main_thread
         .insert(
@@ -868,9 +885,8 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let (writer_transport, core_writer_transport) = duplex();
     let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
     let _core_writer = core.accept_subscriber(
@@ -1536,9 +1552,8 @@ fn browser_client_local_only_subscription_stops_at_worker() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -1622,9 +1637,8 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -1724,9 +1738,8 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let (seed_transport, core_seed_transport) = duplex();
     let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
     let _core_seed = core.accept_subscriber(core_seed_transport, alice);
@@ -1937,9 +1950,8 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let query = main_thread
         .prepare_query(
@@ -2059,9 +2071,8 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let query = main_thread
         .prepare_query(
@@ -2225,9 +2236,8 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let (first_transport, first_worker_transport) = duplex();
     let first_connection = block_on(first_tab.connect_upstream(first_transport));
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let first_query = first_tab
         .prepare_query(&first_tab.table("todos"))
         .expect("prepare first-tab Edge query");
@@ -2538,9 +2548,8 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
     let (main_transport, worker_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let row_id = jazz::ids::RowUuid::from_bytes([0xc6; 16]);
     let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
@@ -2670,9 +2679,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let query = main_thread
         .prepare_query(
@@ -2984,9 +2992,8 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     for offset in 1..=5 {
         let query = main_thread
@@ -3080,9 +3087,8 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -3143,10 +3149,10 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
     let worker = open_db(0x28, alice, &schema);
     let core = open_core(0x38, &schema);
+    worker.set_relay_authority_session_owner_for_test();
 
-    let (worker_upstream_transport, core_transport) = duplex();
-    let worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (worker_upstream, core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let base = worker
         .insert(
             "todos",
@@ -3555,6 +3561,7 @@ fn reopened_worker_forgets_recovered_foreground_marker_after_global_acceptance()
     let successor = open_db(0x20, alice, &schema);
     successor.set_non_durable_client();
     let worker = open_persistent_browser_worker(storage.path(), 0x2f, alice, &schema);
+    worker.set_relay_authority_session_owner_for_test();
     assert!(
         worker.has_recovered_browser_relay_tx_for_test(tx_id),
         "worker restart must mark the recovered unresolved foreground transaction"
@@ -3568,9 +3575,8 @@ fn reopened_worker_forgets_recovered_foreground_marker_after_global_acceptance()
     let (successor_transport, worker_subscriber_transport) = duplex();
     let successor_connection = block_on(successor.connect_upstream(successor_transport));
     let worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_subscriber = core.accept_relay_subscriber(core_transport);
+    let (worker_upstream, core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     worker.tick().expect("replay recovered foreground write");
     successor

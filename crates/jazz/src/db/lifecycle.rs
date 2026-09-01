@@ -906,6 +906,27 @@ where
         self.node.accept_relay_subscriber(transport)
     }
 
+    /// Test-only server admission for one authenticated scope-isolated relay.
+    /// Production servers derive this capability from their authenticated
+    /// handshake rather than accepting test-supplied identity, claims, or
+    /// epoch values.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn accept_scope_isolated_relay_subscriber_for_test(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_scope_isolated_relay_subscriber(
+            transport,
+            identity,
+            claims,
+            admission_epoch,
+        )
+    }
+
     /// Server/host-only scope-relay admission after authenticated handshake.
     // The public serving shell reaches this through its runtime-selected
     // backend enum. Keep this crate-private so an embedding application cannot

@@ -79,7 +79,7 @@ fn session_peer_cannot_choose_relay_authority_binding_source() {
         Some(SyncMessage::SubscribeRejected {
             reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
             ..
-        }) if detail.contains("authenticated SYSTEM trusted-backend relay")
+        }) if detail.contains("live server-admitted scope-isolated relay capability")
     ));
     assert!(
         server

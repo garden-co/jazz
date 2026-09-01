@@ -178,7 +178,7 @@ impl PeerState {
             &self.transport_capability,
             RelayTransportCapability::ScopeIsolatedClientRelay { binding: admitted, .. }
                 if admitted.identity == binding.0 && admitted.claims == binding.1
-        ) || matches!(self.transport_capability, RelayTransportCapability::MultiplexedRelay)
+        )
     }
 
     /// The one immutable user binding selected by server-side scope-relay

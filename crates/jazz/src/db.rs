@@ -2797,7 +2797,7 @@ fn ensure_supported_register_shape_options(
     {
         return Err(Error::new(
             ErrorCode::Query,
-            "relay authority-session bindings require an authenticated relay transport",
+            "relay authority-session bindings require a live server-admitted scope-isolated relay capability",
         ));
     }
     let supported = match (local_receiver, peer_role) {
@@ -2960,9 +2960,11 @@ fn delegated_session_capability(ingest: CommitUnitIngestContext, peer_role: Peer
 }
 
 /// Select the immutable session snapshot permitted for one request. Direct
-/// links use their host-admitted session; only an explicit relay transport can
-/// carry a topology-assigned delegated snapshot. Keeping Subscribe and repair
-/// on this one admission rule prevents one path from accidentally treating a
+/// links use their host-admitted session; only a scope-isolated relay with an
+/// exact server-issued binding can carry a delegated snapshot. A generic
+/// multiplexed relay has no per-binding capability yet, so it must forward
+/// rather than select a user policy subject. Keeping Subscribe and repair on
+/// this one admission rule prevents one path from accidentally treating a
 /// relay's transport identity as a permission subject.
 fn admitted_request_policy_binding(
     ingest: CommitUnitIngestContext,

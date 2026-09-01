@@ -1625,9 +1625,10 @@ where
             .and_then(|scheduler| scheduler.query_runtime_waker());
         let connection_epoch = self.connection_epoch;
         // The host-admitted scope-isolated worker owns one immutable foreground
-        // session and may forward that binding upstream. A separately admitted
-        // privileged relay transport may likewise multiplex request-local
-        // bindings. Raw wire input cannot enable either path.
+        // session and may forward that exact binding upstream. A generic
+        // multiplexed relay has no per-binding admission capability and must
+        // forward rather than select a user binding. Raw wire input cannot
+        // enable either path.
         let permits_delegated_sessions = self.transport.permits_delegated_sessions()
             || self.node.borrow().client_relay_scope().is_some();
         self.observe_shared_subscriber_dirty_epoch();
