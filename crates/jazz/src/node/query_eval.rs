@@ -1584,7 +1584,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<bool, Error> {
-        if shape.query().offset != 0 {
+        if shape.query().offset != 0 || shape.query().limit.is_some() {
             return Ok(true);
         }
         self.is_policy_scoped_exact_id_query(shape, binding)

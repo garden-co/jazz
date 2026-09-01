@@ -818,6 +818,39 @@ fn relay_authority_source_selection_requires_read_policy_for_exact_id() {
 }
 
 #[test]
+fn relay_authority_source_selection_includes_limit_only_windows() {
+    let (_dir, mut node) = open_node();
+    node.set_relay_authority_session_owner();
+
+    let unbounded = Query::from("issues")
+        .validate(&node.catalogue.schema)
+        .unwrap();
+    let limit_only = Query::from("issues")
+        .order_by("title", OrderDirection::Asc)
+        .limit(2)
+        .validate(&node.catalogue.schema)
+        .unwrap();
+
+    assert!(
+        !node
+            .relay_edge_query_requires_authority_source(
+                &unbounded,
+                &unbounded.bind(BTreeMap::new()).unwrap(),
+            )
+            .unwrap(),
+        "an unbounded relay query can evaluate its resident overlay"
+    );
+    assert!(
+        node.relay_edge_query_requires_authority_source(
+            &limit_only,
+            &limit_only.bind(BTreeMap::new()).unwrap(),
+        )
+        .unwrap(),
+        "a limit-only window must preserve the authority-selected membership"
+    );
+}
+
+#[test]
 fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_liveness() {
     let schema = owner_policy_schema();
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());
