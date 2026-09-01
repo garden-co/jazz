@@ -115,7 +115,23 @@ impl Transport for TrustedBackendRelayTransport {
     }
 }
 
-use common::compile_schema;
+use common::{compile_schema, exists, outer_eq, session_eq};
+
+/// Advance the production-shaped two-browser topology by one owner turn at
+/// every hop.  Keeping the foreground and worker turns distinct is important:
+/// a relay receipt is not allowed to serve a downstream subscription in the
+/// same turn in which it received its authority update.
+macro_rules! pump_two_browser_relays {
+    ($owner_foreground:expr, $owner_worker:expr, $owner_edge:expr, $core:expr, $guest_edge:expr, $guest_worker:expr, $guest_foreground:expr, $label:expr) => {{
+        $owner_foreground.tick().expect($label);
+        $owner_worker.tick().expect($label);
+        $owner_edge.tick().expect($label);
+        $core.tick().expect($label);
+        $guest_edge.tick().expect($label);
+        $guest_worker.tick().expect($label);
+        $guest_foreground.tick().expect($label);
+    }};
+}
 
 trait FutureResultExpectExt<T, E>: Future<Output = Result<T, E>> + Sized {
     fn expect(self, message: &str) -> T
@@ -218,6 +234,48 @@ fn included_relation_schema() -> JazzSchema {
                     .fk_column("author", "profiles")
                     .column("body", ColumnType::Text)
                     .column("created", ColumnType::Timestamp),
+            )
+            .build(),
+    )
+}
+
+/// The policy topology used by BandChat's maintained room-message query.  A
+/// member's message is visible only through the room-membership policy source,
+/// so this exercises policy-source generation as well as ordinary row delivery.
+fn band_chat_message_schema() -> JazzSchema {
+    let member_of_outer_room = exists(
+        "room_members",
+        vec![
+            outer_eq("room_id", "room_id"),
+            session_eq("member_author", &["user"]),
+        ],
+    );
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("rooms").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("room_members")
+                    .fk_column("room_id", "rooms")
+                    .column("member_author", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("room_id", "rooms")
+                    .column("text", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(member_of_outer_room)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
             )
             .build(),
     )
@@ -2397,6 +2455,180 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
                 if added.iter().any(|row| row.row.row_uuid() == message.row_uuid())
         )),
         "fresh included Edge subscription must publish the authority result, got {events:?}"
+    );
+}
+
+/// A BandChat room owner's foreground keeps a maintained Edge subscription
+/// while a separately scoped guest foreground writes a message.  This is the
+/// complete browser path, rather than a direct client/core shortcut:
+///
+/// ```text
+/// owner foreground -> owner worker -> owner edge -> Core -> guest edge -> guest worker -> guest foreground
+/// guest foreground -> guest worker -> guest edge -> Core -> owner edge -> owner worker -> owner foreground
+/// ```
+///
+/// In particular, the owner's live message subscription must be refreshed by
+/// the guest's remote row after the membership policy source has been settled.
+#[test]
+fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() {
+    let schema = band_chat_message_schema();
+    let owner = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let guest = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let owner_foreground = open_db(0x61, owner, &schema);
+    let owner_worker = open_db(0x62, owner, &schema);
+    let owner_edge = open_db(0x63, AuthorSubject::SYSTEM, &schema);
+    let guest_edge = open_db(0x64, AuthorSubject::SYSTEM, &schema);
+    let guest_worker = open_db(0x65, guest, &schema);
+    let guest_foreground = open_db(0x66, guest, &schema);
+    let core = open_core(0x67, &schema);
+    owner_foreground.set_non_durable_client();
+    guest_foreground.set_non_durable_client();
+    owner_worker.set_relay_authority_session_owner_for_test();
+    guest_worker.set_relay_authority_session_owner_for_test();
+    owner_edge.set_relay_authority_session_owner_for_test();
+    guest_edge.set_relay_authority_session_owner_for_test();
+
+    let (owner_foreground_transport, owner_worker_downstream_transport) = duplex();
+    let _owner_foreground_upstream =
+        block_on(owner_foreground.connect_upstream(owner_foreground_transport));
+    let _owner_worker_subscriber =
+        owner_worker.accept_subscriber(owner_worker_downstream_transport, owner);
+    let (owner_worker_transport, owner_edge_transport) = duplex();
+    let _owner_worker_upstream = block_on(owner_worker.connect_upstream(owner_worker_transport));
+    let _owner_edge_subscriber = owner_edge.accept_scope_isolated_relay_subscriber_for_test(
+        owner_edge_transport,
+        owner,
+        BTreeMap::new(),
+        1,
+    );
+    let (_owner_edge_upstream, _owner_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(owner_edge, core, owner);
+
+    let (guest_foreground_transport, guest_worker_downstream_transport) = duplex();
+    let _guest_foreground_upstream =
+        block_on(guest_foreground.connect_upstream(guest_foreground_transport));
+    let _guest_worker_subscriber =
+        guest_worker.accept_subscriber(guest_worker_downstream_transport, guest);
+    let (guest_worker_transport, guest_edge_transport) = duplex();
+    let _guest_worker_upstream = block_on(guest_worker.connect_upstream(guest_worker_transport));
+    let _guest_edge_subscriber = guest_edge.accept_scope_isolated_relay_subscriber_for_test(
+        guest_edge_transport,
+        guest,
+        BTreeMap::new(),
+        1,
+    );
+    let (_guest_edge_upstream, _guest_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(guest_edge, core, guest);
+
+    let room = owner_foreground
+        .insert(
+            "rooms",
+            BTreeMap::from([(
+                "name".to_owned(),
+                Value::String("relay rehearsal".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("owner creates room");
+    for _ in 0..8 {
+        pump_two_browser_relays!(
+            owner_foreground,
+            owner_worker,
+            owner_edge,
+            core,
+            guest_edge,
+            guest_worker,
+            guest_foreground,
+            "settle room"
+        );
+    }
+    for member in [owner, guest] {
+        owner_foreground
+            .insert(
+                "room_members",
+                BTreeMap::from([
+                    ("room_id".to_owned(), Value::Uuid(room.row_uuid().0)),
+                    (
+                        "member_author".to_owned(),
+                        Value::String(member.canonical().to_owned()),
+                    ),
+                ]),
+                Default::default(),
+            )
+            .expect("owner admits room member");
+        for _ in 0..8 {
+            pump_two_browser_relays!(
+                owner_foreground,
+                owner_worker,
+                owner_edge,
+                core,
+                guest_edge,
+                guest_worker,
+                guest_foreground,
+                "settle room membership"
+            );
+        }
+    }
+
+    let messages = owner_foreground
+        .prepare_query(&Query::from("messages").filter(eq(col("room_id"), lit(room.row_uuid().0))))
+        .expect("prepare maintained room messages query");
+    let mut owner_subscription = block_on(owner_foreground.subscribe(
+        &messages,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("owner subscribes through scope relay");
+    for _ in 0..10 {
+        pump_two_browser_relays!(
+            owner_foreground,
+            owner_worker,
+            owner_edge,
+            core,
+            guest_edge,
+            guest_worker,
+            guest_foreground,
+            "establish owner message coverage"
+        );
+    }
+    let _opening = std::iter::from_fn(|| owner_subscription.try_next_event()).collect::<Vec<_>>();
+
+    let guest_message = guest_foreground
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("room_id".to_owned(), Value::Uuid(room.row_uuid().0)),
+                (
+                    "text".to_owned(),
+                    Value::String("guest arrives remotely".to_owned()),
+                ),
+            ]),
+            Default::default(),
+        )
+        .expect("guest writes through own scope relay");
+    for _ in 0..12 {
+        pump_two_browser_relays!(
+            owner_foreground,
+            owner_worker,
+            owner_edge,
+            core,
+            guest_edge,
+            guest_worker,
+            guest_foreground,
+            "deliver guest message to owner foreground"
+        );
+    }
+
+    let updates = std::iter::from_fn(|| owner_subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        updates.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, .. }
+                if added.iter().any(|row| row.row.row_uuid() == guest_message.row_uuid())
+        )),
+        "owner foreground missed the remote guest row through the relay chain: {updates:?}",
     );
 }
 
