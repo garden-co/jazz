@@ -1285,6 +1285,7 @@ async fn resident_recursive_limit_discards_staged_closure() {
 
     let mut rollback = database.open_batch();
     rollback.delete("edges", PrimaryKeyValue::U64(2));
+    rollback.delete("edges", PrimaryKeyValue::U64(3));
     database.commit_batch(rollback).await.unwrap();
 
     let subscription = database
