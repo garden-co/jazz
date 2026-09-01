@@ -181,6 +181,20 @@ impl PeerState {
         ) || matches!(self.transport_capability, RelayTransportCapability::MultiplexedRelay)
     }
 
+    /// The one immutable user binding selected by server-side scope-relay
+    /// admission. This stays on the transport capability rather than in the
+    /// connection's mutable session-claims slot: raw `SessionClaims` frames
+    /// and host-side refresh helpers must not replace it mid-connection.
+    pub(crate) fn admitted_scope_relay_binding(
+        &self,
+    ) -> Option<&DelegatedSessionBinding> {
+        match &self.transport_capability {
+            RelayTransportCapability::ScopeIsolatedClientRelay { binding, .. } => Some(binding),
+            RelayTransportCapability::OrdinarySession
+            | RelayTransportCapability::MultiplexedRelay => None,
+        }
+    }
+
     pub(crate) fn rejects_raw_session_claims(&self) -> bool {
         matches!(
             self.transport_capability,

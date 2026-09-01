@@ -2233,6 +2233,150 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     );
 }
 
+/// A scope-isolated relay carries one binding selected by server admission. A
+/// raw `SessionClaims` frame must neither replace that binding nor make the
+/// later terminal write proof use the forged editor role.
+///
+/// ```text
+/// viewer handshake ──scope relay──► Core
+///       │ raw { role: editor }         │ terminal proof remains viewer → Rejected
+///       └──────────────────────────────┘
+/// ```
+#[test]
+fn scope_isolated_relay_terminal_write_rejects_denied_handshake_claims() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let client = open_db(0xa8, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let viewer_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("viewer".to_owned()),
+    )]);
+    let hostile_editor_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("editor".to_owned()),
+    )]);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        viewer_claims,
+        7,
+    );
+
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(hostile_editor_claims.clone());
+    // Generic host refresh is valid for an ordinary Session link, but a
+    // scope-isolated relay must receive a new server-issued capability on
+    // reconnect rather than widen its immutable binding in place.
+
+    relay_transport
+        .send(SyncMessage::SessionClaims {
+            identity: alice,
+            claims: hostile_editor_claims.clone(),
+        })
+        .expect("hostile relay can send a raw wire frame");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("scope relay drops raw SessionClaims instead of adopting them");
+    assert_ne!(
+        server.node().borrow().session_claims_for(alice),
+        hostile_editor_claims,
+        "raw relay claims must not enter the node's mutable compatibility map"
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            cells("viewer must not write", false, alice),
+            Default::default(),
+        )
+        .expect("client can stage a mergeable candidate before terminal policy proof");
+    let tx_id = write.mergeable_tx_id();
+    let unit = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("staged candidate retains its exact commit unit");
+    relay_transport
+        .send(unit)
+        .expect("scope relay forwards the unchanged commit unit");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("terminal authority processes scope relay upload");
+
+    let fates = std::iter::from_fn(|| relay_transport.try_recv()).collect::<Vec<_>>();
+    assert!(
+        fates.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id: candidate, fate: Fate::Rejected(_), .. }
+                if *candidate == tx_id
+        )),
+        "the terminal proof must use the immutable viewer handshake binding, got {fates:?}"
+    );
+    assert!(matches!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .expect("terminal authority retains the upload outcome")
+            .0,
+        Fate::Rejected(_)
+    ));
+}
+
+/// Empty scope-relay claims are an admitted empty snapshot, not an invitation
+/// to use default, prior, or process-global claims when terminal policy proof
+/// runs.
+#[test]
+fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
+    let client = open_db(0xa9, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        BTreeMap::new(),
+        8,
+    );
+    let write = client
+        .insert(
+            "todos",
+            cells("empty claims must not write", false, alice),
+            Default::default(),
+        )
+        .expect("client can stage before the terminal policy decision");
+    let tx_id = write.mergeable_tx_id();
+    relay_transport
+        .send(
+            client
+                .node
+                .node
+                .borrow_mut()
+                .commit_unit_for(tx_id)
+                .expect("staged candidate retains its commit unit"),
+        )
+        .expect("scope relay forwards the unchanged commit unit");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("terminal authority processes empty-claims relay upload");
+    assert!(
+        std::iter::from_fn(|| relay_transport.try_recv()).any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id: candidate, fate: Fate::Rejected(_), .. }
+                if candidate == tx_id
+        )),
+        "an empty admitted binding must fail closed rather than inherit a policy subject"
+    );
+}
+
 /// A terminal support receiver belongs to one admitted link, even if another
 /// live link authenticates the same author with different claims before that
 /// receiver is first proved.

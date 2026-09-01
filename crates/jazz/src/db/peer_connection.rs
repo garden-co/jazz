@@ -401,7 +401,7 @@ where
                     CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => ingest_context.identity,
                 };
-                {
+                let admitted_write_authorization = {
                     let mut node = node.lock().await;
                     peer.prove_terminal_commit_authorization(
                         &mut node,
@@ -410,15 +410,15 @@ where
                         &versions,
                         tx.tx_id,
                     )
-                    .await?;
-                }
+                    .await?
+                };
                 Ok(node
                     .lock()
                     .await
                     .apply_sync_message_with_ingest_context(
                         SyncMessage::CommitUnit { tx, versions },
                         Some(CommitUnitIngestContext {
-                            admitted_write_authorization: true,
+                            admitted_write_authorization,
                             ..ingest_context
                         }),
                     )
@@ -856,6 +856,7 @@ where
     /// trusted authentication layer has accepted a refreshed session.
     pub fn update_authenticated_session_claims(&mut self, claims: BTreeMap<String, Value>) {
         let ConnectionLink::Subscriber(SubscriberConnectionState {
+            peer,
             session_claims,
             session_claim_revision,
             ..
@@ -863,6 +864,12 @@ where
         else {
             return;
         };
+        if peer.admitted_scope_relay_binding().is_some() {
+            // A scope relay receives a fresh immutable capability only through
+            // a new server-authenticated connection. Do not turn this generic
+            // host refresh hook into a mutable capability update.
+            return;
+        }
         if *session_claims == claims {
             return;
         }
@@ -875,6 +882,7 @@ where
     /// author identity.
     fn subscriber_session_claim_binding(&self) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
         let ConnectionLink::Subscriber(SubscriberConnectionState {
+            peer,
             ingest_context,
             session_claims,
             ..
@@ -882,6 +890,9 @@ where
         else {
             return None;
         };
+        if let Some(binding) = peer.admitted_scope_relay_binding() {
+            return Some((binding.identity, binding.claims.clone()));
+        }
         Some((ingest_context.identity, session_claims.clone()))
     }
 
@@ -890,6 +901,16 @@ where
     /// so this author-keyed compatibility state cannot select another live
     /// session's maintained view.
     fn bind_subscriber_session_claims(&self) {
+        if matches!(
+            &self.link,
+            ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. })
+                if peer.admitted_scope_relay_binding().is_some()
+        ) {
+            // All scope-relay policy work takes the immutable binding through
+            // `scoped_active_session_claims`; do not duplicate it into the
+            // author-keyed mutable compatibility map.
+            return;
+        }
         let Some((identity, claims)) = self.subscriber_session_claim_binding() else {
             return;
         };

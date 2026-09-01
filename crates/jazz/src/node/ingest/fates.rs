@@ -464,7 +464,10 @@ where
         Ok(true)
     }
 
-    pub(super) async fn version_satisfies_write_policy(
+    /// Evaluate one candidate under the active exact session scope. Terminal
+    /// relay admission uses this after its support proof before it may issue a
+    /// non-wire authorization receipt.
+    pub(crate) async fn version_satisfies_write_policy(
         &mut self,
         version: &VersionRecord,
         author: AuthorSubject,
