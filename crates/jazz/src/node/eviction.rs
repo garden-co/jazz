@@ -151,14 +151,13 @@ where
 
     /// Return metered edge-cache bytes, if every relevant class can be metered.
     pub async fn edge_cache_metered_bytes(&mut self) -> Result<Option<u64>, Error> {
-        let mut bytes = 0_u64;
-        for cf in self.edge_cache_metered_column_families().await? {
-            let Some(next) = self.database.approximate_class_bytes(&cf).await? else {
-                return Ok(None);
-            };
-            bytes = bytes.saturating_add(next);
-        }
-        Ok(Some(bytes))
+        let logical_families = self.edge_cache_metered_column_families().await?;
+        self.database
+            .approximate_class_bytes_for_logical_families(
+                logical_families.iter().map(String::as_str),
+            )
+            .await
+            .map_err(Error::from)
     }
 
     async fn evict_cold_inner(
