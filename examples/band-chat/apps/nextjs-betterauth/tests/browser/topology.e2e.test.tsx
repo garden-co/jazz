@@ -192,9 +192,9 @@ describe("BandChat cross-topology recovery", () => {
               await offline.wait({ tier: "local" });
               offlineMessageId = offline.value.id;
               expect(
-                (await owner!.db.all(app.messages.where({ roomId: roomId! }), { tier: "local" })).some(
-                  (message) => message.id === offlineMessageId,
-                ),
+                (
+                  await owner!.db.all(app.messages.where({ roomId: roomId! }), { tier: "local" })
+                ).some((message) => message.id === offlineMessageId),
               ).toBe(true);
             },
             faultsAfter: [{ kind: "reconnect", target: "owner" }],
