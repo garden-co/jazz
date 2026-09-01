@@ -617,7 +617,7 @@ where
             // visible until an authoritative generation advances.
             if local
                 .local_authority
-                .is_due(&authority_result_key, authoritative_generation)
+                .is_due(authority_result_key, authoritative_generation)
             {
                 let mut protected_row_keys = preserved_row_keys.clone();
                 if authoritative_generation == local.local_authority.generation() {
@@ -654,17 +654,14 @@ where
                     candidate_reconciliation
                         .replace_source(authority_result_key.clone(), authoritative_generation);
                 }
-                let exact_terminal_operations =
-                    self.take_pending_terminal_operations(authority_result_key);
                 let authority_delta = candidate_reconciliation
                     .reconcile(
-                        authority_result_key,
+                        &authority_result_key,
                         authoritative_generation,
                         &local.result_set,
                         &local.program_facts,
                         remote_members,
                         remote_facts,
-                        exact_terminal_operations,
                     )
                     .expect("the current exact authority source must reconcile");
                 // The local maintained graph may intentionally be behind the
@@ -751,7 +748,6 @@ where
                     let before = local.program_facts.contains(&fact);
                     fact_states.insert(fact, (before, false));
                 }
-                terminal_operations.extend(authority_delta.terminal_operations);
                 if suppressed_authoritative_change {
                     local
                         .local_authority

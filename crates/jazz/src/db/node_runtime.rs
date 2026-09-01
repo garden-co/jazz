@@ -3303,6 +3303,10 @@ where
                 retained.push(Rc::downgrade(&state));
                 continue;
             }
+            let peer_terminal_operations = delivered_authority_result
+                .as_ref()
+                .map(|key| node.borrow_mut().take_pending_terminal_operations(key))
+                .unwrap_or_default();
             let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
             // The browser worker owns the durable baseline, while the
             // main Db owns the application subscription and its
@@ -3509,6 +3513,59 @@ where
                     force_reset_event,
                 )
             } else {
+                if terminal_rows && !peer_terminal_operations.is_empty() {
+                    if let Some(maintained) = refresh.maintained.as_mut() {
+                        // The serving terminal is authoritative for
+                        // structural publication. Advance the local
+                        // Groove mirror for future resets without
+                        // publishing its redundant reconstruction.
+                        node.lock()
+                            .await
+                            .drain_local_maintained_view_subscription_state_with_waker(
+                                maintained,
+                                None,
+                                progress_waker,
+                            )
+                            .await?;
+                    }
+                    let settled = subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view.clone(),
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
+                    let terminal_layout = refresh
+                        .maintained
+                        .as_ref()
+                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "terminal operation arrived without a prepared root layout",
+                            )
+                        })?;
+                    let event = apply_terminal_operations_to_subscription_snapshot(
+                        &mut refresh.snapshot,
+                        &mut refresh.snapshot_index,
+                        peer_terminal_operations,
+                        None,
+                        terminal_layout,
+                        shape.query().table.as_str(),
+                        snapshot_tier,
+                        settled,
+                    )?;
+                    refresh.settled = settled;
+                    retained.push(Rc::downgrade(&state));
+                    if refresh.sender.unbounded_send(event).is_ok() {
+                        changed += 1;
+                    }
+                    continue;
+                }
                 let (maintained_update, suppressed_authoritative_change) =
                     if let Some(maintained) = refresh.maintained.as_mut() {
                         let mut node_ref = node.lock().await;
