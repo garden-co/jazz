@@ -683,6 +683,15 @@ not affect a rendered relation must not reorder neighboring children, while a
 child insert/order change replaces only its touched rendered parent group rather
 than scanning or diffing the accumulated view.
 
+Across peer sync, “delivered result” means the result derived by the receiving
+maintained program after it consumes the authority-covered source closure. The
+authority does not send its collector positions or structural edits. Explicit
+order terms, implicit row-id order, stable tie fields, and any user-defined
+stored ordering values are reproduced as query inputs at the receiver; the
+receiver-local collector alone turns them into application positions. This is
+what lets the same query remain meaningful when a local-first receiver also has
+eligible pending inputs that were absent from the authority's evaluation.
+
 ### 6.4.3 Aggregate result representation
 
 An aggregate or grouped query returns its results through the same row-shaped

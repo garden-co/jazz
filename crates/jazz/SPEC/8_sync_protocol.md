@@ -35,12 +35,13 @@ Invariant digest:
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may suppress a reset for a pre-cursor membership difference only when its server-stamped authorization-progress token matches the serving peer's current token for that reader and canonical binding view. `crates/jazz/src/peer.rs::tests::fast_authorization_progress_bounds_membership_resets` enforces both bounds.
 - `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
-- `INV-SYNC-28`: Before the reconstruction cut, structured-output wire v6 carries terminal resets and typed root/path edits atomically. At the cut it is retired; reconstruction and post-cut local publication are governed by target `INV-SYNC-31..35`.
+- `INV-SYNC-28`: The pre-reconstruction terminal carrier is historical scaffolding and is retired by `INV-SYNC-36`; it is not an authority-output compatibility contract.
 - `INV-SYNC-31`: A downstream subscription MUST synchronize canonical authored facts and their identity-preserving witness closure under an exact manifest/epoch/digest, never an application-projected row as replicated truth.
 - `INV-SYNC-32`: A receiver MUST select branch-key-qualified authored-history winners before projection, decode each synchronized fact in its authored schema, project it through the ordered catalogue lineage into the subscription read schema, and derive terminal output with its local IVM without supplementing unrelated local history.
 - `INV-SYNC-33`: The serving authority MUST decide visibility, membership, and settlement and ship only the safe, complete canonical closure plus identified authorized residual program from which the receiver can reproduce that authorized view; opaque admissions MUST be non-replayable across every authority/view/reader/branch-source/residual identity axis and their protected occurrence plus concrete version/layer witnesses.
 - `INV-SYNC-34`: A subscription is settled only when its receiver has verified every class of the complete reproducible input closure for the authority's declared manifest/epoch; reconnect, repair, reset, and recovery must re-establish that closure before reporting settlement.
 - `INV-SYNC-35`: A receiver MUST atomically and durably install a complete manifest, its facts, local IVM state/terminal, and any fast-known-state receipt before publication; it MUST expose neither a partial closure nor a fast receipt across a crash boundary.
+- `INV-SYNC-36`: Peer sync carries an exact authorized input closure, never authority-produced application terminal rows or ordered terminal operations. The receiver reconciles admitted authority inputs with tier-eligible local inputs and derives the only application terminal by running its local copy of the identified maintained Groove program.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
@@ -526,12 +527,14 @@ projected-row repair. A missing manifest member of **any** fact class is repaire
 by its stable fact identity and class; if exact repair cannot prove the same
 manifest/epoch, the authority sends a new reset closure with a new manifest.
 
-`ViewUpdate` v6 terminal operations are legacy compatibility scaffolding, not
-the target replication contract. Reconstruction receivers never use them as an
-input to correctness, repair, or settlement; they may compare them only as
-diagnostics while the carrier is retired. They are never authoritative, and the
-compatibility path must be removed rather than generalized into a second sync
-engine.
+Authority-produced terminal operations are not part of the replication
+contract. They cannot be an input to correctness, repair, settlement, or
+application publication and MUST NOT appear in a post-cut `ViewUpdate`. The
+pre-cut `terminal_operations` carrier and terminal-reset cache are retired by
+`INV-SYNC-36`; implementations remove them rather than retaining an empty,
+diagnostic, compatibility, or facade-side application path. Ordered terminal
+operations remain an internal output of the receiver's own Groove graph and may
+cross the local Rust-to-host binding ABI, which is not peer sync.
 
 **Hard aggregate boundary; exceptions require a new protocol decision.** An
 ordinary aggregate is reconstructible only when its entire admitted canonical
@@ -588,22 +591,15 @@ and `cold_reset_bulk_ingest_matches_incremental_ingest`
 The remaining reset-specific bypass and the move to an `OrderedKvStorage`
 transaction are implementation work, not protocol invariants.
 
-**Structured-output delivery (v6 and reconstruction cut).** Before the
-reconstruction cut, a legacy v6 terminal reset replaces the receiver's complete
-cached terminal state before any following FIFO edit. Incremental updates carry
-typed, stable-keyed root/path `Insert`, `Update`, `Remove`, and `Move`
-operations emitted by the Groove terminal; they do not carry relation edges,
-row batches for facade-side assembly, or whole-result replacements.
-`SyncMessage::ViewUpdate` carries those terminal operations as one logical
-message, and generic transport fragmentation publishes no partial semantic
-update.
-
-At the reconstruction cut, `INV-SYNC-28` is retired: a received terminal reset
-is not a source of truth and cannot settle a view. The post-cut atomic local
-publication rule is target `INV-SYNC-35`, after the receiver has atomically
-installed a verified closure and run local IVM. Bindings then see one complete
-local terminal reset/edit sequence, never a partial publication. Row/version
-payload references and dedup remain separate from local terminal delivery.
+**Structured-output delivery after the reconstruction cut.** `INV-SYNC-28` is
+retired. Peer sync carries no terminal reset or root/path `Insert`, `Update`,
+`Remove`, or `Move`. The receiver atomically installs the verified covered
+inputs, runs its local maintained program, and publishes the resulting local
+terminal reset/edit sequence only after that graph quiesces (`INV-SYNC-35..36`).
+Bindings therefore see one receiver-local sequence, never a partial authority
+sequence or a mixture of authority indices and local-overlay indices.
+Row/version payload references and peer payload dedup remain separate from
+local terminal delivery.
 
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.

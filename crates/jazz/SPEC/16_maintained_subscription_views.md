@@ -18,6 +18,7 @@ Invariant digest:
 - `groove/SPEC/INVARIANTS.md::INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
 - `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
+- `INV-SYNC-36`: An authority synchronizes an exact, authorized input closure, never its application-output terminal. The receiver reconciles that closure with the local inputs permitted by the requested tier and runs the same maintained Groove program used for local changes. Only that receiver-local terminal may publish application rows or ordered structural edits.
 
 ## Details
 
@@ -124,7 +125,89 @@ terminal cache as a substitute for either fact family. Thus simple roots, join
 results, and nested array relations all share one rule: manifest-admitted inputs
 enter the local graph; terminal rows leave it.
 
-### 16.1.1 Application subscription delta contract
+### 16.1.1 Covered input, one local maintained result
+
+`INV-SYNC-36` fixes the authority/receiver boundary. An authority result is an
+exactly scoped **covered input closure**, not a cached application result. It
+contains the canonical row versions and typed program facts that the authorized
+residual program may observe, together with the witnesses and completeness
+evidence required to trust that closure. A receiver stages those inputs before
+making their membership visible to its maintained graph. A membership or
+relation fact whose referenced row version has not been admitted as part of the
+same exact authority closure is incomplete and cannot advance settlement or
+enter the graph.
+
+Every input change then enters the same receiver-local lowered Groove program:
+
+```text
+exact authority-covered inputs ----+
+                                    +--> one maintained Groove graph --> app output
+eligible local inputs --------------+
+```
+
+The requested tier determines which inputs participate and when the first
+answer may be published; it does not select another evaluator:
+
+- a strict remote authority tier waits for a fresh settled closure for its
+  exact usage-site subscription and evaluates only that authorized closure;
+- a local-first result may additionally contain eligible local pending state,
+  so it can differ meaningfully from the authority's simultaneous result while
+  preserving the same query semantics;
+- a local-only internal execution suppresses upstream registration but still
+  uses the same lowered graph over its local source.
+
+The authority never chooses positions in the receiver's application value.
+Explicit `order_by`, implicit row-id order, stable tie breakers, relation-local
+windows, and stored user-defined ordering data are inputs to the receiving
+query program. Its local Groove collector derives the ordered root and nested
+terminal edits after authority and local inputs have been reconciled. An
+authority-produced root row, nested snapshot, `Insert`, `Update`, `Remove`, or
+`Move` operation MUST NOT cross peer sync as result truth and MUST NOT be
+applied by a facade-side reducer. Such an operation was computed without the
+receiver's eligible local overlay and may name an index that is false for the
+receiver's actual result.
+
+Worked examples:
+
+- **Strict remote root query.** The authority admits rows A and C plus the
+  witnesses proving that closure complete. The receiver installs A and C as
+  its remote source and runs the query's filter and order locally. It does not
+  install an authority-produced `[A, C]` result cache.
+- **Local-first nested insertion.** The authority closure contains children A
+  and C while the receiver has an eligible pending child B. The receiving
+  child collector computes `[A, B, C]`. An authority operation saying “insert C
+  at index 1” would be wrong for this receiver and is therefore never sent.
+- **Permission revocation.** A successor authority closure retracts the opaque
+  admission or safe source witness that supported row A. That input retraction
+  enters the same local graph and its collector removes every affected root or
+  descendant occurrence. The client does not re-evaluate the hidden policy and
+  the authority does not send a presentation-level remove.
+- **Reconnect.** A fresh usage-site subscription cannot reuse its detached
+  predecessor's result or terminal sequence. It verifies a fresh exact closure,
+  installs it, and lets the local graph publish the corresponding reset.
+
+This rule does not make clients authorization authorities. The serving
+authority still selects and proves the safe closure. The receiver runs only the
+identified residual query over admitted inputs; it does not inspect hidden
+policy rows, supplement missing evidence from unrelated local history, or
+reinterpret an opaque admission. Relays retain and forward closures only under
+their exact policy-scoped authority-result identity.
+
+Remote one-shot reads use the same mechanism for a bounded lifetime: register a
+fresh usage-site coverage owner, await its exact settled closure, run the shared
+local program to quiescence, materialize its terminal once, and finalize the
+coverage owner on success, cancellation, or error. They do not inspect an
+equal-shaped predecessor's terminal cache or execute a separate semantic scan.
+
+Settlement is downstream of local evaluation. A receiver may report a
+generation settled only after the complete exact closure has been staged, all
+referenced content witnesses are present, the corresponding local Groove tick
+has quiesced, and its locally derived terminal represents that generation.
+Installing carriers, publishing membership, and evaluating the graph are one
+ordered semantic boundary even when storage commits and runtime scheduling use
+several internal steps.
+
+### 16.1.2 Application subscription delta contract
 
 The application-facing subscription stream is a stream of result deltas. A
 delta contains row additions, row updates, row removals, ordered-position data
@@ -148,7 +231,7 @@ and add/update changes even when the entering row's stored cells did not change.
 Per-event work is expected to be O(changed rows), not O(result set); this is the
 application-surface form of `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 
-### 16.1.2 Fresh one-shot coverage
+### 16.1.3 Fresh one-shot coverage
 
 A new remote settled one-shot is a new usage site, not a request to inspect
 whatever equal-shape state happens to be materialized locally. Each fresh
@@ -158,12 +241,13 @@ generation advancement alone is insufficient: a late update addressed to an
 already detached equal-shape predecessor must not acknowledge its replacement
 (`INV-SYNC-30`).
 
-This usage-site freshness boundary does not create a second query algebra or
-require a maintained terminal stream for the one-shot. It may still materialize
-and post-process the shared lowered shape. It also leaves synchronous/local
-one-shots unchanged and permits still-live maintained subscriptions to reuse
-their maintained coverage groups; only a new remote settled one-shot must prove
-coverage for its own current wire subscription.
+This usage-site freshness boundary does not create a second query algebra.
+The fresh one-shot owns a transient instance of the same coverage and local
+maintained-evaluation lifecycle, materializes one terminal result, and then
+finalizes it. Synchronous/local one-shots remain local, and a still-live
+maintained subscription may reuse its exact maintained coverage group; only a
+new remote settled one-shot must prove coverage for its own current wire
+subscription.
 
 ### 16.2 Policy composition
 
