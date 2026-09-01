@@ -441,6 +441,162 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
 
+    // A public transaction can mix an inherited first-head copy with a plain
+    // first-head insert.  Both operation identities are bound to their exact
+    // versions, so authority admits the whole unit (and can replay it) rather
+    // than treating the copy as a causal dependency or a best-effort sidecar.
+    let batch_head = branch_selector(0x5b);
+    let batch_head_key = schema
+        .project_branch_view_selector(table, &batch_head)
+        .unwrap()
+        .0;
+    let batch_insert_row = row(0x5c);
+    let (mut batch_tx, mut batch_versions) = make_unit(
+        TxId::new(TxTime::from(21), node(0x5d)),
+        allowed,
+        source_tx,
+        batch_head_key.clone(),
+        uuid::Uuid::from_bytes([0x5b; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    batch_tx.n_total_writes = 2;
+    batch_versions.push(
+        VersionRecord::from_cells(
+            table,
+            schema.version_id(),
+            batch_insert_row,
+            Vec::new(),
+            allowed,
+            batch_tx.tx_id.time.physical_ms(),
+            allowed,
+            batch_tx.tx_id.time.physical_ms(),
+            &BTreeMap::from([
+                ("branch_id".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([0x5b; 16]))),
+                ("title".to_owned(), v("exact head insert")),
+                ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
+            ]),
+            None,
+        )
+        .unwrap()
+        .with_branch_key(batch_head_key.clone()),
+    );
+    batch_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .branch_write_intents
+        .push(crate::tx::BranchWriteIntent {
+            version: 1,
+            physical_table_id,
+            authored_schema: schema.version_id(),
+            row_uuid: batch_insert_row,
+            head: batch_head_key.clone(),
+            operation: crate::tx::BranchWriteOperation::ExactHeadInsert,
+        });
+    batch_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .branch_write_intents
+        .sort_by(|left, right| {
+            (left.physical_table_id, left.authored_schema, left.row_uuid, &left.head).cmp(&(
+                right.physical_table_id,
+                right.authored_schema,
+                right.row_uuid,
+                &right.head,
+            ))
+        });
+    let batch_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        batch_tx.clone(),
+        batch_versions.clone(),
+        21,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, batch_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(batch_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+    let replay_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        batch_tx.clone(),
+        batch_versions,
+        21,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, replay_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(batch_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+    assert!(authority
+        .visible_current_cells_in_branch("tasks", &batch_head, source_row)
+        .unwrap()
+        .is_some());
+    assert!(authority
+        .visible_current_cells_in_branch("tasks", &batch_head, batch_insert_row)
+        .unwrap()
+        .is_some());
+
+    // Stripping just the exact-head member's descriptor rejects the complete
+    // unit.  Neither the authorized view copy nor the ordinary insert may
+    // become durable on its own.
+    let rejected_head = branch_selector(0x5e);
+    let rejected_head_key = schema
+        .project_branch_view_selector(table, &rejected_head)
+        .unwrap()
+        .0;
+    let rejected_insert_row = row(0x5f);
+    let (mut rejected_tx, mut rejected_versions) = make_unit(
+        TxId::new(TxTime::from(24), node(0x60)),
+        allowed,
+        source_tx,
+        rejected_head_key.clone(),
+        uuid::Uuid::from_bytes([0x5e; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    rejected_tx.n_total_writes = 2;
+    rejected_versions.push(
+        VersionRecord::from_cells(
+            table,
+            schema.version_id(),
+            rejected_insert_row,
+            Vec::new(),
+            allowed,
+            rejected_tx.tx_id.time.physical_ms(),
+            allowed,
+            rejected_tx.tx_id.time.physical_ms(),
+            &BTreeMap::from([
+                ("branch_id".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([0x5e; 16]))),
+                ("title".to_owned(), v("must reject atomically")),
+                ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
+            ]),
+            None,
+        )
+        .unwrap()
+        .with_branch_key(rejected_head_key.clone()),
+    );
+    let provenance = rejected_tx.contribution_merge.as_mut().unwrap();
+    provenance.branch_write_intents[0].head = rejected_head_key.clone();
+    // The raw payload has two branch versions but only the view-copy proof.
+    // This is deliberately malformed canonical metadata, not a policy denial.
+    let rejected_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        rejected_tx.clone(),
+        rejected_versions,
+        24,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, rejected_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(rejected_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+    for rejected_row in [source_row, rejected_insert_row] {
+        assert!(authority
+            .visible_current_cells_in_branch("tasks", &rejected_head, rejected_row)
+            .unwrap()
+            .is_none());
+    }
+
     // The frozen variant proves the exact source at its declared frontier,
     // rather than silently falling back to the authority's current schema or
     // current base winner.
