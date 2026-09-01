@@ -158,7 +158,7 @@ where
         &self,
         connection_epoch: u64,
         message: SyncMessage,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let connections = self.connections.borrow().clone();
         let mut candidates = Vec::new();
         for candidate in connections {
@@ -176,13 +176,22 @@ where
                 candidates.len()
             ));
         };
+        // A test frame has the same receipt eligibility as a physical arrival
+        // on this link. In particular, a still-attached predecessor can be
+        // useful for exercising stale application, but must not manufacture
+        // durable authority disclosure after a successor replaced it.
+        let authority_receipt_eligible = self
+            .active_authority_view_receipts
+            .borrow()
+            .as_ref()
+            .is_some_and(|receipts| receipts.connection_epoch == connection_epoch);
         let mut connection = connection.lock().await;
         connection.staged_inbound.push_back(StagedInboundMessage {
             message,
-            authority_receipt_eligible: true,
+            authority_receipt_eligible,
         });
         self.schedule_tick(TickUrgency::Immediate);
-        Ok(())
+        Ok(authority_receipt_eligible)
     }
 
     /// Wrap a node for serving subscriber links.

@@ -932,7 +932,7 @@ where
         &self,
         handle: &TestUpstreamConnectionHandle,
         message: SyncMessage,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.node
             .stage_upstream_message_for_test(handle.connection_epoch, message)
             .await

@@ -480,8 +480,11 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
-    block_on(worker.stage_upstream_message_for_test(&upstream, incomplete))
-        .expect("stage incomplete authority view update");
+    assert!(
+        block_on(worker.stage_upstream_message_for_test(&upstream, incomplete))
+            .expect("stage incomplete authority view update"),
+        "the selected upstream may mint an authority receipt"
+    );
     worker.tick().expect("discover missing authority version");
     worker.tick().expect("emit real missing-version fetch");
     let fetches = upstream.take_outbound_for_test();
@@ -492,20 +495,23 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         )),
         "incomplete authority state must use the normal FetchRowVersions request"
     );
-    block_on(worker.stage_upstream_message_for_test(
-        &upstream,
-        SyncMessage::RowVersionPayloads {
-            version_bundles: vec![VersionBundle {
-                scope: VersionBundleScope::CompleteTransaction,
-                tx: transaction.clone(),
-                versions: vec![version],
-                fate: Fate::Accepted,
-                global_time: Some(GlobalTime(1)),
-                durability: DurabilityTier::Global,
-            }],
-        },
-    ))
-    .expect("stage selected authority repair payload");
+    assert!(
+        block_on(worker.stage_upstream_message_for_test(
+            &upstream,
+            SyncMessage::RowVersionPayloads {
+                version_bundles: vec![VersionBundle {
+                    scope: VersionBundleScope::CompleteTransaction,
+                    tx: transaction.clone(),
+                    versions: vec![version],
+                    fate: Fate::Accepted,
+                    global_time: Some(GlobalTime(1)),
+                    durability: DurabilityTier::Global,
+                }],
+            },
+        ))
+        .expect("stage selected authority repair payload"),
+        "the selected authority payload may mint durable repair authority"
+    );
     worker
         .tick()
         .expect("apply authority repair and original view");
@@ -519,6 +525,32 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         "the same-scope foreground receives the repaired authority body"
     );
     block_on(worker.flush_for_test()).expect("durably flush repaired worker state");
+
+    // A second still-attached upstream replaces the test receipt owner. The
+    // first handle may still stage a frame for ordinary stale-path testing,
+    // but it must not mark that frame as disclosure-authorizing.
+    let (successor_transport, _successor_state) = scripted_authority(None);
+    let successor = block_on(worker.connect_upstream_for_test(successor_transport));
+    assert!(
+        !block_on(worker.stage_upstream_message_for_test(
+            &upstream,
+            SyncMessage::ChunkRequestBatch(jazz::protocol::ChunkRequestBatch {
+                requests: Vec::new(),
+            }),
+        ))
+        .expect("stage stale upstream frame"),
+        "a still-attached predecessor cannot mint an authority receipt"
+    );
+    assert!(
+        block_on(worker.stage_upstream_message_for_test(
+            &successor,
+            SyncMessage::ChunkRequestBatch(jazz::protocol::ChunkRequestBatch {
+                requests: Vec::new(),
+            }),
+        ))
+        .expect("stage successor upstream frame"),
+        "only the selected successor may mint an authority receipt"
+    );
 
     assert!(foreground.detach_connection(&foreground_upstream));
     assert!(worker.detach_connection(&worker_foreground));
