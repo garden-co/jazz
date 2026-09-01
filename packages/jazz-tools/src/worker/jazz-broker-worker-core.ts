@@ -1,5 +1,5 @@
 import type { WasmDb } from "jazz-wasm";
-import { loadWasmModule, type WasmModule } from "../runtime/client.js";
+import { loadWasmModule, type WasmModule } from "../runtime/wasm-loader.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
 import {
   acquireBrowserPhysicalDatabaseEpoch,
