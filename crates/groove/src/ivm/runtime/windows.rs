@@ -292,9 +292,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let root_groups_before = direct_tree_slot
-        .is_none()
-        .then(|| state.groups.keys_set());
+    let root_groups_before = direct_tree_slot.is_none().then(|| state.groups.keys_set());
     let mut operations = Vec::new();
     for delta in &deltas {
         let group_key =
@@ -444,7 +442,9 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             debug_assert!(before_index.is_some());
         }
     }
-    state.groups.remove_empty_touched(touched_group_keys.iter().cloned());
+    state
+        .groups
+        .remove_empty_touched(touched_group_keys.iter().cloned());
     if let Some(root_groups_before) = root_groups_before {
         let root_groups_after = state.groups.keys_set();
         operations.retain(|operation| {

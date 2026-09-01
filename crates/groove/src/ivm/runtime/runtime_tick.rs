@@ -652,33 +652,27 @@ impl IncrementalEvaluation<'_> {
                 _ => {}
             }
         }
-        runtime
-            .operator_states
-            .extend(std::mem::take(&mut self.operator_states).into_iter().filter(
-                |(key, _)| runtime.graph.node(key.node).is_some(),
-            ));
-        runtime
-            .arrangement_states
-            .extend(
-                std::mem::take(&mut self.arrangement_states)
-                    .into_iter()
-                    .filter(|(key, _)| runtime.graph.node(key.input).is_some()),
-            );
-        runtime
-            .arrangement_keys_by_input
-            .extend(
-                std::mem::take(&mut self.arrangement_keys_by_input)
-                    .into_iter()
-                    .filter(|(node, _)| runtime.graph.node(*node).is_some()),
-            );
+        runtime.operator_states.extend(
+            std::mem::take(&mut self.operator_states)
+                .into_iter()
+                .filter(|(key, _)| runtime.graph.node(key.node).is_some()),
+        );
+        runtime.arrangement_states.extend(
+            std::mem::take(&mut self.arrangement_states)
+                .into_iter()
+                .filter(|(key, _)| runtime.graph.node(key.input).is_some()),
+        );
+        runtime.arrangement_keys_by_input.extend(
+            std::mem::take(&mut self.arrangement_keys_by_input)
+                .into_iter()
+                .filter(|(node, _)| runtime.graph.node(*node).is_some()),
+        );
 
-        runtime
-            .eval_memo
-            .extend(
-                std::mem::take(&mut self.eval_memo)
-                    .into_iter()
-                    .filter(|(key, _)| runtime.graph.node(key.node).is_some()),
-            );
+        runtime.eval_memo.extend(
+            std::mem::take(&mut self.eval_memo)
+                .into_iter()
+                .filter(|(key, _)| runtime.graph.node(key.node).is_some()),
+        );
         runtime.eval_memo_bytes = runtime
             .eval_memo
             .values()
@@ -703,13 +697,11 @@ impl IncrementalEvaluation<'_> {
         runtime
             .node_meta
             .retain(|node, _| !self.relevant_nodes.contains(node));
-        runtime
-            .node_meta
-            .extend(
-                std::mem::take(&mut self.node_meta)
-                    .into_iter()
-                    .filter(|(node, _)| runtime.graph.node(*node).is_some()),
-            );
+        runtime.node_meta.extend(
+            std::mem::take(&mut self.node_meta)
+                .into_iter()
+                .filter(|(node, _)| runtime.graph.node(*node).is_some()),
+        );
         runtime.table_frontiers = std::mem::take(&mut self.table_frontiers);
         runtime.binding_frontiers = std::mem::take(&mut self.binding_frontiers);
         runtime.current_tick = self.current_tick;
@@ -1443,13 +1435,11 @@ impl<'a> EvaluationSession<'a> {
         for node in &self.relevant_nodes {
             runtime.arrangement_keys_by_input.remove(node);
         }
-        runtime
-            .arrangement_keys_by_input
-            .extend(
-                self.arrangement_keys_by_input
-                    .into_iter()
-                    .filter(|(node, _)| runtime.graph.node(*node).is_some()),
-            );
+        runtime.arrangement_keys_by_input.extend(
+            self.arrangement_keys_by_input
+                .into_iter()
+                .filter(|(node, _)| runtime.graph.node(*node).is_some()),
+        );
         runtime
             .eval_memo
             .retain(|key, _| !self.relevant_nodes.contains(&key.node));

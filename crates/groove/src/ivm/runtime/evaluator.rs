@@ -1942,13 +1942,16 @@ impl TickEvaluator<'_> {
                     top_by_sort_key(output_desc, delta.raw(), top_by)?,
                     delta.record.clone(),
                 );
-                state.value_mut().groups.update(group_prefix.clone(), |group| {
-                    let weight = group.entry(order_key.clone()).or_default();
-                    *weight += delta.weight;
-                    if *weight == 0 {
-                        group.remove(&order_key);
-                    }
-                });
+                state
+                    .value_mut()
+                    .groups
+                    .update(group_prefix.clone(), |group| {
+                        let weight = group.entry(order_key.clone()).or_default();
+                        *weight += delta.weight;
+                        if *weight == 0 {
+                            group.remove(&order_key);
+                        }
+                    });
             }
         }
         state
