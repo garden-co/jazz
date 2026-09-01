@@ -2810,10 +2810,14 @@ fn branch_view_copy_base_storage_value(
         BranchViewCopyBase::Current(branch) => {
             let tag = schema.tag("current").expect("declared current base");
             let payload = &schema.case(tag).expect("declared current base").payload;
-            let record =
-                BranchViewCopyCurrentBaseStorageRecord::encode(payload, branch.canonical_bytes())?
-                    .record()
-                    .clone();
+            let record = BranchViewCopyCurrentBaseStorageRecord::encode(
+                payload,
+                branch
+                    .try_canonical_bytes()
+                    .map_err(|_| Error::InvalidStoredValue("branch-view copy base is invalid"))?,
+            )?
+            .record()
+            .clone();
             Ok(records::EnumValue::new(tag, record))
         }
         BranchViewCopyBase::Snapshot { branch, snapshot } => {
@@ -2831,7 +2835,9 @@ fn branch_view_copy_base_storage_value(
                 .collect::<Result<Vec<_>, _>>()?;
             let record = BranchViewCopySnapshotBaseStorageRecord::encode(
                 payload,
-                branch.canonical_bytes(),
+                branch
+                    .try_canonical_bytes()
+                    .map_err(|_| Error::InvalidStoredValue("branch-view copy base is invalid"))?,
                 snapshot.owner.0,
                 snapshot.global_base.0,
                 snapshot.local_base.0,
@@ -2851,7 +2857,10 @@ fn branch_view_copy_storage_record(
     Ok(BranchViewCopyStorageRecord::encode(
         descriptor,
         evidence.version,
-        evidence.head.canonical_bytes(),
+        evidence
+            .head
+            .try_canonical_bytes()
+            .map_err(|_| Error::InvalidStoredValue("branch-view copy head is invalid"))?,
         branch_view_copy_base_storage_value(&evidence.base)?,
         evidence.table.clone(),
         evidence.row_uuid.0,

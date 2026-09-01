@@ -486,6 +486,7 @@ where
                             || !self
                                 .branch_view_copy_satisfies_read_for_write_visibility(
                                     evidence,
+                                    intent.authored_schema,
                                     permission_subject,
                                     Some(tx.tx_id),
                                 )

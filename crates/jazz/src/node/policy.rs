@@ -203,6 +203,7 @@ where
     pub(super) async fn branch_view_copy_satisfies_read_for_write_visibility(
         &mut self,
         evidence: &crate::tx::BranchViewCopyEvidence,
+        authored_schema: SchemaVersionId,
         author: AuthorSubject,
         candidate_tx_id: Option<TxId>,
     ) -> Result<bool, Error> {
@@ -210,7 +211,7 @@ where
             return Ok(true);
         }
         let Some(source) = self
-            .resolve_branch_view_copy_evidence(evidence, candidate_tx_id)
+            .resolve_branch_view_copy_evidence(evidence, authored_schema, candidate_tx_id)
             .await?
         else {
             return Ok(false);

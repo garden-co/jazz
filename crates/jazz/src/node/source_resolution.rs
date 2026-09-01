@@ -107,13 +107,13 @@ where
     pub(super) async fn resolve_branch_view_copy_evidence(
         &mut self,
         evidence: &BranchViewCopyEvidence,
+        authored_schema: SchemaVersionId,
         candidate_tx_id: Option<TxId>,
     ) -> Result<Option<VersionRow>, Error> {
         if evidence.version != 1 {
             return Ok(None);
         }
-        let schema_version = self.catalogue.current_write_schema.schema;
-        let _table_schema = match self.table_in_schema(&evidence.table, schema_version) {
+        let _table_schema = match self.table_in_schema(&evidence.table, authored_schema) {
             Ok(table) => table,
             Err(Error::TableNotFound(_)) => return Ok(None),
             Err(error) => return Err(error),
@@ -134,7 +134,7 @@ where
         let (head_content, head_deletions) = self
             .branch_winners_for_schema(
                 &evidence.table,
-                schema_version,
+                authored_schema,
                 DurabilityTier::Local,
                 &head,
                 None,
@@ -155,7 +155,7 @@ where
         let (content, deletions) = self
             .branch_winners_for_schema(
                 &evidence.table,
-                schema_version,
+                authored_schema,
                 DurabilityTier::Local,
                 &base_key,
                 snapshot,
