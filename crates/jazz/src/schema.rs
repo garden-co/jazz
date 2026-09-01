@@ -43,6 +43,10 @@ pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// authority identity. Result-store keys remain bounded without reducing the
 /// runtime policy boundary to a hash-only identity.
 pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_bindings";
+/// Append-only proof that a scope-isolated relay actually received a row
+/// version from its upstream authority. This is distinct from live result
+/// membership, whose later removals only govern future disclosure.
+pub const SCOPE_RELAY_REPAIR_LEDGER_STORE: &str = "jazz_scope_relay_repair_ledger";
 /// Direct groove record store used to distinguish clean shutdown from crash
 /// recovery windows for bounded startup repair.
 pub const CLEAN_CLOSE_MARKERS_STORE: &str = "jazz_clean_close_markers";
@@ -650,6 +654,25 @@ impl RuntimeSchema {
                     ("fact_digest", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([("fact", ValueType::Bytes)]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                SCOPE_RELAY_REPAIR_LEDGER_STORE,
+                RecordDescriptor::new([
+                    ("scope_digest", ValueType::Bytes),
+                    ("physical_table_id", ValueType::U64),
+                    ("row_id", ValueType::Uuid),
+                    ("tx_time", ValueType::U64),
+                    ("tx_node", ValueType::Uuid),
+                ]),
+                // Full scope components are values so host supplied strings
+                // never enter a backend's bounded ordered-key space.
+                RecordDescriptor::new([
+                    ("storage_owner", ValueType::String),
+                    (
+                        "admitted_subject",
+                        ValueType::Nullable(Box::new(ValueType::String)),
+                    ),
+                ]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CLEAN_CLOSE_MARKERS_STORE,

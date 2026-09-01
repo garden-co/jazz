@@ -9,6 +9,7 @@ use super::node_runtime::{
     route_upstream_subscription_rejection, take_relay_upstream_subscription_owner,
 };
 use super::*;
+use crate::protocol::expand_version_carriers;
 pub(super) fn route_subscription_refresh_failure(
     subscriptions: &SubscriptionList,
     error: &Error,
@@ -4273,22 +4274,39 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
-                            let repair_policy_binding = admitted_request_policy_binding(
-                                *ingest_context,
-                                peer,
-                                session_claim_binding.clone(),
-                                delegated_session,
-                            );
-                            let Some(repair_policy_binding) = repair_policy_binding else {
-                                drop_peer_request(&self.node);
-                                continue;
+                            let repair_context = if *local_receiver {
+                                // A local foreground can repair from the
+                                // topology-owned worker only when that worker
+                                // has an admitted durable scope. Generic relay
+                                // paths remain fail-closed/forward upstream.
+                                if delegated_session.is_some()
+                                    || self.node.borrow().client_relay_scope().is_none()
+                                {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                crate::peer::RepairServingContext::ScopeIsolatedClientRelay
+                            } else {
+                                let repair_policy_binding = admitted_request_policy_binding(
+                                    *ingest_context,
+                                    peer,
+                                    session_claim_binding.clone(),
+                                    delegated_session,
+                                );
+                                let Some(repair_policy_binding) = repair_policy_binding else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                crate::peer::RepairServingContext::Authority {
+                                    policy_binding: repair_policy_binding,
+                                }
                             };
                             let responses = {
                                 let mut node = self.node.lock().await;
                                 peer.serve_row_versions(
                                     &mut node,
                                     &requests,
-                                    repair_policy_binding,
+                                    repair_context,
                                 )
                                 .await?
                             };
@@ -5226,12 +5244,29 @@ where
             }
         }
     }
+    // Record concrete authoritative payloads only after their normal batch is
+    // accepted. This is intentionally independent of live result membership:
+    // a later removal governs future delivery, not retained bytes.
+    let ledger_bundles = if relay_authority_session_owner {
+        pending
+            .iter()
+            .filter(|update| update.authority_receipt_eligible)
+            .flat_map(|update| {
+                expand_version_carriers(&update.parts.version_carriers).unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let updates = std::mem::take(pending)
         .into_iter()
         .map(|update| update.parts)
         .collect::<Vec<_>>();
     let mut node_ref = node.lock().await;
     node_ref.apply_view_updates_in_batch(updates).await?;
+    node_ref
+        .record_scope_relay_authoritative_bundles(&ledger_bundles)
+        .await?;
     drop(node_ref);
     if relay_authority_session_owner {
         // A relay authority view is input to every locally served browser

@@ -511,7 +511,10 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     // payload is considered: logical-name matching must fail closed.
     let unknown = crate::protocol::RowVersionRef::new("unknown", row_uuid, tx_id);
     assert!(
-        core.row_version_payloads_for_refs(std::slice::from_ref(&unknown), AuthorSubject::SYSTEM)
+        core.row_version_payloads_for_refs(
+            std::slice::from_ref(&unknown),
+            crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(AuthorSubject::SYSTEM),
+        )
             .is_err(),
         "the serving repair path must reject an unknown projected table too"
     );

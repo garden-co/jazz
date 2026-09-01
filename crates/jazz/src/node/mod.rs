@@ -46,8 +46,8 @@ use crate::protocol::{
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
     AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy,
-    SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE, TableSchema,
-    registered_column_transform,
+    SCOPE_RELAY_REPAIR_LEDGER_STORE, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
+    TableSchema, registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;

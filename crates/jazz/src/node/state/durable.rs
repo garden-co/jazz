@@ -2,6 +2,72 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Record exact row versions successfully applied from this durable
+    /// relay's selected authority. Deliberately append-only: later authority
+    /// removal controls future delivery but cannot erase retained knowledge.
+    pub(crate) async fn record_scope_relay_authoritative_bundles(
+        &self,
+        bundles: &[VersionBundle],
+    ) -> Result<(), Error> {
+        let Some(scope) = self.client_relay_scope() else {
+            return Ok(());
+        };
+        let (owner, subject) = scope.durable_components();
+        let digest = scope.durable_digest();
+        let store = self.database.direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
+        let mut writes = Vec::new();
+        for bundle in bundles {
+            for version in &bundle.versions {
+                let table_id = self.physical_table_id_for_schema(version.schema_version(), version.table())?;
+                writes.push(DirectRecordStoreWrite::Set {
+                    key: vec![
+                        Value::Bytes(digest.to_vec()), Value::U64(table_id.0),
+                        Value::Uuid(version.row_uuid().0), Value::U64(bundle.tx.tx_id.time.0),
+                        Value::Uuid(bundle.tx.tx_id.node.0),
+                    ],
+                    value: vec![
+                        Value::String(owner.to_owned()),
+                        Value::Nullable(subject.as_ref().map(|value| Box::new(Value::String(value.clone())))),
+                    ],
+                });
+            }
+        }
+        if !writes.is_empty() { store.write_many(&writes).await?; }
+        Ok(())
+    }
+
+    pub(crate) async fn scope_relay_repair_ledger_contains(
+        &self,
+        table_id: PhysicalTableId,
+        request: &RowVersionRef,
+    ) -> Result<bool, Error> {
+        let Some(scope) = self.client_relay_scope() else { return Ok(false) };
+        let (expected_owner, expected_subject) = scope.durable_components();
+        let store = self.database.direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
+        let record = store.get(&[
+            Value::Bytes(scope.durable_digest().to_vec()), Value::U64(table_id.0),
+            Value::Uuid(request.row_uuid.0), Value::U64(request.tx_time.0),
+            Value::Uuid(request.tx_node_id.0),
+        ]).await?;
+        let Some(record) = record else { return Ok(false) };
+        let owner = match record.get_idx(0)? {
+            Value::String(value) => value,
+            _ => return Err(Error::InvalidStoredValue("scope relay ledger owner must be string")),
+        };
+        let subject = match record.get_idx(1)? {
+            Value::Nullable(None) => None,
+            Value::Nullable(Some(value)) => match value.as_ref() {
+                Value::String(value) => Some(value.to_owned()),
+                _ => return Err(Error::InvalidStoredValue("scope relay ledger subject must be string")),
+            },
+            _ => return Err(Error::InvalidStoredValue("scope relay ledger subject must be nullable string")),
+        };
+        if owner != expected_owner || subject != expected_subject {
+            return Err(Error::InvalidStoredValue("scope relay ledger value does not match admitted scope"));
+        }
+        Ok(true)
+    }
+
     /// Return local synchronization counters.
     pub fn sync_metrics(&self) -> &SyncMetrics {
         &self.sync_metrics

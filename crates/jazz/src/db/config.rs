@@ -14,6 +14,28 @@ pub struct ClientRelayScope {
 }
 
 impl ClientRelayScope {
+    pub(crate) fn durable_digest(&self) -> [u8; 32] {
+        let mut material = Vec::new();
+        material.extend_from_slice(&(self.storage_owner.len() as u64).to_be_bytes());
+        material.extend_from_slice(self.storage_owner.as_bytes());
+        match self.admitted_session {
+            Some(subject) => {
+                material.push(1);
+                material.extend_from_slice(&(subject.canonical().len() as u64).to_be_bytes());
+                material.extend_from_slice(subject.canonical().as_bytes());
+            }
+            None => material.push(0),
+        }
+        blake3::derive_key("jazz.scope-relay-repair-ledger.v1", &material)
+    }
+
+    pub(crate) fn durable_components(&self) -> (&str, Option<String>) {
+        (
+            &self.storage_owner,
+            self.admitted_session
+                .map(|subject| subject.canonical().to_owned()),
+        )
+    }
     /// Construct a scope from a host-admitted canonical owner encoding.
     ///
     /// # Safety

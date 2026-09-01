@@ -186,24 +186,43 @@ impl PeerState {
             "direct repair is missing a terminated permission subject",
         ))?;
         let claims = node.session_claims_for(identity);
-        self.serve_row_versions(node, &requests, (identity, claims)).await
+        self.serve_row_versions(
+            node,
+            &requests,
+            RepairServingContext::Authority {
+                policy_binding: (identity, claims),
+            },
+        )
+        .await
     }
 
     /// Build repair-lane responses for visible requested row-version payloads.
-    pub async fn serve_row_versions<S>(
+    pub(crate) async fn serve_row_versions<S>(
         &mut self,
         node: &mut NodeState<S>,
         requests: &[RowVersionRef],
-        policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
+        context: RepairServingContext,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
     {
-        let (identity, claims) = policy_binding;
-        let versions = node
-            .scoped_active_session_claims(identity, claims)
-            .row_version_payloads_for_refs(requests, identity)
-            .await?;
+        let versions = match context {
+            RepairServingContext::Authority {
+                policy_binding: (identity, claims),
+            } => node
+                .scoped_active_session_claims(identity, claims)
+                .row_version_payloads_for_refs(
+                    requests,
+                    crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(identity),
+                )
+                .await?,
+            RepairServingContext::ScopeIsolatedClientRelay => node
+                .row_version_payloads_for_refs(
+                    requests,
+                    crate::node::RowVersionRepairAuthorization::RetainedScopeLedger,
+                )
+                .await?,
+        };
         Ok(vec![SyncMessage::RowVersionPayloads {
             version_bundles: versions,
         }])
@@ -224,4 +243,14 @@ impl PeerState {
         *self.metrics.maintained_subscription_view
     }
 
+}
+
+/// Chosen by the topology boundary, rather than inferred from `PeerRole`.
+/// Multiplexed relays receive no retained-knowledge capability and must ask an
+/// authority to serve repairs.
+pub(crate) enum RepairServingContext {
+    Authority {
+        policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
+    },
+    ScopeIsolatedClientRelay,
 }

@@ -1,3 +1,12 @@
+/// The authorization source for a row-version repair response. Scope relays
+/// may disclose only exact row versions in their durable authority ledger;
+/// they never re-evaluate a foreground's read policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RowVersionRepairAuthorization {
+    EnforceReadPolicy(AuthorSubject),
+    RetainedScopeLedger,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -245,7 +254,7 @@ where
     pub(crate) async fn row_version_payloads_for_refs(
         &mut self,
         requests: &[RowVersionRef],
-        identity: AuthorSubject,
+        authorization: RowVersionRepairAuthorization,
     ) -> Result<Vec<VersionBundle>, Error> {
         let mut by_tx = BTreeMap::<TxId, Vec<VersionRow>>::new();
         for request in requests {
@@ -321,15 +330,27 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "repair request physical table must have a schema mapping",
             ))?;
-            if !self.dry_run_read_current_allows_in_schema(
-                &request.table,
-                request.row_uuid,
-                request_schema,
-                identity,
-            )
-            .await?
-            {
-                continue;
+            match authorization {
+                RowVersionRepairAuthorization::EnforceReadPolicy(identity) => {
+                    if !self.dry_run_read_current_allows_in_schema(
+                        &request.table,
+                        request.row_uuid,
+                        request_schema,
+                        identity,
+                    )
+                    .await?
+                    {
+                        continue;
+                    }
+                }
+                RowVersionRepairAuthorization::RetainedScopeLedger => {
+                    if !self
+                        .scope_relay_repair_ledger_contains(requested_table_id, request)
+                        .await?
+                    {
+                        continue;
+                    }
+                }
             }
             for (table_id, version) in matching_versions {
                 if table_id == requested_table_id {
