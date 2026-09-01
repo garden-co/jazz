@@ -3,7 +3,7 @@ use crate::legacy_test_future::{
     FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ids::{NodeUuid, RowUuid};
 use crate::node::MergeableCommit;
@@ -83,6 +83,42 @@ fn settled_member(row_uuid: RowUuid, position: u64) -> ResultMemberEntry {
         ))
         .with_settle_position(Some(GlobalTime(position))),
     )
+}
+
+#[test]
+fn cold_deletion_witness_keeps_retained_member_pending_late_content() {
+    // A cold snapshot can co-batch a static deletion witness with Stream A
+    // membership, while Stream B's content witness arrives later. The old
+    // downstream member must survive that gap, a genuinely absent member
+    // must be removed, and a new member remains gated on its content witness.
+    let retained = settled_member(row(1), 1);
+    let deleted = settled_member(row(2), 2);
+    let pending = settled_member(row(3), 3);
+    let previous = BTreeSet::from([retained.clone(), deleted.clone()]);
+    let active = BTreeSet::from([retained.clone(), pending.clone()]);
+    let mut states = BTreeMap::new();
+
+    reconcile_retained_members_after_initial_deletion_witness(
+        &mut states,
+        &previous,
+        &active,
+        &BTreeSet::new(),
+    );
+    assert_eq!(states.get(&retained), Some(&(true, true)));
+    assert_eq!(states.get(&deleted), Some(&(true, false)));
+    assert_eq!(states.get(&pending), Some(&(false, false)));
+
+    // Once Stream B arrives, the newly observed member becomes publishable;
+    // the retained member was never transiently removed.
+    reconcile_retained_members_after_initial_deletion_witness(
+        &mut states,
+        &previous,
+        &active,
+        &BTreeSet::from([pending.clone()]),
+    );
+    assert_eq!(states.get(&retained), Some(&(true, true)));
+    assert_eq!(states.get(&deleted), Some(&(true, false)));
+    assert_eq!(states.get(&pending), Some(&(false, true)));
 }
 
 #[test]

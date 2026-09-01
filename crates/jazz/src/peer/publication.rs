@@ -57,6 +57,25 @@ fn ordinary_current_content_member(member: &ResultMemberEntry) -> bool {
         && row.batch.is_none())
 }
 
+/// Reconcile a retained downstream result set against a cold maintained-view
+/// snapshot that contains a static deletion witness. The active membership is
+/// authoritative for removals. Publishability only gates members the
+/// downstream has not already received, because Stream A can arrive before
+/// Stream B's content witness during cold hydration.
+fn reconcile_retained_members_after_initial_deletion_witness(
+    states: &mut BTreeMap<ResultMemberEntry, (bool, bool)>,
+    previous_members: &BTreeSet<ResultMemberEntry>,
+    active_members: &BTreeSet<ResultMemberEntry>,
+    published_members: &BTreeSet<ResultMemberEntry>,
+) {
+    for member in previous_members.union(active_members) {
+        let was_published = previous_members.contains(member);
+        let is_published = active_members.contains(member)
+            && (was_published || published_members.contains(member));
+        states.insert(member.clone(), (was_published, is_published));
+    }
+}
+
 /// Canonical reconciliation retained by the coverage-group owner while it
 /// publishes established siblings before attempting a fallible clone reset.
 pub(crate) struct ReconciledMaintainedSubscriptionClone {
@@ -1038,23 +1057,28 @@ impl PeerState {
             }
         }
         if initial_deletion_witness {
-            let hydrated_members = self
+            let (hydrated_active_members, hydrated_published_members) = self
                 .publication_states
                 .get(&subscription)
                 .and_then(|state| state.maintained_subscription_view.as_ref())
-                .map(|view| view.maintained.published_result_members())
+                .map(|view| {
+                    (
+                        view.maintained
+                            .active_result_members()
+                            .into_iter()
+                            .collect::<BTreeSet<_>>(),
+                        view.maintained.published_result_members().clone(),
+                    )
+                })
                 .ok_or(Error::InvalidStoredValue(
                     "initial maintained subscription snapshot missing after receive",
                 ))?;
-            for member in previous_member_result_set.union(hydrated_members) {
-                states.insert(
-                    member.clone(),
-                    (
-                        previous_member_result_set.contains(member),
-                        hydrated_members.contains(member),
-                    ),
-                );
-            }
+            reconcile_retained_members_after_initial_deletion_witness(
+                &mut states,
+                &previous_member_result_set,
+                &hydrated_active_members,
+                &hydrated_published_members,
+            );
         }
         if self.role == PeerRole::Relay
             && result_table_filter.is_none()
