@@ -809,6 +809,20 @@ fn validate_server_config(
         _ => {}
     }
 
+    if auth_config
+        .admin_secret
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("admin secret cannot be empty".to_owned());
+    }
+    if auth_config
+        .backend_secret
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("backend secret cannot be empty".to_owned());
+    }
 
     if topology.is_edge() && auth_config.admin_secret.is_none() {
         return Err("edge mode requires --admin-secret / JAZZ_ADMIN_SECRET when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
