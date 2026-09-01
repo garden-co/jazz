@@ -35,6 +35,7 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. } => false,

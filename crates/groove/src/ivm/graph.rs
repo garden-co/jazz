@@ -298,6 +298,10 @@ impl InputSourceId {
         self.runtime_namespace == runtime_namespace
     }
 
+    pub(crate) fn was_allocated_by(self, runtime_namespace: u64, next_local: u64) -> bool {
+        self.belongs_to(runtime_namespace) && self.local < next_local
+    }
+
     pub(crate) fn binding_shape(self) -> String {
         format!(
             "__groove_input_source_{}_{}",

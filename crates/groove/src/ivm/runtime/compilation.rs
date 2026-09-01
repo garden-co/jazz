@@ -153,14 +153,22 @@ impl IvmRuntime {
                 if !inferred_output.registry_compatible_with(output) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
+                let shape = id.binding_shape();
+                if !self.input_source_names.contains(&shape) {
+                    return Err(IvmRuntimeError::InputSourceRetired);
+                }
+                let Some(source) = self.binding_sources.get(&shape) else {
+                    return Err(IvmRuntimeError::InputSourceRetired);
+                };
+                if source.descriptor != *output {
+                    return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(shape));
+                }
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         // A mutable input uses the same runtime delta and
                         // hydration machinery as a prepared binding source;
                         // only its GraphBuilder/API ownership differs.
-                        OpType::BindingSource(BindingSourceOp {
-                            shape: id.binding_shape(),
-                        }),
+                        OpType::BindingSource(BindingSourceOp { shape }),
                         [],
                         *output,
                     ),

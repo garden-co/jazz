@@ -82,6 +82,7 @@ pub(super) fn collect_binding_source_fingerprint(
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => {}
     }
@@ -126,6 +127,7 @@ pub(super) fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder)
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::BindingSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => false,

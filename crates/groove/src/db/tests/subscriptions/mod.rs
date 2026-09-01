@@ -1014,7 +1014,7 @@ async fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
     recursive.commit_batch(batch).await.unwrap();
     assert_eq!(
-        expect_recv_vals(&subscription),
+        expect_try_recv_vals(&subscription),
         vec![
             (vec![Value::U64(1), Value::U64(2)], 1),
             (vec![Value::U64(1), Value::U64(3)], 1),
@@ -1401,7 +1401,7 @@ async fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() 
         .unwrap();
     database.flush().await.unwrap();
     assert_eq!(
-        expect_recv_vals(&subscription),
+        expect_try_recv_vals(&subscription),
         [(vec![7_u64.into(), "Blue Train".into()], 1)]
     );
 
@@ -1413,7 +1413,7 @@ async fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() 
     database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
-        expect_recv_vals(&subscription),
+        expect_try_recv_vals(&subscription),
         [(vec![8_u64.into(), "Giant Steps".into()], 1)]
     );
 }
@@ -1740,8 +1740,8 @@ async fn input_source_replacements_are_atomic_idempotent_and_revoke_cleanly() {
     .await
     .unwrap();
     let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
-    let left = database.allocate_input_source();
-    let right = database.allocate_input_source();
+    let left = database.allocate_input_source(descriptor);
+    let right = database.allocate_input_source(descriptor);
     let graph = GraphBuilder::join(
         GraphBuilder::input_source(left, descriptor),
         GraphBuilder::input_source(right, descriptor),
@@ -1842,9 +1842,9 @@ async fn input_source_batch_rejects_descriptor_conflicts_before_mutating_any_sou
     )
     .await
     .unwrap();
-    let id = database.allocate_input_source();
     let u64_descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
     let string_descriptor = RecordDescriptor::new([("id", ColumnType::String)]);
+    let id = database.allocate_input_source(u64_descriptor);
     let subscription = database
         .subscribe_one_sink(GraphBuilder::input_source(id, u64_descriptor))
         .await
@@ -1880,9 +1880,12 @@ async fn input_source_batch_rejects_descriptor_conflicts_before_mutating_any_sou
         }])
         .await
         .unwrap();
-    assert_eq!(expect_recv_vals(&subscription), [(vec![Value::U64(1)], 1)]);
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        [(vec![Value::U64(1)], 1)]
+    );
 
-    let other = database.allocate_input_source();
+    let other = database.allocate_input_source(u64_descriptor);
     let other_subscription = database
         .subscribe_one_sink(GraphBuilder::input_source(other, u64_descriptor))
         .await
@@ -1918,12 +1921,148 @@ async fn input_sources_cannot_cross_runtime_boundaries() {
         .await
         .unwrap();
     let mut other = Database::new(albums_schema(), storage).await.unwrap();
-    let id = owner.allocate_input_source();
     let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let id = owner.allocate_input_source(descriptor);
     assert!(matches!(
         other
             .subscribe_one_sink(GraphBuilder::input_source(id, descriptor))
             .await,
+        Err(Error::IvmRuntime(IvmRuntimeError::ForeignInputSource))
+    ));
+}
+
+#[futures_test::test]
+async fn input_source_descriptor_is_registered_at_graph_compile_and_mismatches_are_recoverable() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let string_descriptor = RecordDescriptor::new([("value", ColumnType::String)]);
+    let u64_descriptor = RecordDescriptor::new([("value", ColumnType::U64)]);
+    let id = database.allocate_input_source(string_descriptor);
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::input_source(id, string_descriptor))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    // A second graph cannot reinterpret an already-compiled source identity.
+    assert!(matches!(
+        database
+            .subscribe_one_sink(GraphBuilder::input_source(id, u64_descriptor))
+            .await,
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::BindingSourceDescriptorMismatch(_)
+        ))
+    ));
+
+    // The rejected replacement is preflight-only: it must neither poison the
+    // database nor install refcounts under the wrong descriptor.
+    assert!(matches!(
+        database
+            .replace_input_sources([InputSourceReplacement {
+                id,
+                descriptor: u64_descriptor,
+                records: vec![u64_descriptor.create(&[Value::U64(7)]).unwrap()],
+            }])
+            .await,
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::BindingSourceDescriptorMismatch(_)
+        ))
+    ));
+    assert!(subscription.try_recv().is_err());
+
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id,
+            descriptor: string_descriptor,
+            records: vec![
+                string_descriptor
+                    .create(&[Value::String("accepted after mismatch".to_owned())])
+                    .unwrap(),
+            ],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        [(vec![Value::String("accepted after mismatch".to_owned())], 1)]
+    );
+}
+
+#[futures_test::test]
+async fn retiring_input_sources_retracts_live_records_and_releases_runtime_state() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let id = database.allocate_input_source(descriptor);
+    assert_eq!(database.ivm_runtime.active_input_source_state_count(), 1);
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::input_source(id, descriptor))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let record = descriptor.create(&[Value::U64(11)]).unwrap();
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id,
+            descriptor,
+            records: vec![record],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        [(vec![Value::U64(11)], 1)]
+    );
+
+    database.retire_input_sources([id]).await.unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        [(vec![Value::U64(11)], -1)]
+    );
+    assert_eq!(database.ivm_runtime.active_input_source_state_count(), 0);
+    assert!(matches!(
+        database.retire_input_sources([id]).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::InputSourceRetired))
+    ));
+    assert!(matches!(
+        database
+            .replace_input_sources([InputSourceReplacement {
+                id,
+                descriptor,
+                records: vec![],
+            }])
+            .await,
+        Err(Error::IvmRuntime(IvmRuntimeError::InputSourceRetired))
+    ));
+
+    // Retired identities have no tombstone map: allocation is monotone, while
+    // active source state returns to its baseline after each short-lived use.
+    for _ in 0..16 {
+        let transient = database.allocate_input_source(descriptor);
+        database.retire_input_sources([transient]).await.unwrap();
+        assert_eq!(database.ivm_runtime.active_input_source_state_count(), 0);
+    }
+}
+
+#[futures_test::test]
+async fn input_source_retirement_rejects_foreign_runtime_identity() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid storage families");
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let mut owner = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut other = Database::new(albums_schema(), storage).await.unwrap();
+    let foreign = owner.allocate_input_source(descriptor);
+    assert!(matches!(
+        other.retire_input_sources([foreign]).await,
         Err(Error::IvmRuntime(IvmRuntimeError::ForeignInputSource))
     ));
 }

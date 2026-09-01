@@ -108,6 +108,7 @@ fn collect_binding_source_descriptor_fields(
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => {}
     }
@@ -159,6 +160,7 @@ fn collect_binding_source_projected_fields(
         GraphBuilder::BindingSource { .. }
         | GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => {}
     }

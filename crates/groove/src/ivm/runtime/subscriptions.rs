@@ -2516,13 +2516,22 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::ForeignInputSource);
             }
             let name = id.binding_shape();
-            if self.binding_sources.contains_key(&name) && !self.input_source_names.contains(&name)
-            {
-                return Err(IvmRuntimeError::InputSourceNameInUse(name));
+            if !self.input_source_names.contains(&name) {
+                return Err(
+                    if id.was_allocated_by(
+                        self.input_source_runtime_namespace,
+                        self.next_input_source_id,
+                    ) {
+                        IvmRuntimeError::InputSourceRetired
+                    } else {
+                        IvmRuntimeError::InputSourceNameInUse(name)
+                    },
+                );
             }
-            if let Some(source) = self.binding_sources.get(&name)
-                && source.descriptor != *descriptor
-            {
+            let Some(source) = self.binding_sources.get(&name) else {
+                return Err(IvmRuntimeError::InputSourceRetired);
+            };
+            if source.descriptor != *descriptor {
                 return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(name));
             }
         }
@@ -2530,20 +2539,10 @@ impl IvmRuntime {
         let mut deltas = Vec::new();
         for (id, (descriptor, replacement)) in canonical {
             let name = id.binding_shape();
-            if !self.binding_sources.contains_key(&name) {
-                self.input_source_names.insert(name.clone());
-                self.binding_sources.insert(
-                    name.clone(),
-                    BindingSourceState {
-                        descriptor,
-                        refcounts: HashMap::default(),
-                    },
-                );
-            }
             let source = self
                 .binding_sources
                 .get_mut(&name)
-                .expect("input source was just installed or already resident");
+                .expect("preflight retained every active input source");
             debug_assert_eq!(source.descriptor, descriptor);
             let previous = source
                 .refcounts
@@ -2586,6 +2585,84 @@ impl IvmRuntime {
             None,
         )
         .await
+    }
+
+    /// Retire runtime-owned input sources permanently.
+    ///
+    /// Live records are first retracted through one ordinary tick. Only after
+    /// that tick has quiesced are the source descriptor, refcounts, frontier,
+    /// and runtime name removed. Retained graph nodes may remain resident, but
+    /// henceforth observe the source as empty; retired identities cannot be
+    /// replaced or compiled again.
+    pub async fn retire_input_sources<S>(
+        &mut self,
+        ids: impl IntoIterator<Item = InputSourceId>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        let ids = ids.into_iter().collect::<BTreeSet<_>>();
+        for id in &ids {
+            if !id.belongs_to(self.input_source_runtime_namespace) {
+                return Err(IvmRuntimeError::ForeignInputSource);
+            }
+            let name = id.binding_shape();
+            if !self.input_source_names.contains(&name) || !self.binding_sources.contains_key(&name)
+            {
+                return Err(IvmRuntimeError::InputSourceRetired);
+            }
+        }
+
+        let mut deltas = Vec::new();
+        for id in &ids {
+            let name = id.binding_shape();
+            let source = self
+                .binding_sources
+                .get_mut(&name)
+                .expect("retirement preflight retained every active input source");
+            let records = source
+                .refcounts
+                .keys()
+                .map(|key| RecordDelta {
+                    record: key.0.clone().into(),
+                    weight: -1,
+                })
+                .collect::<Vec<_>>();
+            if !records.is_empty() {
+                deltas.push(BindingDelta {
+                    shape: name,
+                    descriptor: source.descriptor,
+                    deltas: records,
+                });
+            }
+            source.refcounts.clear();
+        }
+
+        let metrics = if deltas.is_empty() {
+            self.drive_pending_incremental().await?;
+            TickMetrics::default()
+        } else {
+            self.tick_with_params(
+                Vec::new(),
+                deltas,
+                OwnedStorage::new(Rc::clone(storage)),
+                None,
+            )
+            .await?
+        };
+        for id in ids {
+            let name = id.binding_shape();
+            self.binding_sources.remove(&name);
+            self.input_source_names.remove(&name);
+            self.binding_frontiers.remove(&name);
+        }
+        Ok(metrics)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_input_source_state_count(&self) -> usize {
+        self.input_source_names.len()
     }
 
     pub async fn subscribe_one_sink<S>(

@@ -135,6 +135,15 @@ pub(crate) async fn prepare_and_lower_query_program(
                     }));
                 }
             };
+        if graph_contains_input_source(&resolved_source.graph) {
+            return Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Runtime(
+                    "runtime-owned Groove input sources cannot be used as Jazz query sources"
+                        .to_owned(),
+                )],
+                explain: explain_with_request(&request, explain),
+            }));
+        }
         explain.physical.push(format!(
             "source {:?} ({:?}) -> resolved table {}",
             source,
@@ -336,6 +345,7 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
             GraphBuilder::InlineRecords { output, .. }
             | GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
+            GraphBuilder::InputSource { .. } => None,
             GraphBuilder::Project { fields, .. } => Some(
                 fields
                     .iter()
@@ -690,6 +700,15 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
     }
 }
 
+/// Jazz query lowering owns declarative sources only. A mutable Groove input
+/// is a receiver-local runtime adapter, so it must be composed after lowering
+/// rather than smuggled through an app/query source resolver.
+fn graph_contains_input_source(graph: &GraphBuilder) -> bool {
+    graph_builder_postorder(graph)
+        .into_iter()
+        .any(|node| matches!(node, GraphBuilder::InputSource { .. }))
+}
+
 /// Return builder nodes in child-before-parent order without consuming the
 /// calling thread's stack. Builder graphs are finite by construction; shared
 /// children are intentionally visited once per structural occurrence, matching
@@ -730,6 +749,7 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
             }
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::InputSource { .. }
             | GraphBuilder::Index { .. }
             | GraphBuilder::FrontierSource { .. }
             | GraphBuilder::BindingSource { .. } => {}

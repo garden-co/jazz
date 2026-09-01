@@ -287,8 +287,9 @@ impl IvmRuntime {
         Ok(runtime)
     }
 
-    /// Allocate one opaque, runtime-local mutable input identity.
-    pub fn allocate_input_source(&mut self) -> InputSourceId {
+    /// Allocate one opaque, runtime-local mutable input identity with its
+    /// permanent record descriptor.
+    pub fn allocate_input_source(&mut self, descriptor: RecordDescriptor) -> InputSourceId {
         let id = InputSourceId::new(
             self.input_source_runtime_namespace,
             self.next_input_source_id,
@@ -297,6 +298,20 @@ impl IvmRuntime {
             .next_input_source_id
             .checked_add(1)
             .expect("input source IDs must not wrap within one runtime");
+        let shape = id.binding_shape();
+        let was_new = self.input_source_names.insert(shape.clone());
+        debug_assert!(was_new, "fresh input IDs must have fresh binding shapes");
+        let previous = self.binding_sources.insert(
+            shape,
+            BindingSourceState {
+                descriptor,
+                refcounts: HashMap::default(),
+            },
+        );
+        debug_assert!(
+            previous.is_none(),
+            "fresh input IDs must have no source state"
+        );
         id
     }
 
@@ -445,6 +460,8 @@ pub enum IvmRuntimeError {
     InputSourceNameInUse(String),
     #[error("input source belongs to a different IVM runtime")]
     ForeignInputSource,
+    #[error("input source has been retired")]
+    InputSourceRetired,
     #[error("duplicate schema version {version} for table {table}")]
     DuplicateTableVariant { table: String, version: u64 },
     #[error(transparent)]
