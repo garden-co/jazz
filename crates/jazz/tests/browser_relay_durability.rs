@@ -546,10 +546,23 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     worker
         .tick()
         .expect("apply and forward core fate downstream");
-    assert_scheduled_urgencies(
-        &worker_scheduler,
-        &[TickUrgency::AfterCurrentTurn],
-        "core fate ingress at the worker",
+    let ingress_wakes = worker_scheduler.take_urgencies();
+    assert!(
+        ingress_wakes.contains(&TickUrgency::AfterCurrentTurn),
+        "core fate ingress must schedule owner-turn fate publication: {ingress_wakes:?}"
+    );
+    // A concurrent authoritative membership addition may also request an
+    // Immediate Local wake (INV-EDGE-21). That internal wake is intentionally
+    // not a second public fate projection, so assert the observable turn
+    // boundary instead of treating its optional scheduler request as a stable
+    // wire-level event.
+    main_thread
+        .tick()
+        .expect("a Local wake before the owner turn cannot publish the core fate");
+    assert_eq!(
+        global_wait.get(),
+        None,
+        "the worker must not publish a Global fate before its scheduled owner turn"
     );
     worker
         .tick()
@@ -601,10 +614,19 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
         1
     );
     let events = std::iter::from_fn(|| edge_subscription.try_next_event()).collect::<Vec<_>>();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        SubscriptionEvent::Delta { added, .. } if added.len() == 1
-    )));
+    let additions = events
+        .iter()
+        .filter(|event| matches!(event, SubscriptionEvent::Delta { added, .. } if added.len() == 1))
+        .count();
+    assert_eq!(
+        additions, 1,
+        "the internal Local wake must contribute to one public Edge projection, not a duplicate: {events:?}"
+    );
+    assert_eq!(
+        events.len(),
+        1,
+        "the worker authority source must not create a second public projection: {events:?}"
+    );
 
     // A second mutation after the relay has installed Edge coverage must make
     // the full main -> worker -> core -> worker -> main round trip without
@@ -623,10 +645,25 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     core.tick().expect("accept update at core");
     worker_scheduler.clear();
     worker.tick().expect("forward update fate");
-    assert_scheduled_urgencies(
-        &worker_scheduler,
-        &[TickUrgency::AfterCurrentTurn],
-        "update fate ingress at the worker",
+    let update_ingress_wakes = worker_scheduler.take_urgencies();
+    assert!(
+        update_ingress_wakes.contains(&TickUrgency::AfterCurrentTurn),
+        "update fate ingress must schedule owner-turn fate publication: {update_ingress_wakes:?}"
+    );
+    main_thread
+        .tick()
+        .expect("a Local wake before the owner turn cannot publish the update fate");
+    assert!(
+        !matches!(
+            main_thread
+                .write_state(update_tx)
+                .expect("update state before owner turn"),
+            jazz::db::WriteState {
+                durability: DurabilityTier::Global,
+                ..
+            }
+        ),
+        "the worker must not publish the update's Global fate before its owner turn"
     );
     worker
         .tick()
