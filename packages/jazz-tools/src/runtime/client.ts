@@ -901,8 +901,12 @@ export class JazzClient {
       admin_secret?: string;
       backend_secret?: string;
       backend_session?: Session;
-    } = { jwt_token: this.context.jwtToken ?? null };
-    if (this.context.adminSecret) {
+    } = { jwt_token: this.context.backendSecret ? null : (this.context.jwtToken ?? null) };
+    // A backend open is a separate trusted-serving credential. Do not send an
+    // incidental admin secret alongside it: server admission gives admin
+    // precedence, which would turn this runtime's SYSTEM backend authority
+    // into its adapter fallback wire identity.
+    if (this.context.adminSecret && !this.context.backendSecret) {
       payload.admin_secret = this.context.adminSecret;
     }
     if (this.context.backendSecret) {

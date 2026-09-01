@@ -419,7 +419,24 @@ describe("JazzClient.updateAuthToken", () => {
 
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({
-      jwt_token: "new.jwt.token",
+      jwt_token: null,
+      backend_secret: "backend-abc",
+    });
+  });
+
+  it("does not mix an admin credential into a backend transport refresh", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      ...makeContext(),
+      adminSecret: "admin-xyz",
+      backendSecret: "backend-abc",
+    });
+
+    client.updateAuthToken("new.jwt.token");
+
+    const arg = runtime.updateAuth.mock.calls[0][0] as string;
+    expect(JSON.parse(arg)).toEqual({
+      jwt_token: null,
       backend_secret: "backend-abc",
     });
   });
@@ -486,7 +503,7 @@ describe("JazzClient.updateCookieSession", () => {
 
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({
-      jwt_token: "initial.jwt.token",
+      jwt_token: null,
       backend_secret: "backend-secret",
       backend_session: refreshed,
     });
