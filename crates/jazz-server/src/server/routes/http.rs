@@ -1308,6 +1308,16 @@ pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> imp
             )
                 .into_response();
         }
+        if state.topology.is_edge() && state.runtime_for_client().is_none() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "not_ready",
+                    "component": "runtime",
+                })),
+            )
+                .into_response();
+        }
         return Json(serde_json::json!({
             "status": "healthy"
         }))

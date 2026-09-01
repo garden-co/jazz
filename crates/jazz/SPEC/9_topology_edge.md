@@ -310,6 +310,14 @@ transaction, or sync engine. CORS, WebSocket paths, health endpoints, quota
 limits, and dashboard or deployment configuration are shell/product concerns
 around this role ladder.
 
+`/health` is an operational readiness endpoint, not a liveness probe. It
+returns `503 Service Unavailable` while shutdown is in progress, when an Edge
+upstream has failed fatally, or when an Edge has no runtime eligible for client
+sessions; those outcomes use the existing shutdown or upstream-failure response
+bodies, except that the missing Edge runtime reports
+`{"status":"not_ready","component":"runtime"}`. A fixed or offline Edge with a
+ready runtime remains healthy, and Core health semantics are unchanged.
+
 **Dynamic-catalogue bootstrap.** Publishing a schema alone does not make a
 dynamically catalogued serving authority ready to serve session writes. Before
 it accepts an uploaded commit unit, an authority MUST publish a permissions head
