@@ -955,8 +955,7 @@ impl ClientDb {
         // Install the cancellation guard before the first await: forwarder
         // draining is part of shutdown, and cancellation there must still
         // leave every retained facade terminal and wake concurrent shutdowns.
-        let mut completion =
-            ShutdownCompletion::new(Rc::clone(&self.inner), backend, tick_driver);
+        let mut completion = ShutdownCompletion::new(Rc::clone(&self.inner), backend, tick_driver);
         let mut completions = Vec::with_capacity(forwarders.len());
         for SubscriptionForwarder {
             cancellation,
