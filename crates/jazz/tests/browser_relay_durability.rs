@@ -7,22 +7,25 @@ use std::rc::Rc;
 mod common;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts, SubscriptionEvent,
-    TickScheduler, TickUrgency, Transport, block_on,
+    ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts,
+    SubscriptionEvent, TickScheduler, TickUrgency, Transport, block_on,
 };
 use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
-use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CommitUnitTrust, CurrentRow};
 use jazz::protocol::{
-    RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
+    RegisterShapeOptions, RowVersionRef, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionBundleScope, VersionRecord,
+    ViewUpdatePayload,
 };
 use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
+use jazz::time::{GlobalTime, TxTime};
 use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, TransactionId,
 };
-use jazz::tx::{DurabilityTier, Fate};
+use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
 
@@ -342,6 +345,41 @@ fn open_persistent_browser_worker(
     db
 }
 
+/// Open the same scope-admitted worker shape that a browser host uses. The
+/// unsafe constructor is exercised only by this topology fixture: production
+/// hosts authenticate and bind the owner before opening the relay storage.
+fn open_persistent_scope_isolated_browser_worker(
+    path: &std::path::Path,
+    node: u8,
+    author: AuthorSubject,
+    schema: &JazzSchema,
+) -> Db<RocksDbStorage> {
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open(path, &refs).expect("open scoped persistent browser worker storage");
+    let scope = unsafe {
+        ClientRelayScope::from_admitted_storage_owner("browser-test-profile".to_owned(), author)
+    };
+    unsafe {
+        block_on(Db::open_scope_isolated_client_relay(
+            DbConfig::new(
+                schema.clone(),
+                storage,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author,
+                },
+            ),
+            scope,
+        ))
+    }
+    .expect("open scoped persistent browser worker")
+}
+
 /// A browser main-thread write is optimistic but not Local-durable until the
 /// dedicated worker persists it. Alice owns the non-durable main-thread Db and
 /// the worker is a fate-neutral relay with no upstream server.
@@ -353,6 +391,214 @@ fn open_persistent_browser_worker(
 ///       │                                             │
 ///       └─ wait(Local) ◄──FateUpdate(Pending/Local)───┘
 /// ```
+/// The test-only upstream handle stages through the worker's normal inbound
+/// queue and observes the real outbound Subscribe. This lets the repair E2E
+/// fixture below inject an incomplete authority update without adding a
+/// production message-application API.
+#[test]
+fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
+    let foreground = open_db(0x19, alice, &schema);
+    let storage = tempfile::tempdir().expect("scope-isolated worker storage");
+    let worker =
+        open_persistent_scope_isolated_browser_worker(storage.path(), 0x29, alice, &schema);
+    let (authority_transport, _authority_state) = scripted_authority(None);
+    let upstream = block_on(worker.connect_upstream_for_test(authority_transport));
+
+    let (foreground_transport, worker_transport) = duplex();
+    let foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let worker_foreground = worker.accept_subscriber(worker_transport, alice);
+    let todos = foreground
+        .prepare_query(&foreground.table("todos"))
+        .expect("prepare foreground todos query");
+    let _subscription = block_on(foreground.subscribe(
+        &todos,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe through scope-isolated worker");
+
+    foreground.tick().expect("send foreground subscription");
+    worker.tick().expect("forward subscription upstream");
+    let outbound = upstream.take_outbound_for_test();
+    let subscription_key = outbound
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Subscribe(subscribe) => Some(subscribe.subscription),
+            _ => None,
+        })
+        .expect("real worker transport emitted its authority subscription");
+
+    let row = RowUuid(uuid::Uuid::from_bytes([0x61; 16]));
+    let tx_id = TxId::new(TxTime(61), NodeUuid::from_bytes([0x62; 16]));
+    let transaction = Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 1,
+        made_by: alice,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: None,
+    };
+    let table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "todos")
+        .expect("todos table");
+    let version = VersionRecord::from_cells(
+        table,
+        schema.version_id(),
+        row,
+        Vec::new(),
+        alice,
+        tx_id.time.physical_ms(),
+        alice,
+        tx_id.time.physical_ms(),
+        &BTreeMap::from([("title".to_owned(), Value::String("repair body".to_owned()))]),
+        None,
+    )
+    .expect("encode authority row version");
+    let request = RowVersionRef::new("todos", row, tx_id);
+    let incomplete = SyncMessage::ViewUpdate(ViewUpdatePayload {
+        subscription: subscription_key,
+        settled_through: GlobalTime(1),
+        reset_result_set: true,
+        // The authority already knows this current membership, but omits its
+        // exact body. The worker must use the ordinary FetchRowVersions path.
+        version_carriers: Vec::new(),
+        peer_payload_inventory: Default::default(),
+        result_member_adds: vec![("todos".to_owned().into(), row, tx_id).into()],
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    });
+    block_on(worker.stage_upstream_message_for_test(&upstream, incomplete))
+        .expect("stage incomplete authority view update");
+    worker.tick().expect("discover missing authority version");
+    worker.tick().expect("emit real missing-version fetch");
+    let fetches = upstream.take_outbound_for_test();
+    assert!(
+        fetches.iter().any(|message| matches!(
+            message,
+            SyncMessage::FetchRowVersions { requests, .. } if requests == &vec![request.clone()]
+        )),
+        "incomplete authority state must use the normal FetchRowVersions request"
+    );
+    block_on(worker.stage_upstream_message_for_test(
+        &upstream,
+        SyncMessage::RowVersionPayloads {
+            version_bundles: vec![VersionBundle {
+                scope: VersionBundleScope::CompleteTransaction,
+                tx: transaction.clone(),
+                versions: vec![version],
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(1)),
+                durability: DurabilityTier::Global,
+            }],
+        },
+    ))
+    .expect("stage selected authority repair payload");
+    worker
+        .tick()
+        .expect("apply authority repair and original view");
+    foreground.tick().expect("deliver repaired foreground view");
+    assert!(
+        foreground
+            .read(&todos)
+            .expect("read repaired foreground state")
+            .len()
+            == 1,
+        "the same-scope foreground receives the repaired authority body"
+    );
+    block_on(worker.flush_for_test()).expect("durably flush repaired worker state");
+
+    assert!(foreground.detach_connection(&foreground_upstream));
+    assert!(worker.detach_connection(&worker_foreground));
+    drop(foreground_upstream);
+    drop(worker_foreground);
+    drop(foreground);
+    drop(worker);
+
+    // The authority link and the initial foreground are gone. A freshly
+    // opened worker with the exact same durable scope may still serve the
+    // physical version it was previously authorized to learn; it must not
+    // need to re-run current policy to repair the new foreground.
+    let reopened =
+        open_persistent_scope_isolated_browser_worker(storage.path(), 0x29, alice, &schema);
+    let (mut reopened_foreground_transport, reopened_worker_transport) = duplex();
+    let _reopened_foreground = reopened.accept_subscriber(reopened_worker_transport, alice);
+    reopened_foreground_transport
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![request],
+            delegated_session: None,
+        })
+        .expect("foreground requests retained repair");
+    reopened
+        .tick()
+        .expect("serve retained same-scope repair after reopen");
+    reopened
+        .tick()
+        .expect("flush retained same-scope repair after reopen");
+    let replies =
+        std::iter::from_fn(|| reopened_foreground_transport.try_recv()).collect::<Vec<_>>();
+    assert!(
+        replies.iter().any(|reply| matches!(
+            reply,
+            SyncMessage::RowVersionPayloads { version_bundles } if version_bundles.len() == 1
+        )),
+        "same-scope reopen serves the previously authority-delivered exact version, got {replies:?}"
+    );
+
+    let bob = AuthorSubject::for_test_bytes([0xba; 16]);
+    let (mut bob_transport, bob_worker_transport) = duplex();
+    let _bob_foreground = reopened.accept_subscriber(bob_worker_transport, bob);
+    bob_transport
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![RowVersionRef::new("todos", row, tx_id)],
+            delegated_session: None,
+        })
+        .expect("other subject requests retained repair");
+    assert!(
+        block_on(reopened.tick()).is_err(),
+        "an out-of-scope foreground request must fail closed before a repair reply"
+    );
+    let bob_replies = std::iter::from_fn(|| bob_transport.try_recv()).collect::<Vec<_>>();
+    assert!(
+        !bob_replies
+            .iter()
+            .any(|reply| matches!(reply, SyncMessage::RowVersionPayloads { .. })),
+        "a different foreground subject must never reuse Alice's durable repair ledger"
+    );
+
+    let (mut generic_transport, generic_worker_transport) = duplex();
+    let _generic_relay = reopened.accept_relay_subscriber(generic_worker_transport);
+    generic_transport
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![RowVersionRef::new("todos", row, tx_id)],
+            delegated_session: None,
+        })
+        .expect("generic relay requests retained repair");
+    // A generic relay may be forwarded/ignored rather than rejected with a
+    // transport error, but it must never receive the scope-owned body.
+    let _ = block_on(reopened.tick());
+    let _ = block_on(reopened.tick());
+    let generic_replies = std::iter::from_fn(|| generic_transport.try_recv()).collect::<Vec<_>>();
+    assert!(
+        !generic_replies
+            .iter()
+            .any(|reply| matches!(reply, SyncMessage::RowVersionPayloads { .. })),
+        "a generic relay lacks a foreground session capability and must fail closed"
+    );
+}
+
 #[test]
 fn non_durable_browser_client_waits_for_worker_local_ack() {
     let schema = schema();

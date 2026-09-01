@@ -147,6 +147,44 @@ impl<S> Node<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Test-only staging through the ordinary upstream inbound queue.
+    ///
+    /// A connection epoch is opaque to test callers and must identify exactly
+    /// one still-attached upstream. Refusing ambiguity makes a test fixture
+    /// state its intended authority link instead of accidentally exercising a
+    /// different parallel upstream.
+    #[cfg(feature = "testing")]
+    pub async fn stage_upstream_message_for_test(
+        &self,
+        connection_epoch: u64,
+        message: SyncMessage,
+    ) -> Result<(), String> {
+        let connections = self.connections.borrow().clone();
+        let mut candidates = Vec::new();
+        for candidate in connections {
+            let connection = candidate.lock().await;
+            let selected = connection.connection_epoch == connection_epoch
+                && matches!(connection.link, ConnectionLink::Upstream(_));
+            drop(connection);
+            if selected {
+                candidates.push(candidate);
+            }
+        }
+        let [connection] = candidates.as_slice() else {
+            return Err(format!(
+                "test upstream handle selected {} live upstream connections for epoch {connection_epoch}",
+                candidates.len()
+            ));
+        };
+        let mut connection = connection.lock().await;
+        connection.staged_inbound.push_back(StagedInboundMessage {
+            message,
+            authority_receipt_eligible: true,
+        });
+        self.schedule_tick(TickUrgency::Immediate);
+        Ok(())
+    }
+
     /// Wrap a node for serving subscriber links.
     pub fn new(mut node: NodeState<S>) -> Self {
         // History completeness is a structural property of the opened node,

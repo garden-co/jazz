@@ -3,6 +3,55 @@
 use super::*;
 use crate::time::TxTime;
 
+/// Opaque handle for one upstream connection selected by a test host.
+///
+/// This exists only behind the `testing` feature so integration tests can
+/// stage a real protocol frame through one unambiguous production connection
+/// without exposing a normal-runtime message injection API.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct TestUpstreamConnectionHandle {
+    connection_epoch: u64,
+    outbound: Rc<RefCell<Vec<SyncMessage>>>,
+}
+
+#[cfg(feature = "testing")]
+impl TestUpstreamConnectionHandle {
+    /// Drain frames emitted by the selected connection's real transport.
+    #[doc(hidden)]
+    pub fn take_outbound_for_test(&self) -> Vec<SyncMessage> {
+        std::mem::take(&mut *self.outbound.borrow_mut())
+    }
+}
+
+#[cfg(feature = "testing")]
+struct ObservedTestTransport {
+    inner: Box<dyn Transport>,
+    outbound: Rc<RefCell<Vec<SyncMessage>>>,
+}
+
+#[cfg(feature = "testing")]
+impl Transport for ObservedTestTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message.clone())?;
+        self.outbound.borrow_mut().push(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        self.inner.permits_delegated_sessions()
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -843,6 +892,50 @@ where
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.connect_upstream(transport).await
+    }
+
+    /// Attach an upstream with a test-only opaque handle for staging inbound
+    /// protocol frames and observing the frames emitted by that same link.
+    ///
+    /// Production bindings must use [`Db::connect_upstream`]. This helper is
+    /// deliberately feature-gated: it exercises the ordinary inbound queue,
+    /// rather than creating a second message-application path for tests.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub async fn connect_upstream_for_test(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> TestUpstreamConnectionHandle {
+        let outbound = Rc::new(RefCell::new(Vec::new()));
+        let connection = self
+            .node
+            .connect_upstream(Box::new(ObservedTestTransport {
+                inner: transport,
+                outbound: Rc::clone(&outbound),
+            }))
+            .await;
+        let connection_epoch = connection.lock().await.connection_epoch;
+        TestUpstreamConnectionHandle {
+            connection_epoch,
+            outbound,
+        }
+    }
+
+    /// Stage one protocol frame on the exactly selected test upstream.
+    ///
+    /// The frame is consumed by the normal `PeerConnection::tick` inbound
+    /// loop. A stale, detached, or ambiguous handle fails explicitly rather
+    /// than selecting an arbitrary connection.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub async fn stage_upstream_message_for_test(
+        &self,
+        handle: &TestUpstreamConnectionHandle,
+        message: SyncMessage,
+    ) -> Result<(), String> {
+        self.node
+            .stage_upstream_message_for_test(handle.connection_epoch, message)
+            .await
     }
 
     /// Install or clear the scheduler used to wake this database's live peer
