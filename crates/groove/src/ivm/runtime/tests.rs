@@ -571,22 +571,22 @@ fn edge_table_delta(edges: RecordDescriptor, rows: &[(u64, u64, u64)]) -> TableD
 fn recursive_state_snapshot(
     runtime: &IvmRuntime,
     node: NodeId,
-) -> (Vec<RecordDelta>, bool, Option<u64>) {
+) -> Option<(Vec<RecordDelta>, bool, Option<u64>)> {
     let key = OperatorStateKey {
         scope: ScopeId::root(),
         node,
     };
     let Some(OperatorState::Recursive(state)) = runtime.operator_states.get(&key) else {
-        panic!("recursive state missing for {node:?}");
+        return None;
     };
     let state = state.value();
     let mut accumulated = state.accumulated_deltas();
     accumulated.sort_by(|left, right| left.record.cmp(&right.record));
-    (
+    Some((
         accumulated,
         state.step_arrangements_hydrated(),
         state.hydrated_input_generation(),
-    )
+    ))
 }
 
 fn recursive_reach_from_graph(src: u64) -> GraphBuilder {
@@ -2275,9 +2275,20 @@ async fn resident_recursive_iteration_limit_discards_staged_state() {
     );
     let output = runtime.subscription_output_node(subscription.id()).unwrap();
     let before_state = recursive_state_snapshot(&runtime, output);
+    assert!(
+        before_state.is_some(),
+        "the initial resident evaluation must install recursive state"
+    );
     let before_stats = runtime.stats();
     let before_tick = runtime.current_tick;
     let before_frontiers = runtime.table_frontiers.clone();
+    let before_retained_nodes = runtime.retained_node_ids();
+    let before_output_retainers = runtime
+        .node_meta
+        .get(&output)
+        .expect("subscription output must have live runtime metadata")
+        .retainers
+        .clone();
     runtime
         .tick_resident_staged(
             vec![edge_table_delta(edges, &[(2, 2, 3), (3, 3, 4)])],
@@ -2290,13 +2301,48 @@ async fn resident_recursive_iteration_limit_discards_staged_state() {
 
     assert_eq!(
         recursive_state_snapshot(&runtime, output),
-        before_state,
-        "a scoped resident failure must discard partial recursive state"
+        None,
+        "a scoped resident failure must remove recursive state instead of installing its partial closure"
+    );
+    let after_stats = runtime.stats();
+    assert_eq!(
+        after_stats.recursive_state_count, 0,
+        "a scoped resident failure must not retain recursive operator state"
     );
     assert_eq!(
-        runtime.stats(),
-        before_stats,
-        "a scoped resident failure must not install staged state"
+        after_stats.recursive_accumulated_rows, 0,
+        "a scoped resident failure must not retain a partial recursive closure"
+    );
+    assert_eq!(
+        after_stats.recursive_accumulated_encoded_bytes, 0,
+        "a scoped resident failure must not retain encoded recursive state"
+    );
+    assert!(
+        after_stats.arrangement_count <= before_stats.arrangement_count
+            && after_stats.arrangement_rows <= before_stats.arrangement_rows
+            && after_stats.arrangement_encoded_bytes <= before_stats.arrangement_encoded_bytes,
+        "a scoped resident failure must not retain staged arrangement state"
+    );
+    assert!(
+        after_stats.eval_memo_entries <= before_stats.eval_memo_entries
+            && after_stats.eval_memo_bytes <= before_stats.eval_memo_bytes,
+        "a scoped resident failure must not retain staged evaluator memo state"
+    );
+    assert!(
+        subscription.recv().is_err(),
+        "a scoped resident failure must fail the affected subscription without output"
+    );
+    assert!(
+        subscription.try_recv().is_err(),
+        "a scoped resident failure must not leak a staged notification"
+    );
+    assert!(
+        runtime.pending_binding_retractions.is_empty(),
+        "a scoped resident failure must not leak binding retractions"
+    );
+    assert!(
+        runtime.deferred_notifications.is_empty(),
+        "a scoped resident failure must not leak deferred notifications"
     );
     assert_eq!(
         runtime.current_tick, before_tick,
@@ -2305,6 +2351,24 @@ async fn resident_recursive_iteration_limit_discards_staged_state() {
     assert_eq!(
         runtime.table_frontiers, before_frontiers,
         "a scoped resident failure must not advance input frontiers"
+    );
+    assert_eq!(
+        runtime.retained_node_ids(),
+        before_retained_nodes,
+        "a scoped resident failure must preserve live graph retainers"
+    );
+    assert!(
+        runtime.graph().node(output).is_some(),
+        "a scoped resident failure must preserve the retained output graph node"
+    );
+    assert_eq!(
+        runtime
+            .node_meta
+            .get(&output)
+            .expect("retained subscription output metadata must remain live")
+            .retainers,
+        before_output_retainers,
+        "a scoped resident failure must preserve live output retainers"
     );
 }
 

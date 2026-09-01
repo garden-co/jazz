@@ -470,28 +470,6 @@ impl AntiJoinState {
 }
 
 impl ArrangementState {
-    /// Fold only the touched buckets into the shared base at tick commit.
-    /// Callers drop the previous live arrangement before invoking this method,
-    /// making both COW maps uniquely owned in the common path.
-    pub(super) fn commit_overlay(&mut self) {
-        if self.overlay.is_empty() {
-            return;
-        }
-        let overlay = std::mem::take(&mut self.overlay);
-        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
-        let index = Rc::make_mut(&mut self.index);
-        for (key, bucket) in overlay {
-            match bucket {
-                Some(bucket) => {
-                    index.insert(key, bucket);
-                }
-                None => {
-                    index.remove(&key);
-                }
-            }
-        }
-    }
-
     pub(super) fn clone_keys<'a>(&self, keys: impl IntoIterator<Item = &'a Vec<u8>>) -> Self {
         let mut index = HashMap::default();
         for key in keys {
