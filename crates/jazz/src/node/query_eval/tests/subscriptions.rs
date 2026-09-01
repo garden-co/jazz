@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::legacy_test_future::FutureResolveExt as _;
+use crate::peer::PeerState;
 use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey};
 
 fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
@@ -152,24 +153,27 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         edge_id: None,
         revision: vec![row_byte as u8],
     };
-    let update = |subscription, reset_result_set, adds, removes| crate::node::ViewUpdateParts {
-        subscription,
-        settled_through: crate::time::GlobalTime(7),
-        defer_settlement: false,
-        reset_result_set,
-        version_carriers: Vec::new(),
-        peer_complete_tx_payload_refs: Vec::new(),
-        authorization_progress: Some(3),
-        opening_pending: false,
-        result_member_adds: adds,
-        result_member_removes: removes,
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let update = |subscription, settled_through, reset_result_set, adds, removes| {
+        crate::node::ViewUpdateParts {
+            subscription,
+            settled_through: crate::time::GlobalTime(settled_through),
+            defer_settlement: false,
+            reset_result_set,
+            version_carriers: Vec::new(),
+            peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: Some(3),
+            opening_pending: false,
+            result_member_adds: adds,
+            result_member_removes: removes,
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        }
     };
     relay
         .apply_view_update(update(
             alice_subscribe.subscription,
+            11,
             true,
             vec![member(1)],
             Vec::new(),
@@ -179,6 +183,7 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
     relay
         .apply_view_update(update(
             bob_subscribe.subscription,
+            29,
             true,
             vec![member(2)],
             Vec::new(),
@@ -188,6 +193,7 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
     relay
         .apply_view_update(update(
             alice_subscribe.subscription,
+            37,
             false,
             Vec::new(),
             vec![member(1)],
@@ -203,6 +209,19 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         .unwrap();
     assert_eq!(alice_key.binding_view, bob_key.binding_view);
     assert_ne!(alice_key, bob_key);
+    let mut peer = PeerState::relay();
+    peer.set_subscription_authority_result_source(alice_subscribe.subscription, alice_key.clone());
+    peer.set_subscription_authority_result_source(bob_subscribe.subscription, bob_key.clone());
+    assert_eq!(
+        peer.canonical_subscription_settlement_time(&relay, alice_subscribe.subscription),
+        crate::time::GlobalTime(37),
+        "Alice must not inherit Bob's independently settled policy receipt"
+    );
+    assert_eq!(
+        peer.canonical_subscription_settlement_time(&relay, bob_subscribe.subscription),
+        crate::time::GlobalTime(29),
+        "Bob retains his own authority watermark"
+    );
     assert_eq!(
         relay.query.authority_results[&alice_key].settled_result_set,
         BTreeSet::new()
@@ -283,6 +302,7 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         relay
             .apply_view_update(update(
                 alice_subscribe.subscription,
+                41,
                 false,
                 vec![member(3)],
                 Vec::new(),

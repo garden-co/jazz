@@ -994,11 +994,19 @@ where
         }))
     }
 
-    pub(crate) fn settled_through_for_binding_view(
+    /// Return the settlement watermark for one exact authority result.
+    ///
+    /// A binding view can be shared by several delegated policy snapshots on
+    /// a relay. Publication code that already has a usage-site receipt must
+    /// use this exact lookup rather than the binding-view compatibility
+    /// facade, which deliberately refuses to select a sibling scope.
+    pub(crate) fn settled_through_for_authority_result(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
     ) -> Option<GlobalTime> {
-        self.authority_result_state_for_binding_view(binding_view_key)
+        self.query
+            .authority_results
+            .get(authority_result_key)
             .and_then(|state| state.settled_through)
     }
 

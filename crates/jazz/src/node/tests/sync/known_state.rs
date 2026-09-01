@@ -140,7 +140,9 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let binding_view_key = BindingViewKey::from_canonical_subscription_key(subscription);
+    let authority_result_key = reader
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
 
     let (visible_tx, visible_unit) = writer
         .commit_mergeable_unit_settled(
@@ -196,7 +198,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
             .is_empty()
     );
     assert_eq!(
-        reader.settled_through_for_binding_view(binding_view_key),
+        reader.settled_through_for_authority_result(&authority_result_key),
         Some(GlobalTime(2))
     );
     assert_ne!(visible_tx, invisible_tx);
@@ -211,7 +213,9 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let binding_view_key = BindingViewKey::from_canonical_subscription_key(subscription);
+    let authority_result_key = reader
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
 
     let removal = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
@@ -244,7 +248,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
             .is_empty()
     );
     assert_eq!(
-        reader.settled_through_for_binding_view(binding_view_key),
+        reader.settled_through_for_authority_result(&authority_result_key),
         Some(GlobalTime(3))
     );
 }
@@ -263,6 +267,9 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
     register_shape_binding(&mut reader, &shape, &binding);
     let canonical_subscription = reader.whole_table_subscription_key("todos").unwrap();
     let binding_view_key = BindingViewKey::from_canonical_subscription_key(canonical_subscription);
+    let authority_result_key = reader
+        .authority_result_key_for_subscription(canonical_subscription)
+        .unwrap();
 
     let (_tx_id, visible_unit) = writer
         .commit_mergeable_unit_settled(
@@ -333,7 +340,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
         BTreeMap::from([(row_uuid, title_cells("shared"))])
     );
     assert_eq!(
-        reader.settled_through_for_binding_view(binding_view_key),
+        reader.settled_through_for_authority_result(&authority_result_key),
         Some(GlobalTime(2))
     );
 }

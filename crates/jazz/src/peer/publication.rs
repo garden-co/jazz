@@ -1,34 +1,3 @@
-fn binding_settlement_time<S>(
-    node: &NodeState<S>,
-    subscription: SubscriptionKey,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) -> GlobalTime
-where
-    S: OrderedKvStorage,
-{
-    let key = crate::protocol::BindingViewKey::new(
-        shape.shape_id(),
-        binding.binding_id(),
-        subscription.read_view,
-    );
-    node.settled_through_for_binding_view(key)
-        .unwrap_or_else(|| node.committed_global_time())
-}
-
-fn canonical_subscription_settlement_time<S>(
-    node: &NodeState<S>,
-    subscription: SubscriptionKey,
-) -> GlobalTime
-where
-    S: OrderedKvStorage,
-{
-    node.settled_through_for_binding_view(
-        crate::protocol::BindingViewKey::from_canonical_subscription_key(subscription),
-    )
-    .unwrap_or_else(|| node.committed_global_time())
-}
-
 fn ordinary_flat_row_duplicate_view(
     shape: &ValidatedQuery,
     current_members: &BTreeSet<ResultMemberEntry>,
@@ -124,6 +93,73 @@ impl PeerState {
                 })
             }
         }
+    }
+
+    /// Read the settlement watermark from the exact receipt retained by the
+    /// served subscription. Never route this through a `BindingViewKey`:
+    /// two policy scopes may share that key while having different watermarks.
+    ///
+    /// A missing exact source is only valid for a genuinely direct,
+    /// unscoped publication. Its local receipt may use the current committed
+    /// time when it has not separately settled. A policy-scoped source is
+    /// different: absence of that *particular* receipt must remain the zero
+    /// watermark rather than overclaiming an unrelated committed time.
+    fn settlement_time_for_publication<S>(
+        &self,
+        node: &NodeState<S>,
+        subscription: SubscriptionKey,
+        binding_view: crate::protocol::BindingViewKey,
+    ) -> GlobalTime
+    where
+        S: OrderedKvStorage,
+    {
+        if let Some(authority_result_key) = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.authority_result_source.as_ref())
+        {
+            return node
+                .settled_through_for_authority_result(authority_result_key)
+                .unwrap_or_default();
+        }
+        node.settled_through_for_authority_result(&AuthorityResultKey::unscoped(binding_view))
+            .unwrap_or_else(|| node.committed_global_time())
+    }
+
+    fn binding_settlement_time<S>(
+        &self,
+        node: &NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> GlobalTime
+    where
+        S: OrderedKvStorage,
+    {
+        self.settlement_time_for_publication(
+            node,
+            subscription,
+            crate::protocol::BindingViewKey::new(
+                shape.shape_id(),
+                binding.binding_id(),
+                subscription.read_view,
+            ),
+        )
+    }
+
+    pub(crate) fn canonical_subscription_settlement_time<S>(
+        &self,
+        node: &NodeState<S>,
+        subscription: SubscriptionKey,
+    ) -> GlobalTime
+    where
+        S: OrderedKvStorage,
+    {
+        self.settlement_time_for_publication(
+            node,
+            subscription,
+            crate::protocol::BindingViewKey::from_canonical_subscription_key(subscription),
+        )
     }
 
     pub(crate) fn needs_catalogue_snapshot(&self, fingerprint: [u8; 32]) -> bool {
@@ -733,7 +769,7 @@ impl PeerState {
         let Some(state) = self.publication_states.get(&subscription) else {
             return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
-                settled_through: binding_settlement_time(node, subscription, shape, binding),
+                settled_through: self.binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -947,7 +983,7 @@ impl PeerState {
             return Ok(Some(MaintainedCanonicalUpdate {
                 update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
-                    settled_through: binding_settlement_time(node, subscription, shape, binding),
+                    settled_through: self.binding_settlement_time(node, subscription, shape, binding),
                     reset_result_set: false,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1373,7 +1409,7 @@ impl PeerState {
             {
                 let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
-                    settled_through: binding_settlement_time(node, subscription, shape, binding),
+                    settled_through: self.binding_settlement_time(node, subscription, shape, binding),
                     reset_result_set,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1434,7 +1470,7 @@ impl PeerState {
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
             self.fast_cursor_authorization_matches(subscription, &known_state);
-        let watermark = binding_settlement_time(node, subscription, shape, binding);
+        let watermark = self.binding_settlement_time(node, subscription, shape, binding);
         let simple_membership_delta =
             transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
         let mut result_member_adds = transitions
@@ -1974,10 +2010,8 @@ impl PeerState {
         {
             self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription: maintained_subscription,
-                settled_through: canonical_subscription_settlement_time(
-                    node,
-                    maintained_subscription,
-                ),
+                settled_through: self
+                    .canonical_subscription_settlement_time(node, maintained_subscription),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -2025,8 +2059,11 @@ impl PeerState {
         let mut reset_result_set = true;
         let result_member_adds = if !authorization_mismatch
             && let Some(position) = known_membership_position
-            && canonical_subscription_settlement_time(node, maintained_subscription).0 > 0
-            && position >= canonical_subscription_settlement_time(node, maintained_subscription)
+            && self
+                .canonical_subscription_settlement_time(node, maintained_subscription)
+                .0 > 0
+            && position
+                >= self.canonical_subscription_settlement_time(node, maintained_subscription)
         {
             reset_result_set = false;
             Vec::new()
@@ -2256,8 +2293,11 @@ impl PeerState {
         let mut reset_result_set = true;
         let result_member_adds = if !authorization_mismatch
             && let Some(position) = known_membership_position
-            && canonical_subscription_settlement_time(node, maintained_subscription).0 > 0
-            && position >= canonical_subscription_settlement_time(node, maintained_subscription)
+            && self
+                .canonical_subscription_settlement_time(node, maintained_subscription)
+                .0 > 0
+            && position
+                >= self.canonical_subscription_settlement_time(node, maintained_subscription)
         {
             reset_result_set = false;
             Vec::new()
