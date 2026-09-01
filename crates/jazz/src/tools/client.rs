@@ -146,6 +146,7 @@ struct ClientDbInner {
     identity: CoreDbIdentity,
     connect_config: Option<ConnectConfig>,
     scheduler: Rc<TickSchedulerImpl>,
+    tick_driver: Option<tokio::task::JoinHandle<()>>,
     upstream: Option<BackendConnection>,
     upstream_generation: u64,
     native_terminal_events: VecDeque<(u64, NativeTransportTerminal)>,
@@ -301,7 +302,10 @@ async fn recover_tick_driver_backpressure(
     crate::db::sync_autopsy::record(format!(
         "client tick driver retrying backpressure error attempt {attempts}: {error}"
     ));
-    tokio::time::sleep(tick_driver_retry_delay(*attempts)).await;
+    tokio::select! {
+        _ = scheduler.cancelled() => return false,
+        _ = tokio::time::sleep(tick_driver_retry_delay(*attempts)) => {}
+    }
     scheduler.wake(TickUrgency::Immediate);
     true
 }
@@ -329,11 +333,17 @@ async fn recover_tick_driver_error(
         return false;
     }
 
-    tokio::time::sleep(tick_driver_retry_delay(*attempts)).await;
+    tokio::select! {
+        _ = scheduler.cancelled() => return false,
+        _ = tokio::time::sleep(tick_driver_retry_delay(*attempts)) => {}
+    }
     if class == TickDriverErrorClass::Reconnect
         && ClientDbInner::is_current_disconnected_generation(inner, expected_generation)
     {
         ClientDbInner::start_upstream_recovery(inner, error.to_string());
+    }
+    if scheduler.is_cancelled() {
+        return false;
     }
     scheduler.wake(TickUrgency::Immediate);
     true
@@ -735,7 +745,25 @@ struct TickState {
     deferred: AtomicBool,
     after_current_turn: AtomicBool,
     delayed: AtomicBool,
+    cancelled: AtomicBool,
+    cancel_notify: tokio::sync::Notify,
     notify: tokio::sync::Notify,
+}
+
+impl TickState {
+    async fn cancelled(&self) {
+        loop {
+            if self.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            self.cancel_notify.notified().await;
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.cancel_notify.notify_waiters();
+    }
 }
 
 /// Thread-safe wake bridge retained by cold Groove storage futures.
@@ -780,6 +808,17 @@ impl TickSchedulerImpl {
         }
         self.state.notify.notify_one();
     }
+    fn cancel(&self) {
+        self.state.cancel();
+    }
+
+    async fn cancelled(&self) {
+        self.state.cancelled().await;
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
+    }
 
     fn wake_handle(&self) -> Arc<TickState> {
         Arc::clone(&self.state)
@@ -794,10 +833,14 @@ impl TickSchedulerImpl {
         }
         let state = Arc::clone(&self.state);
         tokio::task::spawn_local(async move {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            state.delayed.store(false, Ordering::Release);
-            state.deferred.store(true, Ordering::Release);
-            state.notify.notify_one();
+            tokio::select! {
+                _ = state.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {
+                    state.delayed.store(false, Ordering::Release);
+                    state.deferred.store(true, Ordering::Release);
+                    state.notify.notify_one();
+                }
+            }
         });
     }
 }
@@ -845,7 +888,9 @@ impl ClientDb {
         let inner = Rc::new(RefCell::new(inner));
         if has_upstream {
             ClientDbInner::connect_upstream_transport(&inner).await?;
-            Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
+            let driver =
+                Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
+            inner.borrow_mut().tick_driver = Some(driver);
         }
         Ok(Rc::new(Self {
             inner,
@@ -856,7 +901,7 @@ impl ClientDb {
     }
 
     async fn close(&self) -> Result<()> {
-        let (backend, forwarders) = {
+        let (backend, forwarders, tick_driver) = {
             let mut inner = self.inner.borrow_mut();
             match inner.shutdown_state {
                 ShutdownState::Open => {
@@ -865,9 +910,14 @@ impl ClientDb {
                     inner.tick_driver_error = Some("client shut down".to_string());
                     inner.tick_driver_error_notify.notify_waiters();
                     inner.shutdown_state = ShutdownState::Closing;
+                    inner.scheduler.cancel();
                     let backend = inner.db.take().ok_or_else(ClientDbInner::shutdown_error)?;
                     let forwarders = std::mem::take(&mut inner.subscription_forwarders);
-                    (backend, forwarders)
+                    let tick_driver = inner.tick_driver.take();
+                    // Do not retain the cancelled scheduler state on a shared
+                    // facade after its driver has been joined.
+                    inner.scheduler = Rc::new(TickSchedulerImpl::default());
+                    (backend, forwarders, tick_driver)
                 }
                 ShutdownState::Closing | ShutdownState::Closed => {
                     drop(inner);
@@ -895,6 +945,11 @@ impl ClientDb {
         }
         for completion in completions {
             let _ = completion.await;
+        }
+        if let Some(tick_driver) = tick_driver {
+            let _ = tick_driver.await;
+            // Let observers of cancellation run before shutdown can finish.
+            tokio::task::yield_now().await;
         }
         let result = completion
             .backend
@@ -1361,13 +1416,19 @@ impl ClientDb {
     fn spawn_local_tick_driver(
         inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let state = scheduler.wake_handle();
         tokio::task::spawn_local(async move {
             let mut backpressure_attempts = 0;
             loop {
-                state.notify.notified().await;
+                tokio::select! {
+                    _ = scheduler.cancelled() => return,
+                    _ = state.notify.notified() => {}
+                }
                 while let Some(urgency) = scheduler.take() {
+                    if scheduler.is_cancelled() {
+                        return;
+                    }
                     let Some(inner) = inner.upgrade() else {
                         return;
                     };
@@ -1386,9 +1447,15 @@ impl ClientDb {
                     }
 
                     if urgency == TickUrgency::Deferred {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        tokio::select! {
+                            _ = scheduler.cancelled() => return,
+                            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                        }
                     } else if urgency == TickUrgency::AfterCurrentTurn {
                         tokio::task::yield_now().await;
+                        if scheduler.is_cancelled() {
+                            return;
+                        }
                     }
                     let backend = match inner.borrow().backend_clone() {
                         Ok(db) => db,
@@ -1438,7 +1505,7 @@ impl ClientDb {
                     }
                 }
             }
-        });
+        })
     }
 }
 
@@ -1547,6 +1614,7 @@ impl ClientDbInner {
             identity,
             connect_config,
             scheduler,
+            tick_driver: None,
             upstream: None,
             upstream_generation: 0,
             native_terminal_events: VecDeque::new(),
