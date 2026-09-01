@@ -181,6 +181,78 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     );
 }
 
+/// A relay may open its downstream maintained receiver after the selected
+/// authority ViewUpdate has already become live.  Opening must seed from that
+/// retained exact authority result rather than waiting for a second upstream
+/// delta which may never arrive.
+#[test]
+fn relay_edge_open_after_live_authority_receipt_seeds_initial_membership() {
+    let (_server_dir, mut server) = open_node();
+    let (_client_dir, mut client) = open_node();
+    let issue = row(41);
+    let shape = Query::from("issues")
+        .select(["title", "state", "assignee", "priority"])
+        .validate(&schema())
+        .expect("validate issues query");
+    let binding = shape.bind(BTreeMap::new()).expect("bind issues query");
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    register_query_shape(&mut server, &shape, opts.clone());
+    subscribe_query_binding(&mut server, &shape, &binding);
+    register_query_shape(&mut client, &shape, opts.clone());
+    subscribe_query_binding(&mut client, &shape, &binding);
+
+    commit_global_issue(&mut server, 41, "open", author(41), 41);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let mut server_peer = PeerState::edge_client(AuthorSubject::SYSTEM);
+    let authority = server_peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut server,
+            subscription,
+            &shape,
+            &binding,
+            opts,
+        )
+        .expect("serve authority receipt")
+        .expect("authority receipt is ready");
+    client
+        .apply_sync_message_settled(authority)
+        .expect("apply authority receipt before opening relay child");
+    let authority_key = client
+        .authority_result_key_for_subscription(subscription)
+        .expect("exact retained authority receipt");
+
+    let (_receiver, _maintained, _schemas, transitions, _tables, initial_received) = client
+        .open_seeded_relay_edge_subscription_view_with_waker(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            &ReadViewSpec::default(),
+            authority_key,
+            None,
+        )
+        .expect("open relay child after live authority receipt");
+    assert!(
+        initial_received,
+        "opening must seed from already-live authority membership"
+    );
+    assert_eq!(transitions.adds.len(), 1, "the retained member is seeded");
+    assert!(
+        transitions
+            .adds
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .any(|(_, row_uuid, _)| row_uuid == issue),
+        "the seeded member is the authority result row"
+    );
+}
+
 #[test]
 fn maintained_root_order_keeps_occurrence_sidecar_aligned() {
     let descriptor =

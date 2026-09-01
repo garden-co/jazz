@@ -1763,9 +1763,10 @@ fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
     );
 }
 
-/// A delegated usage site is immutable even when its trusted relay transport
-/// refreshes its own admitted snapshot. This deliberately delegates SYSTEM:
-/// provenance comes from the admitted wire form, not identity equality.
+/// A scope-isolated relay usage site retains the immutable session selected by
+/// server admission even when the host refresh hook runs afterward. This
+/// deliberately admits SYSTEM as the foreground session: provenance comes
+/// from the exact admitted binding, not identity equality or the transport.
 #[test]
 fn delegated_subscription_binding_survives_relay_claim_refresh() {
     let schema = owner_read_schema();
@@ -1783,7 +1784,12 @@ fn delegated_subscription_binding_survives_relay_claim_refresh() {
         Value::Uuid(AuthorSubject::for_test_bytes([0xb1; 16]).test_uuid()),
     )]);
     let (mut relay_transport, server_transport) = duplex();
-    let subscriber = server.server.accept_relay_subscriber(server_transport);
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        delegated_identity,
+        delegated_claims.clone(),
+        1,
+    );
     relay_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -1842,8 +1848,8 @@ fn delegated_subscription_binding_survives_relay_claim_refresh() {
 
 /// Closing a subscriber must retire the group-owned maintained receiver, not
 /// merely its concrete wire usage. Direct coverage uses the ordinary binding
-/// key, while a trusted relay's delegated coverage is policy-partitioned; both
-/// ownership forms must leave no Groove work behind after normal detach.
+/// key, while a scope-isolated relay's admitted coverage is policy-partitioned;
+/// both ownership forms must leave no Groove work behind after normal detach.
 #[test]
 fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     let direct_schema = schema();
@@ -1940,7 +1946,12 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     let (mut relay_transport, delegated_server_transport) = duplex();
     let delegated_subscriber = delegated_server
         .server
-        .accept_relay_subscriber(delegated_server_transport);
+        .accept_scope_isolated_relay_subscriber(
+            delegated_server_transport,
+            delegated_identity,
+            delegated_claims.clone(),
+            1,
+        );
     relay_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -2030,16 +2041,23 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
 
     let (edge_transport, core_transport) = duplex();
-    let _edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
-    let core_edge = core.accept_subscriber_with_trust(
+    let edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    // The Core does not infer a user session from a trusted/backend transport.
+    // This test models the production scope-relay handshake that admits the
+    // exact foreground binding forwarded by the Edge.
+    let core_edge = core.accept_scope_isolated_relay_subscriber(
         core_transport,
-        AuthorSubject::SYSTEM,
-        CommitUnitTrust::TrustedBackend,
+        session_subject,
+        allowed_claims.clone(),
+        1,
     );
     let (client_transport, edge_client_transport, _client_sent, edge_sent) = duplex_with_taps();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client =
-        edge.accept_subscriber_with_claims(edge_client_transport, session_subject, allowed_claims);
+    let edge_client = edge.accept_subscriber_with_claims(
+        edge_client_transport,
+        session_subject,
+        allowed_claims.clone(),
+    );
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -2083,7 +2101,48 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         &edge_client.borrow().link,
         ConnectionLink::Subscriber(state) if state.peer.has_maintained_subscription(old_maintained_subscription)
     ));
+    let expected_group_source = edge
+        .node
+        .node()
+        .borrow()
+        .authority_result_key_for_subscription(old_upstream_subscription)
+        .expect("scope relay installs the exact upstream authority result");
+    assert!(
+        matches!(
+            &edge_client.borrow().link,
+            ConnectionLink::Subscriber(state)
+                if state
+                    .peer
+                    .subscription_authority_result_source(old_maintained_subscription)
+                    == Some(&expected_group_source)
+        ),
+        "the group-owned maintained receiver must be bound to U before opening; recording U only on D reproduces the cold source=None receiver"
+    );
 
+    // The original Core capability is immutable. A direct client claim
+    // refresh cannot widen or narrow it in place; production `updateAuth`
+    // disconnects and re-admits the scope relay under a fresh epoch.
+    let old_core_binding = match &core_edge.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .peer
+            .subscription_policy_binding(old_upstream_subscription),
+        ConnectionLink::Upstream(_) => None,
+    };
+    assert_eq!(
+        old_core_binding,
+        Some((session_subject, allowed_claims.clone()))
+    );
+    assert!(edge.detach_connection(&edge_upstream));
+
+    let (replacement_edge_transport, replacement_core_transport) = duplex();
+    let _replacement_edge_upstream =
+        crate::db::block_on(edge.connect_upstream(replacement_edge_transport));
+    let replacement_core_edge = core.accept_scope_isolated_relay_subscriber(
+        replacement_core_transport,
+        session_subject,
+        denied_claims.clone(),
+        2,
+    );
     client.set_test_provider_claims(session_subject, denied_claims.clone());
     edge_client
         .borrow_mut()
@@ -2101,13 +2160,12 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
                     if update.subscription == downstream_subscription
                         && update.reset_result_set
                         && update.result_member_adds.is_empty()
-                        && update.result_member_removes.is_empty()
             )
         });
         client.tick().unwrap();
         if saw_fresh_downstream_reset
             && !matches!(
-                &core_edge.borrow().link,
+                &replacement_core_edge.borrow().link,
                 ConnectionLink::Subscriber(state) if state.served.contains_key(&old_upstream_subscription)
             )
         {
@@ -2121,7 +2179,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
     let coverage = &state.served[&downstream_subscription];
     let fresh_upstream_subscription = state.coverage_groups[coverage].upstream_subscription;
     drop(connection);
-    let core_fresh = match &core_edge.borrow().link {
+    let core_fresh = match &replacement_core_edge.borrow().link {
         ConnectionLink::Subscriber(state) => (
             state
                 .peer
@@ -2138,18 +2196,28 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         "the refreshed remote policy must publish a new empty membership reset"
     );
     assert!(matches!(
-        &core_edge.borrow().link,
+        &replacement_core_edge.borrow().link,
         ConnectionLink::Subscriber(state)
             if !state.served.contains_key(&old_upstream_subscription)
                 && state.served.contains_key(&fresh_upstream_subscription)
     ));
+    let fresh_authority_source = edge
+        .node
+        .node()
+        .borrow()
+        .authority_result_key_for_subscription(fresh_upstream_subscription)
+        .expect("fresh upstream usage has an exact authority result");
     assert!(
         matches!(
             &edge_client.borrow().link,
             ConnectionLink::Subscriber(state)
-                if !state.peer.has_maintained_subscription(old_maintained_subscription)
+                if state.peer.has_maintained_subscription(old_maintained_subscription)
+                    && state
+                        .peer
+                        .subscription_authority_result_source(old_maintained_subscription)
+                        == Some(&fresh_authority_source)
         ),
-        "claim refresh must retire the old policy-bound maintained receiver"
+        "claim refresh must retire the old receiver before reopening the same group key against fresh U"
     );
     assert_eq!(
         core_fresh.1,
@@ -2451,11 +2519,12 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     let scope = server
         .node()
         .borrow()
-        .authorization_support_scope(
+        .authorization_support_scope_for_session(
             alice,
+            Some(&a_claims),
             &PermissionAdviceAction::Insert {
                 table: "todos".to_owned(),
-                cells: candidate_cells,
+                cells: candidate_cells.clone(),
             },
         )
         .expect("editor policy has a support clause");
@@ -2464,7 +2533,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         .into_iter()
         .next()
         .expect("editor policy produces one support subscription");
-    let subscription = SubscriptionKey {
+    let a_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: scope.options.read_view_key(),
@@ -2484,7 +2553,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("A terminal proof remains valid after B updates the legacy cache");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims.clone())),
             "the maintained terminal support receiver retains A rather than B's sibling snapshot"
         );
@@ -2495,6 +2564,28 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     a_subscriber
         .borrow_mut()
         .update_authenticated_session_claims(b_claims.clone());
+    let b_scope = server
+        .node()
+        .borrow()
+        .authorization_support_scope_for_session(
+            alice,
+            Some(&b_claims),
+            &PermissionAdviceAction::Insert {
+                table: "todos".to_owned(),
+                cells: candidate_cells.clone(),
+            },
+        )
+        .expect("viewer policy has the same support clause under its own snapshot");
+    let (b_shape, b_binding) = b_scope
+        .subscriptions
+        .into_iter()
+        .next()
+        .expect("viewer policy produces one support subscription");
+    let b_subscription = SubscriptionKey {
+        shape_id: b_shape.shape_id(),
+        binding_id: b_binding.binding_id(),
+        read_view: b_scope.options.read_view_key(),
+    };
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
@@ -2509,7 +2600,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("a refreshed terminal proof replaces the stale support receiver");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(b_subscription),
             Some((alice, b_claims)),
             "terminal support reuse is keyed by exact immutable claims, not just its query key"
         );
@@ -2531,7 +2622,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("the next refreshed terminal proof replaces the stale support receiver");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims)),
             "each claim revision receives a fresh terminal support receiver"
         );

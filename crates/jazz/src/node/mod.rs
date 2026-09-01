@@ -329,7 +329,8 @@ pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(test)]
 pub(crate) use query_eval::take_client_physical_row_query_calls_for_test;
 pub(crate) use query_eval::{
-    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
+    LocalAuthorityReconciliation, LocalMaintainedViewSubscription,
+    LocalMaintainedViewSubscriptionUpdate,
 };
 pub(crate) use views::{FlatTupleSourceTables, MaintainedViewBundleInputs};
 

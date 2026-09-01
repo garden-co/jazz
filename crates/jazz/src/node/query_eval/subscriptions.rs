@@ -811,7 +811,14 @@ where
         previous_program_fact_set: &BTreeSet<ProgramFactEntry>,
         result_table_filter: Option<&str>,
         output_tables: &BTreeMap<String, TableSchema>,
-    ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
+    ) -> Result<
+        Option<(
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeSet<ResultMemberEntry>,
+            BTreeSet<ProgramFactEntry>,
+        )>,
+        Error,
+    > {
         let authority_result_key = source_authority_result
             .map(Ok)
             .unwrap_or_else(|| self.authority_result_key_for_subscription(subscription))?;
@@ -899,7 +906,7 @@ where
                 _ => None,
             })
             .collect();
-        Ok(Some(
+        Ok(Some((
             super::maintained_subscription_view::ResultTransitions {
                 authoritative_membership_changed: false,
                 authoritative_member_adds: BTreeSet::new(),
@@ -914,7 +921,9 @@ where
                 requires_authoritative_membership_reconcile: false,
                 terminal_operations: Vec::new(),
             },
-        ))
+            current,
+            current_facts,
+        )))
     }
 
     pub(crate) async fn authoritative_reset_snapshot_for_authority_result(

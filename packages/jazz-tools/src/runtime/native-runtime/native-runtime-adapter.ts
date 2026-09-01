@@ -2949,6 +2949,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const readContext = this.nativeReadContext(session);
     const attachment = this.attachQueryForContext(query, opts, readContext);
     this.emitQueryCoverageTrace("attach");
+    // Local+Full has two independent axes: registering the attachment starts
+    // normal upstream propagation, but the public Local read is complete from
+    // current local knowledge and must not wait for that remote coverage.
+    if (tier === "local") return attachment;
     if (!this.db.queryAttachmentIsCovered) return attachment;
     const coverageKey = this.coverageKey(readContext, session);
     const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);

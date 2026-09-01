@@ -586,7 +586,7 @@ where
 
     /// Test-only inspection of retry ownership. Rejected foreign transactions
     /// must never acquire an originating node's retained payload.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
         self.node.borrow().rejected_transaction(tx_id).is_some()
@@ -595,7 +595,7 @@ where
     /// Test-only inspection of the process-local browser-relay recovery
     /// marker. It is not durable retry ownership: every terminal fate must
     /// consume it, including an accepted Global fate.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
         self.browser_relay_recovered_tx_ids
@@ -1906,7 +1906,7 @@ where
             mutation_errors: Rc::clone(&self.mutation_errors),
             browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
@@ -2239,7 +2239,7 @@ where
             mutation_errors: Rc::clone(&self.mutation_errors),
             browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),

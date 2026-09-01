@@ -5618,6 +5618,14 @@ fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
     assert!(!*reset_result_set);
     assert_eq!(result_member_removes.len(), 1);
 
+    // The clone is a distinct concrete receiver. Production subscription
+    // admission records its immutable policy binding before an owner-loop
+    // rehydrate; mirror that boundary here rather than letting a direct test
+    // helper fall back to a mutable node-wide identity cache.
+    let policy_binding = peer
+        .subscription_policy_binding(canonical)
+        .expect("canonical receiver has its direct policy binding");
+    peer.set_subscription_policy_binding(target, policy_binding);
     let target_reset = peer
         .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
             &mut core,
