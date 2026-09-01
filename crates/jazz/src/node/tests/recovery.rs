@@ -1,6 +1,7 @@
 use crate::tx::{
-    BranchViewCopyBase, BranchViewCopyEvidence, ContributionComponent, ContributionCoordinate,
-    ContributionDot, ContributionMergeProvenance, ContributionSubstitution,
+    BranchViewCopyBase, BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation,
+    ContributionComponent, ContributionCoordinate, ContributionDot, ContributionMergeProvenance,
+    ContributionSubstitution,
 };
 
 #[test]
@@ -260,17 +261,31 @@ fn contribution_merge_provenance_survives_reopen() {
 #[test]
 fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
     let schema = schema();
-    let (_dir, core) = open_node_with_schema(node(0x31), schema);
+    let (_dir, core) = open_node_with_schema(node(0x31), schema.clone());
     let source = TxId::new(TxTime::from(31), node(0x32));
+    let head = BranchKey {
+        values: vec![(
+            "branch".to_owned(),
+            crate::protocol::BranchColumnValue::from(Value::String("draft".to_owned())),
+        )],
+    };
     let evidence = BranchViewCopyEvidence {
         version: 1,
-        head: BranchKey::default(),
+        head: head.clone(),
         base: BranchViewCopyBase::Current(BranchKey::default()),
         table: "todos".to_owned(),
         row_uuid: row(0x33),
         source_version: source,
     };
-    let provenance = ContributionMergeProvenance::branch_view_copy(evidence.clone());
+    let mut provenance = ContributionMergeProvenance::branch_view_copy(evidence.clone());
+    provenance.branch_write_intents = vec![BranchWriteIntent {
+        version: 1,
+        physical_table_id: crate::ids::PhysicalTableId(1),
+        authored_schema: schema.version_id(),
+        row_uuid: row(0x33),
+        head,
+        operation: BranchWriteOperation::ViewUpdateCopy(evidence.clone()),
+    }];
     let stored = core
         .contribution_merge_storage_value(Some(&provenance))
         .unwrap();
@@ -281,7 +296,7 @@ fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
         panic!("contribution provenance must be a normal Groove record");
     };
     let decoded = core.contribution_merge_from_storage_record(record).unwrap();
-    assert_eq!(decoded.branch_view_copies, vec![evidence]);
+    assert_eq!(decoded, provenance);
     assert!(decoded.substitutions.is_empty());
 }
 
