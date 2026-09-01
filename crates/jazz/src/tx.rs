@@ -184,6 +184,26 @@ impl ContributionMergeProvenance {
 
     /// Reject non-canonical or incomplete provenance received from a helper.
     pub fn validate(&self) -> Result<(), &'static str> {
+        // These keys are later encoded into durable Groove records. Validate
+        // every ordinary contribution coordinate before any caller can reach
+        // the infallible `canonical_bytes` encoder through a transaction that
+        // also happens to carry branch-write intent metadata.
+        if self.source.try_canonical_bytes().is_err()
+            || self.target.try_canonical_bytes().is_err()
+            || self.substitutions.iter().any(|substitution| {
+                substitution
+                    .target
+                    .branch_key
+                    .try_canonical_bytes()
+                    .is_err()
+                    || substitution
+                        .sources
+                        .iter()
+                        .any(|source| source.coordinate.branch_key.try_canonical_bytes().is_err())
+            })
+        {
+            return Err("contribution provenance branch key is invalid");
+        }
         let canonical = Self::canonical(
             self.source.clone(),
             self.target.clone(),
@@ -1230,6 +1250,49 @@ mod contribution_tests {
         provenance.branch_write_intents[0] = intent;
         provenance.branch_view_copies.push(stored);
         assert!(provenance.validate().is_err(), "orphan copy must reject");
+    }
+
+    #[test]
+    fn branch_metadata_cannot_bypass_ordinary_contribution_key_validation() {
+        let (evidence, intent) = view_copy_intent(9);
+        let provenance = ContributionMergeProvenance {
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: vec![evidence],
+            branch_write_intents: vec![intent],
+        };
+        let malformed_key = || BranchKey {
+            values: vec![
+                (
+                    "z".to_owned(),
+                    crate::protocol::BranchColumnValue(vec![1, u8::MAX]),
+                ),
+                (
+                    "a".to_owned(),
+                    crate::protocol::BranchColumnValue(vec![1, u8::MAX]),
+                ),
+            ],
+        };
+        let mut malformed_source = provenance.clone();
+        malformed_source.source = malformed_key();
+        assert!(malformed_source.validate().is_err());
+
+        let mut malformed_target = provenance.clone();
+        malformed_target.target = malformed_key();
+        assert!(malformed_target.validate().is_err());
+
+        let mut malformed_substitution = provenance.clone();
+        let mut target = coordinate("target");
+        target.branch_key = malformed_key();
+        malformed_substitution.substitutions = vec![ContributionSubstitution {
+            target: target.clone(),
+            sources: vec![ContributionDot {
+                tx_id: tx(10),
+                coordinate: target,
+            }],
+        }];
+        assert!(malformed_substitution.validate().is_err());
     }
 
     #[test]

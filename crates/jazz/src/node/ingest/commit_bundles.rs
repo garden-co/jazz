@@ -639,6 +639,18 @@ where
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        // Validate untrusted metadata before a missing ordinary history parent
+        // can park the unit. Otherwise malformed provenance would leave an
+        // inert parked receipt instead of producing its terminal fate.
+        if self
+            .validate_contribution_merge_operation_identities(&tx)
+            .is_err()
+        {
+            return self
+                .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
@@ -685,19 +697,6 @@ where
                 global_time: None,
                 durability: None,
             }]));
-        }
-        // Remote provenance is untrusted. Once schemas are present, settle a
-        // structural failure as malformed instead of leaving the sender with
-        // a bubbled API error and no fate. Stored-record recovery remains
-        // fail-closed through its separate decoder path.
-        if self
-            .validate_contribution_merge_operation_identities(&tx)
-            .is_err()
-        {
-            return self
-                .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
-                .await
-                .map(PublicationOutcome::settled);
         }
         if !Box::pin(self.commit_unit_satisfies_write_policies(
             &tx,
@@ -841,6 +840,15 @@ where
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        if self
+            .validate_contribution_merge_operation_identities(&tx)
+            .is_err()
+        {
+            return self
+                .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
@@ -886,15 +894,6 @@ where
                 global_time: None,
                 durability: None,
             }]));
-        }
-        if self
-            .validate_contribution_merge_operation_identities(&tx)
-            .is_err()
-        {
-            return self
-                .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
-                .await
-                .map(PublicationOutcome::settled);
         }
         if !self
             .commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)

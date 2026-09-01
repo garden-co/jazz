@@ -765,7 +765,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         .project_branch_view_selector(table, &malformed_head)
         .unwrap()
         .0;
-    let (mut malformed_tx, malformed_versions) = make_unit(
+    let (mut malformed_tx, _malformed_versions) = make_unit(
         TxId::new(TxTime::from(42), node(0x62)),
         allowed,
         source_tx,
@@ -791,6 +791,45 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         target: duplicate_dot.coordinate.clone(),
         sources: vec![duplicate_dot.clone(), duplicate_dot],
     }];
+    malformed_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .source = BranchKey {
+        values: vec![
+            ("z".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+            ("a".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+        ],
+    };
+    // Pair the malformed metadata with an otherwise ordinary missing parent.
+    // Provenance validation must happen before orphan parking, so the unit
+    // settles immediately and leaves no parked residue.
+    let missing_parent = TxId::new(TxTime::from(41), node(0x63));
+    let malformed_versions = vec![
+        VersionRecord::from_cells(
+            table,
+            schema.version_id(),
+            source_row,
+            vec![missing_parent],
+            allowed,
+            malformed_tx.tx_id.time.physical_ms(),
+            allowed,
+            malformed_tx.tx_id.time.physical_ms(),
+            &BTreeMap::from([
+                ("branch_id".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([0x61; 16]))),
+                ("title".to_owned(), v("head patch")),
+                ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
+            ]),
+            None,
+        )
+        .unwrap()
+        .with_branch_key(
+            schema
+                .project_branch_view_selector(table, &malformed_head)
+                .unwrap()
+                .0,
+        ),
+    ];
     let malformed_outcome = crate::db::block_on(authority.ingest_commit_unit(
         malformed_tx.clone(),
         malformed_versions,
@@ -802,6 +841,18 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         authority.transaction_state_settled(malformed_tx.tx_id),
         Some((Fate::Rejected(RejectionReason::MalformedCommit(_)), None, DurabilityTier::Local))
     ));
+    assert!(
+        !authority.parking.parked_commit_units.contains_key(&malformed_tx.tx_id),
+        "malformed provenance must not leave an orphan parked behind its terminal fate"
+    );
+    assert!(
+        authority
+            .transaction_record(malformed_tx.tx_id)
+            .unwrap()
+            .contribution_merge
+            .is_none(),
+        "the terminal malformed receipt must not persist unencodable provenance"
+    );
 
     // Durable authority state retains the exact descriptor. A reopened
     // authority therefore keeps the accepted outcome and treats a relayed
