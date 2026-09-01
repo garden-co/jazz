@@ -778,18 +778,19 @@ fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_sour
 }
 
 #[test]
-fn relay_authority_source_selection_requires_read_policy_for_exact_id() {
-    fn selected(schema: JazzSchema) -> bool {
+fn relay_authority_source_selection_requires_authority_session_owner() {
+    fn selected(schema: JazzSchema, owner: bool) -> bool {
         let (_dir, mut node) =
             open_node_with_uuid(NodeUuid::from_bytes([0x35; 16]), schema.clone());
-        node.set_relay_authority_session_owner();
+        if owner {
+            node.set_relay_authority_session_owner();
+        }
         let shape = Query::from("docs")
             .filter(eq(col("id"), lit(Value::Uuid(row(0x36).0))))
             .validate_runtime(&schema)
             .unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
         node.relay_edge_query_requires_authority_source(&shape, &binding)
-            .unwrap()
     }
 
     let table = || PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text);
@@ -804,16 +805,20 @@ fn relay_authority_source_selection_requires_read_policy_for_exact_id() {
         ));
 
     assert!(
-        !selected(no_policy),
-        "public point reads stay on the ordinary relay path"
+        !selected(no_policy.clone(), false),
+        "a non-worker relay keeps its ordinary projection source"
     );
     assert!(
-        selected(read_policy),
-        "read-policy revocation requires authority membership"
+        selected(no_policy, true),
+        "the worker authority owner seeds even public point reads"
     );
     assert!(
-        !selected(write_only_policy),
-        "write-only policy cannot revoke read membership and must not select a second source",
+        selected(read_policy, true),
+        "the worker authority owner seeds policy-scoped point reads"
+    );
+    assert!(
+        selected(write_only_policy, true),
+        "the source rule does not infer completeness from a table's policy shape",
     );
 }
 
@@ -832,20 +837,17 @@ fn relay_authority_source_selection_includes_limit_only_windows() {
         .unwrap();
 
     assert!(
-        !node
-            .relay_edge_query_requires_authority_source(
-                &unbounded,
-                &unbounded.bind(BTreeMap::new()).unwrap(),
-            )
-            .unwrap(),
-        "an unbounded relay query can evaluate its resident overlay"
+        node.relay_edge_query_requires_authority_source(
+            &unbounded,
+            &unbounded.bind(BTreeMap::new()).unwrap(),
+        ),
+        "an unbounded worker relay query must preserve authority membership"
     );
     assert!(
         node.relay_edge_query_requires_authority_source(
             &limit_only,
             &limit_only.bind(BTreeMap::new()).unwrap(),
-        )
-        .unwrap(),
+        ),
         "a limit-only window must preserve the authority-selected membership"
     );
 }

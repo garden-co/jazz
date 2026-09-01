@@ -1562,32 +1562,18 @@ where
             .map(|view| view.key)
     }
 
-    fn is_policy_scoped_exact_id_query(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-    ) -> Result<bool, Error> {
-        let table = self.table_in_schema(&shape.query().table, shape.schema_version())?;
-        Ok(table.read_policy.is_some()
-            && root_literal_equalities(shape.query(), binding)?.contains_key("id"))
-    }
-
-    /// Relay forwarding consumes a selected upstream authority receipt only
-    /// where local re-evaluation would change its meaning: windows would
-    /// otherwise apply their offset twice, and policy-scoped exact-ID reads
-    /// could resurrect a cached row after revocation. A browser worker's
-    /// dedicated authority-session identity keeps that selected receipt
-    /// separate from ordinary Global coverage; it does not turn every Edge
-    /// child into a second projection path.
+    /// A browser worker relaying a strict Edge read must publish from its
+    /// dedicated authority-session membership. The worker's local overlay is
+    /// not a complete replacement for that server-selected result: an
+    /// unbounded filtered query can depend on supporting rows which are
+    /// intentionally absent from the overlay. Non-owner relays keep their
+    /// ordinary projection source.
     pub(crate) fn relay_edge_query_requires_authority_source(
         &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-    ) -> Result<bool, Error> {
-        if shape.query().offset != 0 || shape.query().limit.is_some() {
-            return Ok(true);
-        }
-        self.is_policy_scoped_exact_id_query(shape, binding)
+        _shape: &ValidatedQuery,
+        _binding: &Binding,
+    ) -> bool {
+        self.is_relay_authority_session_owner()
     }
 
     fn client_settled_binding_view_for_query(

@@ -1176,15 +1176,15 @@ impl PeerState {
         let relay_edge_requires_authority_source = purpose == RehydratePurpose::Query
             && self.role == PeerRole::Relay
             && tier == DurabilityTier::Edge
-            && node.relay_edge_query_requires_authority_source(shape, binding)?;
+            && node.relay_edge_query_requires_authority_source(shape, binding);
         let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
         let opened = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             match purpose {
             // A relay's selected Edge child is the browser half of a durable
-            // worker authority receipt. The selection is deliberately narrow:
-            // only a window or policy-scoped exact-ID read would change
-            // semantics if evaluated from the relay's local cache.
+            // worker authority receipt. Every strict Edge child consumes the
+            // same authority-selected membership, including unbounded
+            // filtered queries whose supporting rows are absent locally.
             RehydratePurpose::Query if relay_edge_requires_authority_source => {
                 scoped.open_seeded_relay_edge_subscription_view_with_waker(
                     shape,
