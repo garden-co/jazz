@@ -24,15 +24,6 @@ pub enum AuthMode {
     Anonymous,
 }
 
-/// Construct the one canonical policy-binding vocabulary for an admitted
-/// identity and its provider claims.
-///
-/// Provider values always remain namespaced below `session.claims.*`. The
-/// identity-derived `session.claims.iss`/`sub`, `session.user`, and
-/// `session.authMode` values are overwritten here, after provider claims, so a
-/// transport caller cannot create a competing identity revision by spelling a
-/// reserved field in its claim object.
-
 /// Session context for policy evaluation.
 ///
 /// Contains the authenticated user's identity and claims. Used by policy
