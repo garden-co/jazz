@@ -17,8 +17,8 @@ use super::super::node::maintained_subscription_view::{
     MaintainedSubscriptionView, MaintainedTerminalSchemas,
 };
 use super::super::protocol::{
-    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
+    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
@@ -102,10 +102,13 @@ pub enum PeerRole {
 }
 
 impl PeerRole {
-    pub(super) fn identity(self) -> AuthorSubject {
+    /// The authenticated principal whose policy may be composed for this
+    /// link. A relay is transport only: treating it as `SYSTEM` here would
+    /// turn a topology role into a policy bypass.
+    pub(super) fn permission_subject(self) -> Option<AuthorSubject> {
         match self {
-            Self::Relay => AuthorSubject::SYSTEM,
-            Self::ClientLink { identity } => identity,
+            Self::Relay => None,
+            Self::ClientLink { identity } => Some(identity),
         }
     }
 }
@@ -116,6 +119,14 @@ pub(super) struct PeerSubscriptionState {
     /// Immutable admitted policy context for this usage site. Relay links can
     /// multiplex sessions, so this must not be inferred from connection role.
     pub(super) policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    /// Exact upstream authority receipt consumed by this served usage site.
+    ///
+    /// A relay's maintained receiver has its own synthetic subscription key
+    /// so that downstream policy scopes do not share a runtime. Its source,
+    /// however, is the separately registered upstream usage site. Keeping the
+    /// source key here preserves that relationship without trying to recover
+    /// it from the (non-unique) canonical binding view.
+    pub(super) authority_result_source: Option<AuthorityResultKey>,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
     pub(super) member_index: BTreeMap<MemberIndexKey, MemberSlot>,
@@ -160,8 +171,9 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
-    /// Authoritative source membership for an Edge child of a durable relay.
-    pub(super) source_binding_view: Option<BindingViewKey>,
+    /// Exact authoritative source membership for an Edge child of a durable
+    /// relay. A canonical binding view alone is not a permission boundary.
+    pub(super) source_authority_result: Option<AuthorityResultKey>,
     pub(super) initial_received: bool,
 }
 

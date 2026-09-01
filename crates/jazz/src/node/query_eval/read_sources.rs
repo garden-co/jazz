@@ -94,6 +94,7 @@ where
                 SourceExpr::SettledBindingView {
                     projection,
                     binding_view,
+                    authority_result_key,
                     rows,
                     requires_result_payload,
                 } => {
@@ -115,6 +116,7 @@ where
                             &request.source.table,
                             self.read_view.read_schema,
                             *binding_view,
+                            authority_result_key.clone(),
                             *rows,
                         )
                         .await
@@ -3498,6 +3500,7 @@ where
             shape.schema_version(),
             shape.schema_version(),
             tier,
+            None,
             None,
             false,
         );

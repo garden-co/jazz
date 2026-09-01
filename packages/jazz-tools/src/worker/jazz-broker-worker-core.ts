@@ -932,8 +932,14 @@ async function initialize(context: RuntimeContext): Promise<void> {
           proof.token,
           proof.appId,
           proof.claimedAuthor,
+          physicalOwner.storageOwner,
         )
-      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config);
+      : await wasmModule.WasmDb.openBrowser(
+          context.pageStore,
+          schema,
+          config,
+          physicalOwner.storageOwner,
+        );
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
@@ -941,14 +947,8 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
-      { selfSignedClientProof: proof },
+      { selfSignedClientProof: proof, scopeIsolatedRelay: true },
     );
-    if (!unownedDb?.setRelayAuthoritySessionOwner) {
-      throw new Error(
-        "Browser worker artifact does not support relay authority-session bindings; rebuild the matching Jazz WASM artifact",
-      );
-    }
-    unownedDb.setRelayAuthoritySessionOwner();
     context.runtime = runtime;
     unownedDb = null;
     context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));

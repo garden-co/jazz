@@ -61,7 +61,9 @@ impl PeerState {
             }
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
-        let permission_identity = self.identity();
+        let permission_identity = self.permission_subject().ok_or(Error::InvalidStoredValue(
+            "edge fate authority is missing a terminated permission subject",
+        ))?;
         if let Some(scope_subscriptions) = self.unsettled_authority_scope_subscriptions(
             node,
             permission_identity,
@@ -196,7 +198,7 @@ impl PeerState {
         claims: BTreeMap<String, Value>,
         versions: &[VersionRecord],
         candidate_tx_id: TxId,
-    ) -> Result<(), Error>
+    ) -> Result<bool, Error>
     where
         S: OrderedKvStorage,
     {
@@ -205,13 +207,26 @@ impl PeerState {
         // support proof: claim and join predicates have no SYSTEM session to
         // bind and are irrelevant to the bypass decision.
         if writer == AuthorSubject::SYSTEM {
-            return Ok(());
+            return Ok(true);
         }
+        // Both support hydration and the final policy evaluation below read
+        // the active session scope. Keep the immutable admitted snapshot
+        // installed for the entire proof; the author-keyed compatibility map
+        // is neither sufficient nor safe for a scope-isolated relay.
+        let mut node = node.scoped_active_session_claims(writer, claims.clone());
         for action in node
             .authorization_actions_for_versions_in_transaction(versions, Some(candidate_tx_id))
             .await?
         {
-            let scope = node.authorization_support_scope(writer, &action)?;
+            // Terminal proof is bound to this connection's immutable admitted
+            // snapshot. Never fall back to the node's author-keyed
+            // compatibility map: a scope relay deliberately keeps its binding
+            // out of that mutable map, and same-author sessions may differ.
+            let scope = node.authorization_support_scope_for_session(
+                writer,
+                Some(&claims),
+                &action,
+            )?;
             if scope.subscriptions.is_empty() {
                 continue;
             }
@@ -243,7 +258,7 @@ impl PeerState {
                     // snapshot. Reusing a receiver installed by an earlier
                     // claim revision (or a sibling link) would prove this
                     // commit under the wrong immutable policy binding.
-                    self.forget_subscription_with_node(node, subscription);
+                    self.forget_subscription_with_node(&mut node, subscription);
                 }
                 let (cut, progress) = if self
                     .publication_states
@@ -258,7 +273,7 @@ impl PeerState {
                 } else {
                     let update = self
                         .rehydrate_authorization_support_query_for_identity(
-                            node,
+                            &mut node,
                             writer,
                             claims.clone(),
                             subscription,
@@ -289,7 +304,19 @@ impl PeerState {
             }
             self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
         }
-        Ok(())
+        // Support subscriptions prove that every policy-dependent input has
+        // reached a stable authority cut. The terminal result still has to be
+        // evaluated under this exact snapshot; a claim-only policy has no
+        // support subscription at all and must not become an implicit grant.
+        for version in versions {
+            if !node
+                .version_satisfies_write_policy(version, writer, candidate_tx_id)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     #[cfg(test)]
@@ -316,12 +343,17 @@ impl PeerState {
         if writer == AuthorSubject::SYSTEM {
             return Ok(None);
         }
+        let mut node = node.scoped_active_session_claims(writer, claims.clone());
         let mut unsettled = Vec::new();
         for action in node
             .authorization_actions_for_versions_in_transaction(versions, candidate_tx_id)
             .await?
         {
-            let scope = node.authorization_support_scope(writer, &action)?;
+            let scope = node.authorization_support_scope_for_session(
+                writer,
+                Some(&claims),
+                &action,
+            )?;
             if scope.subscriptions.is_empty() {
                 // A policy with no support clauses is structurally complete;
                 // its terminal decision is evaluated by the same authority
@@ -369,7 +401,7 @@ impl PeerState {
                 if maintained
                     && self.subscription_policy_binding(subscription) != Some(policy_binding.clone())
                 {
-                    self.forget_subscription_with_node(node, subscription);
+                    self.forget_subscription_with_node(&mut node, subscription);
                 }
                 if self
                     .publication_states
@@ -386,7 +418,7 @@ impl PeerState {
                 }
                 let rehydrate = self
                     .rehydrate_authorization_support_query_for_identity(
-                        node,
+                        &mut node,
                         writer,
                         claims.clone(),
                         subscription,

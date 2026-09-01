@@ -1,6 +1,7 @@
 //! Subscription opening, query attachment, coverage, and cleanup.
 
 use super::*;
+use crate::protocol::AuthorityResultKey;
 
 impl<S> Db<S>
 where
@@ -161,11 +162,16 @@ where
             binding.binding_id(),
             upstream_opts.read_view_key(),
         );
+        // Opening a new upstream coverage has no scoped receipt yet.  It must
+        // not inherit a generation from an arbitrary policy that happens to
+        // share this physical binding view.  The explicit unscoped key is the
+        // only compatibility baseline; a scoped stream records its own exact
+        // generation once it is registered below.
         let required_after = self
             .node
             .node
             .borrow()
-            .applied_view_update_generation(binding_view);
+            .applied_authority_result_generation(&AuthorityResultKey::unscoped(binding_view));
         let coverage = coverage_key(shape, binding, upstream_opts.clone());
         // Edge/Global one-shots may borrow a still-live maintained stream:
         // refreshing that exact wire subscription cannot be confused with a
@@ -331,8 +337,20 @@ where
             .required_after
             .iter()
             .all(|(binding_view, required_after)| {
-                node.applied_view_update_generation(*binding_view) > *required_after
-                    && !node.opening_pending_for_binding_view(*binding_view)
+                let mut receipts = attachment
+                    .subscriptions
+                    .iter()
+                    .filter_map(|subscription| {
+                        node.authority_result_key_for_subscription(*subscription)
+                            .ok()
+                    })
+                    .filter(|key| key.binding_view == *binding_view);
+                let Some(receipt) = receipts.next() else {
+                    return false;
+                };
+                receipts.all(|candidate| candidate == receipt)
+                    && node.applied_authority_result_generation(&receipt) > *required_after
+                    && !node.opening_pending_for_authority_result(&receipt)
             })
             && (!attachment.requires_current_authority_receipt || has_current_authority_receipt);
         drop(node);
@@ -610,6 +628,31 @@ where
                 && snapshot.edges.is_empty();
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
+        let settled_authority_result = if remote_read_tier.is_some() {
+            let binding_view_key = BindingViewKey {
+                shape_id: state_shape.shape_id(),
+                binding_id: state_binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: settled_tier,
+                    read_view: opts.read_view.clone(),
+                    propagate_upstream: remote_propagate_upstream,
+                    ..RegisterShapeOptions::default()
+                }
+                .read_view_key(),
+            };
+            let node = self.node.node.lock().await;
+            let mut keys = upstream_subscription_handles
+                .iter()
+                .filter_map(|handle| {
+                    node.authority_result_key_for_subscription(handle.subscription)
+                        .ok()
+                })
+                .filter(|key| key.binding_view == binding_view_key);
+            let key = keys.next();
+            key.filter(|key| keys.all(|candidate| candidate == *key))
+        } else {
+            None
+        };
         if authorization_mode == QueryAuthorizationMode::ClientLocal
             && remote_read_tier.is_some()
             && state_shape.query().aggregate.is_none()
@@ -626,11 +669,15 @@ where
                 .read_view_key(),
             };
             if let Some(maintained) = maintained_subscription.as_mut() {
-                self.node
-                    .node
-                    .lock()
-                    .await
-                    .seed_local_maintained_authoritative_generation(maintained, binding_view_key);
+                let node = self.node.node.lock().await;
+                if let Some(authority_result_key) = settled_authority_result.as_ref()
+                    && authority_result_key.binding_view == binding_view_key
+                {
+                    node.seed_local_maintained_authoritative_generation(
+                        maintained,
+                        authority_result_key,
+                    );
+                }
             }
         }
         let settled = {
@@ -644,6 +691,7 @@ where
                 opts.read_view.clone(),
                 remote_propagate_upstream,
                 requires_authority_receipt,
+                settled_authority_result.as_ref(),
             )
         };
         // An empty local opening carries no observable result information at

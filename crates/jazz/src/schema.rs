@@ -39,6 +39,14 @@ pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
 pub const SETTLED_RESULT_MEMBERS_STORE: &str = "jazz_settled_result_members";
 /// Direct groove record store used for persisted settled program facts.
 pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
+/// Collision-checked directory from a fixed policy-binding digest to its full
+/// authority identity. Result-store keys remain bounded without reducing the
+/// runtime policy boundary to a hash-only identity.
+pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_bindings";
+/// Append-only proof that a scope-isolated relay actually received a row
+/// version from its upstream authority. This is distinct from live result
+/// membership, whose later removals only govern future disclosure.
+pub const SCOPE_RELAY_REPAIR_LEDGER_STORE: &str = "jazz_scope_relay_repair_ledger";
 /// Direct groove record store used to distinguish clean shutdown from crash
 /// recovery windows for bounded startup repair.
 pub const CLEAN_CLOSE_MARKERS_STORE: &str = "jazz_clean_close_markers";
@@ -584,18 +592,31 @@ impl RuntimeSchema {
     }
 
     fn with_jazz_direct_record_stores(&self, schema: GrooveDatabaseSchema) -> GrooveDatabaseSchema {
-        // Ordered direct-store key audit (storage format V1): known-state keys
-        // are three UUIDs; settled member/fact identities are fixed 32-byte
-        // digests; clean-close and consistency markers are fixed internal
-        // strings. Application-shaped bytes therefore occur only in values,
-        // never in a direct-store key.
+        // Ordered direct-store key audit (storage format V1): every authority
+        // result is addressed by three UUIDs, a scope discriminator and a
+        // fixed 256-bit policy-binding directory ID. Application-shaped
+        // claims remain in the collision-checked directory value, never in
+        // an ordered B-tree key.
         schema
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                AUTHORITY_POLICY_BINDINGS_STORE,
+                RecordDescriptor::new([("policy_binding_digest", ValueType::Bytes)]),
+                RecordDescriptor::new([
+                    ("subject", ValueType::String),
+                    (
+                        "claims_v1",
+                        crate::protocol::policy_binding_directory_claims_value_type(),
+                    ),
+                ]),
+            ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 KNOWN_STATE_FACTS_STORE,
                 RecordDescriptor::new([
                     ("shape_id", ValueType::Uuid),
                     ("binding_id", ValueType::Uuid),
                     ("read_view_id", ValueType::Uuid),
+                    ("policy_scope", ValueType::U8),
+                    ("policy_binding_digest", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([
                     ("settled_through", ValueType::U64),
@@ -608,6 +629,8 @@ impl RuntimeSchema {
                     ("shape_id", ValueType::Uuid),
                     ("binding_id", ValueType::Uuid),
                     ("read_view_id", ValueType::Uuid),
+                    ("policy_scope", ValueType::U8),
+                    ("policy_binding_digest", ValueType::Bytes),
                     ("member_digest", ValueType::Bytes),
                 ]),
                 // Result members may contain synthetic application values or
@@ -622,6 +645,8 @@ impl RuntimeSchema {
                     ("shape_id", ValueType::Uuid),
                     ("binding_id", ValueType::Uuid),
                     ("read_view_id", ValueType::Uuid),
+                    ("policy_scope", ValueType::U8),
+                    ("policy_binding_digest", ValueType::Bytes),
                     // Program facts can contain an application result payload.
                     // Keep their durable identity bounded so a promoted large
                     // value is stored in the record body (where the backend
@@ -629,6 +654,26 @@ impl RuntimeSchema {
                     ("fact_digest", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([("fact", ValueType::Bytes)]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                SCOPE_RELAY_REPAIR_LEDGER_STORE,
+                RecordDescriptor::new([
+                    ("scope_digest", ValueType::Bytes),
+                    ("physical_table_id", ValueType::U64),
+                    ("row_id", ValueType::Uuid),
+                    ("tx_time", ValueType::U64),
+                    ("tx_node", ValueType::Uuid),
+                ]),
+                // Full scope components are values so host supplied strings
+                // never enter a backend's bounded ordered-key space.
+                RecordDescriptor::new([
+                    ("format_version", ValueType::U64),
+                    ("storage_owner", ValueType::String),
+                    (
+                        "admitted_subject",
+                        ValueType::Nullable(Box::new(ValueType::String)),
+                    ),
+                ]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CLEAN_CLOSE_MARKERS_STORE,

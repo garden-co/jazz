@@ -28,6 +28,7 @@ const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_merge_heads",
     "jazz_global_changes",
     "jazz_deletion_history",
+    "jazz_authority_policy_bindings",
     "jazz_known_state_facts",
     "jazz_settled_result_members",
     "jazz_settled_program_facts",
@@ -37,17 +38,17 @@ const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
 const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
-    "c085228978da30355c822e77a725be4fe5b2ee3ef815886fc512da79733760d0";
+    "4bd2edf48016c9a311168baaaaef329a11ab61b111a3483da05353a02c61bbe6";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "57b2df3cc4bf0c16702ae388a2892b49b735943b982fcf70a31804c2556e0d18";
+    "fe809092e2da227ff856b0793a07351ea965a65c633af90be9f78f8ec8620a9c";
 const EPOCH_1_NATIVE_SQLITE_SHA256: &str =
-    "c466f29dfca1725cc1f41383d924f706ea6cb5d83b21bdcdaa469fe92fab586c";
+    "2ae18ac862339a22b0ea94dc2c816491e3c4b4582132e3fba747f7c23e9eb55f";
 const EPOCH_1_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-rocksdb.tar.gz.base64");
 const EPOCH_1_NATIVE_ROCKSDB_SHA256: &str =
-    "8125fcb0f5089ac96589808a85d9b142ad6b4680c1a170ea237698c1e761424a";
+    "3954b1daba51f4da25027ce414cf8ddb3cac1d5416ce187fc8f49d1e61b0205f";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -679,6 +680,23 @@ where
     let subscription = node
         .whole_table_subscription_key("notes")
         .expect("native corpus registers its notes subscription");
+    // Keep one policy-scoped authority receipt in the corpus. Its fixed
+    // ordered-key handle and typed collision-check directory are storage
+    // format, not an optional cache implementation detail.
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
+        shape_id: shape.shape_id(),
+        subscription,
+        values: Vec::new(),
+        known_state: None,
+        delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::from([(
+                "corpus_scope".to_owned(),
+                Value::String("settlement-v1".to_owned()),
+            )]),
+        }),
+    }))
+    .expect("native corpus registers a policy-scoped receipt");
     let notes_version = node
         .query_table_versions("notes")
         .expect("native corpus reads notes history")
@@ -879,7 +897,13 @@ where
                     .expect("corpus direct-store value has a canonical semantic fixture");
                 (key, value)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // The baseline corpus intentionally has no scope-isolated relay
+        // attachment. Keep its historical receipt focused on settled state;
+        // a populated repair ledger is separately exercised by relay tests.
+        if store_name == crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE && rows.is_empty() {
+            continue;
+        }
         stores.insert(store_name, rows);
     }
 
@@ -940,6 +964,7 @@ where
         "jazz_merge_heads",
         "jazz_global_changes",
         "jazz_deletion_history",
+        "jazz_authority_policy_bindings",
         "jazz_known_state_facts",
         "jazz_settled_result_members",
         "jazz_settled_program_facts",
@@ -1585,7 +1610,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     }
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "6f1d6396d88b5e5c9dc0c9b87c29d58a61a1c7fad8a0a440fbe5814a39c7a323",
+        "ef920ffd524a578ed3cb7b0b98c1790a7c1b2d70df917427afd0f8e4db70688e",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
     assert_eq!(

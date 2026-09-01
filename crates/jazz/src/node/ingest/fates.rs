@@ -437,6 +437,11 @@ where
                 }
                 match context.trust {
                     CommitUnitTrust::Session => context.identity,
+                    // Relay transport has no permission subject. A relayed
+                    // write must reach a serving authority through its
+                    // topology-owned admission path; it cannot borrow SYSTEM
+                    // or the transport identity here.
+                    CommitUnitTrust::Relay => return Ok(context.admitted_write_authorization),
                     CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }
@@ -579,7 +584,10 @@ where
         Ok(true)
     }
 
-    pub(super) async fn version_satisfies_write_policy(
+    /// Evaluate one candidate under the active exact session scope. Terminal
+    /// relay admission uses this after its support proof before it may issue a
+    /// non-wire authorization receipt.
+    pub(crate) async fn version_satisfies_write_policy(
         &mut self,
         version: &VersionRecord,
         author: AuthorSubject,

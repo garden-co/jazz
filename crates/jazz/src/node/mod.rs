@@ -36,16 +36,18 @@ use crate::ids::{
     RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::protocol::{
-    BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp, MigrationLens,
-    PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity, ProgramFactEntry,
-    ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef,
-    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
+    AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp,
+    MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
+    ProgramFactEntry, ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry,
+    RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
+    expand_version_carriers,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
-    JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy, SETTLED_PROGRAM_FACTS_STORE,
-    SETTLED_RESULT_MEMBERS_STORE, TableSchema, registered_column_transform,
+    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy,
+    SCOPE_RELAY_REPAIR_LEDGER_STORE, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
+    TableSchema, registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
@@ -523,7 +525,7 @@ pub struct NodeState<S> {
     /// This process is the durable browser relay that owns upstream Edge
     /// authority sessions for a non-durable client. This is process-local
     /// topology, never schema policy or persisted state.
-    relay_authority_session_owner: bool,
+    relay_authority_session_owner: Option<crate::db::ClientRelayScope>,
     /// Resident transactions whose Groove persistence receipt has not settled.
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
@@ -842,50 +844,68 @@ struct QueryServing {
     // Local, Edge, and Global views in one relay, so keying by BindingId alone
     // lets one view silently overwrite another's routing metadata.
     registered_bindings: BTreeMap<ShapeId, BTreeMap<(BindingId, ReadViewKey), RegisteredBinding>>,
-    /// Monotonically increasing receiver receipts for applied authoritative
-    /// updates. Attachments capture the current receipt and require a later
-    /// one; this remains logical binding-view state, never a wire nonce.
+    /// Every settled result received from an authority.  This is deliberately
+    /// keyed by Jazz's full policy-scoped identity, rather than the ordinary
+    /// canonical binding view used by local maintained views.  Two sessions
+    /// can run the same query with the same binding and still receive
+    /// different authorized membership.
+    authority_results: BTreeMap<AuthorityResultKey, AuthorityResultState>,
+    // Transitional local facade materialization state.  It stays keyed by an
+    // ordinary binding view and must never be used as the receiving-side
+    // authority receipt.  The following implementation moves inbound updates
+    // into `authority_results` first, then selects the exact aggregate when a
+    // relay needs an authority source.
     applied_view_update_generations: BTreeMap<BindingViewKey, u64>,
-    /// Subscriber-side settled result-member/completeness state by canonical query binding/view.
     settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
     /// Non-durable-client window memberships retained only to interpret its
     /// materialized row overlay after the matching Edge usage site detached.
     /// They are deliberately not authority receipts: Edge/Global reads must
     /// open fresh coverage before they may consume a binding view again.
     local_materialized_window_binding_views: BTreeSet<BindingViewKey>,
-    /// Point index for settled real-row output occurrences.
-    ///
-    /// This mirrors the row-shaped subset of `settled_result_sets` so applying a
-    /// new current winner can remove the previous winner without scanning the
-    /// full result set.
     settled_result_row_index:
         BTreeMap<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>,
-    /// Subscriber-side settled non-row facts by canonical query binding/view.
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
-    /// Server-stamped settled-through cursor for each canonical binding view.
     settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalTime>,
-    /// Server-stamped authorization generation paired with settled fast state.
     authorization_progress_by_binding_view: BTreeMap<BindingViewKey, u64>,
-    /// Binding views whose current subscription declared known-state repair.
     known_state_declared_binding_views: BTreeSet<BindingViewKey>,
-    /// Binding views that have begun receiving an initial snapshot. Some
-    /// snapshot payloads arrive after an empty reset stamp, and every payload
-    /// in that phase is eligible for complete-bundle bulk ingest.
     initial_hydration_binding_views: BTreeSet<BindingViewKey>,
-    /// Binding views that are currently receiving a chunked update sequence.
-    ///
-    /// Intermediate chunks apply storage and settled-result state, but they do
-    /// not define an observation boundary for local maintained subscribers.
-    /// Publication runs when the final chunk clears this marker.
     deferred_publication_binding_views: BTreeSet<BindingViewKey>,
-    /// Binding views whose settled state was replaced by an authoritative
-    /// server-provided reset since the last facade refresh.
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
     pending_opening_binding_views: BTreeSet<BindingViewKey>,
-    /// FIFO terminal edits received from the serving peer and not yet
-    /// published by the local subscription facade.
     pending_terminal_operations_by_binding_view:
         BTreeMap<BindingViewKey, Vec<groove::ivm::TerminalOperation>>,
+}
+
+/// One authority-owned result stream, including every receipt that makes its
+/// membership meaningful after a reconnect or durable reopen.  Nothing in
+/// this aggregate is an ordinary local maintained-view cache.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AuthorityResultState {
+    /// Monotonically increasing receipt for received ViewUpdates.
+    applied_view_update_generation: u64,
+    /// This process has received a complete, exact authority settlement for
+    /// this result since it was opened. It is deliberately live-only: durable
+    /// membership recovered after a restart is useful cache material, but it
+    /// is not evidence that a newly opened usage may skip fresh authority
+    /// coverage.
+    live_settled: bool,
+    /// Exact authoritative membership and an occurrence index for replacement.
+    settled_result_set: BTreeSet<ResultMemberEntry>,
+    settled_result_row_index: BTreeMap<ResultRowMembershipKey, ResultMemberEntry>,
+    /// Non-row facts paired with the membership.
+    settled_program_facts: BTreeSet<ViewFactEntry>,
+    /// Optional fast cursor and authorization receipt. The cursor is durable
+    /// cache metadata; only `live_settled` permits a new known-state claim.
+    settled_through: Option<GlobalTime>,
+    authorization_progress: Option<u64>,
+    /// Per-subscription lifecycle state.  It remains policy-scoped because a
+    /// reset, opening, or terminal operation for Alice must never wake Bob.
+    known_state_declared: bool,
+    initial_hydration: bool,
+    deferred_publication: bool,
+    pending_authoritative_reset: bool,
+    pending_opening: bool,
+    pending_terminal_operations: Vec<groove::ivm::TerminalOperation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -914,6 +934,9 @@ struct RegisteredBinding {
     values: Vec<Value>,
     read_view: ReadViewKey,
     binding_view_key: BindingViewKey,
+    /// Exact, Jazz-owned namespace for authority-selected membership.  This
+    /// stays separate from the canonical local binding key.
+    authority_result_key: AuthorityResultKey,
 }
 
 /// Locally open transactions and local-only permission attribution.
@@ -944,6 +967,11 @@ pub struct CommitUnitIngestContext {
     pub trust: CommitUnitTrust,
     /// Whether this subscriber link is hosted by an edge authority.
     pub edge_authority: bool,
+    /// The authenticated connection admission path has already proved every
+    /// terminal write clause against its immutable delegated session binding.
+    /// This may only be set by the peer-connection authority path immediately
+    /// after that proof; wire messages cannot carry it.
+    pub(crate) admitted_write_authorization: bool,
 }
 
 /// Trust mode for an inbound commit-unit upload.
@@ -951,6 +979,10 @@ pub struct CommitUnitIngestContext {
 pub enum CommitUnitTrust {
     /// Session/client links must honestly set `made_by` to the link identity.
     Session,
+    /// An authenticated relay transport. It has no permission subject and
+    /// may carry a topology-assigned delegated session only for the exact
+    /// request that needs authority-side policy composition.
+    Relay,
     /// Trusted backends may preserve user provenance in `made_by`.
     TrustedBackend,
     /// Administrators may preserve provenance and bypass application write policies.
@@ -959,7 +991,7 @@ pub enum CommitUnitTrust {
 
 impl CommitUnitTrust {
     pub(crate) fn is_trusted(self) -> bool {
-        self != Self::Session
+        matches!(self, Self::TrustedBackend | Self::TrustedAdmin)
     }
 }
 
@@ -2108,24 +2140,43 @@ fn select_all(table: &str) -> Query {
     ))
 }
 
-fn known_state_fact_key(binding_view_key: BindingViewKey) -> [Value; 3] {
-    [
-        Value::Uuid(binding_view_key.shape_id.0),
-        Value::Uuid(binding_view_key.binding_id.0),
-        Value::Uuid(binding_view_key.read_view.id),
-    ]
+/// Durable v1 identity for authority-selected results.
+///
+/// This intentionally uses normal Groove values, not postcard or a variable
+/// claim payload: `[shape, binding, read-view, policy-absent-or-present,
+/// 32-byte policy handle]`. The handle names a separate typed directory entry
+/// that preserves the exact subject and claims and rejects a collision during
+/// both write and recovery.
+fn authority_result_store_prefix(authority_result_key: &AuthorityResultKey) -> Vec<Value> {
+    let binding_view = authority_result_key.binding_view;
+    let mut key = vec![
+        Value::Uuid(binding_view.shape_id.0),
+        Value::Uuid(binding_view.binding_id.0),
+        Value::Uuid(binding_view.read_view.id),
+    ];
+    match &authority_result_key.policy_binding {
+        None => {
+            key.push(Value::U8(0));
+            key.push(Value::Bytes(vec![0; 32]));
+        }
+        Some(policy) => {
+            key.push(Value::U8(1));
+            key.push(Value::Bytes(policy.directory_digest().to_vec()));
+        }
+    }
+    key
 }
 
-fn binding_view_store_prefix(binding_view_key: BindingViewKey) -> Vec<Value> {
-    known_state_fact_key(binding_view_key).to_vec()
+fn known_state_fact_key(authority_result_key: &AuthorityResultKey) -> Vec<Value> {
+    authority_result_store_prefix(authority_result_key)
 }
 
 fn settled_result_member_key(
-    binding_view_key: BindingViewKey,
+    authority_result_key: &AuthorityResultKey,
     member: &ResultMemberEntry,
 ) -> Result<Vec<Value>, Error> {
     let member_bytes = codec::result_member_storage_bytes(member)?;
-    let mut key = binding_view_store_prefix(binding_view_key);
+    let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_result_member_digest(&member_bytes).to_vec(),
     ));
@@ -2144,11 +2195,11 @@ fn settled_result_member_digest(member_bytes: &[u8]) -> [u8; 32] {
 }
 
 fn settled_result_member_storage_write(
-    binding_view_key: BindingViewKey,
+    authority_result_key: &AuthorityResultKey,
     member: &ResultMemberEntry,
 ) -> Result<groove::db::DirectRecordStoreWrite, Error> {
     let member_bytes = codec::result_member_storage_bytes(member)?;
-    let mut key = binding_view_store_prefix(binding_view_key);
+    let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_result_member_digest(&member_bytes).to_vec(),
     ));
@@ -2159,10 +2210,10 @@ fn settled_result_member_storage_write(
 }
 
 fn settled_program_fact_key(
-    binding_view_key: BindingViewKey,
+    authority_result_key: &AuthorityResultKey,
     fact: &ViewFactEntry,
 ) -> Result<Vec<Value>, Error> {
-    let mut key = binding_view_store_prefix(binding_view_key);
+    let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_program_fact_digest(&codec::program_fact_storage_bytes(fact)?).to_vec(),
     ));
@@ -2180,11 +2231,11 @@ fn settled_program_fact_digest(fact_bytes: &[u8]) -> [u8; 32] {
 }
 
 fn settled_program_fact_storage_write(
-    binding_view_key: BindingViewKey,
+    authority_result_key: &AuthorityResultKey,
     fact: &ViewFactEntry,
 ) -> Result<groove::db::DirectRecordStoreWrite, Error> {
     let fact_bytes = codec::program_fact_storage_bytes(fact)?;
-    let mut key = binding_view_store_prefix(binding_view_key);
+    let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_program_fact_digest(&fact_bytes).to_vec(),
     ));
@@ -2194,26 +2245,65 @@ fn settled_program_fact_storage_write(
     })
 }
 
-fn binding_view_key_from_store_key(
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct StoredAuthorityResultKey {
+    binding_view: BindingViewKey,
+    policy_digest: Option<[u8; 32]>,
+}
+
+fn authority_result_key_from_store_prefix(
     key: &[Value],
     context: &'static str,
-) -> Result<BindingViewKey, Error> {
-    if key.len() < 3 {
+) -> Result<StoredAuthorityResultKey, Error> {
+    if key.len() != 5 {
         return Err(Error::InvalidStoredValue(context));
     }
-    let shape_id = match &key[0] {
-        Value::Uuid(uuid) => ShapeId(*uuid),
-        _ => return Err(Error::InvalidStoredValue(context)),
+    let (Value::Uuid(shape_id), Value::Uuid(binding_id), Value::Uuid(read_view)) =
+        (&key[0], &key[1], &key[2])
+    else {
+        return Err(Error::InvalidStoredValue(context));
     };
-    let binding_id = match &key[1] {
-        Value::Uuid(uuid) => BindingId(*uuid),
-        _ => return Err(Error::InvalidStoredValue(context)),
+    let binding_view = BindingViewKey::new(
+        ShapeId(*shape_id),
+        BindingId(*binding_id),
+        ReadViewKey { id: *read_view },
+    );
+    let Value::U8(scope) = key[3] else {
+        return Err(Error::InvalidStoredValue(context));
     };
-    let read_view = match &key[2] {
-        Value::Uuid(uuid) => ReadViewKey { id: *uuid },
-        _ => return Err(Error::InvalidStoredValue(context)),
+    let Value::Bytes(digest) = &key[4] else {
+        return Err(Error::InvalidStoredValue(context));
     };
-    Ok(BindingViewKey::new(shape_id, binding_id, read_view))
+    let digest: [u8; 32] = digest
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::InvalidStoredValue(context))?;
+    match scope {
+        0 if digest == [0; 32] => Ok(StoredAuthorityResultKey {
+            binding_view,
+            policy_digest: None,
+        }),
+        1 => Ok(StoredAuthorityResultKey {
+            binding_view,
+            policy_digest: Some(digest),
+        }),
+        _ => Err(Error::InvalidStoredValue(context)),
+    }
+}
+
+fn resolve_stored_authority_result_key(
+    stored: StoredAuthorityResultKey,
+    policies: &BTreeMap<[u8; 32], crate::protocol::PolicyBindingKey>,
+    context: &'static str,
+) -> Result<AuthorityResultKey, Error> {
+    match stored.policy_digest {
+        None => Ok(AuthorityResultKey::unscoped(stored.binding_view)),
+        Some(digest) => policies
+            .get(&digest)
+            .cloned()
+            .map(|policy| AuthorityResultKey::policy_scoped(stored.binding_view, policy))
+            .ok_or(Error::InvalidStoredValue(context)),
+    }
 }
 
 /// Details of a persisted current row that could not be decoded at the point of use.
@@ -2411,4 +2501,45 @@ fn query_errors_keep_display_source_and_matching_after_node_conversion() {
         error,
         Error::Query(source) if matches!(*source, QueryError::UnknownTable(ref table) if table == "missing")
     ));
+}
+
+#[cfg(test)]
+#[test]
+fn authority_result_store_prefix_round_trips_complete_policy_identity() {
+    let binding_view = BindingViewKey::new(
+        ShapeId(uuid::Uuid::from_u128(1)),
+        BindingId(uuid::Uuid::from_u128(2)),
+        ReadViewKey {
+            id: uuid::Uuid::from_u128(3),
+        },
+    );
+    let mut claims = BTreeMap::new();
+    claims.insert("role".to_owned(), Value::String("editor".to_owned()));
+    claims.insert("team".to_owned(), Value::U64(7));
+    let key = AuthorityResultKey::policy_scoped(
+        binding_view,
+        crate::protocol::PolicyBindingKey::from_canonical_parts(
+            AuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
+            claims,
+        ),
+    );
+
+    let prefix = authority_result_store_prefix(&key);
+    assert_eq!(
+        prefix.len(),
+        5,
+        "authority result identity is a fixed 5-field key"
+    );
+    assert_eq!(prefix[3], Value::U8(1));
+    assert!(matches!(&prefix[4], Value::Bytes(digest) if digest.len() == 32));
+    let digest = key.policy_binding.as_ref().unwrap().directory_digest();
+    assert_eq!(
+        resolve_stored_authority_result_key(
+            authority_result_key_from_store_prefix(&prefix, "test").unwrap(),
+            &BTreeMap::from([(digest, key.policy_binding.clone().unwrap())]),
+            "test",
+        )
+        .unwrap(),
+        key
+    );
 }

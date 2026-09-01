@@ -30,9 +30,10 @@ use crate::protocol::KnownStateCompleteness;
 #[cfg(test)]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    KnownStateDeclaration, ProgramFactEntry, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
-    RowVersionRef, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionCarrier, VersionRecord, expand_version_carriers,
+    AuthorityResultKey, DelegatedSessionBinding, KnownStateDeclaration, ProgramFactEntry,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord,
+    expand_version_carriers,
 };
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
@@ -62,6 +63,9 @@ pub struct PeerState {
     publication_owner: u64,
     role: PeerRole,
     permission_identity: Option<AuthorSubject>,
+    /// Server/host-issued link capability.  This deliberately is not derived
+    /// from `PeerRole`, a wire hello, or a semantic sync message.
+    transport_capability: RelayTransportCapability,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
     ship_complete_exclusive_payloads: bool,
     /// Maintained evaluator and shipped-membership state for canonical
@@ -95,6 +99,7 @@ impl Default for PeerState {
                 identity: AuthorSubject::SYSTEM,
             },
             permission_identity: None,
+            transport_capability: RelayTransportCapability::OrdinarySession,
             shipped_complete_tx_payloads: BTreeSet::new(),
             ship_complete_exclusive_payloads: false,
             publication_states: BTreeMap::new(),
@@ -107,6 +112,22 @@ impl Default for PeerState {
             metrics: PeerMetrics::default(),
         }
     }
+}
+
+/// Closed admission capability for a peer transport.
+///
+/// A generic relay may multiplex independently admitted bindings. A
+/// scope-isolated client relay has exactly one server-authenticated binding,
+/// so raw claims and arbitrary delegated request bindings are never accepted.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RelayTransportCapability {
+    OrdinarySession,
+    #[allow(dead_code)] // constructed only by the private serving admission path
+    ScopeIsolatedClientRelay {
+        binding: DelegatedSessionBinding,
+        admission_epoch: u64,
+    },
+    MultiplexedRelay,
 }
 
 static NEXT_PUBLICATION_OWNER: AtomicU64 = AtomicU64::new(1);

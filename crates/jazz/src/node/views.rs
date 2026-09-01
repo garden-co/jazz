@@ -1284,19 +1284,25 @@ where
         self.validate_view_update_payloads(&updates)?;
         let mut all_bundle_refs = Vec::new();
         let mut bulk_candidates = Vec::new();
-        let mut initial_hydration_binding_views =
-            self.query.initial_hydration_binding_views.clone();
+        let mut initial_hydration_authority_results = self
+            .query
+            .authority_results
+            .iter()
+            .filter_map(|(key, state)| state.initial_hydration.then_some(key.clone()))
+            .collect::<BTreeSet<_>>();
         for update in &updates {
-            let Ok(binding_view_key) = self.binding_view_key_for_subscription(update.subscription)
+            let Ok(authority_result_key) =
+                self.authority_result_key_for_subscription(update.subscription)
             else {
                 continue;
             };
             if update.reset_result_set {
-                initial_hydration_binding_views.insert(binding_view_key);
+                initial_hydration_authority_results.insert(authority_result_key.clone());
             }
             let version_bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
             all_bundle_refs.extend(version_bundle_refs.iter().copied());
-            let in_initial_hydration = initial_hydration_binding_views.contains(&binding_view_key);
+            let in_initial_hydration =
+                initial_hydration_authority_results.contains(&authority_result_key);
             if update.reset_result_set
                 && update.peer_complete_tx_payload_refs.is_empty()
                 && update.result_member_removes.is_empty()
@@ -1307,7 +1313,7 @@ where
                 && version_bundle_refs.is_empty()
                 && (!update.reset_result_set || update.peer_complete_tx_payload_refs.is_empty())
             {
-                initial_hydration_binding_views.remove(&binding_view_key);
+                initial_hydration_authority_results.remove(&authority_result_key);
             }
         }
         let preflight = self
@@ -1396,7 +1402,13 @@ where
             self.apply_view_update_inner(update, Some(&preloaded_tx_ids))
                 .await?;
         }
-        if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
+        if self.initial_sync_flush_active
+            && self
+                .query
+                .authority_results
+                .values()
+                .all(|state| !state.initial_hydration)
+        {
             self.finish_initial_sync_flush_cadence().await?;
         }
         Ok(())
@@ -1469,6 +1481,10 @@ where
             }
             Err(error) => return Err(error),
         };
+        // Wire updates name a usage subscription only.  Resolve the complete
+        // policy-scoped authority identity captured when that subscription was
+        // admitted; never reconstruct or share it through BindingViewKey.
+        let authority_result_key = self.authority_result_key_for_subscription(subscription)?;
         let preflight = if preloaded_tx_ids.is_none() {
             Some(
                 self.preflight_view_bundle_conflicts(&version_bundle_refs)
@@ -1510,28 +1526,38 @@ where
             BTreeSet::new()
         };
         if reset_result_set {
-            self.query
-                .pending_terminal_operations_by_binding_view
-                .remove(&binding_view_key);
-            self.query
-                .initial_hydration_binding_views
-                .insert(binding_view_key);
+            let state = self
+                .query
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default();
+            state.pending_terminal_operations.clear();
+            state.initial_hydration = true;
         }
         if !terminal_operations.is_empty() {
             self.query
-                .pending_terminal_operations_by_binding_view
-                .entry(binding_view_key)
+                .authority_results
+                .entry(authority_result_key.clone())
                 .or_default()
+                .pending_terminal_operations
                 .extend(terminal_operations);
         }
+        self.query
+            .authority_results
+            .entry(authority_result_key.clone())
+            .or_default()
+            .deferred_publication = defer_settlement;
         if defer_settlement {
+            // A newer deferred update supersedes any earlier complete
+            // handoff for this *exact* authority receipt. Its membership may
+            // be useful while the authority finishes the update, but neither
+            // it nor a sibling policy scope may justify a known-state claim
+            // until a non-deferred completion arrives.
             self.query
-                .deferred_publication_binding_views
-                .insert(binding_view_key);
-        } else {
-            self.query
-                .deferred_publication_binding_views
-                .remove(&binding_view_key);
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .live_settled = false;
         }
         let row_result_adds = result_member_adds
             .iter()
@@ -1595,21 +1621,17 @@ where
         let preserve_existing_shared_state = empty_reset
             && self
                 .query
-                .settled_result_sets
-                .get(&binding_view_key)
-                .is_some_and(|members| !members.is_empty());
+                .authority_results
+                .get(&authority_result_key)
+                .is_some_and(|state| !state.settled_result_set.is_empty());
         let reset_cleared_shared_state = reset_result_set && !preserve_existing_shared_state;
         if reset_cleared_shared_state {
-            self.clear_settled_result_view(binding_view_key);
-            self.query.settled_program_facts.remove(&binding_view_key);
-            self.query
-                .settled_through_by_binding_view
-                .remove(&binding_view_key);
+            self.clear_settled_result_view(authority_result_key.clone());
         }
         if reset_result_set {
             self.query
-                .settled_result_sets
-                .entry(binding_view_key)
+                .authority_results
+                .entry(authority_result_key.clone())
                 .or_default();
         }
         let mut result_members_need_rewrite = false;
@@ -1617,13 +1639,14 @@ where
         let fact_rewrite;
         {
             for member in result_member_removes {
-                if self.remove_settled_result_member_indexed(binding_view_key, &member) {
+                if self.remove_settled_result_member_indexed(authority_result_key.clone(), &member)
+                {
                     continue;
                 }
                 if let Some(occurrence_id) = member.output_occurrence_id()
                     && self
                         .remove_settled_result_member_for_occurrence_indexed(
-                            binding_view_key,
+                            authority_result_key.clone(),
                             occurrence_id,
                         )
                         .is_some()
@@ -1635,30 +1658,31 @@ where
                 if let Some(occurrence_id) = member.output_occurrence_id() {
                     result_members_need_rewrite |= self
                         .remove_settled_result_member_for_occurrence_indexed(
-                            binding_view_key,
+                            authority_result_key.clone(),
                             occurrence_id,
                         )
                         .is_some();
                 }
-                self.insert_settled_result_member_indexed(binding_view_key, member);
+                self.insert_settled_result_member_indexed(authority_result_key.clone(), member);
             }
             member_rewrite = if result_members_need_rewrite {
                 Some(
                     self.query
-                        .settled_result_sets
-                        .get(&binding_view_key)
-                        .cloned()
+                        .authority_results
+                        .get(&authority_result_key)
+                        .map(|state| state.settled_result_set.clone())
                         .unwrap_or_default(),
                 )
             } else {
                 None
             };
 
-            let program_facts = self
+            let program_facts = &mut self
                 .query
-                .settled_program_facts
-                .entry(binding_view_key)
-                .or_default();
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .settled_program_facts;
             for fact in program_fact_removes {
                 program_facts.remove(&fact);
             }
@@ -1668,25 +1692,39 @@ where
         if synthetic_result_changed
             && self
                 .query
-                .initial_hydration_binding_views
-                .contains(&binding_view_key)
+                .authority_results
+                .get(&authority_result_key)
+                .is_some_and(|state| state.initial_hydration)
         {
             self.query
-                .pending_authoritative_reset_binding_views
-                .insert(binding_view_key);
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .pending_authoritative_reset = true;
         }
         if !defer_settlement {
-            self.query
-                .settled_through_by_binding_view
-                .insert(binding_view_key, settled_through);
+            let state = self
+                .query
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default();
+            // A complete inbound receipt makes this exact result live for
+            // the current process even when it has no usable fast cursor.
+            // `GlobalTime::default()` is the protocol's cursorless settlement
+            // marker: it permits an exact known-state declaration but must
+            // not claim a fast current-membership position.
+            state.live_settled = true;
+            state.settled_through = (settled_through.0 != 0).then_some(settled_through);
             // A reset is an authoritative membership rebuild, including when
             // it carries retractions. The public subscription materializes its
             // replacement snapshot below, rather than attempting to apply a
             // removal after the reset has cleared the cached result set.
             if reset_result_set && !preserve_existing_shared_state {
                 self.query
-                    .pending_authoritative_reset_binding_views
-                    .insert(binding_view_key);
+                    .authority_results
+                    .entry(authority_result_key.clone())
+                    .or_default()
+                    .pending_authoritative_reset = true;
             }
         }
         // Diagnostic-only: the duplicate-content-version scan feeds a
@@ -1695,9 +1733,9 @@ where
         {
             if let Some((occurrence_id, first, second)) = self
                 .query
-                .settled_result_sets
-                .get(&binding_view_key)
-                .and_then(duplicate_output_occurrence_result_set)
+                .authority_results
+                .get(&authority_result_key)
+                .and_then(|state| duplicate_output_occurrence_result_set(&state.settled_result_set))
             {
                 debug_assert!(
                     first == second,
@@ -1706,8 +1744,8 @@ where
             }
         }
         if !defer_settlement {
-            self.persist_settled_result_state_delta(
-                binding_view_key,
+            self.persist_settled_result_state_delta_for_authority_result(
+                authority_result_key.clone(),
                 reset_cleared_shared_state,
                 &persisted_member_adds,
                 &persisted_member_removes,
@@ -1717,41 +1755,45 @@ where
                 fact_rewrite.as_ref(),
             )
             .await?;
-            self.persist_known_state_fact(binding_view_key, settled_through)
-                .await?;
+            self.persist_known_state_fact_for_authority_result(
+                authority_result_key.clone(),
+                settled_through,
+            )
+            .await?;
         }
         if self
             .query
-            .initial_hydration_binding_views
-            .contains(&binding_view_key)
+            .authority_results
+            .get(&authority_result_key)
+            .is_some_and(|state| state.initial_hydration)
             && version_bundles_is_empty
             && (!reset_result_set || peer_complete_tx_payload_refs.is_empty())
             && !defer_settlement
         {
             self.query
-                .initial_hydration_binding_views
-                .remove(&binding_view_key);
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .initial_hydration = false;
         }
         if let Some(progress) = authorization_progress {
             self.query
-                .authorization_progress_by_binding_view
-                .insert(binding_view_key, progress);
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .authorization_progress = Some(progress);
         }
-        if opening_pending {
-            self.query
-                .pending_opening_binding_views
-                .insert(binding_view_key);
-        } else {
-            self.query
-                .pending_opening_binding_views
-                .remove(&binding_view_key);
-        }
-        let generation = self
+        self.query
+            .authority_results
+            .entry(authority_result_key.clone())
+            .or_default()
+            .pending_opening = opening_pending;
+        let state = self
             .query
-            .applied_view_update_generations
-            .entry(binding_view_key)
+            .authority_results
+            .entry(authority_result_key.clone())
             .or_default();
-        *generation = generation.wrapping_add(1);
+        state.applied_view_update_generation = state.applied_view_update_generation.wrapping_add(1);
         Ok(())
     }
 

@@ -157,6 +157,10 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         projection: SchemaProjection<R>,
         /// Canonical registered binding/view result-set identity.
         binding_view: BindingViewKey,
+        /// Exact authority receipt selected by the subscription that opened
+        /// this source. `binding_view` is only cache/routing identity; it is
+        /// not sufficient to select policy-scoped authoritative data.
+        authority_result_key: Option<crate::protocol::AuthorityResultKey>,
         /// Partition result members from admitted tuple sources so a
         /// self-join cannot feed the same table-wide union into both sides.
         rows: SettledBindingRows,

@@ -2487,7 +2487,9 @@ mod peer_connection;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
 mod config;
-pub use config::{DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource};
+pub use config::{
+    ClientRelayScope, DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource,
+};
 
 /// One-shot read options.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2788,15 +2790,14 @@ fn ensure_supported_register_shape_options(
     opts: &RegisterShapeOptions,
     local_receiver: bool,
     peer_role: PeerRole,
-    relay_authority_session_admitted: bool,
+    delegated_session_capability: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
-    if opts.binding_source == BindingSource::RelayAuthoritySession
-        && !relay_authority_session_admitted
+    if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
             ErrorCode::Query,
-            "relay authority-session bindings may only be registered by an admitted upstream relay",
+            "relay authority-session bindings require a live server-admitted scope-isolated relay capability",
         ));
     }
     let supported = match (local_receiver, peer_role) {
@@ -2928,7 +2929,8 @@ fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust)
 /// the direction or authenticated link role after dispatch.
 fn subscriber_inbound_message_is_authority_only(
     message: &SyncMessage,
-    trust: CommitUnitTrust,
+    ingest: CommitUnitIngestContext,
+    peer: &crate::peer::PeerState,
 ) -> bool {
     matches!(
         message,
@@ -2944,13 +2946,54 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
             | SyncMessage::AuthorizationScopeUnavailable { .. }
             | SyncMessage::AuthorizationScopeDecision { .. }
-    ) || (trust == CommitUnitTrust::Session && matches!(message, SyncMessage::SessionClaims { .. }))
+    ) || (matches!(message, SyncMessage::SessionClaims { .. })
+        && (peer.rejects_raw_session_claims()
+            || !delegated_session_capability(ingest, peer.role())))
 }
 
-fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorSubject {
+/// Only the host-admitted core-facing relay may carry another session's
+/// immutable policy binding.  This is a connection capability, not a field a
+/// wire caller can grant itself by choosing a registration option or message
+/// variant.
+fn delegated_session_capability(ingest: CommitUnitIngestContext, peer_role: PeerRole) -> bool {
+    ingest.trust == CommitUnitTrust::Relay && peer_role == PeerRole::Relay
+}
+
+/// Select the immutable session snapshot permitted for one request. Direct
+/// links use their host-admitted session; only a scope-isolated relay with an
+/// exact server-issued binding can carry a delegated snapshot. A generic
+/// multiplexed relay has no per-binding capability yet, so it must forward
+/// rather than select a user policy subject. Keeping Subscribe and repair on
+/// this one admission rule prevents one path from accidentally treating a
+/// relay's transport identity as a permission subject.
+fn admitted_request_policy_binding(
+    ingest: CommitUnitIngestContext,
+    peer: &crate::peer::PeerState,
+    direct: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    delegated: Option<crate::protocol::DelegatedSessionBinding>,
+) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+    match delegated {
+        // A relay transport is deliberately unbound. Its connection context
+        // may contain an opaque host identity for lifecycle purposes, but it
+        // is never a fallback permission subject for an application query or
+        // repair.
+        None if peer.role() == PeerRole::Relay => None,
+        None => direct,
+        Some(delegated) if delegated_session_capability(ingest, peer.role()) => {
+            let binding = (delegated.identity, delegated.claims);
+            peer.admits_relay_binding(&binding).then_some(binding)
+        }
+        Some(_) => None,
+    }
+}
+
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> Option<AuthorSubject> {
     match ingest.trust {
-        CommitUnitTrust::Session => ingest.identity,
-        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorSubject::SYSTEM,
+        CommitUnitTrust::Session => Some(ingest.identity),
+        CommitUnitTrust::Relay => None,
+        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
+            Some(AuthorSubject::SYSTEM)
+        }
     }
 }
 
@@ -5506,6 +5549,7 @@ fn subscription_is_settled<S>(
     read_view: ReadViewSpec,
     propagate_upstream: bool,
     requires_authority_receipt: bool,
+    authority_result_key: Option<&crate::protocol::AuthorityResultKey>,
 ) -> bool
 where
     S: OrderedKvStorage,
@@ -5524,8 +5568,13 @@ where
         }
         .read_view_key(),
     };
-    node.has_settled_result_set(binding_view_key)
-        && !node.opening_pending_for_binding_view(binding_view_key)
+    // Callers without a registered usage-site key are direct/unscoped paths;
+    // they may inspect only that explicit unscoped receipt. They must never
+    // select a unique scoped receipt by binding view.
+    let fallback_unscoped = crate::protocol::AuthorityResultKey::unscoped(binding_view_key);
+    let authority_result_key = authority_result_key.unwrap_or(&fallback_unscoped);
+    node.has_settled_authority_result(authority_result_key)
+        && !node.opening_pending_for_authority_result(authority_result_key)
         && (!requires_authority_receipt
             || active_authority_view_receipts
                 .borrow()

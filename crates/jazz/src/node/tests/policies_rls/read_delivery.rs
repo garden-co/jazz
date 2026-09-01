@@ -1120,23 +1120,21 @@ fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
     commit_core_owner_fixture(&mut core, row(1), owner, "owned", 10);
 
     let mut relay = PeerState::relay();
-    assert_eq!(relay.identity(), AuthorSubject::SYSTEM);
-    let subscription = core.whole_table_subscription_key("todos").unwrap();
-    relay.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
-    assert_view_update_only_references_rows(
-        &relay.current_rows_update(&mut core, "todos").unwrap(),
-        BTreeSet::from([row(1)]),
+    assert_eq!(relay.permission_subject(), None);
+    assert!(
+        relay.current_rows_update(&mut core, "todos").is_err(),
+        "an unbound relay must not acquire SYSTEM policy bypass to serve a query"
     );
 
     let mut edge_owner = PeerState::edge_client(owner);
-    assert_eq!(edge_owner.identity(), owner);
+    assert_eq!(edge_owner.permission_subject(), Some(owner));
     assert_view_update_only_references_rows(
         &edge_owner.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([row(1)]),
     );
 
     let mut edge_other = PeerState::edge_client(other);
-    assert_eq!(edge_other.identity(), other);
+    assert_eq!(edge_other.permission_subject(), Some(other));
     assert_view_update_only_references_rows(
         &edge_other.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::new(),

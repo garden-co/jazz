@@ -239,6 +239,7 @@ where
                 read_view,
                 authorization_mode,
                 settled_binding_view,
+                None,
                 PreparedClaimBindingMode::Strict,
                 progress_waker,
             )
@@ -288,11 +289,11 @@ where
     pub(crate) async fn drain_local_maintained_view_subscription(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
-        authoritative_binding_view: Option<BindingViewKey>,
+        authoritative_result_key: Option<AuthorityResultKey>,
     ) -> Result<Option<LocalMaintainedViewSubscriptionUpdate>, Error> {
         self.drain_local_maintained_view_subscription_with_waker(
             local,
-            authoritative_binding_view,
+            authoritative_result_key,
             None,
         )
         .await
@@ -301,12 +302,12 @@ where
     pub(crate) async fn drain_local_maintained_view_subscription_with_waker(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
-        authoritative_binding_view: Option<BindingViewKey>,
+        authoritative_result_key: Option<AuthorityResultKey>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<Option<LocalMaintainedViewSubscriptionUpdate>, Error> {
         self.drain_local_maintained_view_subscription_preserving_rows_with_waker(
             local,
-            authoritative_binding_view,
+            authoritative_result_key,
             &BTreeSet::new(),
             progress_waker,
         )
@@ -318,12 +319,12 @@ where
     pub(crate) async fn drain_local_maintained_view_subscription_preserving_rows(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
-        authoritative_binding_view: Option<BindingViewKey>,
+        authoritative_result_key: Option<AuthorityResultKey>,
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
     ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
         self.drain_local_maintained_view_subscription_preserving_rows_with_waker(
             local,
-            authoritative_binding_view,
+            authoritative_result_key,
             preserved_row_keys,
             None,
         )
@@ -333,14 +334,14 @@ where
     pub(crate) async fn drain_local_maintained_view_subscription_preserving_rows_with_waker(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
-        authoritative_binding_view: Option<BindingViewKey>,
+        authoritative_result_key: Option<AuthorityResultKey>,
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
         let (transitions, suppressed_authoritative_change) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
-                authoritative_binding_view,
+                authoritative_result_key,
                 preserved_row_keys,
                 progress_waker,
             )
@@ -358,11 +359,11 @@ where
     pub(crate) async fn drain_local_maintained_view_subscription_state(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
-        authoritative_binding_view: Option<BindingViewKey>,
+        authoritative_result_key: Option<AuthorityResultKey>,
     ) -> Result<bool, Error> {
         self.drain_local_maintained_view_subscription_state_with_waker(
             local,
-            authoritative_binding_view,
+            authoritative_result_key,
             None,
         )
         .await
@@ -371,13 +372,13 @@ where
     pub(crate) async fn drain_local_maintained_view_subscription_state_with_waker(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
-        authoritative_binding_view: Option<BindingViewKey>,
+        authoritative_result_key: Option<AuthorityResultKey>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<bool, Error> {
         let (Some(transitions), _) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
-                authoritative_binding_view,
+                authoritative_result_key,
                 &BTreeSet::new(),
                 progress_waker,
             )
@@ -394,15 +395,16 @@ where
     pub(crate) async fn reset_local_maintained_view_subscription_from_binding_view(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
     ) -> Result<(), Error> {
         // Settled result sets can include support members used to maintain relations or
         // policies. The occurrence sidecar describes only public query roots, matching
         // the authoritative snapshot's `root_count`, so exclude those support members.
         local.result_set = self
             .query
-            .settled_result_sets
-            .get(&binding_view_key)
+            .authority_results
+            .get(authority_result_key)
+            .map(|state| &state.settled_result_set)
             .map(|members| {
                 members
                     .iter()
@@ -418,14 +420,14 @@ where
             })
             .unwrap_or_default();
         local.authoritative_result_generation =
-            self.applied_view_update_generation(binding_view_key);
+            self.applied_authority_result_generation(authority_result_key);
         local.authoritative_reconciliation_deferred = false;
         local.deferred_authoritative_row_keys.clear();
         local.program_facts = self
             .query
-            .settled_program_facts
-            .get(&binding_view_key)
-            .cloned()
+            .authority_results
+            .get(authority_result_key)
+            .map(|state| state.settled_program_facts.clone())
             .unwrap_or_default();
         if local.result_query.aggregate.is_some() {
             local
@@ -463,10 +465,10 @@ where
     pub(crate) fn seed_local_maintained_authoritative_generation(
         &self,
         local: &mut LocalMaintainedViewSubscription,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
     ) {
         local.authoritative_result_generation =
-            self.applied_view_update_generation(binding_view_key);
+            self.applied_authority_result_generation(authority_result_key);
     }
 
     pub(crate) fn defer_local_maintained_authority_reconciliation(
@@ -479,14 +481,14 @@ where
     pub(crate) fn local_maintained_authority_reconciliation_conflicts(
         &self,
         local: &LocalMaintainedViewSubscription,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
     ) -> bool {
         let remote_members = self
             .query
-            .settled_result_sets
-            .get(&binding_view_key)
-            .cloned()
+            .authority_results
+            .get(authority_result_key)
+            .map(|state| state.settled_result_set.clone())
             .unwrap_or_default();
         local
             .result_set
@@ -497,17 +499,17 @@ where
     pub(crate) fn local_maintained_authority_reconciliation_due(
         &self,
         local: &LocalMaintainedViewSubscription,
-        binding_view_key: BindingViewKey,
+        authority_result_key: &AuthorityResultKey,
     ) -> bool {
         local.authoritative_reconciliation_deferred
-            || self.applied_view_update_generation(binding_view_key)
+            || self.applied_authority_result_generation(authority_result_key)
                 != local.authoritative_result_generation
     }
 
     async fn drain_local_maintained_view_subscription_transitions(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
-        authoritative_binding_view: Option<BindingViewKey>,
+        authoritative_result_key: Option<AuthorityResultKey>,
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
@@ -520,13 +522,11 @@ where
         self.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
         if local.result_query.aggregate.is_some()
-            && let Some(remote_members) =
-                self.query.settled_result_sets.get(&local.binding_view_key)
-            && let Some(remote_facts) = self
-                .query
-                .settled_program_facts
-                .get(&local.binding_view_key)
+            && let Some(authority_result) =
+                self.authority_result_state_for_binding_view(local.binding_view_key)
         {
+            let remote_members = &authority_result.settled_result_set;
+            let remote_facts = &authority_result.settled_program_facts;
             let visible_members = remote_members
                 .iter()
                 .filter(|member| {
@@ -607,8 +607,9 @@ where
         let mut authoritative_member_adds = BTreeSet::new();
         let mut suppressed_authoritative_change = false;
         let mut suppressed_authoritative_row_keys = BTreeSet::new();
-        if let Some(binding_view) = authoritative_binding_view {
-            let authoritative_generation = self.applied_view_update_generation(binding_view);
+        if let Some(authority_result_key) = authoritative_result_key {
+            let authoritative_generation =
+                self.applied_authority_result_generation(&authority_result_key);
             // Local optimistic changes can advance the maintained graph
             // without any newer serving-peer membership decision. Keep them
             // visible until an authoritative generation advances.
@@ -622,16 +623,16 @@ where
                 }
                 let remote_members = self
                     .query
-                    .settled_result_sets
-                    .get(&binding_view)
-                    .cloned()
+                    .authority_results
+                    .get(&authority_result_key)
+                    .map(|state| state.settled_result_set.clone())
                     .unwrap_or_default();
                 let remote_payloads = self
                     .query
-                    .settled_program_facts
-                    .get(&binding_view)
+                    .authority_results
+                    .get(&authority_result_key)
                     .into_iter()
-                    .flatten()
+                    .flat_map(|state| state.settled_program_facts.iter())
                     .filter_map(|fact| match fact {
                         ProgramFactEntry::ResultPayload(payload) => {
                             Some((payload.member.clone(), payload.clone()))

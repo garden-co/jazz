@@ -1,34 +1,3 @@
-fn binding_settlement_time<S>(
-    node: &NodeState<S>,
-    subscription: SubscriptionKey,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) -> GlobalTime
-where
-    S: OrderedKvStorage,
-{
-    let key = crate::protocol::BindingViewKey::new(
-        shape.shape_id(),
-        binding.binding_id(),
-        subscription.read_view,
-    );
-    node.settled_through_for_binding_view(key)
-        .unwrap_or_else(|| node.committed_global_time())
-}
-
-fn canonical_subscription_settlement_time<S>(
-    node: &NodeState<S>,
-    subscription: SubscriptionKey,
-) -> GlobalTime
-where
-    S: OrderedKvStorage,
-{
-    node.settled_through_for_binding_view(
-        crate::protocol::BindingViewKey::from_canonical_subscription_key(subscription),
-    )
-    .unwrap_or_else(|| node.committed_global_time())
-}
-
 fn ordinary_flat_row_duplicate_view(
     shape: &ValidatedQuery,
     current_members: &BTreeSet<ResultMemberEntry>,
@@ -126,6 +95,73 @@ impl PeerState {
         }
     }
 
+    /// Read the settlement watermark from the exact receipt retained by the
+    /// served subscription. Never route this through a `BindingViewKey`:
+    /// two policy scopes may share that key while having different watermarks.
+    ///
+    /// A missing exact source is only valid for a genuinely direct,
+    /// unscoped publication. Its local receipt may use the current committed
+    /// time when it has not separately settled. A policy-scoped source is
+    /// different: absence of that *particular* receipt must remain the zero
+    /// watermark rather than overclaiming an unrelated committed time.
+    fn settlement_time_for_publication<S>(
+        &self,
+        node: &NodeState<S>,
+        subscription: SubscriptionKey,
+        binding_view: crate::protocol::BindingViewKey,
+    ) -> GlobalTime
+    where
+        S: OrderedKvStorage,
+    {
+        if let Some(authority_result_key) = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.authority_result_source.as_ref())
+        {
+            return node
+                .settled_through_for_authority_result(authority_result_key)
+                .unwrap_or_default();
+        }
+        node.settled_through_for_authority_result(&AuthorityResultKey::unscoped(binding_view))
+            .unwrap_or_else(|| node.committed_global_time())
+    }
+
+    fn binding_settlement_time<S>(
+        &self,
+        node: &NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> GlobalTime
+    where
+        S: OrderedKvStorage,
+    {
+        self.settlement_time_for_publication(
+            node,
+            subscription,
+            crate::protocol::BindingViewKey::new(
+                shape.shape_id(),
+                binding.binding_id(),
+                subscription.read_view,
+            ),
+        )
+    }
+
+    pub(crate) fn canonical_subscription_settlement_time<S>(
+        &self,
+        node: &NodeState<S>,
+        subscription: SubscriptionKey,
+    ) -> GlobalTime
+    where
+        S: OrderedKvStorage,
+    {
+        self.settlement_time_for_publication(
+            node,
+            subscription,
+            crate::protocol::BindingViewKey::from_canonical_subscription_key(subscription),
+        )
+    }
+
     pub(crate) fn needs_catalogue_snapshot(&self, fingerprint: [u8; 32]) -> bool {
         self.announced_catalogue_fingerprint != Some(fingerprint)
     }
@@ -146,8 +182,100 @@ impl PeerState {
     pub fn relay() -> Self {
         Self {
             role: PeerRole::Relay,
+            transport_capability: RelayTransportCapability::MultiplexedRelay,
             ..Self::default()
         }
+    }
+
+    /// Construct a subjectless scope-isolated relay with its one
+    /// handshake-admitted foreground session. This is topology-private:
+    /// callers on the wire never select this value.
+    #[allow(dead_code)] // constructed only by the private serving admission path
+    pub(crate) fn scope_isolated_relay(
+        identity: AuthorSubject,
+        claims: BTreeMap<String, groove::records::Value>,
+        admission_epoch: u64,
+    ) -> Self {
+        Self {
+            role: PeerRole::Relay,
+            transport_capability: RelayTransportCapability::ScopeIsolatedClientRelay {
+                binding: DelegatedSessionBinding { identity, claims },
+                admission_epoch,
+            },
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn admits_relay_binding(
+        &self,
+        binding: &(AuthorSubject, BTreeMap<String, groove::records::Value>),
+    ) -> bool {
+        matches!(
+            &self.transport_capability,
+            RelayTransportCapability::ScopeIsolatedClientRelay { binding: admitted, .. }
+                if admitted.identity == binding.0 && admitted.claims == binding.1
+        )
+    }
+
+    /// The one immutable user binding selected by server-side scope-relay
+    /// admission. This stays on the transport capability rather than in the
+    /// connection's mutable session-claims slot: raw `SessionClaims` frames
+    /// and host-side refresh helpers must not replace it mid-connection.
+    pub(crate) fn admitted_scope_relay_binding(
+        &self,
+    ) -> Option<&DelegatedSessionBinding> {
+        match &self.transport_capability {
+            RelayTransportCapability::ScopeIsolatedClientRelay { binding, .. } => Some(binding),
+            RelayTransportCapability::OrdinarySession
+            | RelayTransportCapability::MultiplexedRelay => None,
+        }
+    }
+
+    /// Replace the per-attachment capability epoch after the server has
+    /// detached and resumed this scope-isolated relay. The authenticated
+    /// binding stays immutable, but a resumed transport must never retain the
+    /// capability issued to its previous physical attachment.
+    ///
+    /// This intentionally offers no caller-provided epoch: only the server's
+    /// resume path can advance a capability it already admitted.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn refresh_scope_relay_admission_epoch(&mut self) -> bool {
+        let RelayTransportCapability::ScopeIsolatedClientRelay {
+            admission_epoch, ..
+        } = &mut self.transport_capability
+        else {
+            return false;
+        };
+        *admission_epoch = admission_epoch
+            .checked_add(1)
+            .expect("scope-isolated relay admission epoch exhausted");
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
+        match self.transport_capability {
+            RelayTransportCapability::ScopeIsolatedClientRelay {
+                admission_epoch, ..
+            } => Some(admission_epoch),
+            RelayTransportCapability::OrdinarySession
+            | RelayTransportCapability::MultiplexedRelay => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope_relay_binding_for_test(
+        &self,
+    ) -> Option<(AuthorSubject, BTreeMap<String, groove::records::Value>)> {
+        self.admitted_scope_relay_binding()
+            .map(|binding| (binding.identity, binding.claims.clone()))
+    }
+
+    pub(crate) fn rejects_raw_session_claims(&self) -> bool {
+        matches!(
+            self.transport_capability,
+            RelayTransportCapability::ScopeIsolatedClientRelay { .. }
+        )
     }
 
     /// Construct a peer link that terminates one client author identity.
@@ -183,15 +311,29 @@ impl PeerState {
         self.role
     }
 
-    /// Return the wire/session identity for this peer link.
-    pub fn link_identity(&self) -> AuthorSubject {
-        self.role.identity()
+    /// Return the principal terminated by this peer link, if it terminates
+    /// one. A relay is an explicit transport capability, never a synthetic
+    /// SYSTEM session.
+    pub fn link_identity(&self) -> Option<AuthorSubject> {
+        self.role.permission_subject()
     }
 
-    /// Return the identity used to evaluate reads on this peer link.
+    /// Compatibility accessor for direct client links. Relay callers must use
+    /// an admitted per-request binding rather than treating transport as a
+    /// principal.
     pub fn identity(&self) -> AuthorSubject {
-        self.permission_identity
-            .unwrap_or_else(|| self.role.identity())
+        self.link_identity()
+            .expect("relay transport has no identity; use an admitted policy binding")
+    }
+
+    /// Return the principal that may be used for policy composition.
+    ///
+    /// A trusted serving client link may deliberately carry an explicit
+    /// internal principal such as SYSTEM. Relay transport itself never has a
+    /// permission subject, so callers must bind an admitted session per usage
+    /// site instead of falling back to a synthetic identity.
+    pub fn permission_subject(&self) -> Option<AuthorSubject> {
+        self.permission_identity.or(self.role.permission_subject())
     }
 
     /// Bind the authorization snapshot selected at subscriber admission to one
@@ -206,6 +348,21 @@ impl PeerState {
             .entry(subscription)
             .or_default()
             .policy_binding = Some(binding);
+    }
+
+    /// Associate a relay-owned maintained receiver with the precise upstream
+    /// authority receipt that supplies its membership. This is intentionally
+    /// separate from its policy binding: the former is a local lifecycle
+    /// handle, while the latter is the admitted authorization context.
+    pub(crate) fn set_subscription_authority_result_source(
+        &mut self,
+        subscription: SubscriptionKey,
+        authority_result_key: AuthorityResultKey,
+    ) {
+        self.publication_states
+            .entry(subscription)
+            .or_default()
+            .authority_result_source = Some(authority_result_key);
     }
 
     pub(crate) fn subscription_policy_binding(
@@ -259,7 +416,9 @@ impl PeerState {
         // state.  The snapshot is intentionally installed only when the
         // usage site is first opened: later claim changes are handled by
         // the owner loop rebuilding its explicitly bound views.
-        let identity = self.identity();
+        let identity = self.permission_subject().ok_or(Error::InvalidStoredValue(
+            "direct subscription is missing a terminated permission subject",
+        ))?;
         self.set_subscription_policy_binding(
             subscription,
             (identity, node.session_claims_for(identity)),
@@ -610,7 +769,7 @@ impl PeerState {
         let Some(state) = self.publication_states.get(&subscription) else {
             return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
-                settled_through: binding_settlement_time(node, subscription, shape, binding),
+                settled_through: self.binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -824,7 +983,7 @@ impl PeerState {
             return Ok(Some(MaintainedCanonicalUpdate {
                 update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
-                    settled_through: binding_settlement_time(node, subscription, shape, binding),
+                    settled_through: self.binding_settlement_time(node, subscription, shape, binding),
                     reset_result_set: false,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -968,11 +1127,11 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .map(|maintained| maintained.tables.clone())
             .unwrap_or_default();
-        let source_binding_view = self
+        let source_authority_result = self
             .publication_states
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
-            .and_then(|maintained| maintained.source_binding_view);
+            .and_then(|maintained| maintained.source_authority_result.clone());
         let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
             && node
                 .table(shape.query().table.as_str())?
@@ -1084,7 +1243,7 @@ impl PeerState {
             && result_table_filter.is_none()
             && let Some(settled) = node.settled_result_transitions_for_subscription(
                 subscription,
-                source_binding_view,
+                source_authority_result,
                 &previous_member_result_set,
                 &previous_program_fact_set,
                 result_table_filter,
@@ -1177,6 +1336,27 @@ impl PeerState {
             && self.role == PeerRole::Relay
             && tier == DurabilityTier::Edge
             && node.relay_edge_query_requires_authority_source(shape, binding);
+        // The downstream usage registration chose this policy scope.  Carry
+        // that exact receipt into source resolution; the shared binding-view
+        // key alone is not an authority identity in a multiplexed relay.
+        let source_authority_result_key = if relay_edge_requires_authority_source {
+            // The downstream opening can be serviced before the relay's
+            // upstream Subscribe has been registered locally. That is normal
+            // owner-loop ordering, not an invalid subscription. Suspend this
+            // opening until the connection records its exact upstream usage
+            // source; guessing from the group key would leak or erase a
+            // sibling policy's membership.
+            let Some(source) = self
+                .publication_states
+                .get(&subscription)
+                .and_then(|state| state.authority_result_source.clone())
+            else {
+                return Ok(None);
+            };
+            Some(source)
+        } else {
+            None
+        };
         let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
         let opened = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
@@ -1191,6 +1371,9 @@ impl PeerState {
                     binding,
                     policy_identity,
                     read_view,
+                    source_authority_result_key
+                        .clone()
+                        .expect("strict relay source resolved above"),
                     progress_waker,
                 )
                     .await
@@ -1218,9 +1401,6 @@ impl PeerState {
                 .await,
             }
         };
-        let source_binding_view = relay_edge_requires_authority_source
-            .then(|| node.relay_edge_subscription_source_binding_view_key(shape, binding, read_view))
-            .flatten();
         let (receiver, mut maintained, terminal_schemas, transitions, tables, initial_received) =
             match opened {
             Ok(opened) => opened,
@@ -1229,7 +1409,7 @@ impl PeerState {
             {
                 let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
-                    settled_through: binding_settlement_time(node, subscription, shape, binding),
+                    settled_through: self.binding_settlement_time(node, subscription, shape, binding),
                     reset_result_set,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1259,7 +1439,7 @@ impl PeerState {
                 maintained,
                 terminal_schemas,
                 tables,
-                source_binding_view,
+                source_authority_result: source_authority_result_key.clone(),
                 initial_received: false,
             };
             self.replace_maintained_subscription_view(
@@ -1290,7 +1470,7 @@ impl PeerState {
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
             self.fast_cursor_authorization_matches(subscription, &known_state);
-        let watermark = binding_settlement_time(node, subscription, shape, binding);
+        let watermark = self.binding_settlement_time(node, subscription, shape, binding);
         let simple_membership_delta =
             transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
         let mut result_member_adds = transitions
@@ -1469,7 +1649,7 @@ impl PeerState {
             maintained,
             terminal_schemas,
             tables,
-            source_binding_view,
+            source_authority_result: source_authority_result_key,
             initial_received: true,
         };
         self.replace_maintained_subscription_view(node, subscription, maintained_subscription);
@@ -1635,6 +1815,15 @@ impl PeerState {
                 .has_served_authorization_progress
                 .then_some(state.authorization_progress)
         });
+        // `forget_subscription_with_node` below retires the old maintained
+        // runtime, but the relay's exact upstream receipt is immutable
+        // lifecycle metadata for this usage site. Carry it through the
+        // replacement rather than making the new receiver rediscover a
+        // source from its synthetic group key.
+        let authority_result_source = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.authority_result_source.clone());
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
         // Retire the old publication before retaining its replacement.  The
         // served policy helper creates a lightweight publication state, so
@@ -1656,6 +1845,7 @@ impl PeerState {
         state.program_fact_set = previous_program_fact_set;
         state.member_index = previous_member_index;
         state.policy_binding = Some(policy_binding);
+        state.authority_result_source = authority_result_source;
         if let Some(authorization_progress) = retained_authorization {
             state.authorization_progress = authorization_progress;
             state.has_served_authorization_progress = true;
@@ -1820,10 +2010,8 @@ impl PeerState {
         {
             self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription: maintained_subscription,
-                settled_through: canonical_subscription_settlement_time(
-                    node,
-                    maintained_subscription,
-                ),
+                settled_through: self
+                    .canonical_subscription_settlement_time(node, maintained_subscription),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1871,8 +2059,11 @@ impl PeerState {
         let mut reset_result_set = true;
         let result_member_adds = if !authorization_mismatch
             && let Some(position) = known_membership_position
-            && canonical_subscription_settlement_time(node, maintained_subscription).0 > 0
-            && position >= canonical_subscription_settlement_time(node, maintained_subscription)
+            && self
+                .canonical_subscription_settlement_time(node, maintained_subscription)
+                .0 > 0
+            && position
+                >= self.canonical_subscription_settlement_time(node, maintained_subscription)
         {
             reset_result_set = false;
             Vec::new()
@@ -2102,8 +2293,11 @@ impl PeerState {
         let mut reset_result_set = true;
         let result_member_adds = if !authorization_mismatch
             && let Some(position) = known_membership_position
-            && canonical_subscription_settlement_time(node, maintained_subscription).0 > 0
-            && position >= canonical_subscription_settlement_time(node, maintained_subscription)
+            && self
+                .canonical_subscription_settlement_time(node, maintained_subscription)
+                .0 > 0
+            && position
+                >= self.canonical_subscription_settlement_time(node, maintained_subscription)
         {
             reset_result_set = false;
             Vec::new()
@@ -2124,6 +2318,7 @@ impl PeerState {
         } else {
             current_result_member_set.iter().cloned().collect()
         };
+        let (policy_identity, _) = self.served_subscription_policy_binding(target_subscription)?;
         let target_reset = {
             let maintained = &self
                 .publication_states
@@ -2163,7 +2358,7 @@ impl PeerState {
                     // attachment races their first update.
                     program_fact_adds: current_program_fact_set.iter().cloned().collect(),
                     program_fact_removes: Vec::new(),
-                    identity: self.identity(),
+                    identity: policy_identity,
                     tier,
                     maintained_facts: maintained,
                     allow_storage_witness_fallback,

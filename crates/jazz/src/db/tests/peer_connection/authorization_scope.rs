@@ -896,24 +896,24 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     };
     authority_transport.send(view_update(true, 1)).unwrap();
     edge.tick().unwrap();
-    let binding_view = edge
+    let authority_result_key = edge
         .node
         .node
         .borrow()
-        .binding_view_key_for_subscription(subscription)
+        .authority_result_key_for_subscription(subscription)
         .unwrap();
     assert!(
         edge.node
             .node
             .borrow()
-            .opening_pending_for_binding_view(binding_view),
+            .opening_pending_for_authority_result(&authority_result_key),
         "normal authority opening must install the pending marker"
     );
     let before_generation = edge
         .node
         .node
         .borrow()
-        .applied_view_update_generation(binding_view);
+        .applied_authority_result_generation(&authority_result_key);
     let before_watermark = edge.node.node.borrow().committed_global_time();
     let before_drops = edge
         .node
@@ -932,12 +932,12 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     let node = node.borrow();
     assert_eq!(node.committed_global_time(), before_watermark);
     assert_eq!(
-        node.applied_view_update_generation(binding_view),
+        node.applied_authority_result_generation(&authority_result_key),
         before_generation,
         "subscriber spoof must not mutate the maintained view"
     );
     assert!(
-        node.opening_pending_for_binding_view(binding_view),
+        node.opening_pending_for_authority_result(&authority_result_key),
         "subscriber spoof must not clear authority-owned opening state"
     );
     assert_eq!(
@@ -952,11 +952,11 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     let node = Rc::clone(&edge.node.node);
     let node = node.borrow();
     assert_eq!(
-        node.applied_view_update_generation(binding_view),
+        node.applied_authority_result_generation(&authority_result_key),
         before_generation + 1,
         "the same message class must remain admitted from an authority link"
     );
-    assert!(!node.opening_pending_for_binding_view(binding_view));
+    assert!(!node.opening_pending_for_authority_result(&authority_result_key));
 }
 
 // This stays internal because the admission ordering and retained peer registration

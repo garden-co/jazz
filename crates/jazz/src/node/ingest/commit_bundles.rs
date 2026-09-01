@@ -169,6 +169,7 @@ where
             identity,
             trust: CommitUnitTrust::TrustedBackend,
             edge_authority: true,
+            admitted_write_authorization: false,
         });
         let mut updates = self.ingest_edge_authority_mergeable_commit_unit_once(
             tx,

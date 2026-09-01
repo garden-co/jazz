@@ -534,11 +534,11 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
-    let binding_view = receiver
-        .binding_view_key_for_subscription(subscription)
+    let authority_result_key = receiver
+        .authority_result_key_for_subscription(subscription)
         .unwrap();
-    let before_generation = receiver.applied_view_update_generation(binding_view);
-    assert!(receiver.opening_pending_for_binding_view(binding_view));
+    let before_generation = receiver.applied_authority_result_generation(&authority_result_key);
+    assert!(receiver.opening_pending_for_authority_result(&authority_result_key));
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         receiver.apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
@@ -583,9 +583,9 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         ))
     ));
     assert!(receiver.transaction_state_settled(bad_tx).is_none());
-    assert!(receiver.opening_pending_for_binding_view(binding_view));
+    assert!(receiver.opening_pending_for_authority_result(&authority_result_key));
     assert_eq!(
-        receiver.applied_view_update_generation(binding_view),
+        receiver.applied_authority_result_generation(&authority_result_key),
         before_generation
     );
     receiver
@@ -602,9 +602,9 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
-    assert!(!receiver.opening_pending_for_binding_view(binding_view));
+    assert!(!receiver.opening_pending_for_authority_result(&authority_result_key));
     assert_eq!(
-        receiver.applied_view_update_generation(binding_view),
+        receiver.applied_authority_result_generation(&authority_result_key),
         before_generation + 1
     );
     assert!(receiver

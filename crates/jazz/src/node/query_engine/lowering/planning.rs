@@ -1053,6 +1053,7 @@ fn supported_current_storage_projection(
         | SourceExpr::SettledBindingView {
             projection,
             binding_view: _,
+            authority_result_key: _,
             rows: _,
             requires_result_payload: _,
         } => Some(projection),

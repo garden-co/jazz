@@ -236,6 +236,35 @@ describe("websocket frame carrier", () => {
     expect(actual).toBe('["https://issuer.example","provider-subject"]');
   });
 
+  it("uses SYSTEM as the wire identity for a credential-only backend open", () => {
+    const fallback = new TextEncoder().encode('["https://jazz.test","backend-cache"]');
+
+    const actual = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ backend_secret: "not inspected by the client" }),
+        fallback,
+      ),
+    );
+
+    expect(actual).toBe('["urn:jazz:system","system"]');
+  });
+
+  it("ignores an incidental bearer token for a credential-only backend open", () => {
+    const fallback = new TextEncoder().encode('["https://jazz.test","backend-cache"]');
+    const jwt = `header.${btoa(
+      JSON.stringify({ iss: "https://issuer.example", sub: "user-123" }),
+    )}.signature`;
+
+    const actual = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ backend_secret: "not inspected by the client", jwt_token: jwt }),
+        fallback,
+      ),
+    );
+
+    expect(actual).toBe('["urn:jazz:system","system"]');
+  });
+
   it("matches the server's backend-session precedence over a simultaneous bearer token", () => {
     const fallback = new TextEncoder().encode('["https://jazz.test","cache"]');
     const jwt = `header.${btoa(

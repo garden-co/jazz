@@ -859,6 +859,7 @@ impl ServerRuntimeHandle {
         trust: CommitUnitTrust,
         negotiated_features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
+        link_admission: crate::serving::ServerLinkAdmission,
     ) -> Result<ServerSession, String> {
         self.run(move |shell| {
             shell
@@ -868,6 +869,7 @@ impl ServerRuntimeHandle {
                     trust,
                     negotiated_features,
                     session_context,
+                    link_admission,
                 )
                 .map_err(|error| error.to_string())
         })

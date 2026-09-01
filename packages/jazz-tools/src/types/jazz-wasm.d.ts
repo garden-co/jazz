@@ -109,7 +109,13 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmDb;
-    static openBrowser(pageStore: unknown, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
+    /** Host-only relay open; `storageOwner` is supplied by broker ownership admission. */
+    static openBrowser(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+      storageOwner: string,
+    ): Promise<WasmDb>;
     static openBrowserWithSelfSignedProof(
       pageStore: unknown,
       schema: Uint8Array,
@@ -117,6 +123,7 @@ declare module "jazz-wasm" {
       token: string,
       appId: string,
       claimedAuthor: string,
+      storageOwner: string,
     ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
@@ -292,7 +299,6 @@ declare module "jazz-wasm" {
     foregroundTxTimeHighWater(): bigint;
     /** @internal Foreground node-lease bootstrap only. */
     seedForegroundTxTimeHighWater(highWater: bigint): void;
-    setRelayAuthoritySessionOwner(): void;
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
     close(): Promise<boolean>;

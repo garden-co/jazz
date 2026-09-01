@@ -1,6 +1,9 @@
 //! subscriptions query-evaluation tests.
 
 use super::*;
+use crate::legacy_test_future::FutureResolveExt as _;
+use crate::peer::PeerState;
+use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey};
 
 fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
     match graph {
@@ -98,6 +101,533 @@ fn maintained_physical_point_hydration_uses_only_its_current_row_source() {
         BTreeSet::from([target])
     );
     node.unsubscribe_groove_subscription(receiver.id());
+}
+
+/// Two delegated sessions can receive interleaved updates for the same
+/// canonical query binding without sharing authority membership.
+///
+/// alice authority ──reset/add/remove──► relay receipt A
+/// bob authority ────reset/add─────────► relay receipt B
+///
+/// The relay stores both receipts independently even though the application
+/// query, parameter binding, and read view are identical.
+#[test]
+fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
+    let (dir, mut relay) = open_node();
+    let shape = Query::from("issues")
+        .validate(&relay.catalogue.schema)
+        .unwrap();
+    register_query_shape(&mut relay, &shape, RegisterShapeOptions::default());
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let subscription = |byte, identity| Subscribe {
+        shape_id: shape.shape_id(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            read_view: Default::default(),
+        },
+        values: Vec::new(),
+        known_state: None,
+        delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+            identity,
+            claims: BTreeMap::new(),
+        }),
+    };
+    let alice = author(1);
+    let bob = author(2);
+    let alice_subscribe = subscription(0xa1, alice);
+    let bob_subscribe = subscription(0xb2, bob);
+    relay
+        .apply_sync_message_settled(SyncMessage::Subscribe(alice_subscribe.clone()))
+        .unwrap();
+    relay
+        .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
+        .unwrap();
+
+    let member = |row_byte| crate::protocol::ResultMemberEntry::PathTuple {
+        path: "membership".to_owned(),
+        source_table: groove::Intern::from("issues".to_owned()),
+        source_row: row(row_byte),
+        target_table: groove::Intern::from("users".to_owned()),
+        target_row: row(row_byte),
+        edge_id: None,
+        revision: vec![row_byte as u8],
+    };
+    let update = |subscription, settled_through, reset_result_set, adds, removes| {
+        crate::node::ViewUpdateParts {
+            subscription,
+            settled_through: crate::time::GlobalTime(settled_through),
+            defer_settlement: false,
+            reset_result_set,
+            version_carriers: Vec::new(),
+            peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: Some(3),
+            opening_pending: false,
+            result_member_adds: adds,
+            result_member_removes: removes,
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        }
+    };
+    relay
+        .apply_view_update(update(
+            alice_subscribe.subscription,
+            11,
+            true,
+            vec![member(1)],
+            Vec::new(),
+        ))
+        .resolve()
+        .unwrap();
+    relay
+        .apply_view_update(update(
+            bob_subscribe.subscription,
+            29,
+            true,
+            vec![member(2)],
+            Vec::new(),
+        ))
+        .resolve()
+        .unwrap();
+    relay
+        .apply_view_update(update(
+            alice_subscribe.subscription,
+            37,
+            false,
+            Vec::new(),
+            vec![member(1)],
+        ))
+        .resolve()
+        .unwrap();
+
+    let alice_key = relay
+        .authority_result_key_for_subscription(alice_subscribe.subscription)
+        .unwrap();
+    let bob_key = relay
+        .authority_result_key_for_subscription(bob_subscribe.subscription)
+        .unwrap();
+    assert_eq!(alice_key.binding_view, bob_key.binding_view);
+    assert_ne!(alice_key, bob_key);
+    let mut peer = PeerState::relay();
+    peer.set_subscription_authority_result_source(alice_subscribe.subscription, alice_key.clone());
+    peer.set_subscription_authority_result_source(bob_subscribe.subscription, bob_key.clone());
+    assert_eq!(
+        peer.canonical_subscription_settlement_time(&relay, alice_subscribe.subscription),
+        crate::time::GlobalTime(37),
+        "Alice must not inherit Bob's independently settled policy receipt"
+    );
+    assert_eq!(
+        peer.canonical_subscription_settlement_time(&relay, bob_subscribe.subscription),
+        crate::time::GlobalTime(29),
+        "Bob retains his own authority watermark"
+    );
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                alice_subscribe.subscription,
+                &[],
+                alice,
+                Some(&(alice, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        Some(
+            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalTime(37),
+                authorization_progress: 3,
+            }
+        ),
+        "Alice's known state must use her exact receipt, not Bob's watermark"
+    );
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                bob_subscribe.subscription,
+                &[],
+                bob,
+                Some(&(bob, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        Some(
+            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalTime(29),
+                authorization_progress: 3,
+            }
+        ),
+        "Bob's known state remains independent from Alice's later receipt"
+    );
+    // A deferred reset supersedes Alice's earlier live receipt until the
+    // authority completes it. Bob shares the binding view but must retain his
+    // own independent live receipt throughout that gap.
+    let mut alice_deferred = update(
+        alice_subscribe.subscription,
+        41,
+        true,
+        Vec::new(),
+        Vec::new(),
+    );
+    alice_deferred.defer_settlement = true;
+    relay.apply_view_update(alice_deferred).resolve().unwrap();
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                alice_subscribe.subscription,
+                &[],
+                alice,
+                Some(&(alice, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        None,
+        "Alice's deferred reset must revoke her previous live handoff"
+    );
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                bob_subscribe.subscription,
+                &[],
+                bob,
+                Some(&(bob, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        Some(
+            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalTime(29),
+                authorization_progress: 3,
+            }
+        ),
+        "Alice's deferred lifecycle must not revoke Bob's sibling scope"
+    );
+    relay
+        .apply_view_update(update(
+            alice_subscribe.subscription,
+            43,
+            true,
+            Vec::new(),
+            Vec::new(),
+        ))
+        .resolve()
+        .unwrap();
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                alice_subscribe.subscription,
+                &[],
+                alice,
+                Some(&(alice, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        Some(
+            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalTime(43),
+                authorization_progress: 3,
+            }
+        ),
+        "only Alice's subsequent non-deferred completion restores her receipt"
+    );
+    assert_eq!(
+        relay.query.authority_results[&alice_key].settled_result_set,
+        BTreeSet::new()
+    );
+    assert_eq!(
+        relay.query.authority_results[&bob_key].settled_result_set,
+        BTreeSet::from([member(2)])
+    );
+    assert!(
+        relay
+            .unique_authority_result_key_for_binding_view(alice_key.binding_view)
+            .is_none(),
+        "a BindingViewKey-only reader must refuse an ambiguous multiplexed receipt"
+    );
+
+    // The settled-member key is exactly the five-field authority identity
+    // followed by the member handle. The policy handle remains bounded in the
+    // ordered key; the exact subject + claims live in the typed directory.
+    let member_store = relay
+        .database
+        .direct_record_store(crate::schema::SETTLED_RESULT_MEMBERS_STORE)
+        .unwrap();
+    let members = futures::executor::block_on(member_store.prefix_entries(&[])).unwrap();
+    assert_eq!(members.len(), 1, "only bob's unretracted member persists");
+    let member_key = &members[0].key;
+    assert_eq!(
+        member_key.len(),
+        6,
+        "member key extends the 5-field receipt key"
+    );
+    assert_eq!(member_key[3], Value::U8(1));
+    assert!(matches!(&member_key[4], Value::Bytes(handle) if handle.len() == 32));
+    assert!(matches!(&member_key[5], Value::Bytes(handle) if handle.len() == 32));
+
+    let directory = relay
+        .database
+        .direct_record_store(crate::schema::AUTHORITY_POLICY_BINDINGS_STORE)
+        .unwrap();
+    let entries = futures::executor::block_on(directory.prefix_entries(&[])).unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "each exact delegated identity has one directory entry"
+    );
+    for entry in &entries {
+        let [Value::Bytes(handle)] = entry.key.as_slice() else {
+            panic!("directory key must be exactly one binary handle");
+        };
+        assert_eq!(handle.len(), 32, "directory handle is fixed-width");
+        let Value::String(subject) = entry.value.get_idx(0).unwrap() else {
+            panic!("directory subject must stay an ordinary typed string");
+        };
+        let claims = crate::protocol::policy_binding_directory_claims_from_value(
+            entry.value.get_idx(1).unwrap(),
+        )
+        .expect("directory claims must be normal typed Groove values");
+        let policy = PolicyBindingKey::from_canonical_parts(
+            AuthorSubject::from_canonical(&subject).unwrap(),
+            claims,
+        );
+        assert_eq!(policy.directory_digest().as_slice(), handle.as_slice());
+    }
+
+    // Plant the only possible digest collision shape: the valid fixed handle
+    // names a different valid typed subject/claims record. A later update must
+    // reject it rather than overwrite, merge, or silently use the wrong scope.
+    let alice_policy = alice_key.policy_binding.as_ref().unwrap();
+    futures::executor::block_on(directory.set(
+        &[Value::Bytes(alice_policy.directory_digest().to_vec())],
+        &[
+            Value::String(bob.canonical().to_owned()),
+            crate::protocol::policy_binding_directory_claims_value(&BTreeMap::new()).unwrap(),
+        ],
+    ))
+    .unwrap();
+    drop(directory);
+    assert!(matches!(
+        relay
+            .apply_view_update(update(
+                alice_subscribe.subscription,
+                41,
+                false,
+                vec![member(3)],
+                Vec::new(),
+            ))
+            .resolve(),
+        Err(crate::node::Error::InvalidStoredValue(
+            "policy binding digest aliases a distinct exact policy identity"
+        ))
+    ));
+    let directory = relay
+        .database
+        .direct_record_store(crate::schema::AUTHORITY_POLICY_BINDINGS_STORE)
+        .unwrap();
+    futures::executor::block_on(directory.set(
+        &[Value::Bytes(alice_policy.directory_digest().to_vec())],
+        &[
+            Value::String(alice_policy.identity.canonical().to_owned()),
+            crate::protocol::policy_binding_directory_claims_value(alice_policy.claims()).unwrap(),
+        ],
+    ))
+    .unwrap();
+
+    let schema = relay.catalogue.schema.clone();
+    relay.close().resolve().unwrap();
+    drop(relay);
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync)
+        .expect("reopen authority-result store");
+    let reopened = NodeState::new(NodeUuid::from_bytes([9; 16]), schema, storage)
+        .expect("recover authority-result store");
+    assert_eq!(
+        reopened.query.authority_results[&alice_key].settled_result_set,
+        BTreeSet::new(),
+        "reopen retains alice's independent retraction"
+    );
+    assert_eq!(
+        reopened.query.authority_results[&bob_key].settled_result_set,
+        BTreeSet::from([member(2)]),
+        "reopen retains bob's independent admission"
+    );
+}
+
+/// Lifecycle bookkeeping follows the exact delegated receipt, rather than
+/// collapsing through the shared query binding view. In particular, an
+/// opening reset for Alice and a deferred reset for Bob can each be consumed,
+/// requeued, and completed without either stream starving the other.
+#[test]
+fn interleaved_policy_scoped_lifecycles_keep_reset_defer_and_terminal_streams_separate() {
+    let (_dir, mut relay) = open_node();
+    let shape = Query::from("issues")
+        .validate(&relay.catalogue.schema)
+        .unwrap();
+    register_query_shape(&mut relay, &shape, RegisterShapeOptions::default());
+
+    let subscription = |byte, identity| Subscribe {
+        shape_id: shape.shape_id(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            read_view: Default::default(),
+        },
+        values: Vec::new(),
+        known_state: None,
+        delegated_session: Some(DelegatedSessionBinding {
+            identity,
+            claims: BTreeMap::new(),
+        }),
+    };
+    let alice_subscribe = subscription(0xa1, author(1));
+    let bob_subscribe = subscription(0xb2, author(2));
+    relay
+        .apply_sync_message_settled(SyncMessage::Subscribe(alice_subscribe.clone()))
+        .unwrap();
+    relay
+        .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
+        .unwrap();
+
+    let terminal = |marker| groove::ivm::TerminalOperation {
+        root_descriptor: groove::records::RecordDescriptor::default(),
+        root_key: vec![marker],
+        path: Vec::new(),
+        edit: groove::ivm::TerminalEdit::Remove { key: vec![marker] },
+    };
+    let update =
+        |subscription, reset_result_set, opening_pending, defer_settlement, marker: Option<u8>| {
+            crate::node::ViewUpdateParts {
+                subscription,
+                settled_through: crate::time::GlobalTime(7),
+                defer_settlement,
+                reset_result_set,
+                version_carriers: Vec::new(),
+                peer_complete_tx_payload_refs: Vec::new(),
+                authorization_progress: Some(3),
+                opening_pending,
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                terminal_operations: marker.into_iter().map(terminal).collect(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            }
+        };
+
+    relay
+        .apply_view_update(update(
+            alice_subscribe.subscription,
+            true,
+            true,
+            false,
+            Some(1),
+        ))
+        .resolve()
+        .unwrap();
+    relay
+        .apply_view_update(update(
+            bob_subscribe.subscription,
+            true,
+            false,
+            false,
+            Some(2),
+        ))
+        .resolve()
+        .unwrap();
+
+    let alice_key = relay
+        .authority_result_key_for_subscription(alice_subscribe.subscription)
+        .unwrap();
+    let bob_key = relay
+        .authority_result_key_for_subscription(bob_subscribe.subscription)
+        .unwrap();
+    assert_eq!(alice_key.binding_view, bob_key.binding_view);
+    assert_ne!(alice_key, bob_key);
+    assert!(relay.opening_pending_for_authority_result(&alice_key));
+    assert!(!relay.publication_deferred_for_authority_result(&alice_key));
+    assert!(!relay.opening_pending_for_authority_result(&bob_key));
+    assert!(!relay.publication_deferred_for_authority_result(&bob_key));
+    assert_eq!(relay.applied_authority_result_generation(&alice_key), 1);
+    assert_eq!(relay.applied_authority_result_generation(&bob_key), 1);
+
+    let pending = relay.take_pending_authoritative_resets();
+    assert_eq!(
+        pending,
+        BTreeSet::from([alice_key.clone(), bob_key.clone()])
+    );
+    assert_eq!(
+        relay.take_pending_terminal_operations(&alice_key)[0].root_key,
+        vec![1],
+        "Alice can consume only her terminal stream"
+    );
+    assert_eq!(
+        relay.take_pending_terminal_operations(&bob_key)[0].root_key,
+        vec![2],
+        "Bob can consume only his terminal stream"
+    );
+
+    // Bob can defer a later publication while Alice's opening continues. That
+    // deferred marker is also exact-policy state, not binding-view state.
+    relay
+        .apply_view_update(update(bob_subscribe.subscription, false, false, true, None))
+        .resolve()
+        .unwrap();
+    assert!(relay.publication_deferred_for_authority_result(&bob_key));
+    assert!(!relay.publication_deferred_for_authority_result(&alice_key));
+
+    for authority_result_key in &pending {
+        relay.defer_authoritative_reset(authority_result_key);
+    }
+    assert_eq!(
+        relay.take_pending_authoritative_resets(),
+        BTreeSet::from([alice_key.clone(), bob_key.clone()]),
+        "each exact reset can be deferred and retried without ambiguity"
+    );
+
+    relay
+        .apply_view_update(update(
+            alice_subscribe.subscription,
+            false,
+            false,
+            false,
+            None,
+        ))
+        .resolve()
+        .unwrap();
+    relay
+        .apply_view_update(update(
+            bob_subscribe.subscription,
+            false,
+            false,
+            false,
+            None,
+        ))
+        .resolve()
+        .unwrap();
+    assert!(!relay.opening_pending_for_authority_result(&alice_key));
+    assert!(!relay.publication_deferred_for_authority_result(&bob_key));
+    assert!(
+        relay.applied_authority_result_generation(&alice_key) > 1,
+        "Alice's lifecycle keeps progressing after her opening reset"
+    );
+    assert!(
+        relay.applied_authority_result_generation(&bob_key) > 1,
+        "Bob's deferred lifecycle keeps progressing independently"
+    );
 }
 
 /// Storage-backed scalar membership ships the exact deletion-register winner
@@ -725,7 +1255,7 @@ fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
 }
 
 #[test]
-fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_source() {
+fn authority_result_key_is_explicit_and_does_not_replace_direct_edge_source() {
     let (_dir, mut node) = open_node();
     let shape = Query::from("issues")
         .validate(&node.catalogue.schema)
@@ -747,7 +1277,7 @@ fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_sour
     );
     assert_eq!(ordinary_direct, expected_ordinary);
 
-    node.set_relay_authority_session_owner();
+    node.set_relay_authority_session_owner_for_test();
     assert_eq!(
         node.client_settled_binding_view_key_for_query(
             &shape,
@@ -758,23 +1288,18 @@ fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_sour
         Some(expected_ordinary),
         "marking a worker must not retag ordinary direct Edge settlement",
     );
-    let relay_authority =
-        node.relay_authority_session_binding_view_key(&shape, &binding, &ReadViewSpec::default());
-    assert_ne!(relay_authority, ordinary_direct);
-    assert_eq!(
-        relay_authority,
-        BindingViewKey::new(
-            shape.shape_id(),
-            binding.binding_id(),
-            RegisterShapeOptions {
-                tier: DurabilityTier::Global,
-                binding_source: BindingSource::RelayAuthoritySession,
-                ..RegisterShapeOptions::default()
-            }
-            .read_view_key(),
-        ),
-        "only the relay publication path uses the distinct authority ingress key",
+    let relay_authority = AuthorityResultKey::policy_scoped(
+        ordinary_direct,
+        PolicyBindingKey::from_delegated_session(&DelegatedSessionBinding {
+            identity: author(0x34),
+            claims: BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]),
+        }),
     );
+    assert_eq!(
+        relay_authority.binding_view, ordinary_direct,
+        "the authority receipt shares canonical query routing, but retains the exact policy scope separately",
+    );
+    assert!(relay_authority.policy_binding.is_some());
 }
 
 #[test]
@@ -783,7 +1308,7 @@ fn relay_authority_source_selection_requires_authority_session_owner() {
         let (_dir, mut node) =
             open_node_with_uuid(NodeUuid::from_bytes([0x35; 16]), schema.clone());
         if owner {
-            node.set_relay_authority_session_owner();
+            node.set_relay_authority_session_owner_for_test();
         }
         let shape = Query::from("docs")
             .filter(eq(col("id"), lit(Value::Uuid(row(0x36).0))))
@@ -825,7 +1350,7 @@ fn relay_authority_source_selection_requires_authority_session_owner() {
 #[test]
 fn relay_authority_source_selection_includes_limit_only_windows() {
     let (_dir, mut node) = open_node();
-    node.set_relay_authority_session_owner();
+    node.set_relay_authority_session_owner_for_test();
 
     let unbounded = Query::from("issues")
         .validate(&node.catalogue.schema)

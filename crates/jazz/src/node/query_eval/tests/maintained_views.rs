@@ -108,13 +108,10 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     client
         .apply_sync_message_settled(initial)
         .expect("apply initial settled issues view");
-    let binding_view = *client
-        .query
-        .settled_result_sets
-        .keys()
-        .find(|key| key.shape_id == shape.shape_id() && key.binding_id == binding.binding_id())
-        .expect("applied ViewUpdate registers a settled binding view");
-    assert!(client.has_settled_result_set(binding_view));
+    let authority_result_key = client
+        .authority_result_key_for_subscription(subscription)
+        .expect("applied ViewUpdate registers its exact authority receipt");
+    assert!(client.has_settled_authority_result(&authority_result_key));
 
     let (local_shape, local_binding, local_plan) = client
         .prepare_query_binding_for_link_in_authorization_mode(
@@ -137,7 +134,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         )
         .expect("open client-local maintained issues query");
     assert_eq!(initial_snapshot.root_count, 1);
-    client.seed_local_maintained_authoritative_generation(&mut local, binding_view);
+    client.seed_local_maintained_authoritative_generation(&mut local, &authority_result_key);
 
     let updated_tx = client
         .commit_mergeable_settled(
@@ -158,7 +155,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     let _ = updated_tx;
 
     let update = client
-        .drain_local_maintained_view_subscription(&mut local, Some(binding_view))
+        .drain_local_maintained_view_subscription(&mut local, Some(authority_result_key))
         .expect("drain client-local maintained update")
         .expect("ordinary content update produces a delta");
     let LocalMaintainedViewSubscriptionUpdate::Flat {

@@ -55,6 +55,10 @@ pub const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS: WireFeatures = 1 << 6;
 pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
 /// Peers support Groove chunk misses on the independently driven auxiliary lane.
 pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
+/// The endpoint understands a server-admitted, scope-isolated client-relay
+/// link.  This is a transport-admission capability only: a peer's advertised
+/// role and semantic frames never create the capability.
+pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -631,6 +635,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_AUXILIARY_CHUNKS
+        | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
         | runtime_transport_compression_features()
 }
 

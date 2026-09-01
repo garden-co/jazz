@@ -593,6 +593,7 @@ where
                 outbound_shape_owners: BTreeMap::new(),
                 outbound_binding_owners: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
+                authority_results: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
                 local_materialized_window_binding_views: BTreeSet::new(),
@@ -623,7 +624,7 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
-            relay_authority_session_owner: false,
+            relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
             ahead_current_keys: FxHashSet::default(),
@@ -768,12 +769,39 @@ where
     /// Mark this process as the durable half of a browser client/worker relay.
     /// The marker only selects an internal upstream binding identity for Edge
     /// coverage; it is neither persisted nor an authorization policy input.
-    pub(crate) fn set_relay_authority_session_owner(&mut self) {
-        self.relay_authority_session_owner = true;
+    pub(crate) fn configure_scope_isolated_client_relay(
+        &mut self,
+        scope: crate::db::ClientRelayScope,
+    ) -> Result<(), Error> {
+        if let Some(current) = &self.relay_authority_session_owner
+            && !current.same_owner(&scope)
+        {
+            return Err(Error::InvalidBranchKey(
+                "a relay cannot be rebound to a different storage ownership scope".into(),
+            ));
+        }
+        self.relay_authority_session_owner = Some(scope);
+        Ok(())
     }
 
     pub(crate) fn is_relay_authority_session_owner(&self) -> bool {
-        self.relay_authority_session_owner
+        self.relay_authority_session_owner.is_some()
+    }
+
+    /// The immutable host-admitted scope carried by this relay. Downstream
+    /// relay/repair setup may observe its presence, but never manufacture one.
+    pub(crate) fn client_relay_scope(&self) -> Option<&crate::db::ClientRelayScope> {
+        self.relay_authority_session_owner.as_ref()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_relay_authority_session_owner_for_test(&mut self) {
+        // SAFETY: direct node tests model the host-admitted scope with a fixed
+        // synthetic owner; production code has no toggle-shaped API.
+        let scope = crate::db::ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
+        self.configure_scope_isolated_client_relay(scope)
+            .expect("test scope is stable");
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.
@@ -1537,6 +1565,7 @@ where
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
+        self.query.authority_results.clear();
         self.query.settled_result_sets.clear();
         self.query.local_materialized_window_binding_views.clear();
         self.query.settled_result_row_index.clear();
@@ -1556,75 +1585,92 @@ where
 
     fn insert_settled_result_member_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         member: ResultMemberEntry,
     ) {
+        let state = self
+            .query
+            .authority_results
+            .entry(authority_result_key)
+            .or_default();
         if let Some(row_key) = Self::result_member_row_key(&member) {
-            self.query
-                .settled_result_row_index
-                .entry(binding_view_key)
-                .or_default()
-                .insert(row_key, member.clone());
+            state.settled_result_row_index.insert(row_key, member.clone());
         }
-        self.query
-            .settled_result_sets
-            .entry(binding_view_key)
-            .or_default()
-            .insert(member);
+        state.settled_result_set.insert(member);
     }
 
     fn remove_settled_result_member_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         member: &ResultMemberEntry,
     ) -> bool {
         let removed = self
             .query
-            .settled_result_sets
-            .get_mut(&binding_view_key)
-            .is_some_and(|members| members.remove(member));
+            .authority_results
+            .get_mut(&authority_result_key)
+            .is_some_and(|state| state.settled_result_set.remove(member));
         if removed
             && let Some(row_key) = Self::result_member_row_key(member)
             && self
                 .query
-                .settled_result_row_index
-                .get(&binding_view_key)
-                .and_then(|index| index.get(&row_key))
+                .authority_results
+                .get(&authority_result_key)
+                .and_then(|state| state.settled_result_row_index.get(&row_key))
                 == Some(member)
-            && let Some(index) = self
+            && let Some(state) = self
                 .query
-                .settled_result_row_index
-                .get_mut(&binding_view_key)
+                .authority_results
+                .get_mut(&authority_result_key)
         {
-            index.remove(&row_key);
+            state.settled_result_row_index.remove(&row_key);
         }
         removed
     }
 
     fn remove_settled_result_member_for_occurrence_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         occurrence_id: ResultRowMembershipKey,
     ) -> Option<ResultMemberEntry> {
         let previous = self
             .query
-            .settled_result_row_index
-            .get_mut(&binding_view_key)
-            .and_then(|index| index.remove(&occurrence_id))?;
-        if let Some(members) = self.query.settled_result_sets.get_mut(&binding_view_key) {
-            members.remove(&previous);
+            .authority_results
+            .get_mut(&authority_result_key)
+            .and_then(|state| state.settled_result_row_index.remove(&occurrence_id))?;
+        if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+            state.settled_result_set.remove(&previous);
         }
         Some(previous)
     }
 
-    fn clear_settled_result_view(&mut self, binding_view_key: BindingViewKey) {
-        self.query.settled_result_sets.remove(&binding_view_key);
+    fn clear_settled_result_view(&mut self, authority_result_key: AuthorityResultKey) {
+        // A reset replaces receipt contents, not the receipt itself. In
+        // particular, the exact policy-scoped lifecycle generation, opening
+        // marker, deferred-publication bit, and terminal queue must survive
+        // while new membership is installed. Removing the whole state made a
+        // second reset restart its generation at one and let one scoped reset
+        // erase another stream's progress through the binding-only facade.
+        if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+            state.settled_result_set.clear();
+            state.settled_result_row_index.clear();
+            state.settled_program_facts.clear();
+        }
         self.query
             .local_materialized_window_binding_views
-            .remove(&binding_view_key);
+            .remove(&authority_result_key.binding_view);
+    }
+
+    /// Retire a receipt whose exact usage-site ownership has ended.
+    ///
+    /// This is deliberately distinct from [`Self::clear_settled_result_view`]:
+    /// an authority reset replaces membership while preserving its lifecycle
+    /// generation, whereas an unsubscribe or ownerless-recovery invalidation
+    /// must not leave a settled stamp that could satisfy the next usage site.
+    fn retire_authority_result_view(&mut self, authority_result_key: AuthorityResultKey) {
+        self.query.authority_results.remove(&authority_result_key);
         self.query
-            .settled_result_row_index
-            .remove(&binding_view_key);
+            .local_materialized_window_binding_views
+            .remove(&authority_result_key.binding_view);
     }
 
     async fn open_catalogue_stage<T>(

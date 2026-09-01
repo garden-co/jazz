@@ -21,6 +21,7 @@ use jazz::db::{CommitUnitTrust, ConnectionSessionContext};
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
+use jazz::serving::ServerLinkAdmission;
 use jazz::tools::Session;
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
@@ -72,6 +73,7 @@ struct WebSocketAdmission {
     claims: BTreeMap<String, CoreValue>,
     trust: CommitUnitTrust,
     credential: WebSocketCredential,
+    requested_link: RequestedWebSocketLink,
 }
 
 /// Authentication class selected by the prelude.  `TrustedBackend` is still
@@ -190,6 +192,22 @@ struct WebSocketPrelude {
     /// subscriber session and never admits application frames.
     #[serde(default)]
     bootstrap_catalogue: bool,
+    /// Requested before any wire frame.  It is only a request: after JWT/cookie
+    /// authentication and feature negotiation the server either creates its
+    /// own immutable admitted relay capability or rejects the connection.
+    #[serde(default)]
+    requested_link: RequestedWebSocketLink,
+}
+
+/// The only client-selectable *request* at the WebSocket boundary.  This is
+/// intentionally separate from `WirePeerRole`: a wire hello says what a peer
+/// implements, not what authority it receives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RequestedWebSocketLink {
+    #[default]
+    OrdinarySession,
+    ScopeIsolatedClientRelay,
 }
 
 async fn ws_admission(
@@ -198,6 +216,7 @@ async fn ws_admission(
     state: &Arc<ServerState>,
 ) -> Result<WebSocketAdmission, String> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
+    let requested_link = prelude.requested_link;
     let auth = prelude.auth;
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
@@ -220,6 +239,7 @@ async fn ws_admission(
             claims: BTreeMap::new(),
             trust,
             credential: WebSocketCredential::Admin,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
         });
     }
 
@@ -265,6 +285,7 @@ async fn ws_admission(
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
             credential: WebSocketCredential::Backend,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
         });
     }
 
@@ -296,6 +317,7 @@ async fn ws_admission(
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
         credential: WebSocketCredential::Session,
+        requested_link,
     })
 }
 
@@ -693,6 +715,32 @@ async fn handle_ws_connection(
     } else {
         None
     };
+    let link_admission = match admission.requested_link {
+        RequestedWebSocketLink::OrdinarySession => ServerLinkAdmission::OrdinarySession,
+        RequestedWebSocketLink::ScopeIsolatedClientRelay
+            if admission.credential == WebSocketCredential::Session
+                && negotiated.features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
+        {
+            // This epoch was minted by the server for this accepted socket.
+            // Reconnects necessarily get a fresh capability.
+            ServerLinkAdmission::ScopeIsolatedClientRelay {
+                admission_epoch: server_endpoint.epoch,
+            }
+        }
+        RequestedWebSocketLink::ScopeIsolatedClientRelay => {
+            send_ws_error(
+                &mut socket,
+                WireError::new(
+                    WireErrorCode::UnsupportedFeature,
+                    WireRetry::Never,
+                    "scope-isolated client relay requires an authenticated session and negotiated relay feature",
+                ),
+            )
+            .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
     let session = match core_server_shell
         .open_with_session_context(
             admission.identity,
@@ -700,6 +748,7 @@ async fn handle_ws_connection(
             admission.trust,
             negotiated.features,
             session_context,
+            link_admission,
         )
         .await
     {
@@ -1258,6 +1307,7 @@ mod tests {
         let prelude = WebSocketPrelude {
             peer_identity: peer_identity.canonical().to_owned(),
             bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_session: Some(serde_json::json!({ "attacker": true })),
                 ..Default::default()
@@ -1378,6 +1428,7 @@ mod tests {
             WebSocketPrelude {
                 peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
                 bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1395,6 +1446,7 @@ mod tests {
             WebSocketPrelude {
                 peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
                 bootstrap_catalogue: true,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1413,6 +1465,7 @@ mod tests {
                     .canonical()
                     .to_owned(),
                 bootstrap_catalogue: true,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1435,6 +1488,7 @@ mod tests {
         let prelude = WebSocketPrelude {
             peer_identity: forged_peer.canonical().to_owned(),
             bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
@@ -1469,6 +1523,7 @@ mod tests {
         let prelude = WebSocketPrelude {
             peer_identity: identity.canonical().to_owned(),
             bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({

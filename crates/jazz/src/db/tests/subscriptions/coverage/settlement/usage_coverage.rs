@@ -67,12 +67,19 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
     server.tick().unwrap();
     client.tick().unwrap();
     let (binding_view, required_after) = attachment.required_after[0];
+    let authority_result_key = client
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(attachment.subscription())
+        .unwrap();
+    assert_eq!(authority_result_key.binding_view, binding_view);
     assert!(
         client
             .node
             .node
             .borrow()
-            .applied_view_update_generation(binding_view)
+            .applied_authority_result_generation(&authority_result_key)
             > required_after,
         "the reconnect response must advance the attachment generation"
     );

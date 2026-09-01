@@ -9,6 +9,7 @@ use super::node_runtime::{
     route_upstream_subscription_rejection, take_relay_upstream_subscription_owner,
 };
 use super::*;
+use crate::protocol::expand_version_carriers;
 pub(super) fn route_subscription_refresh_failure(
     subscriptions: &SubscriptionList,
     error: &Error,
@@ -192,6 +193,7 @@ where
                     identity: AuthorSubject::SYSTEM,
                     trust: CommitUnitTrust::TrustedBackend,
                     edge_authority: false,
+                    admitted_write_authorization: false,
                 }),
             )
             .await?;
@@ -236,10 +238,23 @@ where
             SyncMessage::CommitUnit { tx, versions } if local_receiver => {
                 let tx_id = tx.tx_id;
                 register_local_fate_route(local_fate_routes, tx_id, downstream_fates);
-                node.lock()
-                    .await
-                    .ingest_relay_commit_unit(tx, versions)
+                let mut state = node.lock().await;
+                let same_scope_author = state.client_relay_scope().is_some_and(|scope| {
+                    scope.admits_session(session_claim_binding.0)
+                        && tx.made_by == session_claim_binding.0
+                });
+                state
+                    .ingest_relay_commit_unit(tx.clone(), versions.clone())
                     .await?;
+                if same_scope_author {
+                    state
+                        .record_scope_relay_authored_pending_versions(
+                            &tx,
+                            &versions,
+                            session_claim_binding.0,
+                        )
+                        .await?;
+                }
                 Ok(PublicationOutcome::settled(Vec::new()))
             }
             SyncMessage::CommitUnit { tx, versions }
@@ -385,19 +400,22 @@ where
             }
             SyncMessage::CommitUnit { tx, versions }
                 if tx.kind == TxKind::Mergeable
-                    && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+                    && (matches!(peer.role(), PeerRole::ClientLink { .. })
+                        || peer.role() == PeerRole::Relay) =>
             {
-                // A trusted relay authenticates its transport as SYSTEM (or a
-                // backend), but the terminal authorization proof belongs to
-                // the transaction's already-validated permission subject.
-                // Using the transport identity here recompiled `session.*`
-                // policy predicates under SYSTEM after a relayed commit.
+                // Terminal authorization belongs to the immutable session
+                // selected at request admission, never to the relay's
+                // subjectless transport identity. A scope-isolated relay has
+                // already been checked against its server-issued one-binding
+                // capability; a multiplexed relay has passed the corresponding
+                // transport admission check for this request.
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
+                    CommitUnitTrust::Relay => session_claim_binding.0,
                     CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => ingest_context.identity,
                 };
-                {
+                let admitted_write_authorization = {
                     let mut node = node.lock().await;
                     peer.prove_terminal_commit_authorization(
                         &mut node,
@@ -406,14 +424,17 @@ where
                         &versions,
                         tx.tx_id,
                     )
-                    .await?;
-                }
+                    .await?
+                };
                 Ok(node
                     .lock()
                     .await
                     .apply_sync_message_with_ingest_context(
                         SyncMessage::CommitUnit { tx, versions },
-                        Some(ingest_context),
+                        Some(CommitUnitIngestContext {
+                            admitted_write_authorization,
+                            ..ingest_context
+                        }),
                     )
                     .await?)
             }
@@ -822,6 +843,16 @@ pub struct ResumeCursor {
     pub(super) session_claim_revision: u64,
 }
 
+impl ResumeCursor {
+    /// Resume attaches the saved peer to a new physical transport. Preserve
+    /// the server-authenticated scope binding while replacing its old
+    /// per-attachment admission capability.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn refresh_scope_relay_admission_epoch(&mut self) -> bool {
+        self.peer.refresh_scope_relay_admission_epoch()
+    }
+}
+
 impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -849,6 +880,7 @@ where
     /// trusted authentication layer has accepted a refreshed session.
     pub fn update_authenticated_session_claims(&mut self, claims: BTreeMap<String, Value>) {
         let ConnectionLink::Subscriber(SubscriberConnectionState {
+            peer,
             session_claims,
             session_claim_revision,
             ..
@@ -856,6 +888,12 @@ where
         else {
             return;
         };
+        if peer.admitted_scope_relay_binding().is_some() {
+            // A scope relay receives a fresh immutable capability only through
+            // a new server-authenticated connection. Do not turn this generic
+            // host refresh hook into a mutable capability update.
+            return;
+        }
         if *session_claims == claims {
             return;
         }
@@ -868,6 +906,7 @@ where
     /// author identity.
     fn subscriber_session_claim_binding(&self) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
         let ConnectionLink::Subscriber(SubscriberConnectionState {
+            peer,
             ingest_context,
             session_claims,
             ..
@@ -875,6 +914,9 @@ where
         else {
             return None;
         };
+        if let Some(binding) = peer.admitted_scope_relay_binding() {
+            return Some((binding.identity, binding.claims.clone()));
+        }
         Some((ingest_context.identity, session_claims.clone()))
     }
 
@@ -883,6 +925,16 @@ where
     /// so this author-keyed compatibility state cannot select another live
     /// session's maintained view.
     fn bind_subscriber_session_claims(&self) {
+        if matches!(
+            &self.link,
+            ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. })
+                if peer.admitted_scope_relay_binding().is_some()
+        ) {
+            // All scope-relay policy work takes the immutable binding through
+            // `scoped_active_session_claims`; do not duplicate it into the
+            // author-keyed mutable compatibility map.
+            return;
+        }
         let Some((identity, claims)) = self.subscriber_session_claim_binding() else {
             return;
         };
@@ -953,8 +1005,9 @@ where
                 let mut refreshed = coverage.clone();
                 if let Some(policy) = &mut refreshed.policy_binding {
                     policy.identity = refreshed_direct_binding.0;
-                    policy.canonical_claims = postcard::to_allocvec(&refreshed_direct_binding.1)
-                        .expect("claims map is canonical postcard");
+                    policy.canonical_claims = crate::protocol::CanonicalPolicyClaims::new(
+                        refreshed_direct_binding.1.clone(),
+                    );
                 }
                 (coverage.clone(), refreshed)
             })
@@ -1366,6 +1419,24 @@ where
         self.last_resume_bytes
     }
 
+    #[cfg(test)]
+    pub(crate) fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
+        let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {
+            return None;
+        };
+        peer.scope_relay_admission_epoch_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope_relay_binding_for_test(
+        &self,
+    ) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+        let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {
+            return None;
+        };
+        peer.scope_relay_binding_for_test()
+    }
+
     /// Return a receipt only after this connection applied its matching
     /// authorization-support view. A reconnect creates a new connection and
     /// therefore has no receipt to reuse.
@@ -1392,7 +1463,10 @@ where
         else {
             return None;
         };
-        let replacement = PeerState::client_link(peer.link_identity());
+        let replacement = match peer.role() {
+            PeerRole::Relay => PeerState::relay(),
+            PeerRole::ClientLink { identity } => PeerState::client_link(identity),
+        };
         Some(ResumeCursor {
             peer: std::mem::replace(peer, replacement),
             ingest_context: *ingest_context,
@@ -1565,7 +1639,13 @@ where
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker());
         let connection_epoch = self.connection_epoch;
-        let permits_delegated_sessions = self.transport.permits_delegated_sessions();
+        // The host-admitted scope-isolated worker owns one immutable foreground
+        // session and may forward that exact binding upstream. A generic
+        // multiplexed relay has no per-binding admission capability and must
+        // forward rather than select a user binding. Raw wire input cannot
+        // enable either path.
+        let permits_delegated_sessions = self.transport.permits_delegated_sessions()
+            || self.node.borrow().client_relay_scope().is_some();
         self.observe_shared_subscriber_dirty_epoch();
         let session_claim_binding = self.subscriber_session_claim_binding();
         self.bind_subscriber_session_claims();
@@ -1716,6 +1796,11 @@ where
                                             pending_subscription.subscription,
                                             &values,
                                             pending_subscription.identity,
+                                            if permits_delegated_sessions {
+                                                pending_subscription.policy_binding.as_ref()
+                                            } else {
+                                                None
+                                            },
                                         )
                                         .await?;
                                     let subscribe = Subscribe {
@@ -2341,9 +2426,18 @@ where
                                 };
                                 {
                                     let mut node = self.node.lock().await;
-                                    node.apply_row_version_payloads_for_requests(
+                                    let applied_bundles = node.apply_row_version_payloads_for_requests(
                                         &repair.requests,
                                         version_bundles,
+                                    )
+                                    .await?;
+                                    // Only the still-selected authority receipt can later be
+                                    // served to this durable foreground scope without a fresh
+                                    // policy check. A stale/fallback repair may populate the
+                                    // local cache, but never grants durable disclosure authority.
+                                    node.record_scope_relay_authoritative_repair_payloads(
+                                        &applied_bundles,
+                                        repair.authority_receipt_eligible,
                                     )
                                     .await?;
                                 }
@@ -3264,7 +3358,11 @@ where
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
                     let scope_purpose: Option<crate::protocol::AuthorizationScopePurpose> = None;
-                    if subscriber_inbound_message_is_authority_only(&message, ingest_context.trust)
+                    if subscriber_inbound_message_is_authority_only(
+                        &message,
+                        *ingest_context,
+                        peer,
+                    )
                     {
                         drop_peer_request(&self.node);
                         continue;
@@ -3417,8 +3515,7 @@ where
                                 &opts,
                                 *local_receiver,
                                 peer.role(),
-                                !*local_receiver
-                                    && matches!(peer.role(), PeerRole::ClientLink { .. }),
+                                delegated_session_capability(*ingest_context, peer.role()),
                             ) {
                                 shape_registrations.insert(
                                     registration_key,
@@ -3472,7 +3569,10 @@ where
                                 // side-effecting preflight until Subscribe,
                                 // where the authenticated branch gate is
                                 // available.
-                                if shape.params().is_empty() {
+                                if shape.params().is_empty()
+                                    && let Some(permission_subject) =
+                                        subscriber_permission_subject(*ingest_context)
+                                {
                                     let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
                                     let binding = match binding {
                                         Ok(binding) => binding,
@@ -3491,7 +3591,7 @@ where
                                             shape,
                                             &binding,
                                             opts.tier,
-                                            subscriber_permission_subject(*ingest_context),
+                                            permission_subject,
                                             &opts.read_view,
                                             QueryAuthorizationMode::TrustedServing,
                                         )
@@ -3598,22 +3698,19 @@ where
                             // inactive Subscribe arm on a normal two-megabyte executor stack.
                             let should_continue = Box::pin(async {
                             let subscription_has_delegated_session = subscribe.delegated_session.is_some();
-                            let session_claim_binding = match subscribe.delegated_session.clone() {
-                                None => session_claim_binding.clone(),
-                                Some(delegated) => {
-                                    let delegated_link_is_trusted = ingest_context.trust
-                                        == CommitUnitTrust::TrustedBackend
-                                        && ingest_context.identity == AuthorSubject::SYSTEM;
-                                    if !delegated_link_is_trusted {
-                                        // A session must be authenticated by its transport unless
-                                        // this is the dedicated core-facing relay link. Never let
-                                        // a client self-assert a broader query policy context.
-                                        drop_peer_request(&self.node);
-                                        return Ok::<bool, Error>(true);
-                                    }
-                                    Some((delegated.identity, delegated.claims))
-                                }
-                            };
+                            let session_claim_binding = admitted_request_policy_binding(
+                                *ingest_context,
+                                peer,
+                                session_claim_binding.clone(),
+                                subscribe.delegated_session.clone(),
+                            );
+                            if session_claim_binding.is_none() {
+                                // A relay's transport is not a user. It may
+                                // only carry the topology-assigned immutable
+                                // session snapshot for this request.
+                                drop_peer_request(&self.node);
+                                return Ok::<bool, Error>(true);
+                            }
                             if let Err(message) =
                                 validate_known_state_declaration(&subscribe.known_state)
                             {
@@ -3702,8 +3799,7 @@ where
                                 &opts,
                                 *local_receiver,
                                 peer.role(),
-                                !*local_receiver
-                                    && matches!(peer.role(), PeerRole::ClientLink { .. }),
+                                delegated_session_capability(*ingest_context, peer.role()),
                             )
                             .is_err()
                             {
@@ -3718,10 +3814,9 @@ where
                             if peer.role() == PeerRole::Relay || subscription_has_delegated_session {
                                 coverage.policy_binding = Some(crate::protocol::PolicyBindingKey {
                                     identity: subscription_policy_binding.0,
-                                    canonical_claims: postcard::to_allocvec(
-                                        &subscription_policy_binding.1,
-                                    )
-                                    .expect("claims map is canonical postcard"),
+                                    canonical_claims: crate::protocol::CanonicalPolicyClaims::new(
+                                        subscription_policy_binding.1.clone(),
+                                    ),
                                 });
                             }
                             if served_current_rows.contains_key(&subscription) {
@@ -3842,7 +3937,7 @@ where
                                     DurabilityTier::Global,
                                     opts.propagate_upstream,
                                 );
-                                if self.node.borrow().is_relay_authority_session_owner() {
+                                if self.node.borrow().client_relay_scope().is_some() {
                                     opts.binding_source = BindingSource::RelayAuthoritySession;
                                 }
                                 opts
@@ -3944,7 +4039,20 @@ where
                             let local_waiting_for_upstream_settlement = local_subscriber
                                 && opts.propagate_upstream
                                 && opts.tier > DurabilityTier::Local
-                                && !self.node.borrow().has_settled_result_set(upstream_binding_view);
+                                && {
+                                    // This incoming usage site was just
+                                    // registered with its exact policy
+                                    // binding. A same-shaped sibling's
+                                    // receipt must neither settle nor block
+                                    // it.
+                                    let node = self.node.borrow();
+                                    !node
+                                        .authority_result_key_for_subscription(subscription)
+                                        .ok()
+                                        .is_some_and(|key| {
+                                            node.has_settled_authority_result(&key)
+                                        })
+                                };
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())
@@ -4136,6 +4244,16 @@ where
                                             )
                                             .is_some()
                                             {
+                                                // The relay owns both the
+                                                // local exact authority
+                                                // receipt and its wire usage
+                                                // site. Retiring only the
+                                                // remote wire handle leaks a
+                                                // settled receipt until a
+                                                // later lifecycle sweep.
+                                                self.node
+                                                    .borrow_mut()
+                                                    .apply_unsubscribe(upstream_subscription);
                                                 upstream_subscriptions.borrow_mut().push(
                                                     PendingUpstreamCommand::Unsubscribe(
                                                         upstream_subscription,
@@ -4178,17 +4296,51 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
-                            let repair_policy_binding = match delegated_session {
-                                None => session_claim_binding.clone(),
-                                Some(delegated) => {
-                                    let delegated_link_is_trusted = ingest_context.trust
-                                        == CommitUnitTrust::TrustedBackend
-                                        && ingest_context.identity == AuthorSubject::SYSTEM;
-                                    if !delegated_link_is_trusted {
-                                        drop_peer_request(&self.node);
-                                        continue;
-                                    }
-                                    Some((delegated.identity, delegated.claims))
+                            let repair_context = if *local_receiver {
+                                // This path is exclusively for a direct page
+                                // (or native foreground) client link. The
+                                // worker's upstream capability chose what
+                                // entered the ledger; the foreground hop only
+                                // proves it is the same live durable subject.
+                                // `local_receiver` alone also describes local
+                                // generic relays, which must never turn cache
+                                // contents into scope-ledger authority.
+                                let PeerRole::ClientLink { identity: peer_identity } = peer.role()
+                                else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let Some((session_identity, _)) = session_claim_binding.as_ref()
+                                else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let scope_matches = self
+                                    .node
+                                    .borrow()
+                                    .client_relay_scope()
+                                    .is_some_and(|scope| {
+                                        scope.admits_session(peer_identity)
+                                            && peer_identity == *session_identity
+                                    });
+                                if delegated_session.is_some() || !scope_matches {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                crate::peer::RepairServingContext::ScopeIsolatedClientRelay
+                            } else {
+                                let repair_policy_binding = admitted_request_policy_binding(
+                                    *ingest_context,
+                                    peer,
+                                    session_claim_binding.clone(),
+                                    delegated_session,
+                                );
+                                let Some(repair_policy_binding) = repair_policy_binding else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                crate::peer::RepairServingContext::Authority {
+                                    policy_binding: repair_policy_binding,
                                 }
                             };
                             let responses = {
@@ -4196,10 +4348,7 @@ where
                                 peer.serve_row_versions(
                                     &mut node,
                                     &requests,
-                                    repair_policy_binding.ok_or_else(|| Error::new(
-                                        ErrorCode::Protocol,
-                                        "row-version repair has no direct session policy binding",
-                                    ))?,
+                                    repair_context,
                                 )
                                 .await?
                             };
@@ -4216,11 +4365,15 @@ where
                         }
                         other => {
                             if matches!(other, SyncMessage::SessionClaims { .. })
-                                && ingest_context.trust == CommitUnitTrust::Session
+                                && matches!(
+                                    ingest_context.trust,
+                                    CommitUnitTrust::Session | CommitUnitTrust::Relay
+                                )
                             {
-                                // Claims are fixed when the host admits or resumes this
-                                // connection. A subscriber can otherwise self-assert a
-                                // broader policy context after authentication.
+                                // Claims are fixed at host admission. A session cannot
+                                // broaden itself, and a subjectless relay cannot mutate
+                                // the node-wide claim cache; delegated bindings are
+                                // request-local and topology-admitted instead.
                                 drop_peer_request(&self.node);
                                 continue;
                             }
@@ -4456,14 +4609,34 @@ where
                             group_subscription,
                             group.policy_binding.clone(),
                         );
-                        let settled_handoff = group.awaiting_upstream_settlement
-                            && self.node.borrow().has_settled_result_set(BindingViewKey {
-                                shape_id: group.shape.shape_id(),
-                                binding_id: group.binding.binding_id(),
-                                read_view: group.upstream_opts.read_view_key(),
-                            });
+                        // The maintained receiver is addressed by the
+                        // policy-partitioned coverage-group key, while the
+                        // selected membership belongs to its separately
+                        // registered upstream usage key. Keep that exact
+                        // association even for groups that did not have to
+                        // wait on this turn; strict relay materialization
+                        // always needs it.
+                        let upstream_authority_result_key = self
+                            .node
+                            .borrow()
+                            .authority_result_key_for_subscription(group.upstream_subscription)
+                            .ok();
+                        let upstream_authority_is_settled = {
+                            let node = self.node.borrow();
+                            upstream_authority_result_key
+                                .as_ref()
+                                .is_some_and(|key| node.has_settled_authority_result(key))
+                        };
+                        let settled_handoff =
+                            group.awaiting_upstream_settlement && upstream_authority_is_settled;
                         if group.awaiting_upstream_settlement && !settled_handoff {
                             continue;
+                        }
+                        if let Some(authority_result_key) = upstream_authority_result_key {
+                            peer.set_subscription_authority_result_source(
+                                group_subscription,
+                                authority_result_key,
+                            );
                         }
                         let pending_initial =
                             std::mem::take(&mut group.pending_initial_subscribers);
@@ -5082,7 +5255,7 @@ where
         .map(|update| update.parts.settled_through)
         .max();
     let node_ref = node.borrow();
-    let relay_authority_session_owner = node_ref.is_relay_authority_session_owner();
+    let relay_authority_session_owner = node_ref.client_relay_scope().is_some();
     let confirmed_binding_views = confirmed_subscriptions
         .iter()
         .filter_map(|(subscription, settled_through)| {
@@ -5113,12 +5286,29 @@ where
             }
         }
     }
+    // Record concrete authoritative payloads only after their normal batch is
+    // accepted. This is intentionally independent of live result membership:
+    // a later removal governs future delivery, not retained bytes.
+    let ledger_bundles = if relay_authority_session_owner {
+        pending
+            .iter()
+            .filter(|update| update.authority_receipt_eligible)
+            .flat_map(|update| {
+                expand_version_carriers(&update.parts.version_carriers).unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let updates = std::mem::take(pending)
         .into_iter()
         .map(|update| update.parts)
         .collect::<Vec<_>>();
     let mut node_ref = node.lock().await;
     node_ref.apply_view_updates_in_batch(updates).await?;
+    node_ref
+        .record_scope_relay_authoritative_bundles(&ledger_bundles)
+        .await?;
     drop(node_ref);
     if relay_authority_session_owner {
         // A relay authority view is input to every locally served browser
