@@ -86,6 +86,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
     pending_binding_retractions: usize,
     pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
+    /// A scoped resident failure invalidates the live slice and discards all
+    /// staged state. No continuation or publication may install it later.
+    discarded: bool,
 }
 
 #[derive(Clone)]
@@ -621,9 +624,18 @@ impl IncrementalEvaluation<'_> {
         self.terminal_deltas.retain(|node, _| !nodes.contains(node));
         self.root_ordering_windows
             .retain(|node, _| !nodes.contains(node));
+        self.discarded = true;
+        self.pending_subscription_outputs.clear();
+        self.terminal_deltas.clear();
+        self.root_ordering_windows.clear();
+        self.pending_notifications.clear();
+        self.published_subscriptions.clear();
     }
 
     fn install(&mut self, runtime: &mut IvmRuntime) {
+        if self.discarded {
+            return;
+        }
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
@@ -667,6 +679,18 @@ impl IncrementalEvaluation<'_> {
             .map(|entry| entry.payload_bytes)
             .sum();
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
+        // Retainers are owned by graph lifecycle operations, not by this
+        // evaluation snapshot. Preserve their current live value when a
+        // suspended continuation resumes after lifecycle activity.
+        for node in &self.relevant_nodes {
+            match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
+                (Some(meta), Some(live)) => meta.retainers = live.retainers.clone(),
+                (None, Some(live)) => {
+                    self.node_meta.insert(*node, live.clone());
+                }
+                _ => {}
+            }
+        }
         runtime
             .node_meta
             .retain(|node, _| !self.relevant_nodes.contains(node));
@@ -686,6 +710,9 @@ impl IncrementalEvaluation<'_> {
         runtime: &mut IvmRuntime,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), EvaluationFailure>> {
+        if self.discarded {
+            return Poll::Ready(Ok(()));
+        }
         let ready = self.requests.poll(cx);
         if ready == 0 {
             self.requests.poll_eager_retry(cx);
@@ -2249,6 +2276,7 @@ impl IvmRuntime {
             node_meta,
             pending_binding_retractions,
             pending_notifications: Vec::new(),
+            discarded: false,
         })
     }
 
@@ -2656,5 +2684,112 @@ fn bump_input_frontiers_staged(
     ) {
         let meta = node_meta.entry(node).or_default();
         meta.input_generation = meta.input_generation.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{
+        ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
+    };
+    use crate::storage::MemoryStorage;
+
+    #[futures_test::test]
+    async fn resumed_install_preserves_live_retainer_changes() {
+        let schema = DatabaseSchema::new([TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage =
+            Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+        let output = runtime
+            .add_dedup_graph(&GraphBuilder::table("edges").project(["src", "dst"]))
+            .unwrap()
+            .node;
+        runtime.add_retainer(output, Retainer::PreparedShape("old".to_owned()));
+        let edges = schema.table("edges").unwrap().record_schema();
+        let record = edges
+            .create(&[Value::U64(1), Value::U64(1), Value::U64(2)])
+            .unwrap();
+        let mut evaluation = runtime
+            .begin_tick_with_params(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "edges".to_owned(),
+                    descriptor: edges,
+                    deltas: vec![RecordDelta {
+                        record: record.into(),
+                        weight: 1,
+                    }],
+                }],
+                Vec::new(),
+                OwnedStorage::new(Rc::clone(&storage)),
+                None,
+            )
+            .await
+            .unwrap();
+
+        runtime.add_retainer(output, Retainer::Subscription("new".to_owned()));
+        evaluation.install(&mut runtime);
+
+        let retainers = &runtime.node_meta.get(&output).unwrap().retainers;
+        assert!(retainers.contains(&Retainer::PreparedShape("old".to_owned())));
+        assert!(retainers.contains(&Retainer::Subscription("new".to_owned())));
+    }
+
+    #[futures_test::test]
+    async fn abandoned_resident_evaluation_cannot_install_frontiers() {
+        let schema = DatabaseSchema::new([TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage =
+            Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+        let output = runtime
+            .add_dedup_graph(&GraphBuilder::table("edges").project(["src", "dst"]))
+            .unwrap()
+            .node;
+        runtime.add_retainer(output, Retainer::PreparedShape("retained".to_owned()));
+        let edges = schema.table("edges").unwrap().record_schema();
+        let record = edges
+            .create(&[Value::U64(1), Value::U64(1), Value::U64(2)])
+            .unwrap();
+        let mut evaluation = runtime
+            .begin_tick_with_params(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "edges".to_owned(),
+                    descriptor: edges,
+                    deltas: vec![RecordDelta {
+                        record: record.into(),
+                        weight: 1,
+                    }],
+                }],
+                Vec::new(),
+                OwnedStorage::new(Rc::clone(&storage)),
+                None,
+            )
+            .await
+            .unwrap();
+        let before_tick = runtime.current_tick;
+        let before_frontiers = runtime.table_frontiers.clone();
+        evaluation.abandon(&HashSet::default());
+        evaluation.install(&mut runtime);
+
+        assert_eq!(runtime.current_tick, before_tick);
+        assert_eq!(runtime.table_frontiers, before_frontiers);
     }
 }
