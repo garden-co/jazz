@@ -218,6 +218,93 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         "a BindingViewKey-only reader must refuse an ambiguous multiplexed receipt"
     );
 
+    // The settled-member key is exactly the five-field authority identity
+    // followed by the member handle. The policy handle remains bounded in the
+    // ordered key; the exact subject + claims live in the typed directory.
+    let member_store = relay
+        .database
+        .direct_record_store(crate::schema::SETTLED_RESULT_MEMBERS_STORE)
+        .unwrap();
+    let members = futures::executor::block_on(member_store.prefix_entries(&[])).unwrap();
+    assert_eq!(members.len(), 1, "only bob's unretracted member persists");
+    let member_key = &members[0].key;
+    assert_eq!(
+        member_key.len(),
+        6,
+        "member key extends the 5-field receipt key"
+    );
+    assert_eq!(member_key[3], Value::U8(1));
+    assert!(matches!(&member_key[4], Value::Bytes(handle) if handle.len() == 32));
+    assert!(matches!(&member_key[5], Value::Bytes(handle) if handle.len() == 32));
+
+    let directory = relay
+        .database
+        .direct_record_store(crate::schema::AUTHORITY_POLICY_BINDINGS_STORE)
+        .unwrap();
+    let entries = futures::executor::block_on(directory.prefix_entries(&[])).unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "each exact delegated identity has one directory entry"
+    );
+    for entry in &entries {
+        let [Value::Bytes(handle)] = entry.key.as_slice() else {
+            panic!("directory key must be exactly one binary handle");
+        };
+        assert_eq!(handle.len(), 32, "directory handle is fixed-width");
+        let Value::String(subject) = entry.value.get_idx(0).unwrap() else {
+            panic!("directory subject must stay an ordinary typed string");
+        };
+        let claims = crate::protocol::policy_binding_directory_claims_from_value(
+            entry.value.get_idx(1).unwrap(),
+        )
+        .expect("directory claims must be normal typed Groove values");
+        let policy = PolicyBindingKey::from_canonical_parts(
+            AuthorSubject::from_canonical(&subject).unwrap(),
+            claims,
+        );
+        assert_eq!(policy.directory_digest().as_slice(), handle.as_slice());
+    }
+
+    // Plant the only possible digest collision shape: the valid fixed handle
+    // names a different valid typed subject/claims record. A later update must
+    // reject it rather than overwrite, merge, or silently use the wrong scope.
+    let alice_policy = alice_key.policy_binding.as_ref().unwrap();
+    futures::executor::block_on(directory.set(
+        &[Value::Bytes(alice_policy.directory_digest().to_vec())],
+        &[
+            Value::String(bob.canonical().to_owned()),
+            crate::protocol::policy_binding_directory_claims_value(&BTreeMap::new()).unwrap(),
+        ],
+    ))
+    .unwrap();
+    drop(directory);
+    assert!(matches!(
+        relay
+            .apply_view_update(update(
+                alice_subscribe.subscription,
+                false,
+                vec![member(3)],
+                Vec::new(),
+            ))
+            .resolve(),
+        Err(crate::node::Error::InvalidStoredValue(
+            "policy binding digest aliases a distinct exact policy identity"
+        ))
+    ));
+    let directory = relay
+        .database
+        .direct_record_store(crate::schema::AUTHORITY_POLICY_BINDINGS_STORE)
+        .unwrap();
+    futures::executor::block_on(directory.set(
+        &[Value::Bytes(alice_policy.directory_digest().to_vec())],
+        &[
+            Value::String(alice_policy.identity.canonical().to_owned()),
+            crate::protocol::policy_binding_directory_claims_value(alice_policy.claims()).unwrap(),
+        ],
+    ))
+    .unwrap();
+
     let schema = relay.catalogue.schema.clone();
     relay.close().resolve().unwrap();
     drop(relay);

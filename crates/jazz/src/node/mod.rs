@@ -2135,10 +2135,11 @@ fn select_all(table: &str) -> Query {
 
 /// Durable v1 identity for authority-selected results.
 ///
-/// This intentionally uses normal Groove values, not postcard or a digest:
-/// `[shape, binding, read-view, policy-absent-or-present, subject, claims]`.
-/// Claims are an ordered array of `(name, value)` Groove tuples, so two claim
-/// snapshots cannot collide or become indistinguishable after recovery.
+/// This intentionally uses normal Groove values, not postcard or a variable
+/// claim payload: `[shape, binding, read-view, policy-absent-or-present,
+/// 32-byte policy handle]`. The handle names a separate typed directory entry
+/// that preserves the exact subject and claims and rejects a collision during
+/// both write and recovery.
 fn authority_result_store_prefix(authority_result_key: &AuthorityResultKey) -> Vec<Value> {
     let binding_view = authority_result_key.binding_view;
     let mut key = vec![
@@ -2517,6 +2518,11 @@ fn authority_result_store_prefix_round_trips_complete_policy_identity() {
     );
 
     let prefix = authority_result_store_prefix(&key);
+    assert_eq!(
+        prefix.len(),
+        5,
+        "authority result identity is a fixed 5-field key"
+    );
     assert_eq!(prefix[3], Value::U8(1));
     assert!(matches!(&prefix[4], Value::Bytes(digest) if digest.len() == 32));
     let digest = key.policy_binding.as_ref().unwrap().directory_digest();
