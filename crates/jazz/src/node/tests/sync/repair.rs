@@ -355,6 +355,80 @@ fn scope_relay_repair_requires_a_live_scope_capability() {
     assert!(version_bundles.is_empty());
 }
 
+/// A repaired version is durable knowledge for exactly the host-attested
+/// scope that received it. Reopening that scope retains the closure; opening
+/// the same physical database under a different admitted subject does not.
+#[test]
+fn scope_relay_repair_ledger_survives_reopen_only_for_exact_scope() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (relay_dir, mut relay_node) = open_node_with_schema(node(9), schema.clone());
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    install_test_uuid_sub_claim(&mut relay_node, bob);
+    let alice_scope = unsafe {
+        crate::db::ClientRelayScope::from_admitted_storage_owner(
+            "relay-storage-owner".to_owned(),
+            alice,
+        )
+    };
+    relay_node
+        .configure_scope_isolated_client_relay(alice_scope.clone())
+        .unwrap();
+    let row_uuid = row(0x2c);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", row_uuid, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "reopen retained authority delivery")),
+    );
+    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+        panic!("expected authority view update");
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(bundles[0].versions[0].schema_version(), "todos")
+        .unwrap();
+    relay_node
+        .record_scope_relay_authoritative_bundles(&bundles)
+        .resolve()
+        .unwrap();
+    let request = crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id);
+    drop(relay_node);
+
+    let mut reopened = reopen_node_at(&relay_dir, node(9), schema.clone());
+    reopened
+        .configure_scope_isolated_client_relay(alice_scope)
+        .unwrap();
+    assert!(
+        reopened
+            .scope_relay_repair_ledger_contains(table_id, &request)
+            .resolve()
+            .unwrap(),
+        "same durable scope retains delivered closure"
+    );
+    drop(reopened);
+
+    let mut wrong_scope = reopen_node_at(&relay_dir, node(9), schema);
+    wrong_scope
+        .configure_scope_isolated_client_relay(unsafe {
+            crate::db::ClientRelayScope::from_admitted_storage_owner(
+                "relay-storage-owner".to_owned(),
+                bob,
+            )
+        })
+        .unwrap();
+    assert!(
+        !wrong_scope
+            .scope_relay_repair_ledger_contains(table_id, &request)
+            .resolve()
+            .unwrap(),
+        "different admitted scope cannot reuse ledger"
+    );
+}
+
 #[test]
 fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
