@@ -4297,12 +4297,21 @@ where
                                 continue;
                             }
                             let repair_context = if *local_receiver {
-                                // This path is exclusively for the direct,
-                                // topology-attested foreground attachment.
+                                // This path is exclusively for a direct page
+                                // (or native foreground) client link. The
+                                // worker's upstream capability chose what
+                                // entered the ledger; the foreground hop only
+                                // proves it is the same live durable subject.
                                 // `local_receiver` alone also describes local
                                 // generic relays, which must never turn cache
                                 // contents into scope-ledger authority.
-                                let Some(binding) = peer.admitted_scope_relay_binding() else {
+                                let PeerRole::ClientLink { identity: peer_identity } = peer.role()
+                                else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let Some((session_identity, _)) = session_claim_binding.as_ref()
+                                else {
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
@@ -4311,10 +4320,8 @@ where
                                     .borrow()
                                     .client_relay_scope()
                                     .is_some_and(|scope| {
-                                        scope.admits_session(binding.identity)
-                                            && session_claim_binding.as_ref().is_some_and(
-                                                |(identity, _)| binding.identity == *identity,
-                                            )
+                                        scope.admits_session(peer_identity)
+                                            && peer_identity == *session_identity
                                     });
                                 if delegated_session.is_some() || !scope_matches {
                                     drop_peer_request(&self.node);
