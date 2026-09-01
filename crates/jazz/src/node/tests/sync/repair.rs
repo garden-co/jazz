@@ -247,6 +247,44 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
         panic!("expected retained same-scope repair response");
     };
     assert!(version_bundles.is_empty(), "unrecorded ref stays hidden");
+
+    // A matching digest alone is not a capability. Corrupting the retained
+    // scope value must fail closed rather than serve the row under a guessed
+    // scope key.
+    let scope = relay_node.client_relay_scope().unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(bundles[0].versions[0].schema_version(), "todos")
+        .unwrap();
+    let store = relay_node
+        .database
+        .direct_record_store(crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE)
+        .unwrap();
+    store
+        .set(
+            &[
+                Value::Bytes(scope.durable_digest().to_vec()),
+                Value::U64(table_id.0),
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_id.time.0),
+                Value::Uuid(tx_id.node.0),
+            ],
+            &[
+                Value::String("wrong scope".to_owned()),
+                Value::Nullable(None),
+            ],
+        )
+        .resolve()
+        .unwrap();
+    assert!(matches!(
+        relay
+            .serve_row_versions(
+                &mut relay_node,
+                std::slice::from_ref(&request),
+                crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+            )
+            .resolve(),
+        Err(Error::InvalidStoredValue("scope relay ledger value does not match admitted scope"))
+    ));
 }
 
 #[test]
