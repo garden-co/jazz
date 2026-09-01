@@ -3,7 +3,7 @@
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
@@ -32,7 +32,10 @@ use crate::protocol::ReadViewSpec as CoreReadViewSpec;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
 use crate::storage_codec_profile::epoch_1_storage_codec_profile;
 use crate::tools::OpenTransactionId;
-use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
+use crate::tools::native_transport_connector::{
+    NativeTransportConnector, NativeTransportRequest, NativeTransportTerminal,
+    NativeTransportTerminalFuture,
+};
 use crate::tools::public_api::types::{
     OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
 };
@@ -192,6 +195,8 @@ struct ClientDbInner {
     connect_config: Option<ConnectConfig>,
     scheduler: Rc<TickSchedulerImpl>,
     upstream: Option<BackendConnection>,
+    upstream_generation: u64,
+    native_terminal_events: VecDeque<(u64, NativeTransportTerminal)>,
     write_map: HashMap<TransactionId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<OpenTransactionId, ExclusiveTransactionState>,
@@ -853,6 +858,7 @@ impl ClientDb {
         .await?;
         let inner = Rc::new(RefCell::new(inner));
         if has_upstream {
+            ClientDbInner::connect_upstream_transport(&inner).await?;
             Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
         }
         Ok(Rc::new(Self {
@@ -1314,6 +1320,53 @@ impl ClientDb {
         self.inner.borrow().ensure_tick_driver_running()
     }
 
+    fn spawn_native_terminal_watcher(
+        inner: Weak<RefCell<ClientDbInner>>,
+        scheduler: Rc<TickSchedulerImpl>,
+        generation: u64,
+        terminal: NativeTransportTerminalFuture,
+    ) {
+        tokio::task::spawn_local(async move {
+            let terminal = terminal.await;
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            inner
+                .borrow_mut()
+                .native_terminal_events
+                .push_back((generation, terminal));
+            scheduler.wake(TickUrgency::Immediate);
+        });
+    }
+
+    async fn handle_native_terminal(
+        inner: &Rc<RefCell<ClientDbInner>>,
+        generation: u64,
+        terminal: NativeTransportTerminal,
+    ) {
+        let reconnect = {
+            let mut inner_state = inner.borrow_mut();
+            if generation != inner_state.upstream_generation
+                || !matches!(inner_state.shutdown_state, ShutdownState::Open)
+            {
+                return;
+            }
+            match terminal {
+                NativeTransportTerminal::OwnerDropped => {
+                    inner_state.disconnect_upstream();
+                    false
+                }
+                NativeTransportTerminal::PeerClosed(_) | NativeTransportTerminal::Failed(_) => {
+                    inner_state.disconnect_upstream();
+                    true
+                }
+            }
+        };
+        if reconnect {
+            let _ = ClientDbInner::reconnect_upstream(inner).await;
+        }
+    }
+
     fn spawn_local_tick_driver(
         inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
@@ -1327,6 +1380,14 @@ impl ClientDb {
                     let Some(inner) = inner.upgrade() else {
                         return;
                     };
+                    loop {
+                        let event = { inner.borrow_mut().native_terminal_events.pop_front() };
+                        let Some((generation, terminal)) = event else {
+                            break;
+                        };
+                        ClientDb::handle_native_terminal(&inner, generation, terminal).await;
+                    }
+
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     } else if urgency == TickUrgency::AfterCurrentTurn {
@@ -1385,6 +1446,7 @@ impl ClientDbInner {
     }
 
     fn disconnect_upstream(&mut self) -> bool {
+        self.upstream_generation = self.upstream_generation.wrapping_add(1);
         let Some(connection) = self.upstream.take() else {
             return false;
         };
@@ -1466,12 +1528,14 @@ impl ClientDbInner {
         } else {
             None
         };
-        let mut inner = Self {
+        let inner = Self {
             db: Some(db),
             identity,
             connect_config,
             scheduler,
             upstream: None,
+            upstream_generation: 0,
+            native_terminal_events: VecDeque::new(),
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
@@ -1483,56 +1547,53 @@ impl ClientDbInner {
             shutdown_state: ShutdownState::Open,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         };
-        inner.connect_upstream_transport().await?;
         Ok(inner)
     }
 
     async fn reconnect_upstream(inner: &Rc<RefCell<Self>>) -> Result<bool> {
+        Self::connect_upstream_transport(inner).await
+    }
+
+    async fn connect_upstream_transport(inner: &Rc<RefCell<Self>>) -> Result<bool> {
         let (db, identity, scheduler, config) = {
-            let inner = inner.borrow();
-            if !matches!(inner.shutdown_state, ShutdownState::Open) {
+            let inner_state = inner.borrow();
+            if !matches!(inner_state.shutdown_state, ShutdownState::Open) {
                 return Err(Self::shutdown_error());
             }
-            if inner.upstream.is_some() {
+            if inner_state.upstream.is_some() {
                 return Ok(false);
             }
-            let Some(config) = inner.connect_config.clone() else {
+            let Some(config) = inner_state.connect_config.clone() else {
                 return Ok(false);
             };
             (
-                inner.backend_clone()?,
-                inner.identity,
-                Rc::clone(&inner.scheduler),
+                inner_state.backend_clone()?,
+                inner_state.identity,
+                Rc::clone(&inner_state.scheduler),
                 config,
             )
         };
-        let connection = Self::connect_with_config(&db, identity, scheduler, config).await?;
-        let mut inner = inner.borrow_mut();
-        if !matches!(inner.shutdown_state, ShutdownState::Open) || inner.upstream.is_some() {
-            db.detach_connection(&connection);
-            return Ok(false);
-        }
-        inner.upstream = Some(connection);
-        Ok(true)
-    }
-
-    async fn connect_upstream_transport(&mut self) -> Result<()> {
-        if self.upstream.is_some() {
-            return Ok(());
-        }
-        let Some(config) = self.connect_config.clone() else {
-            return Ok(());
+        let (connection, terminal) =
+            Self::connect_with_config(&db, identity, Rc::clone(&scheduler), config).await?;
+        let generation = {
+            let mut inner_state = inner.borrow_mut();
+            if !matches!(inner_state.shutdown_state, ShutdownState::Open)
+                || inner_state.upstream.is_some()
+            {
+                db.detach_connection(&connection);
+                return Ok(false);
+            }
+            inner_state.upstream_generation = inner_state.upstream_generation.wrapping_add(1);
+            inner_state.upstream = Some(connection);
+            inner_state.upstream_generation
         };
-        self.upstream = Some(
-            Self::connect_with_config(
-                self.backend()?,
-                self.identity,
-                Rc::clone(&self.scheduler),
-                config,
-            )
-            .await?,
+        ClientDb::spawn_native_terminal_watcher(
+            Rc::downgrade(inner),
+            scheduler,
+            generation,
+            terminal,
         );
-        Ok(())
+        Ok(true)
     }
 
     async fn connect_with_config(
@@ -1540,7 +1601,7 @@ impl ClientDbInner {
         identity: CoreDbIdentity,
         scheduler: Rc<TickSchedulerImpl>,
         config: ConnectConfig,
-    ) -> Result<BackendConnection> {
+    ) -> Result<(BackendConnection, NativeTransportTerminalFuture)> {
         let wake = scheduler.wake_handle();
         let connected = config
             .connector
@@ -1556,7 +1617,7 @@ impl ClientDbInner {
             })
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
-        Ok(db
+        let connection = db
             .connect_upstream(Box::new(
                 WireTransportAdapter::new_with_session_context_and_delegated_sessions(
                     connected.transport,
@@ -1567,7 +1628,8 @@ impl ClientDbInner {
                     connected.permits_delegated_sessions,
                 ),
             ))
-            .await)
+            .await;
+        Ok((connection, connected.terminal))
     }
 
     fn ensure_transaction_open(&self, transaction_id: OpenTransactionId) -> Result<()> {
