@@ -686,6 +686,19 @@ where
                 durability: None,
             }]));
         }
+        // Remote provenance is untrusted. Once schemas are present, settle a
+        // structural failure as malformed instead of leaving the sender with
+        // a bubbled API error and no fate. Stored-record recovery remains
+        // fail-closed through its separate decoder path.
+        if self
+            .validate_contribution_merge_operation_identities(&tx)
+            .is_err()
+        {
+            return self
+                .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if !Box::pin(self.commit_unit_satisfies_write_policies(
             &tx,
             &versions,
@@ -873,6 +886,15 @@ where
                 global_time: None,
                 durability: None,
             }]));
+        }
+        if self
+            .validate_contribution_merge_operation_identities(&tx)
+            .is_err()
+        {
+            return self
+                .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
         }
         if !self
             .commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)

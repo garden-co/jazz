@@ -753,7 +753,54 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
     settle_outcome(&mut authority, tampered_outcome).unwrap();
     assert!(matches!(
         authority.transaction_state_settled(tampered_tx.tx_id),
-        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+        Some((Fate::Rejected(RejectionReason::MalformedCommit(_)), None, DurabilityTier::Local))
+    ));
+
+    // A raw transaction cannot smuggle noncanonical calculated provenance
+    // alongside otherwise valid branch-copy metadata. This is structural
+    // malformed input, distinct from the earlier canonical-but-unreadable
+    // `denied_tx` receipt, which remains AuthorizationDenied.
+    let malformed_head = branch_selector(0x61);
+    let malformed_head_key = schema
+        .project_branch_view_selector(table, &malformed_head)
+        .unwrap()
+        .0;
+    let (mut malformed_tx, malformed_versions) = make_unit(
+        TxId::new(TxTime::from(42), node(0x62)),
+        allowed,
+        source_tx,
+        malformed_head_key,
+        uuid::Uuid::from_bytes([0x61; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    let duplicate_dot = crate::tx::ContributionDot {
+        tx_id: source_tx,
+        coordinate: crate::tx::ContributionCoordinate {
+            branch_key: BranchKey::default(),
+            table: "todos".to_owned(),
+            row_uuid: source_row,
+            layer: crate::tx::MergeAspect::Content,
+            component: crate::tx::ContributionComponent::Column("title".to_owned()),
+        },
+    };
+    malformed_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .substitutions = vec![crate::tx::ContributionSubstitution {
+        target: duplicate_dot.coordinate.clone(),
+        sources: vec![duplicate_dot.clone(), duplicate_dot],
+    }];
+    let malformed_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        malformed_tx.clone(),
+        malformed_versions,
+        42,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, malformed_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(malformed_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::MalformedCommit(_)), None, DurabilityTier::Local))
     ));
 
     // Durable authority state retains the exact descriptor. A reopened

@@ -189,9 +189,12 @@ impl ContributionMergeProvenance {
             self.target.clone(),
             self.substitutions.clone(),
         )?;
-        if self.branch_view_copies.is_empty()
-            && self.branch_write_intents.is_empty()
-            && &canonical != self
+        // Contribution substitutions retain their own canonical contract even
+        // when a transaction also carries branch-write metadata. Do not let
+        // the latter bypass duplicate-source/target validation.
+        if canonical.source != self.source
+            || canonical.target != self.target
+            || canonical.substitutions != self.substitutions
         {
             return Err("contribution merge provenance must be canonical");
         }
