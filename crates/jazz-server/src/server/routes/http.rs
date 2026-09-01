@@ -1426,6 +1426,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fatal_edge_upstream_failure_precedes_missing_runtime() {
+        let state = blank_dynamic_edge().await;
+        let reason = "authority rejected edge credentials";
+        state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
+            reason: reason.to_owned(),
+        });
+
+        let (status, json) = health(state).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "status": "unhealthy",
+                "component": "edge_upstream",
+                "reason": reason,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn dynamic_edge_becomes_healthy_after_runtime_publication() {
         let schema = readiness_schema();
         let authority = ServerBuilder::new(AppId::from_name("health-authority"))
