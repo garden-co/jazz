@@ -1738,7 +1738,70 @@ pub struct PolicyBindingKey {
     pub identity: AuthorSubject,
     /// Canonical postcard bytes of the claims map; retained rather than hashed
     /// so distinct snapshots can never share coverage on a hash collision.
-    pub canonical_claims: Vec<u8>,
+    pub canonical_claims: CanonicalPolicyClaims,
+}
+
+/// Exact ordered policy claims with a private canonical comparison key.
+///
+/// The comparison bytes are process-local bookkeeping only. Serde persists or
+/// transports the ordinary named Groove values and reconstructs them on read.
+#[derive(Clone, Debug)]
+pub struct CanonicalPolicyClaims {
+    claims: BTreeMap<String, Value>,
+    comparison_key: Vec<u8>,
+}
+
+impl CanonicalPolicyClaims {
+    /// Construct from the exact named claims map.
+    pub fn new(claims: BTreeMap<String, Value>) -> Self {
+        let mut comparison_key = Vec::new();
+        for (name, value) in &claims {
+            put_str(&mut comparison_key, name);
+            put_value(&mut comparison_key, value);
+        }
+        Self {
+            claims,
+            comparison_key,
+        }
+    }
+
+    /// Borrow the ordinary durable/wire claims representation.
+    pub fn claims(&self) -> &BTreeMap<String, Value> {
+        &self.claims
+    }
+}
+
+impl PartialEq for CanonicalPolicyClaims {
+    fn eq(&self, other: &Self) -> bool {
+        self.comparison_key == other.comparison_key
+    }
+}
+impl Eq for CanonicalPolicyClaims {}
+impl PartialOrd for CanonicalPolicyClaims {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for CanonicalPolicyClaims {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.comparison_key.cmp(&other.comparison_key)
+    }
+}
+impl std::hash::Hash for CanonicalPolicyClaims {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.comparison_key.hash(state)
+    }
+}
+
+impl serde::Serialize for CanonicalPolicyClaims {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.claims.serialize(serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for CanonicalPolicyClaims {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(BTreeMap::deserialize(deserializer)?))
+    }
 }
 
 impl PolicyBindingKey {
@@ -1746,8 +1809,7 @@ impl PolicyBindingKey {
     pub fn from_delegated_session(session: &DelegatedSessionBinding) -> Self {
         Self {
             identity: session.identity,
-            canonical_claims: postcard::to_allocvec(&session.claims)
-                .expect("claims map has a canonical postcard encoding"),
+            canonical_claims: CanonicalPolicyClaims::new(session.claims.clone()),
         }
     }
 }

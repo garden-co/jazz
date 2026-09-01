@@ -991,8 +991,9 @@ where
                 let mut refreshed = coverage.clone();
                 if let Some(policy) = &mut refreshed.policy_binding {
                     policy.identity = refreshed_direct_binding.0;
-                    policy.canonical_claims = postcard::to_allocvec(&refreshed_direct_binding.1)
-                        .expect("claims map is canonical postcard");
+                    policy.canonical_claims = crate::protocol::CanonicalPolicyClaims::new(
+                        refreshed_direct_binding.1.clone(),
+                    );
                 }
                 (coverage.clone(), refreshed)
             })
@@ -3785,10 +3786,9 @@ where
                             if peer.role() == PeerRole::Relay || subscription_has_delegated_session {
                                 coverage.policy_binding = Some(crate::protocol::PolicyBindingKey {
                                     identity: subscription_policy_binding.0,
-                                    canonical_claims: postcard::to_allocvec(
-                                        &subscription_policy_binding.1,
-                                    )
-                                    .expect("claims map is canonical postcard"),
+                                    canonical_claims: crate::protocol::CanonicalPolicyClaims::new(
+                                        subscription_policy_binding.1.clone(),
+                                    ),
                                 });
                             }
                             if served_current_rows.contains_key(&subscription) {
