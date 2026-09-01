@@ -265,6 +265,85 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         ),
         "Bob's known state remains independent from Alice's later receipt"
     );
+    // A deferred reset supersedes Alice's earlier live receipt until the
+    // authority completes it. Bob shares the binding view but must retain his
+    // own independent live receipt throughout that gap.
+    let mut alice_deferred = update(
+        alice_subscribe.subscription,
+        41,
+        true,
+        Vec::new(),
+        Vec::new(),
+    );
+    alice_deferred.defer_settlement = true;
+    relay.apply_view_update(alice_deferred).resolve().unwrap();
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                alice_subscribe.subscription,
+                &[],
+                alice,
+                Some(&(alice, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        None,
+        "Alice's deferred reset must revoke her previous live handoff"
+    );
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                bob_subscribe.subscription,
+                &[],
+                bob,
+                Some(&(bob, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        Some(
+            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalTime(29),
+                authorization_progress: 3,
+            }
+        ),
+        "Alice's deferred lifecycle must not revoke Bob's sibling scope"
+    );
+    relay
+        .apply_view_update(update(
+            alice_subscribe.subscription,
+            43,
+            true,
+            Vec::new(),
+            Vec::new(),
+        ))
+        .resolve()
+        .unwrap();
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                alice_subscribe.subscription,
+                &[],
+                alice,
+                Some(&(alice, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        Some(
+            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalTime(43),
+                authorization_progress: 3,
+            }
+        ),
+        "only Alice's subsequent non-deferred completion restores her receipt"
+    );
     assert_eq!(
         relay.query.authority_results[&alice_key].settled_result_set,
         BTreeSet::new()

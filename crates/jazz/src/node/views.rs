@@ -1547,6 +1547,18 @@ where
             .entry(authority_result_key.clone())
             .or_default()
             .deferred_publication = defer_settlement;
+        if defer_settlement {
+            // A newer deferred update supersedes any earlier complete
+            // handoff for this *exact* authority receipt. Its membership may
+            // be useful while the authority finishes the update, but neither
+            // it nor a sibling policy scope may justify a known-state claim
+            // until a non-deferred completion arrives.
+            self.query
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .live_settled = false;
+        }
         let row_result_adds = result_member_adds
             .iter()
             .filter_map(ResultMemberEntry::as_row)
