@@ -23,7 +23,7 @@ Invariant digest:
   subscription mechanism.
 - `INV-API-8`: `Db::insert` MUST generate the row id using its configured `RowIdSource`; `Db::insert_with_id` MUST use the caller-supplied `RowUuid`.
 - `INV-API-9`: `Db::update` MUST preserve omitted fields for a locally present row by merging the patch over the row's current local cells.
-- `INV-API-10`: `Db::upsert` MUST merge supplied cells over current cells when the row exists locally and MUST write supplied cells directly when the row does not exist locally.
+- `INV-API-10`: `Db::upsert` MUST merge supplied cells over current cells when the row exists locally and MUST write supplied cells directly when the row does not exist locally. Through a branch-view `WriteTarget`, it MUST merge a head-local row, copy an inherited base row into the head without a cross-branch parent, or insert into the head when the row is absent from the full view. A head-local deletion winner that hides the row MUST instead reject the upsert with `ErrorCode::WriteRejected`; upsert MUST NOT write tombstone-hidden content or implicitly restore the deletion register. Standalone and mergeable-transaction upserts MUST use the same rule.
 - `INV-API-11`: `Db::delete` MUST lower to a mergeable commit with `DeletionEvent::Deleted` and make the row absent from current reads after local application.
 - `INV-API-12`: `Db::restore` MUST reject empty cell data with `ErrorCode::Schema` and MUST lower a non-empty restore to content write plus `DeletionEvent::Restored`.
 - `INV-API-13`: Every local write method MUST return a `WriteHandle` carrying the affected `RowUuid`, backing `TxId`, and local durability tier.
@@ -63,6 +63,8 @@ Invariant digest:
   that transport error; Local durability remains valid. The worker MUST NOT
   fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
   replay that transient foreground error to a peer attached later.
+
+- `INV-API-35`: Once a local mutation is durably persisted or its ordered publication is owned by the node runtime, the mutation API MUST return its committed `WriteHandle`/`TxId`; a later resident-subscription refresh failure MUST be emitted through the subscription error channel and MUST NOT be returned as a generic mutation or peer-ingest failure.
 
 ## Details
 
@@ -242,11 +244,20 @@ events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `DurabilityTier` remains the protocol/core lattice and the write-settlement API.
 Bindings expose the separate, read-only `ReadTier` vocabulary:
 
-| `ReadTier`         | binding behavior                                                                                           | core lowering                                                                       |
-| ------------------ | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `LocalFirst`       | return/evaluate local knowledge                                                                            | `DurabilityTier::Local`                                                             |
-| `Remote`           | wait for the ordinary remote/edge view                                                                     | legacy remote durability tier                                                       |
-| `RemoteIfPossible` | use local knowledge only after an application explicitly disconnects; otherwise wait exactly like `Remote` | local only for that explicit-offline start, otherwise legacy remote durability tier |
+| `ReadTier`         | binding behavior                                                                                                      | own local writes | core lowering                                                                       |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------- |
+| `LocalFirst`       | return/evaluate local knowledge                                                                                       | immediate        | `DurabilityTier::Local`                                                             |
+| `Remote`           | wait for the ordinary remote/edge view                                                                                | deferred         | legacy remote durability tier                                                       |
+| `RemoteIfPossible` | use local knowledge only after an application explicitly disconnects; otherwise use the same initial gate as `Remote` | immediate        | local only for that explicit-offline start, otherwise legacy remote durability tier |
+
+Bindings MUST infer the own-local-write policy from `ReadTier`; they MUST NOT
+expose `LocalUpdates` as a product query option. The low-level core `ReadOpts`
+contract retains `LocalUpdates` for internal transaction and migration paths.
+Bindings also MUST NOT expose `Propagation` as a product query option. Product
+reads lower with `Propagation::Full`. The Inspector MAY use an internal
+`local-only` read tier that lowers to `DurabilityTier::Local`, immediate local
+updates, and `Propagation::LocalOnly`; that tier MUST NOT appear in the public
+binding `ReadTier` type.
 
 `RemoteIfPossible` does **not** infer offline state from a timeout, connection
 error, slow response, or an ordinary transport reconnect. A one-shot read
@@ -255,28 +266,52 @@ then atomically replaces that local native subscription with the remote one on
 reconnect; it never creates a second query path or replays a historical remote
 failure. Low-level `ReadOpts` and the legacy binding entrypoints still accept
 `DurabilityTier` unchanged during the migration. The native Rust facade has no
-public explicit-offline toggle, so its `RemoteIfPossible` is strict `Remote`
-until such a host boundary exists.
+public explicit-offline toggle, so its `RemoteIfPossible` always uses the remote
+initial gate while retaining the immediate own-write policy.
 
 Subscription finalization is also asynchronous ownership work. Dropping a
 stream MUST synchronously enqueue one idempotent finalization command without
-borrowing the storage-owning node; the next node tick drains it under ordinary
-async node ownership, retiring both the local maintained-view subscription and
-any upstream coverage ownership/unsubscribe. `SubscriptionStream::close()`
-enqueues that same command and awaits its drain acknowledgement; dropping the
-`close()` future cannot lose cleanup because the command was queued first, and
-the stream is terminal immediately after `close()` is invoked: later polls MUST
-return `None`. Finalization commands identify the owned subscription state, not
-a snapshot of a Groove ID, so a catalogue/runtime refresh cannot replace a
-handle between enqueue and drain. Enqueue synchronously marks that state closed;
-refresh MUST NOT rehydrate it while retirement is waiting for the node mutex.
+borrowing the storage-owning node; the next node-owner turn, including an
+ordinary node tick or database shutdown, drains it. `SubscriptionStream::close()`
+enqueues that same command and directly drives its drain under ordinary async
+node ownership, so an uncontended explicit close does not require an external
+tick. The stream MUST retain the in-flight completion before `close()` first
+awaits. If that caller future is cancelled while waiting for the node owner, a
+later `close()` MUST resume and await the same command; it MUST NOT return
+success merely because cleanup was already enqueued. Once close begins, the
+`Stream`, `next_event()`, and `try_next_event()` surfaces are terminal and MUST
+return `None`.
 
-Database shutdown closes finalization admission and snapshots every live stream
-into its retirement set before its first storage await. It drains that set,
-retires the maintained runtime and connection bookkeeping, and only then closes
-storage. A finalizer arriving after admission closes may be acknowledged because
-the whole runtime it could have owned is already terminal; it cannot leave a
-Groove subscription, upstream refcount, or connection resident.
+The close acknowledgement is a local ownership-retirement boundary. It means
+the local maintained-view subscription is retired, every propagated coverage
+owner/refcount held by that stream is released, and an Unsubscribe for the last
+shared owner has been applied locally and queued for the upstream connection.
+It does not mean that a wire Unsubscribe has already been delivered or accepted;
+that remains connection-tick work with the connection's transport error
+semantics. Closing one of several shared owners MUST preserve the upstream
+subscription; closing the last MUST queue exactly one retirement. Repeated
+close, concurrent drain, and shutdown overlap MUST remain deterministic and
+idempotent.
+
+Finalization commands identify the owned subscription state, not a snapshot of
+a Groove ID, so a catalogue/runtime refresh cannot replace a handle between
+enqueue and drain. Enqueue synchronously marks that state closed; refresh MUST
+NOT rehydrate it while retirement is waiting for the node mutex.
+
+Database shutdown closes both subscription-finalization and transaction
+admission before its first suspension. It snapshots every live stream into
+its retirement set and transfers the open-transaction sweep to node-owned
+maintenance before waiting for node ownership. Cancelling a pending `Db::close`
+MUST NOT lose that sweep or an accepted FIFO mutation it was polling: the next
+node owner resumes the retained queue entry, drains queued transaction
+abandonment, and terminalizes every remaining open transaction while the closed
+gate rejects new openers and operations. An opener that was waiting for node
+ownership when admission closes must reject and enqueue its local cleanup,
+because it was absent from the shutdown snapshot. Only after those ownership
+passes does a completing close retire maintained runtime and connection
+bookkeeping and close storage. A finalizer arriving after terminal retirement
+owns no resident work because the completed sweep already owns that runtime
+state.
 
 **Implementation status (2026-07-27).** Local live reads currently use a named
 local materialized-row bridge while maintained-view integration continues;
@@ -294,6 +329,37 @@ and `restore`. `insert` obtains its row id from the configured
 patch over the row's current local cells, so omitted fields keep their value
 (`INV-API-9`).
 
+An upsert's `WriteTarget` is the complete read view used to choose between
+update and insert. For a head-over-base branch view, a head-local row is patched
+with its local content winner as parent. A row inherited only from the base is
+copied into the head and patched without making the base transaction a parent;
+unchanged indirect large-value cells retain engine-only proof from that exact
+inherited preimage. A row absent from both head and base is inserted into the
+head.
+
+A committed head-local deletion winner is not absence when it tombstone-hides
+the row: the upsert returns `ErrorCode::WriteRejected` and emits no content
+write. Callers that mean to revive committed deleted state must use `restore`
+with `ExactWriteTarget::Branch(head)`, which publishes replacement content and
+`DeletionEvent::Restored` together. Within one mergeable transaction, however,
+a later upsert supersedes that same transaction's pending delete atomically, so
+the commit cannot contain tombstone-hidden replacement content. Transactional
+branch-view classification and session read visibility include the staged
+overlay, allowing a session to upsert a branch row it inserted or upserted
+earlier in the same transaction.
+
+Low-level JavaScript upsert options use `{ head, base? }` for a branch view.
+`branch` is not an upsert selector: callers use it only for exact branch-target
+operations such as insert and restore. An upsert with a `branch` property is
+rejected by property presence—including `branch: undefined` or `branch: null`—
+and an upsert containing `base` without `head` is rejected before the
+root/default target can be selected.
+
+Rust `UpsertOptions::target` now uses `WriteTarget` rather than
+`ExactWriteTarget`. Root/default callers keep their runtime behaviour, but code
+that constructs the field with `ExactWriteTarget` must migrate, and exhaustive
+matches over the options field must handle `WriteTarget::BranchView`.
+
 The write handle is the caller's durability and fate observation point. It
 carries the affected `RowUuid`, the backing `TxId` (`mergeable_tx_id()`), and the local
 durability tier (`INV-API-13`). `wait(tier)` returns only when the requested
@@ -304,11 +370,32 @@ yet observed. In particular, a `Global` wait requires the conjunction
 `GlobalTime`; a hydrated or propagated `Global` durability claim without the
 other two facts does not complete it (`INV-API-15`, ch. 3).
 
+Mutation acceptance ends at publication ownership, not observer delivery
+(`INV-API-35`). A pre-publication validation or persistence failure returns an
+error and emits no observer update. After persistence succeeds, or after a
+deferred publication enters the node-owned ordered queue, the API returns the
+committed handle/transaction id. If subscription refresh then fails, each
+affected stream receives its existing `Rejected::ServerFailure` event while the
+write receipt remains successful. Cancellation cannot reclaim a queued
+publication; the node retries its front publication in order before releasing
+later publications or upstream upload work.
+
 Each single-call write creates **one mergeable transaction**. `mergeable_tx()`
 groups multiple facade writes under one `TxId`; the resulting commit unit carries
 `n_total_writes` equal to the number of grouped versions (`INV-API-26`).
 `exclusive_tx()` exposes the serializable transaction path from ch. 3/ch. 5 on
 the facade and reports validation conflicts as `WriteRejected` (`INV-API-27`).
+
+Owning Rust transaction handles use idempotent RAII abandonment. Dropping an
+uncommitted `MergeableTx` or `ExclusiveTx` synchronously records a deduplicated
+tombstone outside the storage-owning node, then retires it immediately when the
+node is uncontended or schedules node maintenance. Every transaction open,
+read, stage, and commit operation MUST inspect and drain its id's tombstone
+after acquiring node ownership and before acting. Thus an operation already
+waiting ahead of the maintenance tick cannot commit a logically abandoned
+transaction. Tombstone drainage treats missing or already-terminal ids as
+benign and processes every later id independently; drop never waits for async
+ownership.
 
 Write durability follows the client facade boundary. A `Db` write always lands
 locally first, remains `Local`, and is queued in the shared outbox for upstream
@@ -349,10 +436,14 @@ Trusted backends can perform core-only attributed writes: the backend sets
 backend's authenticated identity. Clients may attribute writes only to themselves
 (`INV-API-29`, ch. 7).
 
-_Further invariants._ `INV-API-10` — `upsert` merges over current cells when the
-row exists locally, else writes the supplied cells. `INV-API-11` — `delete`
-lowers to a mergeable `DeletionEvent::Deleted`. `INV-API-12` — `restore` rejects
-empty data and lowers to content + `DeletionEvent::Restored`. `INV-API-25` —
+_Further invariants._ `INV-API-10` — `upsert` uses its complete `WriteTarget`:
+it merges a root or head-local row, copies and patches a base-inherited row into
+the head without a cross-branch parent, or inserts into the target when absent.
+A tombstone-hidden row is not insertable: root and branch-view upserts reject it,
+and only `restore` emits `DeletionEvent::Restored`. Standalone and
+mergeable-transaction upserts use the same choice.
+`INV-API-11` — `delete` lowers to a mergeable `DeletionEvent::Deleted`.
+`INV-API-12` — `restore` rejects empty data and lowers to content plus `DeletionEvent::Restored`. `INV-API-25` —
 
 #### Permission advice dry runs
 
@@ -414,7 +505,10 @@ directions; relay/edge/core peer roles remain below the facade (ch. 9).
 `PeerConnection::tick` sends each unannounced subscription once
 (`RegisterShape` then `Subscribe`, `INV-API-19`), uploads each local commit
 once (`INV-API-20`), drains inbound messages, applies them, and refreshes
-registered subscriptions (ch. 8).
+registered subscriptions (ch. 8). An ingest publication is persisted and its
+ordered post-settlement work remains owned before that refresh runs. Refresh
+failure is delivered to subscription owners and does not turn successful ingest
+into a retryable peer failure (`INV-API-35`, `INV-TX-25`).
 
 Bindings that schedule `Db::tick()` in a background client driver own the
 driver's lifecycle. They classify a returned error before deciding whether to

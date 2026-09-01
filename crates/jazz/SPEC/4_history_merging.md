@@ -178,6 +178,29 @@ a distinct durable root composes this base with its own root-local codec family
 before opening. Adding a new Jazz-owned durable byte family requires a new
 storage epoch, golden fixtures, and an explicit decoder/migration decision.
 
+The native whole-root compatibility receipt is
+`fixtures/native_storage_corpus.md` and its executable tests in
+`node/tests/native_storage_corpus.rs`. It complements the per-family goldens:
+the receipt pins one authority-issued catalogue snapshot, immutable and
+current physical rows, transaction/merge metadata, and an indirect content
+tree together through both SQLite and RocksDB. Current Jazz must first inspect
+the committed backend store read-only, then open that same logical snapshot
+without writes, materialize its content tree, and preserve it across a mixed
+current-format write and a third-process reopen. Regeneration produces fresh
+backend-owned candidate bytes which are copied/unpacked into independent roots
+and put through that same full receipt before their checksums can be promoted;
+only the logical pack is deterministic. This corpus is storage-epoch evidence,
+not a compatibility decoder for pre-epoch-alpha roots.
+
+Corpus regeneration stages candidates in implementation-owned private temporary
+roots; a maintainer-supplied path is only a create-new publication destination.
+Before verification and publication, the producer rejects path/root/dot and
+symlink aliases and rejects a staged regular file that has the same stable
+physical identity as the live SQLite image or any regular RocksDB member. This
+is an accidental-alias guard for a trusted maintainer filesystem, not a hostile
+concurrent-filesystem/TOCTOU security boundary. Existing output paths are never
+overwritten: regeneration requires explicit deletion or a fresh output path.
+
 ### 4.4 Deletion as a separate layer
 
 Deletion is modeled separately from content so that hiding and restoring a row do

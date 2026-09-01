@@ -7,7 +7,6 @@ fn recursive_doc_access_policy() -> PublicPolicyExpr {
         "team",
         &[],
         &[],
-        "teams",
         "team_edges",
         "member",
         "parent",
@@ -58,6 +57,81 @@ fn recursive_doc_policy_schema(select_policy: PublicPolicyExpr) -> JazzSchema {
 
 fn recursive_doc_write_policy_schema() -> JazzSchema {
     recursive_doc_policy_schema(PublicPolicyExpr::True)
+}
+
+fn scalar_frontier_doc_access_policy(max_depth: usize) -> PublicPolicyExpr {
+    let mut policy = crate::test_public_schema::seeded_recursive_access_policy(
+        "doc_access",
+        "doc",
+        "team",
+        &[],
+        &[],
+        "team_edges",
+        "member",
+        "parent",
+        &[("enabled", PublicValue::Boolean(true))],
+        "user_team_edges",
+        "user_id",
+        &["claims", "sub"],
+        "team",
+    );
+    let PublicPolicyExpr::ExistsRel { rel } = &mut policy else {
+        unreachable!("seeded recursive policy is an ExistsRel");
+    };
+    let crate::tools::public_schema::RelExpr::Filter { input, .. } = rel else {
+        unreachable!("seeded recursive policy correlates its access join");
+    };
+    let crate::tools::public_schema::RelExpr::Join { left, .. } = input.as_mut() else {
+        unreachable!("seeded recursive policy joins its scalar frontier to access");
+    };
+    let crate::tools::public_schema::RelExpr::Gather { bound, .. } = left.as_mut() else {
+        unreachable!("seeded recursive policy starts from Gather");
+    };
+    *bound = crate::tools::public_schema::RelRecursionBound::MaxDepth(max_depth);
+    policy
+}
+
+fn projected_frontier_doc_policy_schema(max_depth: usize) -> JazzSchema {
+    let policy = scalar_frontier_doc_access_policy(max_depth);
+    let protected = PublicTablePolicies::new()
+        .with_select(policy.clone())
+        .with_insert(policy.clone())
+        .with_update(Some(policy.clone()), policy.clone())
+        .with_delete(policy);
+    let deny = || PublicTablePolicies::new().with_select(PublicPolicyExpr::False);
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .column("kind", PublicColumnType::Text)
+                    .policies(protected),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teams")
+                    .column("name", PublicColumnType::Text)
+                    .policies(deny()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("user_team_edges")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .fk_column("team", "teams")
+                    .policies(deny()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("doc_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams")
+                    .policies(deny()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column("enabled", PublicColumnType::Boolean)
+                    .policies(deny()),
+            ),
+    )
 }
 
 fn recursive_doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
@@ -356,6 +430,600 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
         ]
     );
     assert!(removes.is_empty());
+}
+
+#[test]
+fn projected_frontier_authorizes_unseeded_parent_and_terminates_team_cycle() {
+    let schema = projected_frontier_doc_policy_schema(2);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xb2);
+    core.set_test_provider_claims(
+        reader,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
+    let child_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000011"));
+    let parent_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000012"));
+    let hidden_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000013"));
+    let child_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000011"));
+    let parent_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000012"));
+    let hidden_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000013"));
+
+    for (team, name) in [
+        (child_team, "child"),
+        (parent_team, "parent"),
+        (hidden_team, "hidden"),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(name.to_owned()),
+            )])),
+        );
+    }
+    for (doc, title, tx_time) in [
+        (child_doc, "seed team", 20),
+        (parent_doc, "reachable parent", 21),
+        (hidden_doc, "hidden", 22),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("docs", doc, tx_time)
+                .cells(recursive_doc_cells(title, "visible")),
+        );
+    }
+    for (index, doc, team) in [
+        (0xa1, child_doc, child_team),
+        (0xa2, parent_doc, parent_team),
+        (0xa3, hidden_doc, hidden_team),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("doc_access", row(index), 30).cells(BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ])),
+        );
+    }
+    accept_global(
+        &mut core,
+        MergeableCommit::new("user_team_edges", row(0xd1), 35).cells(BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
+            ("team".to_owned(), Value::Uuid(child_team.0)),
+        ])),
+    );
+    for (edge, member, parent) in [
+        (0xe1, child_team, parent_team),
+        (0xe2, parent_team, child_team),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("team_edges", row(edge), 40).cells(BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(member.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+                ("enabled".to_owned(), Value::Bool(true)),
+            ])),
+        );
+    }
+
+    let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(reader);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    let visible = adds
+        .into_iter()
+        .map(|(_, row, _)| row)
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(visible, BTreeSet::from([child_doc, parent_doc]));
+    assert!(removes.is_empty());
+}
+
+fn projected_frontier_visibility_at_depth(
+    max_depth: usize,
+) -> (BTreeSet<RowUuid>, RowUuid, RowUuid) {
+    let schema = projected_frontier_doc_policy_schema(max_depth);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xb2);
+    core.set_test_provider_claims(
+        reader,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
+    let child_team = row(0x21);
+    let parent_team = row(0x22);
+    let seed_doc = row(0x31);
+    let parent_doc = row(0x32);
+
+    for (team, name) in [(child_team, "child"), (parent_team, "parent")] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(name.to_owned()),
+            )])),
+        );
+    }
+    for (doc, title, team) in [
+        (seed_doc, "seed", child_team),
+        (parent_doc, "one hop", parent_team),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("docs", doc, 20)
+                .cells(recursive_doc_cells(title, "visible")),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("doc_access", doc, 30).cells(BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ])),
+        );
+    }
+    accept_global(
+        &mut core,
+        MergeableCommit::new("user_team_edges", row(0xd2), 35).cells(BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
+            ("team".to_owned(), Value::Uuid(child_team.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("team_edges", row(0xe3), 40).cells(BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(child_team.0)),
+            ("parent".to_owned(), Value::Uuid(parent_team.0)),
+            ("enabled".to_owned(), Value::Bool(true)),
+        ])),
+    );
+
+    let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(reader);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert!(removes.is_empty());
+    (
+        adds
+            .into_iter()
+            .map(|(_, row, _)| row)
+            .collect::<BTreeSet<_>>(),
+        seed_doc,
+        parent_doc,
+    )
+}
+
+#[test]
+fn max_depth_zero_is_seed_only_and_one_adds_exactly_one_authorization_hop() {
+    let (zero_visible, seed_doc, parent_doc) = projected_frontier_visibility_at_depth(0);
+    assert_eq!(zero_visible, BTreeSet::from([seed_doc]));
+    assert!(!zero_visible.contains(&parent_doc));
+
+    let (one_visible, seed_doc, parent_doc) = projected_frontier_visibility_at_depth(1);
+    assert_eq!(one_visible, BTreeSet::from([seed_doc, parent_doc]));
+}
+
+#[test]
+fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies() {
+    let schema = projected_frontier_doc_policy_schema(2);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xb2);
+    core.set_test_provider_claims(
+        reader,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
+
+    let team_a = row(0x11);
+    let team_b = row(0x12);
+    let team_c = row(0x13);
+    let team_d = row(0x14);
+    let team_filtered = row(0x15);
+    let team_edge_grant = row(0x16);
+    let doc_a = row(0x21);
+    let doc_b = row(0x22);
+    let doc_c = row(0x23);
+    let doc_d = row(0x24);
+    let doc_filtered = row(0x25);
+    let doc_edge_grant = row(0x26);
+
+    for (index, team) in [
+        team_a,
+        team_b,
+        team_c,
+        team_d,
+        team_filtered,
+        team_edge_grant,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("teams", team, 10 + index as u64).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(format!("team {index}")),
+            )])),
+        );
+    }
+    for (index, (doc, team)) in [
+        (doc_a, team_a),
+        (doc_b, team_b),
+        (doc_c, team_c),
+        (doc_d, team_d),
+        (doc_filtered, team_filtered),
+        (doc_edge_grant, team_edge_grant),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("docs", doc, 20 + index as u64)
+                .cells(recursive_doc_cells(&format!("doc {index}"), "frontier")),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("doc_access", row(0x31 + index as u8), 30 + index as u64)
+                .cells(BTreeMap::from([
+                    ("doc".to_owned(), Value::Uuid(doc.0)),
+                    ("team".to_owned(), Value::Uuid(team.0)),
+                ])),
+        );
+    }
+    for (edge, member, parent, enabled, time) in [
+        (row(0x41), team_a, team_b, true, 40),
+        (row(0x42), team_b, team_c, true, 41),
+        (row(0x43), team_c, team_d, true, 42),
+        (row(0x44), team_a, team_filtered, false, 43),
+        (row(0x45), team_c, team_a, true, 44),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("team_edges", edge, time).cells(BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(member.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+                ("enabled".to_owned(), Value::Bool(enabled)),
+            ])),
+        );
+    }
+
+    // Dependency rows are raw authorization evidence only. Each dependency
+    // table has an explicit deny policy and remains empty through an ordinary
+    // client read even though its rows can authorize the outer document.
+    for dependency in ["teams", "user_team_edges", "team_edges", "doc_access"] {
+        let mut evidence_peer = PeerState::edge_client(reader);
+        let update = evidence_peer
+            .current_rows_update(&mut core, dependency)
+            .unwrap();
+        assert_view_update_only_references_rows(&update, BTreeSet::new());
+        assert_view_update_only_ships_rows(&update, BTreeSet::new());
+    }
+
+    let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(reader);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows(&initial),
+        (Vec::new(), Vec::new())
+    );
+    assert_view_update_only_ships_rows(&initial, BTreeSet::new());
+
+    let doc_delta = |update: &SyncMessage| {
+        let (adds, removes) = canonical_view_update_rows(update);
+        assert!(
+            adds.iter()
+                .chain(removes.iter())
+                .all(|(table, _, _)| table.as_str() == "docs"),
+            "policy evidence must never become an independently visible result member"
+        );
+        (
+            adds
+                .into_iter()
+                .map(|(_, row_uuid, _)| row_uuid)
+                .collect::<BTreeSet<_>>(),
+            removes
+                .into_iter()
+                .map(|(_, row_uuid, _)| row_uuid)
+                .collect::<BTreeSet<_>>(),
+        )
+    };
+
+    let seed_row = row(0x51);
+    let seed_grant = accept_global(
+        &mut core,
+        MergeableCommit::new("user_team_edges", seed_row, 50).cells(BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
+            ("team".to_owned(), Value::Uuid(team_a.0)),
+        ])),
+    );
+    let mut populated_seed_peer = PeerState::edge_client(reader);
+    let hidden_seed = populated_seed_peer
+        .current_rows_update(&mut core, "user_team_edges")
+        .unwrap();
+    assert_view_update_only_references_rows(&hidden_seed, BTreeSet::new());
+    assert_view_update_only_ships_rows(&hidden_seed, BTreeSet::new());
+    let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        doc_delta(&grant),
+        (
+            BTreeSet::from([doc_a, doc_b, doc_c]),
+            BTreeSet::new()
+        ),
+        "the seed, depth-N frontier, and cycle are visible; depth N+1 and the filtered edge deny"
+    );
+    assert_view_update_only_ships_rows(
+        &grant,
+        BTreeSet::from([doc_a, doc_b, doc_c]),
+    );
+
+    let seed_move = accept_global(
+        &mut core,
+        MergeableCommit::new("user_team_edges", seed_row, 51)
+            .parents(vec![seed_grant])
+            .cells(BTreeMap::from([
+                ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
+                ("team".to_owned(), Value::Uuid(team_d.0)),
+            ])),
+    );
+    let moved = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        doc_delta(&moved),
+        (
+            BTreeSet::from([doc_d]),
+            BTreeSet::from([doc_a, doc_b, doc_c])
+        )
+    );
+    assert_view_update_only_ships_rows(&moved, BTreeSet::from([doc_d]));
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("user_team_edges", seed_row, 52)
+            .parents(vec![seed_move])
+            .cells(BTreeMap::from([
+                ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
+                ("team".to_owned(), Value::Uuid(team_a.0)),
+            ])),
+    );
+    let moved_back = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        doc_delta(&moved_back),
+        (
+            BTreeSet::from([doc_a, doc_b, doc_c]),
+            BTreeSet::from([doc_d])
+        )
+    );
+    assert_view_update_only_ships_rows(
+        &moved_back,
+        BTreeSet::from([doc_a, doc_b, doc_c]),
+    );
+
+    let granted_edge_row = row(0x52);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("team_edges", granted_edge_row, 53).cells(BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(team_a.0)),
+            ("parent".to_owned(), Value::Uuid(team_edge_grant.0)),
+            ("enabled".to_owned(), Value::Bool(true)),
+        ])),
+    );
+    let edge_grant = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        doc_delta(&edge_grant),
+        (BTreeSet::from([doc_edge_grant]), BTreeSet::new())
+    );
+    assert_view_update_only_ships_rows(&edge_grant, BTreeSet::from([doc_edge_grant]));
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("team_edges", granted_edge_row, 54)
+            .deletion(DeletionEvent::Deleted),
+    );
+    let edge_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        doc_delta(&edge_revoke),
+        (BTreeSet::new(), BTreeSet::from([doc_edge_grant]))
+    );
+    assert_view_update_only_ships_rows(&edge_revoke, BTreeSet::new());
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("user_team_edges", seed_row, 55)
+            .deletion(DeletionEvent::Deleted),
+    );
+    let seed_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        doc_delta(&seed_revoke),
+        (
+            BTreeSet::new(),
+            BTreeSet::from([doc_a, doc_b, doc_c])
+        )
+    );
+    assert_view_update_only_ships_rows(&seed_revoke, BTreeSet::new());
+}
+
+#[test]
+fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
+    let schema = projected_frontier_doc_policy_schema(1);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xb2);
+    let claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(reader.test_uuid()))]);
+    writer.set_test_provider_claims(reader, claims.clone());
+    core.set_test_provider_claims(reader, claims);
+
+    let direct_team = row(0x61);
+    let closure_team = row(0x62);
+    let hidden_team = row(0x63);
+    for (index, team) in [direct_team, closure_team, hidden_team]
+        .into_iter()
+        .enumerate()
+    {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("teams", team, 10 + index as u64).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(format!("write team {index}")),
+            )])),
+        );
+    }
+    accept_global(
+        &mut core,
+        MergeableCommit::new("user_team_edges", row(0x64), 20).cells(BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
+            ("team".to_owned(), Value::Uuid(direct_team.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("team_edges", row(0x65), 21).cells(BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(direct_team.0)),
+            ("parent".to_owned(), Value::Uuid(closure_team.0)),
+            ("enabled".to_owned(), Value::Bool(true)),
+        ])),
+    );
+
+    let update_doc = row(0x66);
+    let delete_doc = row(0x67);
+    let hidden_doc = row(0x68);
+    let allowed_insert = row(0x69);
+    let denied_insert = row(0x6a);
+    let update_parent = accept_global(
+        &mut core,
+        MergeableCommit::new("docs", update_doc, 30)
+            .cells(recursive_doc_cells("update old", "write")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", delete_doc, 31)
+            .cells(recursive_doc_cells("delete me", "write")),
+    );
+    let hidden_parent = accept_global(
+        &mut core,
+        MergeableCommit::new("docs", hidden_doc, 32)
+            .cells(recursive_doc_cells("hidden", "write")),
+    );
+    for (index, (doc, team)) in [
+        (update_doc, direct_team),
+        (delete_doc, closure_team),
+        (hidden_doc, hidden_team),
+        (allowed_insert, closure_team),
+        (denied_insert, hidden_team),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("doc_access", row(0x70 + index as u8), 40 + index as u64)
+                .cells(BTreeMap::from([
+                    ("doc".to_owned(), Value::Uuid(doc.0)),
+                    ("team".to_owned(), Value::Uuid(team.0)),
+                ])),
+        );
+    }
+
+    let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut read_peer = PeerState::client_link(reader);
+    let read = read_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    let (read_adds, read_removes) = canonical_view_update_rows(&read);
+    assert_eq!(
+        read_adds
+            .into_iter()
+            .map(|(_, row_uuid, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([update_doc, delete_doc])
+    );
+    assert!(read_removes.is_empty());
+    assert_view_update_only_ships_rows(&read, BTreeSet::from([update_doc, delete_doc]));
+
+    let mut apply = |commit: MergeableCommit| {
+        let (tx_id, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
+        let [receipt] = core
+            .apply_sync_message_settled(unit)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let SyncMessage::FateUpdate {
+            tx_id: receipt_tx,
+            fate,
+            ..
+        } = receipt
+        else {
+            panic!("write authorization must produce a fate receipt");
+        };
+        assert_eq!(receipt_tx, tx_id);
+        (tx_id, fate)
+    };
+
+    let (_, allowed_insert_fate) = apply(
+        MergeableCommit::new("docs", allowed_insert, 50)
+            .made_by(reader)
+            .cells(recursive_doc_cells("inserted", "write")),
+    );
+    let (_, denied_insert_fate) = apply(
+        MergeableCommit::new("docs", denied_insert, 51)
+            .made_by(reader)
+            .cells(recursive_doc_cells("denied insert", "write")),
+    );
+    let (_, allowed_update_fate) = apply(
+        MergeableCommit::new("docs", update_doc, 52)
+            .made_by(reader)
+            .parents(vec![update_parent])
+            .cells(recursive_doc_cells("update new", "write")),
+    );
+    let (_, denied_update_fate) = apply(
+        MergeableCommit::new("docs", hidden_doc, 53)
+            .made_by(reader)
+            .parents(vec![hidden_parent])
+            .cells(recursive_doc_cells("denied update", "write")),
+    );
+    let (_, allowed_delete_fate) = apply(
+        MergeableCommit::new("docs", delete_doc, 54)
+            .made_by(reader)
+            .deletion(DeletionEvent::Deleted),
+    );
+    let (_, denied_delete_fate) = apply(
+        MergeableCommit::new("docs", hidden_doc, 55)
+            .made_by(reader)
+            .deletion(DeletionEvent::Deleted),
+    );
+    drop(apply);
+
+    assert_eq!(allowed_insert_fate, Fate::Accepted);
+    assert_eq!(allowed_update_fate, Fate::Accepted);
+    assert_eq!(allowed_delete_fate, Fate::Accepted);
+    for denied in [
+        denied_insert_fate,
+        denied_update_fate,
+        denied_delete_fate,
+    ] {
+        assert_eq!(
+            denied,
+            Fate::Rejected(RejectionReason::AuthorizationDenied)
+        );
+    }
+
+    let mut final_peer = PeerState::client_link(reader);
+    let final_read = final_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    let (final_adds, final_removes) = canonical_view_update_rows(&final_read);
+    assert_eq!(
+        final_adds
+            .into_iter()
+            .map(|(_, row_uuid, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([update_doc, allowed_insert])
+    );
+    assert!(final_removes.is_empty());
+    assert_view_update_only_ships_rows(
+        &final_read,
+        BTreeSet::from([update_doc, allowed_insert]),
+    );
 }
 
 #[test]

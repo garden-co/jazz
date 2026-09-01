@@ -60,6 +60,14 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
     }
   };
 
+  const assertSamePrincipal = (nextSession: PublicSession | null): void => {
+    if (JSON.stringify(state.session?.user ?? null) !== JSON.stringify(nextSession?.user ?? null)) {
+      throw new Error(
+        "Changing auth principal on a live client is not supported. Recreate the Db.",
+      );
+    }
+  };
+
   return {
     getState(): AuthState {
       return state;
@@ -92,6 +100,31 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       return state;
     },
 
+    /** Validate a prospective token update without changing state or notifying listeners. */
+    validateJwtToken(jwtToken?: string, trustedReservedSession?: Session): boolean {
+      if (options?.lockAuthenticatedState) return false;
+      const resolved = resolveClientSessionStateSync({
+        appId: input.appId,
+        jwtToken,
+        cookieSession: input.cookieSession,
+        trustedReservedSession,
+      });
+      assertSamePrincipal(resolved.session);
+      return true;
+    },
+
+    /** Validate a prospective cookie update without changing state or notifying listeners. */
+    validateCookieSession(cookieSession?: Session): boolean {
+      if (options?.lockAuthenticatedState) return false;
+      const resolved = resolveClientSessionStateSync({
+        appId: input.appId,
+        jwtToken: input.jwtToken,
+        cookieSession,
+      });
+      assertSamePrincipal(resolved.session);
+      return true;
+    },
+
     applyJwtToken(jwtToken?: string, trustedReservedSession?: Session): AuthState {
       if (options?.lockAuthenticatedState) {
         return state;
@@ -104,13 +137,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         trustedReservedSession,
       });
 
-      const currentAuthor = state.session?.user ?? null;
-      const nextAuthor = resolved.session?.user ?? null;
-      if (JSON.stringify(currentAuthor) !== JSON.stringify(nextAuthor)) {
-        throw new Error(
-          "Changing auth principal on a live client is not supported. Recreate the Db.",
-        );
-      }
+      assertSamePrincipal(resolved.session);
 
       const nextState: AuthState = {
         authMode: initialAuthMode,
@@ -133,13 +160,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         cookieSession,
       });
 
-      const currentAuthor = state.session?.user ?? null;
-      const nextAuthor = resolved.session?.user ?? null;
-      if (JSON.stringify(currentAuthor) !== JSON.stringify(nextAuthor)) {
-        throw new Error(
-          "Changing auth principal on a live client is not supported. Recreate the Db.",
-        );
-      }
+      assertSamePrincipal(resolved.session);
 
       const nextState: AuthState = {
         authMode: initialAuthMode,

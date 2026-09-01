@@ -1514,7 +1514,6 @@ describe("NAPI integration", () => {
         makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id),
         {
           tier: "local",
-          localUpdates: "immediate",
         },
       );
       expect(rowAfterUpdate).not.toBeNull();

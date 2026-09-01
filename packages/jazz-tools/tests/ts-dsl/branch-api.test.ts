@@ -84,9 +84,13 @@ describe("branch API", () => {
       { branch: "draft" },
     ).value;
 
-    expect(() =>
-      db!.update(app.documents, document.id, { branch: "published" }, { branch: "draft" }),
-    ).toThrow("branch column does not match exact branch key");
+    await expect(
+      db!
+        .update(app.documents, document.id, { branch: "published" }, { branch: "draft" })
+        .wait({ tier: "local" }),
+    ).rejects.toThrow(
+      "Schema: invalid mergeable commit: branch column does not match exact branch key",
+    );
 
     expect(await db.one(app.documents.where({ id: document.id }), { branch: "draft" })).toEqual(
       document,

@@ -263,6 +263,9 @@ pub struct RecursiveOp {
     /// Hard stop for non-settling recursive queries, especially cyclic bag
     /// semantics where multiplicities can grow forever.
     pub max_iters: usize,
+    /// Whether exhausting `max_iters` is a successful semantic cutoff rather
+    /// than a non-convergence error.
+    pub truncate_at_max_iters: bool,
     /// Tables read by the seed and step graphs, cached when the graph is compiled.
     pub read_tables: Vec<String>,
 }
@@ -272,27 +275,29 @@ pub struct RecursiveOp {
 /// Per-group maximum operator descriptor.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ArgMaxByOp {
-    /// Grouping fields, in primary-key prefix order.
+    /// Grouping fields that define independent winner partitions.
     pub group_fields: Vec<String>,
-    /// Ordering fields, immediately after `group_fields` in the primary key.
+    /// Declared ordering fields compared after `group_fields`.
     pub order_fields: Vec<String>,
     /// Resolved logical field indices for `group_fields`.
     pub group_field_indices: Vec<usize>,
-    /// Resolved logical field indices for the full primary key.
-    pub primary_key_field_indices: Vec<usize>,
+    /// Resolved indices for the declared `group_fields + order_fields`
+    /// comparison key. Full record bytes independently identify multiplicity.
+    pub comparison_field_indices: Vec<usize>,
 }
 
 /// Per-group minimum operator descriptor.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ArgMinByOp {
-    /// Grouping fields, in primary-key prefix order.
+    /// Grouping fields that define independent winner partitions.
     pub group_fields: Vec<String>,
-    /// Ordering fields, immediately after `group_fields` in the primary key.
+    /// Declared ordering fields compared after `group_fields`.
     pub order_fields: Vec<String>,
     /// Resolved logical field indices for `group_fields`.
     pub group_field_indices: Vec<usize>,
-    /// Resolved logical field indices for the full primary key.
-    pub primary_key_field_indices: Vec<usize>,
+    /// Resolved indices for the declared `group_fields + order_fields`
+    /// comparison key. Full record bytes independently identify multiplicity.
+    pub comparison_field_indices: Vec<usize>,
 }
 
 /// Per-group ordered top-N window descriptor.

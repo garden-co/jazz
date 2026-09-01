@@ -564,17 +564,11 @@ where
                 .collect::<Vec<_>>();
             if let Some(members) = rewrite {
                 for member in members {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_result_member_key(binding_view_key, member)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_result_member_storage_write(binding_view_key, member)?);
                 }
             } else {
                 for member in adds {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_result_member_key(binding_view_key, member)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_result_member_storage_write(binding_view_key, member)?);
                 }
             }
             store.write_many(&operations).await?;
@@ -588,10 +582,7 @@ where
             });
         }
         for member in adds {
-            operations.push(DirectRecordStoreWrite::Set {
-                key: settled_result_member_key(binding_view_key, member)?,
-                value: vec![Value::U64(1)],
-            });
+            operations.push(settled_result_member_storage_write(binding_view_key, member)?);
         }
         if !operations.is_empty() {
             store.write_many(&operations).await?;
@@ -624,17 +615,11 @@ where
                 .collect::<Vec<_>>();
             if let Some(facts) = rewrite {
                 for fact in facts {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_program_fact_key(binding_view_key, fact)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
                 }
             } else {
                 for fact in adds {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_program_fact_key(binding_view_key, fact)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
                 }
             }
             store.write_many(&operations).await?;
@@ -648,10 +633,7 @@ where
             });
         }
         for fact in adds {
-            operations.push(DirectRecordStoreWrite::Set {
-                key: settled_program_fact_key(binding_view_key, fact)?,
-                value: vec![Value::U64(1)],
-            });
+            operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
         }
         if !operations.is_empty() {
             store.write_many(&operations).await?;
@@ -765,7 +747,20 @@ where
                 &entry.key,
                 "settled result member binding key must be valid",
             )?;
-            let member_bytes = match &entry.key[3] {
+            let member_digest = match &entry.key[3] {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled result member digest must be bytes",
+                    ));
+                }
+            };
+            if member_digest.len() != 32 {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member digest must be 32 bytes",
+                ));
+            }
+            let member_bytes = match entry.value.get_idx(0)? {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -773,7 +768,12 @@ where
                     ));
                 }
             };
-            let member = result_member_from_storage_bytes(member_bytes)?;
+            if settled_result_member_digest(&member_bytes).as_slice() != member_digest {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member payload does not match its digest",
+                ));
+            }
+            let member = result_member_from_storage_bytes(&member_bytes)?;
             recovered_members.push((binding_view_key, member));
         }
         let mut settled_result_sets =
@@ -807,7 +807,20 @@ where
                 &entry.key,
                 "settled program fact binding key must be valid",
             )?;
-            let fact_bytes = match &entry.key[3] {
+            let fact_digest = match &entry.key[3] {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact digest must be bytes",
+                    ));
+                }
+            };
+            if fact_digest.len() != 32 {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact digest must be 32 bytes",
+                ));
+            }
+            let fact_bytes = match entry.value.get_idx(0)? {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -815,7 +828,12 @@ where
                     ));
                 }
             };
-            let fact = codec::program_fact_from_storage_bytes(fact_bytes)?;
+            if settled_program_fact_digest(&fact_bytes).as_slice() != fact_digest {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact payload does not match its digest",
+                ));
+            }
+            let fact = codec::program_fact_from_storage_bytes(&fact_bytes)?;
             settled_program_facts
                 .entry(binding_view_key)
                 .or_default()
@@ -961,6 +979,7 @@ self.database.finish_persistence(persisted)?;
 
     /// Resume all query work that can make progress now, without holding the
     /// caller open for storage-blocked nodes.
+    #[allow(dead_code)] // Test-only and feature-gated direct callers use the no-owner form.
     pub(crate) async fn drive_ready_query_runtime(&mut self) -> Result<(), Error> {
         self.drive_ready_query_runtime_with_waker(None).await
     }
@@ -1055,6 +1074,17 @@ self.database.finish_persistence(persisted)?;
 
     pub(crate) fn groove_runtime_token(&self) -> u64 {
         self.groove_runtime_token
+    }
+
+    /// Simulate a live catalogue change that invalidates prepared Groove
+    /// handles without replacing the durable node state.
+    ///
+    /// Production takes this path for changes such as same-version policy
+    /// updates: existing subscriptions must rehydrate against the new runtime
+    /// token while already-received authority state remains available.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn invalidate_groove_runtime_for_test(&mut self) {
+        self.groove_runtime_token = crate::node::next_groove_runtime_token();
     }
 
     /// Return metrics for the most recent committed storage batch, if any.

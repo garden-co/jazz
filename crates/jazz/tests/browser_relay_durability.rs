@@ -10,16 +10,18 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts, SubscriptionEvent,
     TickScheduler, TickUrgency, Transport, block_on,
 };
-use jazz::groove::records::Value;
+use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::node::CurrentRow;
+use jazz::node::{CommitUnitTrust, CurrentRow};
 use jazz::protocol::{
     RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
-use jazz::query::{BindingId, OrderDirection, Query, col, eq, lit};
+use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, TransactionId,
+};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
@@ -84,12 +86,14 @@ impl<F, T, E> FutureResultExpectExt<T, E> for F where F: Future<Output = Result<
 #[derive(Default)]
 struct CountingScheduler {
     calls: Cell<usize>,
+    urgencies: RefCell<Vec<TickUrgency>>,
     deadlines_ms: RefCell<Vec<u64>>,
 }
 
 impl TickScheduler for CountingScheduler {
-    fn schedule_tick(&self, _urgency: TickUrgency) {
+    fn schedule_tick(&self, urgency: TickUrgency) {
         self.calls.set(self.calls.get() + 1);
+        self.urgencies.borrow_mut().push(urgency);
     }
 
     fn schedule_tick_after(&self, delay_ms: u64) {
@@ -97,6 +101,33 @@ impl TickScheduler for CountingScheduler {
         // than converting them to an immediate callback.
         self.deadlines_ms.borrow_mut().push(delay_ms);
     }
+}
+
+impl CountingScheduler {
+    /// The raw-Db topology harness owns turns itself. Reset its observation
+    /// window immediately before the transition whose host wake is under test.
+    fn clear(&self) {
+        self.calls.set(0);
+        self.urgencies.borrow_mut().clear();
+        self.deadlines_ms.borrow_mut().clear();
+    }
+
+    fn take_urgencies(&self) -> Vec<TickUrgency> {
+        self.calls.set(0);
+        std::mem::take(&mut *self.urgencies.borrow_mut())
+    }
+}
+
+fn assert_scheduled_urgencies(
+    scheduler: &CountingScheduler,
+    expected: &[TickUrgency],
+    transition: &str,
+) {
+    assert_eq!(
+        scheduler.take_urgencies(),
+        expected,
+        "{transition} must preserve its exact owner-turn wake requests",
+    );
 }
 
 fn schema() -> JazzSchema {
@@ -223,6 +254,36 @@ fn open_persistent_worker(
         },
     )))
     .expect("open persistent worker")
+}
+
+/// Mirrors the browser worker host: its durable replica node is distinct from
+/// the foreground node, but it opens under the browser session author so it
+/// can recover only that session's unresolved relayed writes.
+fn open_persistent_browser_worker(
+    path: &std::path::Path,
+    node: u8,
+    author: AuthorSubject,
+    schema: &JazzSchema,
+) -> Db<RocksDbStorage> {
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open(path, &refs).expect("open persistent browser worker storage");
+    let db = block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )))
+    .expect("open persistent browser worker");
+    db.restore_browser_relay_pending_uploads()
+        .expect("restore browser relay pending uploads");
+    db
 }
 
 /// A browser main-thread write is optimistic but not Local-durable until the
@@ -437,7 +498,12 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
 
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let write = main_thread
         .insert(
@@ -463,10 +529,21 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     main_thread.tick().expect("apply worker Local ack");
     assert_eq!(global_wait.get(), None);
 
+    let worker_scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(worker_scheduler.clone()));
     core.tick().expect("accept at core");
+    worker_scheduler.clear();
     worker
         .tick()
         .expect("apply and forward core fate downstream");
+    assert_scheduled_urgencies(
+        &worker_scheduler,
+        &[TickUrgency::AfterCurrentTurn],
+        "core fate ingress at the worker",
+    );
+    worker
+        .tick()
+        .expect("publish core fate on the scheduled worker follow-up turn");
     main_thread.tick().expect("apply core fate through worker");
 
     assert_eq!(global_wait.get(), Some(true));
@@ -534,7 +611,16 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     main_thread.tick().expect("upload update to worker");
     worker.tick().expect("persist and forward update");
     core.tick().expect("accept update at core");
+    worker_scheduler.clear();
     worker.tick().expect("forward update fate");
+    assert_scheduled_urgencies(
+        &worker_scheduler,
+        &[TickUrgency::AfterCurrentTurn],
+        "update fate ingress at the worker",
+    );
+    worker
+        .tick()
+        .expect("publish update fate on the scheduled worker follow-up turn");
     main_thread.tick().expect("apply update fate");
     assert!(matches!(
         main_thread
@@ -585,8 +671,26 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
     assert_truthful_empty_local_opening(subscription.try_next_event());
 
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
     main_thread.tick().expect("request Local worker view");
+    scheduler.clear();
     worker.tick().expect("serve Local worker view");
+    // Subscription opening, inbound admission, and the node's subscriber
+    // dirty epoch each request the same next owner turn. All three must remain
+    // AfterCurrentTurn; a host coalesces them into the one turn driven below.
+    assert_scheduled_urgencies(
+        &scheduler,
+        &[
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+        ],
+        "worker Local subscription opening",
+    );
+    worker
+        .tick()
+        .expect("serve the scheduled Local worker follow-up turn");
     main_thread.tick().expect("apply Local worker view");
 
     assert_eq!(
@@ -605,6 +709,96 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
         !events
             .iter()
             .any(|event| matches!(event, SubscriptionEvent::Rejected { .. }))
+    );
+}
+
+/// A Local structured read is served from the persistent worker's resident
+/// state even when that worker owns a separate authority-session identity.
+/// It must not wait for, or select, an upstream authority source.
+#[test]
+fn browser_client_hydrates_local_structured_subscription_without_authority() {
+    let schema = included_relation_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let worker = open_db(0x25, AuthorSubject::SYSTEM, &schema);
+    worker.set_relay_authority_session_owner();
+    let profile = worker
+        .insert(
+            "profiles",
+            BTreeMap::from([(
+                "name".to_owned(),
+                Value::String("resident local sender".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("seed worker-local profile");
+    let message = worker
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("author".to_owned(), Value::Uuid(profile.row_uuid().0)),
+                ("body".to_owned(), Value::String("local message".to_owned())),
+                ("created".to_owned(), Value::U64(1)),
+            ]),
+            Default::default(),
+        )
+        .expect("seed worker-local message");
+
+    let main_thread = open_db(0x14, alice, &schema);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_connection = worker.accept_subscriber(worker_transport, alice);
+    let query = main_thread
+        .prepare_query(
+            &Query::from("messages")
+                .array_subquery(ArraySubquery::new("sender", "profiles", "id", "author")),
+        )
+        .expect("prepare Local structured query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe to Local structured worker state");
+    assert_truthful_empty_local_opening(subscription.try_next_event());
+
+    for _ in 0..3 {
+        main_thread
+            .tick()
+            .expect("request Local structured worker view");
+        worker.tick().expect("serve Local structured worker view");
+        main_thread
+            .tick()
+            .expect("apply Local structured worker view");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    let Some(SubscriptionEvent::Delta { added, .. }) = events.iter().find(|event| {
+        matches!(event, SubscriptionEvent::Delta { added, .. }
+            if added.iter().any(|row| row.row.row_uuid() == message.row_uuid()))
+    }) else {
+        panic!("Local structured read must resolve from worker state, got {events:?}");
+    };
+    let root = added
+        .iter()
+        .find(|row| row.row.row_uuid() == message.row_uuid())
+        .expect("Local structured update contains seeded message");
+    let (descriptor, raw) = root.row.encoded_record();
+    let record = BorrowedRecord::new(raw, descriptor);
+    let Value::Array(sender) = record.get("sender").expect("nested sender field") else {
+        panic!("Local structured update must materialize sender")
+    };
+    assert!(matches!(
+        sender.as_slice(),
+        [Value::Record(sender)] if matches!(sender.get("name"), Ok(Value::String(name)) if name == "resident local sender")
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Rejected { .. })),
+        "Local structured read cannot require an authority receipt: {events:?}"
     );
 }
 
@@ -628,7 +822,12 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let (writer_transport, core_writer_transport) = duplex();
     let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
     let _core_writer = core.accept_subscriber(
@@ -1004,6 +1203,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }))
             .expect("subscribe with distinct wire key");
     }
@@ -1069,6 +1269,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }))
             .expect("subscribe with a fresh rejected wire key");
         for _ in 0..3 {
@@ -1099,6 +1300,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
             subscription: first,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .expect("resubscribe a previously rejected wire key");
     for _ in 0..3 {
@@ -1222,8 +1424,23 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
     assert_truthful_empty_local_opening(subscription.try_next_event());
 
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
     main_thread.tick().expect("request worker baseline");
+    scheduler.clear();
     worker.tick().expect("send worker baseline");
+    assert_scheduled_urgencies(
+        &scheduler,
+        &[
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+        ],
+        "worker baseline subscription opening",
+    );
+    worker
+        .tick()
+        .expect("send worker baseline on the scheduled follow-up turn");
     main_thread
         .tick()
         .expect("apply worker baseline while local hydration is suspended");
@@ -1277,7 +1494,12 @@ fn browser_client_local_only_subscription_stops_at_worker() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -1362,7 +1584,12 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -1420,6 +1647,20 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 }
 
 #[test]
+/// Alice seeds one exclusive transaction containing sibling rows; her browser
+/// main thread asks its durable worker relay for each sibling as an Edge read.
+///
+/// ```text
+/// alice ──exclusive org/todo/check/note──► core
+/// browser main ──Edge sibling query──► worker ──► core
+/// ```
+///
+/// The core must accept and persist the whole exclusive bundle before the
+/// relay extends its projection for each sibling. Besides the view-scoped
+/// cardinality contract, this keeps the deep authoritative-ingest path on a
+/// normal host thread rather than relying on an enlarged test stack. The
+/// ordinary `Db::tick` boundary must therefore remain stack-safe when this
+/// receipt runs on libtest's default 2 MiB worker stack.
 fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let schema = compile_schema(
         &SchemaBuilder::new()
@@ -1449,7 +1690,12 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let (seed_transport, core_seed_transport) = duplex();
     let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
     let _core_seed = core.accept_subscriber(core_seed_transport, alice);
@@ -1662,7 +1908,12 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let query = main_thread
         .prepare_query(
@@ -1717,6 +1968,198 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     );
 }
 
+/// A cold browser foreground must finish one complete structured authority
+/// reset when the worker already has no local query runtime for the new remote
+/// usage site. Alice's main runtime opens a bounded ordered message relation;
+/// the worker relays Core's one reset, which contains both the root members and
+/// the profile facts required to materialize the nested `sender` records.
+///
+/// ```text
+/// alice main ──remote structured subscribe──► worker ──Global──► core
+/// alice main ◄──complete reset (roots + sender facts)── worker ◄── core
+/// ```
+fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
+    foreground_tier: DurabilityTier,
+) {
+    let schema = included_relation_schema();
+    let alice = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let main_thread = open_db(0x24, alice, &schema);
+    let worker = open_db(0x34, alice, &schema);
+    let core = open_core(0x44, &schema);
+    main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner();
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
+
+    let seeder = open_db(0x54, alice, &schema);
+    let (seeder_transport, core_seed_transport) = duplex();
+    let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
+    let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let mut messages = Vec::new();
+    let mut sender_names = Vec::new();
+    for created in 1..=5 {
+        let sender_name = format!("structured sender {created}");
+        let profile = seeder
+            .insert(
+                "profiles",
+                BTreeMap::from([("name".to_owned(), Value::String(sender_name.clone()))]),
+                Default::default(),
+            )
+            .expect("seed structured sender profile");
+        messages.push(
+            seeder
+                .insert(
+                    "messages",
+                    BTreeMap::from([
+                        ("author".to_owned(), Value::Uuid(profile.row_uuid().0)),
+                        (
+                            "body".to_owned(),
+                            Value::String(format!("cold structured message {created}")),
+                        ),
+                        ("created".to_owned(), Value::U64(created)),
+                    ]),
+                    Default::default(),
+                )
+                .expect("seed structured message"),
+        );
+        sender_names.push(sender_name);
+    }
+    for _ in 0..8 {
+        seeder.tick().expect("upload structured fixture");
+        core.tick().expect("accept structured fixture");
+        seeder.tick().expect("settle structured fixture");
+    }
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    let query = main_thread
+        .prepare_query(
+            &Query::from("messages")
+                .array_subquery(ArraySubquery::new("sender", "profiles", "id", "author"))
+                .order_by("created", OrderDirection::Desc)
+                .limit(21),
+        )
+        .expect("prepare cold structured query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &query,
+        ReadOpts {
+            tier: foreground_tier,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe through cold worker relay");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the provisional structured opening must wait for the authority reset"
+    );
+
+    let mut authority_update_scheduled = false;
+    for _ in 0..8 {
+        main_thread
+            .tick()
+            .expect("register structured worker coverage");
+        worker
+            .tick()
+            .expect("forward structured authority coverage");
+        core.tick().expect("serve structured authority reset");
+        let schedules_before = scheduler.calls.get();
+        worker.tick().expect("relay structured authority reset");
+        authority_update_scheduled |= scheduler.calls.get() > schedules_before;
+        main_thread
+            .tick()
+            .expect("apply complete structured authority reset");
+    }
+
+    assert!(
+        authority_update_scheduled,
+        "the worker must schedule its post-reset remote serve pass"
+    );
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    let resets = events
+        .iter()
+        .filter(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resets.len(),
+        1,
+        "the bounded owner turns must publish exactly one reset, got {events:?}"
+    );
+    let reset = resets[0];
+    let SubscriptionEvent::Delta {
+        settled,
+        added,
+        updated,
+        removed,
+        ..
+    } = reset
+    else {
+        unreachable!("the reset was matched above")
+    };
+    assert!(*settled, "the single reset must settle the Edge receipt");
+    assert!(updated.is_empty(), "a reset cannot carry root updates");
+    assert!(
+        removed.is_empty(),
+        "a fresh reset cannot remove prior roots"
+    );
+    assert_eq!(added.len(), messages.len());
+    assert_eq!(
+        added
+            .iter()
+            .map(|row| row.row.row_uuid())
+            .collect::<Vec<_>>(),
+        messages
+            .iter()
+            .rev()
+            .map(|message| message.row_uuid())
+            .collect::<Vec<_>>(),
+        "the complete reset must preserve the authority's descending root order"
+    );
+    for (root, expected_sender) in added.iter().zip(sender_names.iter().rev()) {
+        let (descriptor, raw) = root.row.encoded_record();
+        let record = BorrowedRecord::new(raw, descriptor);
+        let Value::Array(sender) = record.get("sender").expect("nested sender field") else {
+            panic!("the reset must materialize sender as a nested array")
+        };
+        assert_eq!(
+            sender.len(),
+            1,
+            "root {:?} must retain exactly one sender fact",
+            root.row.row_uuid()
+        );
+        let Value::Record(sender) = &sender[0] else {
+            panic!("the nested sender must be a record")
+        };
+        assert!(matches!(
+            sender.get("name"),
+            Ok(Value::String(name)) if name == *expected_sender
+        ));
+    }
+}
+
+#[test]
+fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
+    assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
+        DurabilityTier::Edge,
+    );
+}
+
+#[test]
+fn cold_browser_relay_global_structured_reset_materializes_ordered_sender_facts() {
+    assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
+        DurabilityTier::Global,
+    );
+}
+
 /// A reopened browser tab receives a new Edge receipt after the persistent
 /// worker has already applied the authority membership for an earlier tab.
 /// Alice closes the first main-thread runtime; the worker remains connected
@@ -1763,7 +2206,12 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let first_query = first_tab
         .prepare_query(&first_tab.table("todos"))
         .expect("prepare first-tab Edge query");
@@ -1897,7 +2345,12 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
     let (worker_upstream_transport, core_worker_transport) = duplex();
     let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_worker_subscriber = core.accept_subscriber(core_worker_transport, alice);
+    let core_worker_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_worker_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let exact_query = Query::from("todos")
         .order_by("title", OrderDirection::Asc)
         .offset(1);
@@ -1986,7 +2439,12 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let (reopened_upstream_transport, reopened_core_transport) = duplex();
     let _reopened_upstream =
         block_on(reopened_worker.connect_upstream(reopened_upstream_transport));
-    let _reopened_core_subscriber = core.accept_subscriber(reopened_core_transport, alice);
+    let _reopened_core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        reopened_core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let reopened_query = reopened_tab
         .prepare_query(&exact_query)
         .expect("prepare reopened Edge query");
@@ -2066,7 +2524,12 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
     let _worker_subscriber = worker.accept_subscriber(worker_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let row_id = jazz::ids::RowUuid::from_bytes([0xc6; 16]);
     let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
@@ -2194,7 +2657,12 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let query = main_thread
         .prepare_query(
@@ -2504,7 +2972,12 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     for offset in 1..=5 {
         let query = main_thread
@@ -2599,7 +3072,12 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -2663,7 +3141,12 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
 
     let (worker_upstream_transport, core_transport) = duplex();
     let worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_subscriber = core.accept_subscriber(core_transport, alice);
+    let core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let base = worker
         .insert(
             "todos",
@@ -2701,8 +3184,23 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
         .expect("prepare local todos query");
     let _subscription =
         block_on(first_main.subscribe(&todos, ReadOpts::default())).expect("subscribe locally");
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
     first_main.tick().expect("request worker-local row");
+    scheduler.clear();
     worker.tick().expect("serve worker-local row");
+    assert_scheduled_urgencies(
+        &scheduler,
+        &[
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+        ],
+        "initial causal parent publication",
+    );
+    worker
+        .tick()
+        .expect("serve worker-local row on the scheduled follow-up turn");
     first_main.tick().expect("hydrate accepted parent");
     assert_eq!(
         first_main.read(&todos).expect("read accepted parent").len(),
@@ -2802,8 +3300,19 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
     main_thread.tick().expect("apply worker Local ack");
     assert_eq!(global_wait_rejected.get(), None);
 
+    let worker_scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(worker_scheduler.clone()));
     core.tick().expect("reject mismatched session author");
+    worker_scheduler.clear();
     worker.tick().expect("apply and forward rejection");
+    assert_scheduled_urgencies(
+        &worker_scheduler,
+        &[TickUrgency::AfterCurrentTurn],
+        "core rejection ingress at the worker",
+    );
+    worker
+        .tick()
+        .expect("publish rejection on the scheduled worker follow-up turn");
     main_thread.tick().expect("apply rejection through worker");
 
     assert_eq!(global_wait_rejected.get(), Some(true));
@@ -2881,8 +3390,18 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
     );
 }
 
+/// A worker restores Alice's former foreground transaction, but only carries
+/// its terminal header/fate long enough to notify Alice's live successor.
+/// Its distinct worker node must never own the rejected retry payload.
+///
+/// ```text
+/// former Alice tab ──Local write──► durable worker ──restart──► successor tab
+///                                        │                         │
+///                                        └──Rejected──► one live callback
+///                                             └── no foreign retry payload
+/// ```
 #[test]
-fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
+fn reopened_worker_notifies_attached_successor_of_foreground_rejection() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb9; 16]);
@@ -2890,7 +3409,7 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
 
     let first_main = open_db(0x1b, alice, &schema);
     first_main.set_non_durable_client();
-    let first_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
+    let first_worker = open_persistent_browser_worker(storage.path(), 0x2a, alice, &schema);
     let (first_main_transport, first_worker_transport) = duplex();
     let first_main_connection =
         jazz::db::block_on(first_main.connect_upstream(first_main_transport));
@@ -2915,17 +3434,25 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     drop(first_worker);
     drop(first_main);
 
-    let reopened_main = open_db(0x1b, alice, &schema);
+    // A fresh foreground runtime must use a distinct physical node identity.
+    // The worker owns durable replay, while the successor only receives the
+    // worker's live rejection notification.
+    let reopened_main = open_db(0x1c, alice, &schema);
     reopened_main.set_non_durable_client();
-    let reopened_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
+    let reopened_worker = open_persistent_browser_worker(storage.path(), 0x2a, alice, &schema);
+    let mutation_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_errors = Rc::clone(&mutation_errors);
+    reopened_worker.on_mutation_error(Rc::new(move |event| {
+        observed_errors.borrow_mut().push(event.clone());
+    }));
     let core = open_core(0x3a, &schema);
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = jazz::db::block_on(reopened_main.connect_upstream(main_transport));
-    let _worker_subscriber = reopened_worker.accept_subscriber(worker_subscriber_transport, alice);
+    let main_connection = jazz::db::block_on(reopened_main.connect_upstream(main_transport));
+    let worker_subscriber = reopened_worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream =
+    let worker_upstream =
         jazz::db::block_on(reopened_worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, bob);
+    let core_subscriber = core.accept_subscriber(core_transport, bob);
 
     reopened_worker
         .tick()
@@ -2937,6 +3464,13 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     reopened_worker
         .tick()
         .expect("apply and route authority rejection");
+    assert!(
+        !reopened_worker.has_retained_rejection_for_test(tx_id),
+        "the worker may retain the replayed transaction header/fate for its live notification, but must not retain its foreign retry payload"
+    );
+    reopened_worker
+        .tick()
+        .expect("deliver the relay-owned live rejection exactly once");
     reopened_main
         .tick()
         .expect("apply rejection after replayed Local acknowledgement");
@@ -2948,4 +3482,242 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
             .fate,
         Fate::Rejected(_)
     ));
+    assert_eq!(mutation_errors.borrow().len(), 1);
+    assert_eq!(
+        mutation_errors.borrow()[0].transaction.transaction_id,
+        TransactionId::from_committed_tx(tx_id)
+    );
+    drop(main_connection);
+    drop(worker_subscriber);
+    drop(worker_upstream);
+    drop(core_subscriber);
+    drop(reopened_main);
+    drop(reopened_worker);
+
+    // Reopening without an attached browser runtime must not replay the
+    // prior notification. This public lifecycle receipt proves the worker did
+    // not persist foreign rejected payload/version state (INV-TX-9).
+    let after_appless_interval =
+        open_persistent_browser_worker(storage.path(), 0x2a, alice, &schema);
+    assert!(
+        !after_appless_interval.has_retained_rejection_for_test(tx_id),
+        "reopening the worker must not recover a foreign retry payload"
+    );
+    let after_restart_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_after_restart = Rc::clone(&after_restart_errors);
+    after_appless_interval.on_mutation_error(Rc::new(move |event| {
+        observed_after_restart.borrow_mut().push(event.clone());
+    }));
+    after_appless_interval
+        .tick()
+        .expect("drive post-rejection browser relay opening");
+    assert!(
+        after_restart_errors.borrow().is_empty(),
+        "a later browser relay must not replay the prior app notification"
+    );
+}
+
+/// A recovered browser-relay marker is a one-live-terminal-fate routing aid,
+/// not a rejection queue. An Accepted/Global fate must consume it just as a
+/// rejection does, publish normal settled state, and leave no later callback
+/// backlog.
+#[test]
+fn reopened_worker_forgets_recovered_foreground_marker_after_global_acceptance() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xad; 16]);
+    let storage = tempfile::tempdir().expect("worker temp dir");
+
+    let first_main = open_db(0x1f, alice, &schema);
+    first_main.set_non_durable_client();
+    let first_worker = open_persistent_browser_worker(storage.path(), 0x2f, alice, &schema);
+    let (first_main_transport, first_worker_transport) = duplex();
+    let first_main_connection = block_on(first_main.connect_upstream(first_main_transport));
+    let first_worker_connection = first_worker.accept_subscriber(first_worker_transport, alice);
+    let write = first_main
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("accept after worker restart".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("insert pending todo");
+    let tx_id = write.mergeable_tx_id();
+    first_main.tick().expect("upload to first worker");
+    first_worker.tick().expect("persist in first worker");
+    first_main.tick().expect("apply first Local ack");
+    drop(first_worker_connection);
+    drop(first_main_connection);
+    drop(first_worker);
+    drop(first_main);
+
+    let successor = open_db(0x20, alice, &schema);
+    successor.set_non_durable_client();
+    let worker = open_persistent_browser_worker(storage.path(), 0x2f, alice, &schema);
+    assert!(
+        worker.has_recovered_browser_relay_tx_for_test(tx_id),
+        "worker restart must mark the recovered unresolved foreground transaction"
+    );
+    let mutation_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_errors = Rc::clone(&mutation_errors);
+    worker.on_mutation_error(Rc::new(move |event| {
+        observed_errors.borrow_mut().push(event.clone());
+    }));
+    let core = open_core(0x3f, &schema);
+    let (successor_transport, worker_subscriber_transport) = duplex();
+    let successor_connection = block_on(successor.connect_upstream(successor_transport));
+    let worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    worker.tick().expect("replay recovered foreground write");
+    successor
+        .tick()
+        .expect("apply replayed Local acknowledgement");
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
+    core.tick().expect("accept matching session author");
+    scheduler.clear();
+    worker.tick().expect("apply accepted Global fate");
+    assert_scheduled_urgencies(
+        &scheduler,
+        &[TickUrgency::AfterCurrentTurn],
+        "recovered accepted fate ingress at the worker",
+    );
+    worker
+        .tick()
+        .expect("publish accepted Global fate on the scheduled follow-up turn");
+    successor.tick().expect("apply accepted fate through relay");
+
+    assert!(matches!(
+        worker.write_state(tx_id).expect("worker accepted state"),
+        jazz::db::WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            global_time: Some(_),
+        }
+    ));
+    assert!(matches!(
+        successor
+            .write_state(tx_id)
+            .expect("successor accepted state"),
+        jazz::db::WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            global_time: Some(_),
+        }
+    ));
+    assert!(
+        !worker.has_recovered_browser_relay_tx_for_test(tx_id),
+        "Accepted/Global must consume the process-local recovered marker"
+    );
+    worker
+        .tick()
+        .expect("drive any erroneous fallback delivery");
+    assert!(
+        mutation_errors.borrow().is_empty(),
+        "accepted recovery must never report a mutation rejection"
+    );
+
+    drop(successor_connection);
+    drop(worker_subscriber);
+    drop(worker_upstream);
+    drop(core_subscriber);
+    drop(successor);
+    drop(worker);
+
+    let later_worker = open_persistent_browser_worker(storage.path(), 0x2f, alice, &schema);
+    assert!(
+        !later_worker.has_recovered_browser_relay_tx_for_test(tx_id),
+        "accepted terminal state must leave no recovered-marker backlog"
+    );
+    let later_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_later_errors = Rc::clone(&later_errors);
+    later_worker.on_mutation_error(Rc::new(move |event| {
+        observed_later_errors.borrow_mut().push(event.clone());
+    }));
+    later_worker.tick().expect("drive later worker opening");
+    assert!(
+        later_errors.borrow().is_empty(),
+        "a late attachment must not receive a stale recovery callback"
+    );
+}
+
+/// A browser relay may have an active programmatic wait for a transaction it
+/// restored from a former foreground runtime. That wait consumes the same live
+/// rejection instead of allowing a duplicate fallback callback.
+#[test]
+fn recovered_browser_relay_wait_suppresses_mutation_error_fallback() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xac; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xbc; 16]);
+    let storage = tempfile::tempdir().expect("worker temp dir");
+
+    let first_main = open_db(0x1d, alice, &schema);
+    first_main.set_non_durable_client();
+    let first_worker = open_persistent_browser_worker(storage.path(), 0x2d, alice, &schema);
+    let (first_main_transport, first_worker_transport) = duplex();
+    let first_main_connection = block_on(first_main.connect_upstream(first_main_transport));
+    let first_worker_connection = first_worker.accept_subscriber(first_worker_transport, alice);
+    let write = first_main
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("wait handles replayed rejection".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("insert pending todo");
+    let tx_id = write.mergeable_tx_id();
+    first_main.tick().expect("upload to first worker");
+    first_worker.tick().expect("persist in first worker");
+    first_main.tick().expect("apply first Local ack");
+    drop(first_worker_connection);
+    drop(first_main_connection);
+    drop(first_worker);
+    drop(first_main);
+
+    let successor = open_db(0x1e, alice, &schema);
+    successor.set_non_durable_client();
+    let worker = open_persistent_browser_worker(storage.path(), 0x2d, alice, &schema);
+    let fallback_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_fallback_errors = Rc::clone(&fallback_errors);
+    worker.on_mutation_error(Rc::new(move |event| {
+        observed_fallback_errors.borrow_mut().push(event.clone());
+    }));
+    let wait_result = Rc::new(Cell::new(None));
+    let observed_wait = Rc::clone(&wait_result);
+    worker.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
+        observed_wait.set(Some(result.is_err()));
+    });
+
+    let core = open_core(0x3d, &schema);
+    let (successor_transport, worker_subscriber_transport) = duplex();
+    let _successor_connection = block_on(successor.connect_upstream(successor_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, bob);
+
+    worker.tick().expect("replay pending write");
+    successor
+        .tick()
+        .expect("apply replayed Local acknowledgement");
+    core.tick().expect("reject mismatched session author");
+    worker.tick().expect("apply rejection to relay wait");
+    worker.tick().expect("drive any fallback delivery");
+
+    assert_eq!(wait_result.get(), Some(true));
+    assert!(
+        fallback_errors.borrow().is_empty(),
+        "the active wait must consume the relay rejection before fallback delivery"
+    );
 }

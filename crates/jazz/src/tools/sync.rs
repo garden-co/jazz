@@ -19,7 +19,7 @@ pub enum DurabilityTier {
 /// remote is never an offline fallback signal.
 ///
 /// The Rust native facade has no public explicit-offline toggle, so
-/// `RemoteIfPossible` has the same strict waiting behavior as `Remote` there.
+/// `RemoteIfPossible` uses the same strict initial remote gate as `Remote` there.
 /// Browser and other host bindings apply the explicit-disconnect fallback at
 /// their connection boundary before lowering this choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

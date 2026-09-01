@@ -372,6 +372,59 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
     )));
 }
 
+/// A maintained current-source predicate must lower a bare UUID literal to
+/// the source field's declared nullable shape before Groove evaluates it.
+#[test]
+fn current_nullable_field_comparison_preserves_declared_literal_depth() {
+    let mut input = row_set_input(0x72);
+    let source = source("todos", SourceRole::Root);
+    let filter = RowSetNodeId("nullable-filter".to_owned());
+    input.shape.nodes.insert(
+        filter.clone(),
+        RowSetExpr::Filter {
+            input: input.shape.root.clone(),
+            predicate: PredicateExpr::Compare {
+                left: NormalizedValueRef::SourceField {
+                    source,
+                    field: "todo".to_owned(),
+                },
+                op: ComparisonOp::Eq,
+                right: NormalizedValueRef::Literal(
+                    postcard::to_allocvec(&Value::Uuid(row(0xa2).0)).unwrap(),
+                ),
+            },
+        },
+    );
+    input.shape.root = filter;
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: system_policy_context(),
+        input,
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([ProgramFactKey::ResultMembership]),
+        },
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("nullable field comparison lowers");
+    assert!(program.lowered.terminals.iter().any(|terminal| {
+        graph_any(&terminal.graph, &|graph| {
+            matches!(
+                graph,
+                GraphBuilder::Filter {
+                    predicate: groove::ivm::PredicateExpr::Eq { field, value },
+                    ..
+                } if field == "user_todo"
+                    && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
+                        groove::ivm::LiteralValue::Uuid(row(0xa2).0),
+                    )))
+            )
+        })
+    }));
+}
+
 #[test]
 fn current_join_via_lowers_as_left_deep_semijoin() {
     let root = RowSetNodeId("root".to_owned());
@@ -522,7 +575,9 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                                 predicate,
                                                 groove::ivm::PredicateExpr::Eq { field, value }
                                                     if field == "user_tag"
-                                                        && value == &groove::ivm::LiteralValue::String("ship".to_owned())
+                                                        && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
+                                                            groove::ivm::LiteralValue::String("ship".to_owned()),
+                                                        )))
                                             )
                                     )
                         )

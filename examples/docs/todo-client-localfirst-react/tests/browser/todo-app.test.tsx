@@ -173,7 +173,13 @@ describe("React Todo App E2E", () => {
     await act(async () => checkbox.click());
 
     await waitFor(
-      () => el.querySelector("#todo-list li")!.classList.contains("done"),
+      () => {
+        // A subscription update may replace the list item between polling
+        // iterations. Keep waiting for the asserted state rather than turning
+        // that ordinary transient into a test-process TypeError.
+        const updatedTodo = el.querySelector("#todo-list li");
+        return updatedTodo?.classList.contains("done") ?? false;
+      },
       3000,
       "Todo should be marked done",
     );

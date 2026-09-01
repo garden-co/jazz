@@ -30,6 +30,7 @@
       "outputs": [".next/**", "!.next/cache/**"]
     },
     "jazz-napi#build": {
+      "cache": false,
       "inputs": [
         "package.json",
         "Cargo.toml",
@@ -125,6 +126,7 @@
       "outputs": []
     },
     "jazz-tools#build": {
+      "cache": false,
       "inputs": [
         "package.json",
         "src/**",
@@ -139,7 +141,13 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "outputs": ["dist/**"],
-      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
+      "passThroughEnv": [
+        "JAZZ_TEST_SEALED_TOOLS_DIST",
+        "JAZZ_CORRECTNESS_ARTIFACT_RUN",
+        "JAZZ_CORRECTNESS_WASM_PACKAGE",
+        "JAZZ_CORRECTNESS_NAPI_BINDING",
+        "JAZZ_CORRECTNESS_NAPI_FINGERPRINT"
+      ]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],
@@ -171,15 +179,15 @@
     "test": {
       "dependsOn": ["^build"],
       "cache": false,
-      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
-    },
-    "rn-device-acceptance#test": {
-      "dependsOn": [],
-      "cache": false
-    },
-    "rn-device-acceptance#build": {
-      "dependsOn": [],
-      "cache": false
+      "passThroughEnv": [
+        "JAZZ_TEST_SEALED_TOOLS_DIST",
+        "JAZZ_CORRECTNESS_ARTIFACT_RUN",
+        "JAZZ_CORRECTNESS_WASM_PACKAGE",
+        "JAZZ_CORRECTNESS_NAPI_BINDING",
+        "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",
+        "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
+        "JAZZ_CORRECTNESS_CONSUMER_TOKEN"
+      ]
     }
   }
 }

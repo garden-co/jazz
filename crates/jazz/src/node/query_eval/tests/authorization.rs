@@ -848,6 +848,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 &mut node,
                 SyncMessage::FetchRowVersions {
                     requests: missing.clone(),
+                    delegated_session: None,
                 },
             )
             .expect("serve normal-member message include/order repair payloads");
@@ -1136,6 +1137,17 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
     );
 }
 
+/// Terminal authorization support hydration records the writer's exact
+/// admitted snapshot before maintaining its internally allocated view.
+///
+/// ```text
+/// writer ──commit proof──► authority ──support view (writer + claims)──► policy
+/// ```
+///
+/// This stays in the query-evaluation seam because the support subscription
+/// is authority-owned and intentionally has no public client handle. The
+/// direct setup above is cleared so it cannot mask the support helper's
+/// required explicit binding.
 #[test]
 fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
     // Terminal CommitUnit admission rehydrates a compiled read-policy
@@ -1193,21 +1205,26 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
         .into_iter()
         .next()
         .expect("read policy requires one support subscription");
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: options.read_view_key(),
+    };
     let mut peer = PeerState::client_link(writer);
     let ordinary_error = peer
         .rehydrate_query(&mut node, &shape, &binding)
         .expect_err("ordinary prepared subscription hydration must retain missing-claim errors");
     assert!(matches!(ordinary_error, Error::InvalidStoredValue(_)));
-
+    // The direct helper deliberately installs its own fallback. Clear that
+    // setup state so the authority-only helper must establish its explicit
+    // proof binding without inheriting a direct-path side effect.
+    peer.forget_subscription(subscription);
     let update = peer
         .rehydrate_authorization_support_query_for_identity(
             &mut node,
             writer,
-            SubscriptionKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-                read_view: options.read_view_key(),
-            },
+            BTreeMap::new(),
+            subscription,
             &shape,
             &binding,
             options,
@@ -1223,6 +1240,11 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
     };
     assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
+    assert_eq!(
+        peer.subscription_policy_binding(subscription),
+        Some((writer, BTreeMap::new())),
+        "the internally allocated authorization support subscription records its proof subject rather than inheriting a transport identity"
+    );
 }
 
 #[test]

@@ -15,13 +15,22 @@ describe("registerWindowJazzStorageClient", () => {
     vi.unstubAllGlobals();
   });
 
-  it("scopes the reported namespace for cookie sessions and leaves anonymous cookie sessions unscoped", () => {
+  it("reports physical namespaces derived from the logical base and complete auth scope", () => {
     vi.stubGlobal("window", {});
+
+    const appId = "chat-app";
+    const env = "test";
+    const logicalBase = "shared-device-cache";
+    const physicalName = (auth: object) =>
+      `${logicalBase}::jazz-browser-v1::${encodeURIComponent(
+        JSON.stringify({ version: 1, appId, env, auth }),
+      )}`;
 
     const unregisterExternal = registerWindowJazzStorageClient(
       makeStorageDb({
-        appId: "chat-app",
-        driver: { type: "persistent" },
+        appId,
+        env,
+        driver: { type: "persistent", dbName: logicalBase },
         cookieSession: {
           user_id: "alice@example.com",
           claims: {},
@@ -32,8 +41,9 @@ describe("registerWindowJazzStorageClient", () => {
     );
     const unregisterAnonymous = registerWindowJazzStorageClient(
       makeStorageDb({
-        appId: "chat-app",
-        driver: { type: "persistent" },
+        appId,
+        env,
+        driver: { type: "persistent", dbName: logicalBase },
         cookieSession: {
           user_id: "ephemeral-visitor",
           claims: {},
@@ -44,8 +54,9 @@ describe("registerWindowJazzStorageClient", () => {
     );
     const unregisterSameExternal = registerWindowJazzStorageClient(
       makeStorageDb({
-        appId: "chat-app",
-        driver: { type: "persistent" },
+        appId,
+        env,
+        driver: { type: "persistent", dbName: logicalBase },
         cookieSession: {
           user_id: "alice@example.com",
           claims: {},
@@ -56,8 +67,9 @@ describe("registerWindowJazzStorageClient", () => {
     );
     const unregisterOtherExternal = registerWindowJazzStorageClient(
       makeStorageDb({
-        appId: "chat-app",
-        driver: { type: "persistent" },
+        appId,
+        env,
+        driver: { type: "persistent", dbName: logicalBase },
         cookieSession: {
           user_id: "bob@example.com",
           claims: {},
@@ -68,10 +80,20 @@ describe("registerWindowJazzStorageClient", () => {
     );
 
     expect(window.__jazz?.listLiveStorageNamespaces()).toEqual([
-      "chat-app",
-      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22alice%40example.com%22%5D",
-      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22bob%40example.com%22%5D",
+      physicalName({ kind: "anonymous" }),
+      physicalName({
+        kind: "principal",
+        authMode: "external",
+        user: '["https://issuer.example","alice@example.com"]',
+      }),
+      physicalName({
+        kind: "principal",
+        authMode: "external",
+        user: '["https://issuer.example","bob@example.com"]',
+      }),
     ]);
+    // Planted positive: using only the caller's logical base, or omitting any
+    // app/environment/auth field, would collapse distinct live stores here.
 
     unregisterExternal();
     unregisterAnonymous();

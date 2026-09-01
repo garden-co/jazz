@@ -584,6 +584,7 @@ pub(super) fn sync_facts() -> BTreeSet<ProgramFactKey> {
 pub(super) struct FakeSourceResolver {
     pub(super) requests: Vec<SourceRequest>,
     pub(super) branch_witnesses: bool,
+    pub(super) current_rows_use_arg_by: bool,
 }
 
 impl SourceGraphPreparer for FakeSourceResolver {
@@ -664,7 +665,14 @@ impl SourceGraphPreparer for FakeSourceResolver {
                     request.source.table.clone(),
                     [ColumnSchema::new("title", ColumnType::String)],
                 ),
-                graph: GraphBuilder::table(format!("resolved_{}", request.source.table)),
+                graph: {
+                    let graph = GraphBuilder::table(format!("resolved_{}", request.source.table));
+                    if self.current_rows_use_arg_by {
+                        GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"])
+                    } else {
+                        graph
+                    }
+                },
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor: RecordDescriptor::new(descriptor_fields),

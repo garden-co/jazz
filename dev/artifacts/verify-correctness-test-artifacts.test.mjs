@@ -46,7 +46,7 @@ test("reports a stale generated WASM method even when source declarations are cu
     `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a) {}\n}`,
   );
   assert.match(
-    verifyCorrectnessTestArtifacts(root).join("\n"),
+    verifyCorrectnessTestArtifacts(root, { allowUnsealedFixture: true }).join("\n"),
     /acceptSubscriber: consumer=2, d.ts=2, glue=1/,
   );
   rmSync(root, { recursive: true, force: true });
@@ -59,7 +59,7 @@ test("reports a wire-version mismatch", () => {
     "export const WIRE_PROTOCOL_VERSION = 8;\n",
   );
   assert.match(
-    verifyCorrectnessTestArtifacts(root).join("\n"),
+    verifyCorrectnessTestArtifacts(root, { allowUnsealedFixture: true }).join("\n"),
     /wire protocol version mismatch: Rust=9, TS=8/,
   );
   rmSync(root, { recursive: true, force: true });
@@ -72,7 +72,7 @@ test("reports stale generated bounded auxiliary transport arguments", () => {
     `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames() {}\n}\nexport class WasmWrite {\nget txId() { return wasm.wasmwrite_txId(); }\n}`,
   );
   assert.match(
-    verifyCorrectnessTestArtifacts(root).join("\n"),
+    verifyCorrectnessTestArtifacts(root, { allowUnsealedFixture: true }).join("\n"),
     /WasmTransport\.recvAuxiliaryWireFrames: consumer=2, d\.ts=2, glue=0/,
   );
   rmSync(root, { recursive: true, force: true });
@@ -88,7 +88,7 @@ test("rejects stale generated WASM write identity exports", () => {
     join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),
     `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames, max_bytes) {}\n}\nexport class WasmWrite {\nget batchId() { return wasm.wasmwrite_batchId(); }\n}`,
   );
-  const failures = verifyCorrectnessTestArtifacts(root).join("\n");
+  const failures = verifyCorrectnessTestArtifacts(root, { allowUnsealedFixture: true }).join("\n");
   assert.match(failures, /WasmWrite declaration is missing txId/);
   assert.match(failures, /WasmWrite declaration still exposes batchId/);
   assert.match(failures, /WasmWrite glue is missing txId/);

@@ -5,9 +5,70 @@
 
 use super::peer_connection::{
     ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
-    mutation_error_event, take_pending_mutation_error_delivery,
+    coverage_group_subscription_key, mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
+use crate::time::TxTime;
+
+/// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
+/// close future drops the lease, rather than the accepted operation.
+struct QueuedMutationLease<'a> {
+    queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+    active_leases: &'a Cell<usize>,
+    operation: Option<QueuedMutationOperation>,
+}
+
+impl<'a> QueuedMutationLease<'a> {
+    fn new(
+        queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+        active_leases: &'a Cell<usize>,
+        operation: QueuedMutationOperation,
+    ) -> Self {
+        active_leases.set(
+            active_leases
+                .get()
+                .checked_add(1)
+                .expect("queued mutation lease count overflow"),
+        );
+        Self {
+            queue,
+            active_leases,
+            operation: Some(operation),
+        }
+    }
+
+    fn operation(&self) -> &QueuedMutationOperation {
+        self.operation
+            .as_ref()
+            .expect("queued mutation lease must retain its operation")
+    }
+
+    fn operation_mut(&mut self) -> &mut QueuedMutationOperation {
+        self.operation
+            .as_mut()
+            .expect("queued mutation lease must retain its operation")
+    }
+
+    fn take(&mut self) -> QueuedMutationOperation {
+        self.operation
+            .take()
+            .expect("queued mutation lease must retain its operation")
+    }
+}
+
+impl Drop for QueuedMutationLease<'_> {
+    fn drop(&mut self) {
+        if let Some(operation) = self.operation.take() {
+            self.queue.borrow_mut().push_front(operation);
+        }
+        self.active_leases.set(
+            self.active_leases
+                .get()
+                .checked_sub(1)
+                .expect("queued mutation lease count underflow"),
+        );
+    }
+}
 
 /// Node-owned participant surface for upstream and subscriber connections.
 pub struct Node<S>
@@ -15,14 +76,34 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
+    close_owner: futures::lock::Mutex<()>,
+    tx_time_reservation_clock: Rc<Cell<TxTime>>,
+    node_uuid: NodeUuid,
     receives_commits_as_local: bool,
     pub(super) subscriptions: SubscriptionList,
     pub(super) outbox: Outbox,
     pub(super) pending_local_publications: PendingLocalPublications,
+    queued_mutations: RefCell<VecDeque<QueuedMutationOperation>>,
+    /// Operations temporarily popped by an owner future. They remain part of
+    /// FIFO shutdown work even while a cold await leaves the queue empty.
+    queued_mutation_active_leases: Cell<usize>,
+    transaction_wait_observers: RefCell<Vec<TransactionWaitObserver>>,
+    queued_mutation_failures: RefCell<BTreeMap<TxId, Error>>,
+    /// Rejections claimed by a waiter during the current owner turn. They
+    /// stay observable until every waiter that was woken by the same fate has
+    /// had one polling opportunity, then are discarded before the turn ends.
+    deferred_rejection_discards: RefCell<BTreeSet<TxId>>,
+    queued_open_transaction_failures: RefCell<BTreeMap<OpenTransactionId, Error>>,
+    reserved_mutations: RefCell<BTreeSet<TxId>>,
+    pub(super) pending_transaction_abandonments: TransactionAbandonmentTombstones,
+    transaction_abandonments_closed: Cell<bool>,
+    transaction_abandonment_shutdown_pending: Cell<bool>,
     pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
     subscription_finalizations_closed: Cell<bool>,
+    subscription_runtime_retired: Cell<bool>,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
     pub(super) upstream_coverage_refcounts: UpstreamCoverageRefCounts,
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
@@ -45,6 +126,12 @@ where
     pub(super) admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     pub(super) mutation_errors: SharedMutationErrors,
+    /// Transaction IDs restored from durable browser-relay storage after a
+    /// worker restart. These IDs were authored by an ephemeral foreground
+    /// node, so their rejection payload must never become worker-owned
+    /// durable state. The set exists only until its terminal authority fate is
+    /// observed in this runtime.
+    pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) next_write_state_waiter_id: Cell<u64>,
     pub(super) next_subscription_nonce: Cell<u64>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -68,6 +155,8 @@ where
         let receives_commits_as_local = !node.is_history_complete();
         let chunk_resolver = PeerChunkResolver::default();
         let local_chunk_reader = node.local_chunk_reader_handle();
+        let tx_time_reservation_clock = node.tx_time_reservation_clock();
+        let node_uuid = node.node_uuid();
         node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
         let pending_mutation_errors = node
             .rejected_transactions()
@@ -79,14 +168,29 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
+            close_owner: futures::lock::Mutex::new(()),
+            tx_time_reservation_clock,
+            node_uuid,
             receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
+            queued_mutations: RefCell::new(VecDeque::new()),
+            queued_mutation_active_leases: Cell::new(0),
+            transaction_wait_observers: RefCell::new(Vec::new()),
+            queued_mutation_failures: RefCell::new(BTreeMap::new()),
+            deferred_rejection_discards: RefCell::new(BTreeSet::new()),
+            queued_open_transaction_failures: RefCell::new(BTreeMap::new()),
+            reserved_mutations: RefCell::new(BTreeSet::new()),
+            pending_transaction_abandonments: Rc::new(RefCell::new(BTreeSet::new())),
+            transaction_abandonments_closed: Cell::new(false),
+            transaction_abandonment_shutdown_pending: Cell::new(false),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
             subscription_finalizations_closed: Cell::new(false),
+            subscription_runtime_retired: Cell::new(false),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
             awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
@@ -106,6 +210,7 @@ where
                 callback: None,
                 pending: pending_mutation_errors,
             })),
+            browser_relay_recovered_tx_ids: Rc::new(RefCell::new(BTreeSet::new())),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -120,6 +225,290 @@ where
             chunk_resolver,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
+        }
+    }
+
+    /// Reserve a definitive local transaction identity without borrowing the
+    /// async storage-owning node. The shared high-water mirror is advanced by
+    /// every ordinary mint and remote observation as well.
+    pub(super) fn reserve_transaction_id(&self, now_ms: u64) -> Result<TxId, Error> {
+        self.ensure_mutation_admission_open()?;
+        let made_at = TxTime::tick(self.tx_time_reservation_clock.get(), now_ms)
+            .map_err(crate::node::Error::from)
+            .map_err(Error::from)?;
+        self.tx_time_reservation_clock.set(made_at);
+        Ok(TxId::new(made_at, self.node_uuid))
+    }
+
+    pub(super) fn begin_mutation_shutdown(&self) {
+        self.mutation_owner_lifecycle
+            .set(MutationOwnerLifecycle::Closing);
+        // Wait observers may be parked on a state-change channel even when
+        // there is no queued mutation left to wake them. Closing is itself a
+        // terminal observation boundary, so wake every waiter to let it
+        // either observe its requested tier or report that the runtime closed
+        // first.
+        let waiters = std::mem::take(&mut *self.write_state_waiters.borrow_mut());
+        for (_, waiters) in waiters {
+            for waiter in waiters {
+                let WriteStateWaiterNotify::Future(sender) = waiter.notify;
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    /// Serialize shutdown drains while keeping admission closure outside the
+    /// await. Cancellation releases ownership so another close caller can
+    /// resume the same idempotent drain and finalization sequence.
+    pub(super) async fn lock_close_owner(&self) -> futures::lock::MutexGuard<'_, ()> {
+        self.close_owner.lock().await
+    }
+
+    pub(super) fn ensure_mutation_admission_open(&self) -> Result<(), Error> {
+        if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Open {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::WriteRejected,
+                "database mutation owner is closing",
+            ))
+        }
+    }
+
+    pub(super) fn ensure_subscription_finalization_open(&self) -> Result<(), Error> {
+        if self.subscription_finalizations_closed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "database subscription admission is closed",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn enqueue_mutation(
+        &self,
+        tx_id: TxId,
+        future: QueuedMutationFuture,
+    ) -> Rc<RefCell<QueuedMutationStatus>> {
+        let status = Rc::new(RefCell::new(QueuedMutationStatus::Pending));
+        self.reserved_mutations.borrow_mut().insert(tx_id);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: Some(tx_id),
+                open_tx_id: None,
+                future,
+                status: Some(Rc::clone(&status)),
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        status
+    }
+
+    pub(super) fn enqueue_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+        future: QueuedMutationFuture,
+    ) -> Result<(), Error> {
+        self.ensure_mutation_admission_open()?;
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: Some(open_tx_id),
+                future,
+                status: None,
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        Ok(())
+    }
+
+    /// Put a transaction-local read behind every already-admitted operation
+    /// for that transaction. The receiver owns the eventual result, while the
+    /// owner queue retains the cold storage future and its wake route.
+    pub(super) fn enqueue_transaction_read<T: 'static>(
+        &self,
+        open_tx_id: OpenTransactionId,
+        read: impl Future<Output = Result<T, Error>> + 'static,
+    ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        let sender = Rc::new(RefCell::new(Some(sender)));
+        let read_sender = Rc::clone(&sender);
+        let completion_sender = Rc::clone(&sender);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: Some(open_tx_id),
+                future: Box::pin(async move {
+                    let result = read.await;
+                    if let Some(sender) = read_sender.borrow_mut().take() {
+                        let _ = sender.send(result);
+                    }
+                    Ok(())
+                }),
+                status: None,
+                completion: Some(Box::new(move |outcome| {
+                    if let Err(error) = outcome
+                        && let Some(sender) = completion_sender.borrow_mut().take()
+                    {
+                        let _ = sender.send(Err(error));
+                    }
+                })),
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        receiver
+    }
+
+    pub(super) fn enqueue_transaction_commit(
+        &self,
+        open_tx_id: OpenTransactionId,
+        tx_id: TxId,
+        future: QueuedMutationFuture,
+    ) -> Rc<RefCell<QueuedMutationStatus>> {
+        let status = Rc::new(RefCell::new(QueuedMutationStatus::Pending));
+        self.reserved_mutations.borrow_mut().insert(tx_id);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: Some(tx_id),
+                open_tx_id: Some(open_tx_id),
+                future,
+                status: Some(Rc::clone(&status)),
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        status
+    }
+
+    pub(super) fn enqueue_transaction_cleanup(&self, future: QueuedMutationFuture) {
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: None,
+                future,
+                status: None,
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    /// Poll one FIFO owner-queue entry and report whether it retained its
+    /// continuation. A retained operation may still own [`NodeState`] across
+    /// a cold-storage or cooperative-evaluation await.
+    pub(super) fn poll_queued_mutation_once(&self) -> bool {
+        use std::task::{Context, Poll, Waker};
+
+        let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+            return false;
+        };
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
+            self.queued_open_transaction_failures
+                .borrow()
+                .get(&open_tx_id)
+                .cloned()
+        });
+        let outcome = match poisoned {
+            Some(error) => Poll::Ready(Err(error)),
+            None => operation.future.as_mut().poll(&mut context),
+        };
+        match outcome {
+            Poll::Pending => {
+                self.queued_mutations.borrow_mut().push_front(operation);
+                true
+            }
+            Poll::Ready(result) => {
+                self.finish_queued_mutation(operation, result);
+                false
+            }
+        }
+    }
+
+    fn finish_queued_mutation(
+        &self,
+        mut operation: QueuedMutationOperation,
+        result: Result<(), Error>,
+    ) {
+        if let Some(completion) = operation.completion.take() {
+            completion(result.clone());
+        }
+        if let Some(tx_id) = operation.tx_id {
+            self.reserved_mutations.borrow_mut().remove(&tx_id);
+        }
+        if let Err(error) = &result
+            && let Some(open_tx_id) = operation.open_tx_id
+        {
+            self.queued_open_transaction_failures
+                .borrow_mut()
+                .entry(open_tx_id)
+                .or_insert_with(|| error.clone());
+        }
+        if let (Some(tx_id), Some(status)) = (operation.tx_id, operation.status) {
+            let terminal_failed = result.is_err();
+            match result {
+                Ok(()) => *status.borrow_mut() = QueuedMutationStatus::Published,
+                Err(error) => {
+                    *status.borrow_mut() = QueuedMutationStatus::Failed(error.clone());
+                    self.queued_mutation_failures
+                        .borrow_mut()
+                        .insert(tx_id, error);
+                }
+            }
+            if let Some(waiters) = self.write_state_waiters.borrow_mut().remove(&tx_id) {
+                for waiter in waiters {
+                    let WriteStateWaiterNotify::Future(sender) = waiter.notify;
+                    let _ = sender.send(());
+                }
+            }
+            if terminal_failed && let Some(open_tx_id) = operation.open_tx_id {
+                let node = Rc::clone(&self.node);
+                self.enqueue_transaction_cleanup(Box::pin(async move {
+                    let mut node = node.lock().await;
+                    match node.abandon_tx(open_tx_id) {
+                        Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+                        Err(error) => Err(error.into()),
+                    }
+                }));
+            }
+        }
+        if operation.tx_id.is_some()
+            && let Some(open_tx_id) = operation.open_tx_id
+        {
+            self.queued_open_transaction_failures
+                .borrow_mut()
+                .remove(&open_tx_id);
+        }
+        if !self.queued_mutations.borrow().is_empty() {
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    pub(super) async fn drain_queued_mutations(&self) {
+        loop {
+            let Some(operation) = self.queued_mutations.borrow_mut().pop_front() else {
+                return;
+            };
+            let mut lease = QueuedMutationLease::new(
+                &self.queued_mutations,
+                &self.queued_mutation_active_leases,
+                operation,
+            );
+            let poisoned = lease.operation().open_tx_id.and_then(|open_tx_id| {
+                self.queued_open_transaction_failures
+                    .borrow()
+                    .get(&open_tx_id)
+                    .cloned()
+            });
+            let result = match poisoned {
+                Some(error) => Err(error),
+                None => lease.operation_mut().future.as_mut().await,
+            };
+            self.finish_queued_mutation(lease.take(), result);
         }
     }
 
@@ -146,6 +535,25 @@ where
     /// Borrow the served node.
     pub fn node(&self) -> SharedNodeState<S> {
         Rc::clone(&self.node)
+    }
+
+    /// Test-only inspection of retry ownership. Rejected foreign transactions
+    /// must never acquire an originating node's retained payload.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
+        self.node.borrow().rejected_transaction(tx_id).is_some()
+    }
+
+    /// Test-only inspection of the process-local browser-relay recovery
+    /// marker. It is not durable retry ownership: every terminal fate must
+    /// consume it, including an accepted Global fate.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
+        self.browser_relay_recovered_tx_ids
+            .borrow()
+            .contains(&tx_id)
     }
 
     /// Configure Jazz-owned ingress and expiry policy for unpublished large
@@ -216,6 +624,14 @@ where
         self.schedule_tick(TickUrgency::Immediate);
     }
 
+    /// Whether a resident publication still needs its ordered durability turn.
+    /// This check is deliberately synchronous so a host's one bounded tick
+    /// does not spend its sole poll acquiring the publication-settler mutex
+    /// when there is no publication to advance.
+    pub(super) fn has_pending_local_publications(&self) -> bool {
+        !self.pending_local_publications.borrow().is_empty()
+    }
+
     pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
         let _settler = self.local_publication_settler.lock().await;
         loop {
@@ -267,6 +683,9 @@ where
         let pending = node.pending_transaction_ids_for_author(author);
         let pending = crate::db::block_on(pending)?;
         drop(node);
+        self.browser_relay_recovered_tx_ids
+            .borrow_mut()
+            .extend(pending.iter().copied());
         for tx_id in pending {
             self.queue_pending_upload(tx_id, None);
         }
@@ -400,6 +819,200 @@ where
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker())
     }
+    /// Lock the node for opening a transaction while the database still owns
+    /// transaction admission.
+    ///
+    /// `owner_operation_admitted` is true only for an operation already
+    /// retained by the binding owner before shutdown. Those operations must
+    /// drain in FIFO order before the final sweep. Every direct caller checks
+    /// the gate both before and after waiting for the node mutex.
+    ///
+    /// The tombstone check closes the corresponding race with an
+    /// already-linearized handle abandonment.
+    pub(super) async fn lock_for_transaction_open(
+        &self,
+        open_tx_id: OpenTransactionId,
+        owner_operation_admitted: bool,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        if !owner_operation_admitted {
+            self.ensure_transaction_admission_open()?;
+        }
+        let mut node = self.node.lock().await;
+        if !owner_operation_admitted && let Err(error) = self.ensure_transaction_admission_open() {
+            self.finish_transaction_abandonment_shutdown_in(&mut node)?;
+            return Err(error);
+        }
+        self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
+        Ok(node)
+    }
+
+    /// Lock the node for an operation on an existing transaction.
+    ///
+    /// A handle drop records its tombstone without waiting for this mutex.
+    /// Therefore even an operation already queued ahead of the maintenance tick
+    /// observes and retires the tombstone before it can stage, read, or commit.
+    /// Binding-owner operations accepted before shutdown may finish draining;
+    /// direct callers observe the closed gate after acquiring ownership.
+    pub(super) async fn lock_for_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+        owner_operation_admitted: bool,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        let mut node = self.node.lock().await;
+        self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
+        if !owner_operation_admitted && let Err(error) = self.ensure_transaction_admission_open() {
+            self.finish_transaction_abandonment_shutdown_in(&mut node)?;
+            return Err(error);
+        }
+        Ok(node)
+    }
+
+    fn ensure_transaction_admission_open(&self) -> Result<(), Error> {
+        if self.transaction_abandonments_closed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "database transaction admission is closed",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_transaction_abandoned(&self, open_tx_id: OpenTransactionId) -> bool {
+        self.pending_transaction_abandonments
+            .borrow_mut()
+            .insert(open_tx_id)
+    }
+
+    pub(super) fn clear_transaction_abandonment(&self, open_tx_id: OpenTransactionId) {
+        self.pending_transaction_abandonments
+            .borrow_mut()
+            .remove(&open_tx_id);
+    }
+
+    fn reject_tombstoned_transaction_in(
+        &self,
+        node: &mut NodeState<S>,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if !self
+            .pending_transaction_abandonments
+            .borrow()
+            .contains(&open_tx_id)
+        {
+            return Ok(());
+        }
+        let retirement = Self::abandon_transaction_for_maintenance(node, open_tx_id);
+        if retirement.is_ok() {
+            self.clear_transaction_abandonment(open_tx_id);
+        }
+        retirement?;
+        Err(transaction_abandoned(open_tx_id))
+    }
+
+    /// Abandon an RAII-owned transaction immediately when the node is
+    /// uncontended, otherwise leave its deduplicated tombstone for the next
+    /// transaction operation or asynchronous owner turn.
+    ///
+    /// This is synchronous and never waits for the node mutex.
+    pub(super) fn abandon_or_enqueue_transaction(&self, open_tx_id: OpenTransactionId) {
+        if self.transaction_abandonments_closed.get() {
+            // Shutdown owns every still-open transaction after closing this
+            // gate, so a late Drop has no separate maintenance to admit.
+            return;
+        }
+        if !self.mark_transaction_abandoned(open_tx_id) {
+            return;
+        }
+        if let Some(mut node) = self.node.try_lock() {
+            if Self::abandon_transaction_for_maintenance(&mut node, open_tx_id).is_ok() {
+                self.clear_transaction_abandonment(open_tx_id);
+            } else {
+                self.schedule_tick(TickUrgency::Immediate);
+            }
+            return;
+        }
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    fn abandon_transaction_for_maintenance(
+        node: &mut NodeState<S>,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        match node.abandon_tx(open_tx_id) {
+            Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn drain_transaction_abandonments_in(&self, node: &mut NodeState<S>) -> Result<usize, Error> {
+        let abandonments = std::mem::take(&mut *self.pending_transaction_abandonments.borrow_mut());
+        let count = abandonments.len();
+        let mut first_error = None;
+        for open_tx_id in abandonments {
+            if let Err(error) = Self::abandon_transaction_for_maintenance(node, open_tx_id) {
+                self.pending_transaction_abandonments
+                    .borrow_mut()
+                    .insert(open_tx_id);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(count),
+        }
+    }
+
+    fn finish_transaction_abandonment_shutdown_in(
+        &self,
+        node: &mut NodeState<S>,
+    ) -> Result<usize, Error> {
+        let drain_result = self.drain_transaction_abandonments_in(node);
+        // Shutdown must not retire every open transaction until the FIFO owner
+        // has reached quiescence. A queued begin/stage/commit was admitted
+        // before close closed the gate, but may not have acquired the node
+        // lock yet. Sweeping it from an intervening ordinary tick would turn
+        // that accepted operation into a tombstoned transaction. Keep the
+        // shutdown sweep pending until its own queue has completely drained;
+        // a later owner turn or close will run this same idempotent sweep.
+        if self.transaction_abandonment_shutdown_pending.get()
+            && self.queued_mutations.borrow().is_empty()
+            && self.queued_mutation_active_leases.get() == 0
+        {
+            self.transaction_abandonment_shutdown_pending.set(false);
+            node.abandon_all_open_transactions();
+        }
+        drain_result
+    }
+
+    async fn drain_transaction_abandonments(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        self.finish_transaction_abandonment_shutdown_in(&mut node)
+    }
+
+    /// Close transaction admission and transfer the final open-transaction
+    /// sweep to the node tick owner before the close future can suspend.
+    ///
+    /// If the caller cancels `Db::close` while it is waiting for the node
+    /// mutex, the scheduled tick still drains tombstones and terminalizes every
+    /// open transaction. Repeated close attempts and tick passes are benign.
+    pub(super) fn begin_transaction_abandonment_shutdown(&self) {
+        if self.transaction_abandonments_closed.replace(true) {
+            return;
+        }
+        self.transaction_abandonment_shutdown_pending.set(true);
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    pub(super) async fn finish_transaction_abandonment_shutdown(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        self.finish_transaction_abandonment_shutdown_in(&mut node)
+    }
+
+    pub(super) fn transaction_abandonment_shutdown_is_pending(&self) -> bool {
+        self.transaction_abandonment_shutdown_pending.get()
+    }
 
     /// Enqueue a stream-finalization command without touching the async node
     /// mutex. This is the only operation a stream's `Drop` implementation may
@@ -410,13 +1023,14 @@ where
         mut command: PendingSubscriptionFinalization,
     ) {
         if self.subscription_finalizations_closed.get() {
-            // Db::close has synchronously retired every maintained view and
-            // connection before setting this gate. A late finalizer therefore
-            // owns no resident Groove or upstream state to clean up.
-            if let Some(acknowledgement) = command.acknowledgement.take() {
-                let _ = acknowledgement.send(());
+            if self.subscription_runtime_retired.get() {
+                // Terminal retirement already drained every maintained view
+                // and connection, so a late finalizer owns no resident work.
+                if let Some(acknowledgement) = command.acknowledgement.take() {
+                    let _ = acknowledgement.send(());
+                }
+                return;
             }
-            return;
         }
         self.pending_subscription_finalizations
             .borrow_mut()
@@ -515,6 +1129,9 @@ where
                 acknowledgement: None,
             });
         }
+        // Once admission closes, an abandoned close future must not be the
+        // sole owner capable of retiring the captured streams.
+        self.schedule_tick(TickUrgency::Immediate);
     }
 
     /// Release all connection and subscription bookkeeping after its backing
@@ -522,6 +1139,7 @@ where
     /// view or upstream ownership behind: the retirement pass drained them
     /// before close, and this removes the now-unusable runtime shell.
     pub(super) fn retire_subscription_runtime_after_close(&self) {
+        self.subscription_runtime_retired.set(true);
         self.subscriptions.borrow_mut().clear();
         self.connections.borrow_mut().clear();
         self.upstream_subscriptions.borrow_mut().clear();
@@ -539,6 +1157,10 @@ where
             .clear();
     }
 
+    pub(super) fn subscription_finalization_shutdown_is_pending(&self) -> bool {
+        self.subscription_finalizations_closed.get() && !self.subscription_runtime_retired.get()
+    }
+
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
         let should_schedule = {
             let mut state = self.mutation_errors.borrow_mut();
@@ -550,21 +1172,73 @@ where
         }
     }
 
-    fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
+    async fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
         let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
         let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
         if retained {
-            crate::db::block_on(self.node.borrow_mut().discard_rejection(tx_id))?;
+            self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+            self.schedule_tick(TickUrgency::Immediate);
         }
         Ok(pending.is_some() || retained)
     }
 
-    pub(super) fn transaction_wait_outcome(
+    #[cfg(test)]
+    pub(super) fn defer_rejection_discard_for_test(&self, tx_id: TxId) {
+        self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+    }
+
+    /// Finish rejection acknowledgement after all wait observers woken by one
+    /// owner turn have had a chance to inspect the shared terminal state.
+    pub(super) async fn flush_deferred_rejection_discards(&self) -> Result<(), Error> {
+        let tx_ids = std::mem::take(&mut *self.deferred_rejection_discards.borrow_mut());
+        let mut first_error = None;
+        for tx_id in tx_ids {
+            if let Err(error) = self.node.lock().await.discard_rejection(tx_id).await {
+                self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            // A failed atomic Groove commit poisons this opened database. Do
+            // not convert its retained acknowledgement into an immediate tick
+            // loop: the caller must observe the error and reopen before this
+            // runtime can make durable progress again. Other errors are also
+            // retained, but have no generic retry-safety contract here, so a
+            // host may explicitly service a later owner turn without us
+            // spinning on an unknown storage failure.
+            if matches!(
+                error,
+                crate::node::Error::Groove(groove::db::Error::DatabasePoisoned)
+            ) {
+                tracing::error!(
+                    %error,
+                    "deferred mutation-error acknowledgement requires reopening the database"
+                );
+            } else {
+                tracing::warn!(
+                    %error,
+                    "deferred mutation-error acknowledgement retained for an explicit later retry"
+                );
+            }
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    pub(super) async fn transaction_wait_outcome(
         &self,
         tx_id: TxId,
         tier: DurabilityTier,
     ) -> Option<Result<TxId, Error>> {
-        let state = crate::db::block_on(self.node.borrow_mut().transaction_state(tx_id));
+        if let Some(error) = self.queued_mutation_failures.borrow().get(&tx_id) {
+            return Some(Err(error.clone()));
+        }
+        if self.reserved_mutations.borrow().contains(&tx_id) {
+            return None;
+        }
+        let state = self.node.lock().await.transaction_state(tx_id).await;
         let Some((fate, global_time, durability)) = state else {
             return Some(Err(Error::new(
                 ErrorCode::NotObserved,
@@ -574,7 +1248,7 @@ where
         let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
         match fate {
             Fate::Rejected(reason) => {
-                if let Err(error) = self.consume_mutation_error(tx_id) {
+                if let Err(error) = self.consume_mutation_error(tx_id).await {
                     tracing::warn!(?tx_id, %error, "failed to consume waited mutation error");
                 }
                 Some(Err(write_rejected(tx_id, reason)))
@@ -584,21 +1258,231 @@ where
         }
     }
 
+    /// Read a transaction's wait predicate without claiming its rejection.
+    ///
+    /// A queued empty update may use an existing transaction as its bounded
+    /// completion target. That public request must observe the target's state,
+    /// but it is not an additional owner of the target's mutation-error
+    /// delivery: the target's own waiter or mutation-error callback retains
+    /// that responsibility.
+    async fn completion_target_wait_outcome(
+        &self,
+        public_tx_id: TxId,
+        target_tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Option<Result<TxId, Error>> {
+        let state = self.node.lock().await.transaction_state(target_tx_id).await;
+        let Some((fate, global_time, durability)) = state else {
+            return Some(Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("completion target for transaction {public_tx_id:?} is not known locally"),
+            )));
+        };
+        let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
+        match fate {
+            Fate::Rejected(reason) => Some(Err(write_rejected(public_tx_id, reason))),
+            Fate::Pending | Fate::Accepted if satisfied => Some(Ok(public_tx_id)),
+            Fate::Pending | Fate::Accepted => None,
+        }
+    }
+
+    pub(super) fn queued_mutation_write_state(
+        &self,
+        tx_id: TxId,
+    ) -> Option<Result<WriteState, Error>> {
+        if let Some(error) = self.queued_mutation_failures.borrow().get(&tx_id) {
+            return Some(Err(error.clone()));
+        }
+        self.reserved_mutations
+            .borrow()
+            .contains(&tx_id)
+            .then_some(Ok(WriteState {
+                fate: Fate::Pending,
+                global_time: None,
+                durability: DurabilityTier::None,
+            }))
+    }
+
+    pub(super) fn take_queued_mutation_failure(&self, tx_id: TxId) -> Option<Error> {
+        self.queued_mutation_failures.borrow_mut().remove(&tx_id)
+    }
+
     pub(super) fn wait_for_transaction_with(
         self: &Rc<Self>,
         tx_id: TxId,
         tier: DurabilityTier,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
-        if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier) {
-            callback(outcome);
+        self.wait_for_write_with(tx_id, None, tier, callback);
+    }
+
+    /// Callback wait for a binding-owned write handle. A queued empty update
+    /// reserves a request id before it can asynchronously discover that the
+    /// update is a no-op; its handle-local alias then points at the existing
+    /// transaction whose state satisfies this wait. The alias is retained by
+    /// the caller, never by this runtime.
+    pub(super) fn wait_for_write_with(
+        self: &Rc<Self>,
+        tx_id: TxId,
+        alias: Option<QueuedMutationAlias>,
+        tier: DurabilityTier,
+        callback: Box<dyn FnOnce(Result<TxId, Error>)>,
+    ) {
+        if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing {
+            callback(Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("database is closed; transaction {tx_id:?} cannot be observed"),
+            )));
             return;
         }
         let node = Rc::clone(self);
-        self.register_write_state_callback(
-            tx_id,
-            Box::new(move || node.wait_for_transaction_with(tx_id, tier, callback)),
-        );
+        self.transaction_wait_observers
+            .borrow_mut()
+            .push(Box::pin(async move {
+                callback(node.wait_for_write(tx_id, alias, tier).await);
+            }));
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    async fn wait_for_write(
+        &self,
+        tx_id: TxId,
+        alias: Option<QueuedMutationAlias>,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        let Some(alias) = alias else {
+            return self.wait_for_transaction(tx_id, tier).await;
+        };
+        loop {
+            let target_tx_id = { *alias.borrow() };
+            if let Some(target_tx_id) = target_tx_id {
+                return self
+                    .wait_for_completion_target(tx_id, target_tx_id, tier)
+                    .await;
+            }
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
+            }
+            let state_change = self.register_write_state_waiter(tx_id);
+            let target_tx_id = { *alias.borrow() };
+            if let Some(target_tx_id) = target_tx_id {
+                drop(state_change);
+                return self
+                    .wait_for_completion_target(tx_id, target_tx_id, tier)
+                    .await;
+            }
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    async fn wait_for_completion_target(
+        &self,
+        public_tx_id: TxId,
+        target_tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self
+                .completion_target_wait_outcome(public_tx_id, target_tx_id, tier)
+                .await
+            {
+                return outcome;
+            }
+            let state_change = self.register_write_state_waiter(target_tx_id);
+            if let Some(outcome) = self
+                .completion_target_wait_outcome(public_tx_id, target_tx_id, tier)
+                .await
+            {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    pub(super) async fn wait_for_transaction(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
+            }
+            let state_change = self.register_write_state_waiter(tx_id);
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                drop(state_change);
+                return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                drop(state_change);
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
+            }
+            state_change.await;
+        }
+    }
+
+    pub(super) fn poll_transaction_wait_observers(&self) {
+        use std::task::{Context, Poll, Waker};
+
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        let mut observers = std::mem::take(&mut *self.transaction_wait_observers.borrow_mut());
+        observers.retain_mut(|observer| observer.as_mut().poll(&mut context) == Poll::Pending);
+        self.transaction_wait_observers
+            .borrow_mut()
+            .splice(0..0, observers);
+    }
+
+    #[cfg(test)]
+    pub(super) fn enqueue_transaction_wait_observer_for_test(
+        &self,
+        observer: TransactionWaitObserver,
+    ) {
+        self.transaction_wait_observers.borrow_mut().push(observer);
+    }
+
+    pub(super) async fn drain_transaction_wait_observers(&self) {
+        std::future::poll_fn(|context| {
+            let mut observers = std::mem::take(&mut *self.transaction_wait_observers.borrow_mut());
+            observers.retain_mut(|observer| observer.as_mut().poll(context) == Poll::Pending);
+            let empty = observers.is_empty();
+            self.transaction_wait_observers
+                .borrow_mut()
+                .splice(0..0, observers);
+            if empty {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     fn deliver_pending_mutation_errors(&self) {
@@ -624,9 +1508,13 @@ where
         self.permission_advice_waiters
             .borrow_mut()
             .insert(request_id, sender);
-        self.upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action });
+        self.upstream_subscriptions.borrow_mut().push(
+            PendingUpstreamCommand::AuthorizationScopeIntent {
+                request_id,
+                action,
+                session_claim_binding: None,
+            },
+        );
         self.schedule_tick(TickUrgency::Immediate);
         PermissionAdviceFuture {
             waiters: Rc::clone(&self.permission_advice_waiters),
@@ -682,20 +1570,7 @@ where
         }
     }
 
-    fn register_write_state_callback(&self, tx_id: TxId, callback: Box<dyn FnOnce()>) {
-        let waiter_id = self.next_write_state_waiter_id.get();
-        self.next_write_state_waiter_id
-            .set(waiter_id.wrapping_add(1).max(1));
-        self.write_state_waiters
-            .borrow_mut()
-            .entry(tx_id)
-            .or_default()
-            .push(WriteStateWaiter {
-                id: waiter_id,
-                notify: WriteStateWaiterNotify::Callback(callback),
-            });
-    }
-
+    #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
         let progress_waker = self.query_runtime_waker();
         refresh_subscriptions_in(
@@ -890,6 +1765,7 @@ where
                             binding: binding.clone(),
                             opts,
                             identity: state.author,
+                            policy_binding: None,
                         },
                     ));
                 }
@@ -930,6 +1806,7 @@ where
                                     binding: group.binding.clone(),
                                     opts: group.upstream_opts.clone(),
                                     identity: subscriber.peer.link_identity(),
+                                    policy_binding: Some(group.policy_binding.clone()),
                                 })
                         })
                         .collect::<Vec<_>>()
@@ -969,7 +1846,10 @@ where
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
             mutation_errors: Rc::clone(&self.mutation_errors),
+            browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+            #[cfg(test)]
+            fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
             connection_epoch,
@@ -1219,7 +2099,10 @@ where
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates,
             mutation_errors: Rc::clone(&self.mutation_errors),
+            browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+            #[cfg(test)]
+            fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
             connection_epoch,
@@ -1273,6 +2156,8 @@ where
         let connection_epoch = connection_ref.connection_epoch;
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
+        let mut terminal_permission_advice = Vec::new();
+        let current_session_claims = self.node.borrow().session_claims_with_revisions();
         let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
             match &mut connection_ref.link {
                 ConnectionLink::Upstream(UpstreamConnectionState {
@@ -1289,21 +2174,67 @@ where
                     // coalesce under its fresh authority context and wire id.
                     let live_waiters = self.permission_advice_waiters.borrow();
                     let mut queued = BTreeSet::new();
+                    // The lease manager becomes authoritative as soon as it
+                    // captures a session binding, even if the matching
+                    // command is still retained after a backpressured send.
+                    // Visit it first so a command's initial `None` cannot
+                    // erase the request-owned snapshot during detach.
+                    for request in scope_lease_manager.requests.values() {
+                        for request_id in &request.waiters {
+                            if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
+                                let (identity, claims) = &request.session_claim_binding;
+                                let current_claims = current_session_claims
+                                    .iter()
+                                    .find_map(|(current_identity, current_claims, _)| {
+                                        (current_identity == identity).then_some(current_claims)
+                                    })
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if current_claims == *claims {
+                                    reconnect_permission_advice.push((
+                                        *request_id,
+                                        request.action.clone(),
+                                        Some(request.session_claim_binding.clone()),
+                                    ));
+                                } else {
+                                    // A successor can only prove its currently
+                                    // admitted session. Never send a B-scoped
+                                    // hydration to settle this A-owned request.
+                                    terminal_permission_advice.push(*request_id);
+                                }
+                            }
+                        }
+                    }
                     for command in pending.iter() {
-                        let PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } =
-                            command
+                        let PendingUpstreamCommand::AuthorizationScopeIntent {
+                            request_id,
+                            action,
+                            session_claim_binding,
+                        } = command
                         else {
                             continue;
                         };
                         if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                            reconnect_permission_advice.push((*request_id, action.clone()));
-                        }
-                    }
-                    for request in scope_lease_manager.requests.values() {
-                        for request_id in &request.waiters {
-                            if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                                reconnect_permission_advice
-                                    .push((*request_id, request.action.clone()));
+                            if session_claim_binding
+                                .as_ref()
+                                .is_none_or(|(identity, claims)| {
+                                    current_session_claims
+                                        .iter()
+                                        .find_map(|(current_identity, current_claims, _)| {
+                                            (current_identity == identity).then_some(current_claims)
+                                        })
+                                        .cloned()
+                                        .unwrap_or_default()
+                                        == *claims
+                                })
+                            {
+                                reconnect_permission_advice.push((
+                                    *request_id,
+                                    action.clone(),
+                                    session_claim_binding.clone(),
+                                ));
+                            } else {
+                                terminal_permission_advice.push(*request_id);
                             }
                         }
                     }
@@ -1321,6 +2252,7 @@ where
                     peer,
                     served,
                     coverage_groups,
+                    shape_registrations,
                     scope_purposes,
                     scope_aggregates,
                     authority_scope_hydrations,
@@ -1344,13 +2276,11 @@ where
                         }
                         peer.forget_subscription_with_node(
                             &mut node,
-                            SubscriptionKey {
-                                shape_id: coverage.shape_id,
-                                binding_id: coverage.binding_id,
-                                read_view: coverage.opts.read_view_key(),
-                            },
+                            coverage_group_subscription_key(&coverage),
                         );
                     }
+                    node.release_shapes_for_peer(connection_epoch);
+                    shape_registrations.clear();
                     scope_aggregates.clear();
                     authority_scope_hydrations.clear();
                     (None, None, None, retired)
@@ -1371,6 +2301,15 @@ where
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         drop(connections);
         let detached = true;
+        for request_id in terminal_permission_advice {
+            if let Some(waiter) = self
+                .permission_advice_waiters
+                .borrow_mut()
+                .remove(&request_id)
+            {
+                let _ = waiter.send(PermissionAdvice::Unknown);
+            }
+        }
         if !retired_relay_subscriptions.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
                 retired_relay_subscriptions
@@ -1381,14 +2320,15 @@ where
         }
         if !reconnect_permission_advice.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
-                reconnect_permission_advice
-                    .into_iter()
-                    .map(
-                        |(request_id, action)| PendingUpstreamCommand::AuthorizationScopeIntent {
+                reconnect_permission_advice.into_iter().map(
+                    |(request_id, action, session_claim_binding)| {
+                        PendingUpstreamCommand::AuthorizationScopeIntent {
                             request_id,
                             action,
-                        },
-                    ),
+                            session_claim_binding,
+                        }
+                    },
+                ),
             );
             self.schedule_tick(TickUrgency::Immediate);
         }
@@ -1522,6 +2462,7 @@ where
 
     /// Service every accepted subscriber connection once.
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
+        self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
@@ -1543,16 +2484,21 @@ where
         }
         let mut remote_sync_applied = false;
         let mut released_outbox_tx_ids = HashSet::new();
-        // A later subscriber can mutate Core state after an earlier peer link
-        // has already had its turn in this pass.  Remember that generation so
-        // the post-receive serve pass below reaches that earlier link too;
-        // websocket hosts are event-driven and need not provide unrelated
-        // follow-up traffic just to flush a freshly accepted row.
+        // A later connection can mutate Core state after an earlier subscriber
+        // has already had its turn in this pass. Remember that generation so
+        // every subscriber is served on a fresh owner turn below. In
+        // particular, do not recursively re-enter a just-admitted subscriber:
+        // its initial view can suspend on cold storage, while later inbound
+        // commit frames and their local fates must still get a turn.
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
         let connections = self.connections.borrow().clone();
         for connection in &connections {
             let mut connection = connection.lock().await;
-            let next = connection.tick().await?;
+            // `PeerConnection::tick` contains the subscriber admission state
+            // machine. Keep that future off the enclosing Db tick frame so a
+            // normal host/test thread cannot accumulate it across connection
+            // passes.
+            let next = Box::pin(connection.tick()).await?;
             released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
@@ -1561,17 +2507,30 @@ where
         let subscriber_state_changed =
             self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
         if remote_sync_applied || subscriber_state_changed {
-            for connection in &connections {
-                let should_tick = {
-                    let mut connection = connection.lock().await;
-                    connection.mark_subscriber_dirty() || subscriber_state_changed
-                };
-                if should_tick {
-                    let mut connection = connection.lock().await;
-                    let next = connection.tick().await?;
-                    released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
-                    stats.subscription_events += next.subscription_events;
-                    stats.remote_sync_applied += next.remote_sync_applied;
+            // A binding with a host scheduler can service this newly dirty
+            // subscriber on the next owner turn.  A bare `Db` intentionally
+            // permits manual driving without installing such a scheduler,
+            // though: dropping the wake in that mode would leave the
+            // subscriber dirty until unrelated inbound traffic happened to
+            // arrive. Preserve the former bounded second serve pass there.
+            if self.scheduler.borrow().is_some() {
+                for connection in &connections {
+                    connection.lock().await.mark_subscriber_dirty();
+                }
+                self.schedule_tick(TickUrgency::AfterCurrentTurn);
+            } else {
+                for connection in &connections {
+                    let should_tick = {
+                        let mut connection = connection.lock().await;
+                        connection.mark_subscriber_dirty() || subscriber_state_changed
+                    };
+                    if should_tick {
+                        let mut connection = connection.lock().await;
+                        let next = Box::pin(connection.tick()).await?;
+                        released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
+                        stats.subscription_events += next.subscription_events;
+                        stats.remote_sync_applied += next.remote_sync_applied;
+                    }
                 }
             }
         }
@@ -1807,7 +2766,7 @@ where
             let (maintained, mut snapshot) = node
                 .lock()
                 .await
-                .open_maintained_view_subscription_in_authorization_mode(
+                .open_maintained_view_subscription_in_authorization_mode_with_waker(
                     &shape,
                     &binding,
                     author,
@@ -1815,6 +2774,7 @@ where
                     &read_view,
                     Some(prepared_plan),
                     authorization_mode,
+                    progress_waker,
                 )
                 .await?;
             if state.borrow().closed.get() {
@@ -1938,10 +2898,11 @@ where
                     let drained = node
                         .lock()
                         .await
-                        .drain_local_maintained_view_subscription_preserving_rows(
+                        .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                             &mut maintained,
                             Some(binding_view),
                             &local_overlay_row_keys,
+                            progress_waker,
                         )
                         .await;
                     {
@@ -2014,10 +2975,18 @@ where
                     }
                 }
             }
-            let root_occurrence_ids = if shape.query().aggregate.is_some() {
+            let root_occurrence_ids = if shape.query().aggregate.is_some()
+                || !shape.query().array_subqueries.is_empty()
+            {
+                // A fresh structured subscription has not necessarily rebuilt
+                // its local terminal collector when its first authoritative
+                // reset arrives. Structured roots are always their own public
+                // occurrence, so pair that reset directly with its snapshot
+                // roots instead of the still-cold collector sidecar.
                 snapshot
                     .rows
                     .iter()
+                    .take(snapshot.root_count)
                     .map(|row| {
                         crate::tools::OutputOccurrenceId::single_source(
                             crate::tools::ObjectId::from_uuid(row.row_uuid().0),
@@ -2238,7 +3207,7 @@ where
                 let (replacement, snapshot) = node
                     .lock()
                     .await
-                    .open_maintained_view_subscription_in_authorization_mode(
+                    .open_maintained_view_subscription_in_authorization_mode_with_waker(
                         &shape,
                         &binding,
                         author,
@@ -2246,6 +3215,7 @@ where
                         &read_view,
                         None,
                         authorization_mode,
+                        progress_waker,
                     )
                     .await?;
                 let replacement_subscription_id = replacement.subscription_id();
@@ -2299,7 +3269,11 @@ where
                     let mut node_ref = node.lock().await;
                     if authoritative_snapshot_available {
                         match node_ref
-                            .drain_local_maintained_view_subscription_state(maintained, None)
+                            .drain_local_maintained_view_subscription_state_with_waker(
+                                maintained,
+                                None,
+                                progress_waker,
+                            )
                             .await
                         {
                             Ok(_) => {
@@ -2315,7 +3289,11 @@ where
                         }
                     } else {
                         match node_ref
-                            .drain_local_maintained_view_subscription(maintained, None)
+                            .drain_local_maintained_view_subscription_with_waker(
+                                maintained,
+                                None,
+                                progress_waker,
+                            )
                             .await
                         {
                             Ok(update) => update,
@@ -2406,7 +3384,11 @@ where
                         // publishing its redundant reconstruction.
                         node.lock()
                             .await
-                            .drain_local_maintained_view_subscription_state(maintained, None)
+                            .drain_local_maintained_view_subscription_state_with_waker(
+                                maintained,
+                                None,
+                                progress_waker,
+                            )
                             .await?;
                     }
                     let settled = subscription_is_settled(
@@ -2462,10 +3444,11 @@ where
                             && shape.query().aggregate.is_none())
                         .then_some(settled_binding_view);
                         match node_ref
-                            .drain_local_maintained_view_subscription_preserving_rows(
+                            .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                                 maintained,
                                 authoritative_binding_view,
                                 &local_overlay_row_keys,
+                                progress_waker,
                             )
                             .await
                         {
@@ -2556,7 +3539,7 @@ where
                                 &state_ref.snapshot,
                                 &state_ref.snapshot_index,
                             )?;
-                            let event = subscription_terminal_delta_event(
+                            let mut event = subscription_terminal_delta_event(
                                 snapshot_tier,
                                 settled,
                                 &state_ref.snapshot,
@@ -2564,6 +3547,22 @@ where
                                 &snapshot,
                                 &current_root_occurrences,
                             )?;
+                            let SubscriptionEvent::Delta {
+                                publishable,
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations,
+                                ..
+                            } = &mut event
+                            else {
+                                unreachable!("terminal snapshot diffs always emit deltas")
+                            };
+                            *publishable = state_ref.settled != settled
+                                || !added.is_empty()
+                                || !updated.is_empty()
+                                || !removed.is_empty()
+                                || !terminal_operations.is_empty();
                             state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
                             state_ref.snapshot_index =
                                 relation_snapshot_index_with_root_occurrences(
@@ -2647,15 +3646,27 @@ where
                                     shape.query(),
                                     &state_ref.snapshot,
                                 )?;
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
                             if let SubscriptionEvent::Delta {
+                                reset,
+                                publishable,
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations,
                                 settled: event_settled,
                                 ..
                             } = &mut event
                             {
+                                *publishable = previous_settled != settled
+                                    || *reset
+                                    || !added.is_empty()
+                                    || !updated.is_empty()
+                                    || !removed.is_empty()
+                                    || !terminal_operations.is_empty();
                                 *event_settled = settled;
                             }
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
                             if state_ref.sender.unbounded_send(event).is_ok() {
                                 changed += 1;
                             }

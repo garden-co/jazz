@@ -32,6 +32,55 @@ function transport(overrides: Partial<Transport> = {}): Transport {
 }
 
 describe("BrowserWorkerTransportPump", () => {
+  it("reruns an active sibling when another peer admits external work", async () => {
+    const listeners = new Set<(requiresDistinctPass?: boolean) => void>();
+    let releaseSiblingPass!: () => void;
+    let siblingPasses = 0;
+    const peerRuntime = {
+      onPeerTransportWork: (next: (requiresDistinctPass?: boolean) => void) => {
+        listeners.add(next);
+        return () => listeners.delete(next);
+      },
+      progressPeerTransport: async () => {
+        siblingPasses += 1;
+        if (siblingPasses === 1) {
+          await new Promise<void>((resolve) => (releaseSiblingPass = resolve));
+        }
+      },
+      notifyPeerTransportActivity: () => {
+        for (const listener of listeners) listener(true);
+      },
+      retirePeerTransport: async (transport: Transport) => {
+        transport.close();
+      },
+    };
+    const sibling = new BrowserWorkerTransportPump(
+      peerRuntime,
+      transport(),
+      () => undefined,
+      vi.fn(),
+    );
+    await vi.waitFor(() => expect(siblingPasses).toBe(1));
+
+    const sourceRuntime = {
+      ...peerRuntime,
+      progressPeerTransport: async () => undefined,
+    };
+    const source = new BrowserWorkerTransportPump(
+      sourceRuntime,
+      transport(),
+      () => undefined,
+      vi.fn(),
+    );
+    source.receive([Uint8Array.from([1])]);
+    await vi.waitFor(() => expect(listeners.size).toBe(2));
+
+    releaseSiblingPass();
+    await vi.waitFor(() => expect(siblingPasses).toBe(2));
+    source.close();
+    sibling.close();
+  });
+
   it("reports a rejected transport tick", async () => {
     const failure = new Error("tick failed");
     const onError = vi.fn();

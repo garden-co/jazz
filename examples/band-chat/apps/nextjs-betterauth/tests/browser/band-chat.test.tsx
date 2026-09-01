@@ -49,7 +49,17 @@ afterEach(async () => {
   }
 });
 
-it("renders the serving-authority owner, guest-message, and removal flow", async () => {
+it("negotiates persistent browser workers and renders the owner, guest-message, and removal flow", async () => {
+  // Regression: a persistent browser worker creates its NativeRuntimeAdapter
+  // around WasmDb, then uses that artifact's feature mask for the server Hello.
+  // Removing WasmDb.wireFeatures makes this first remote worker connection fail
+  // before either mounted user can complete the shared room flow.
+  //
+  // Each mounted preview also registers several local subscriptions
+  // (rooms, profiles, messages, and members) while its persistent worker is
+  // still opening.  Admission may hold *delivery* until storage opens, but it
+  // must not serially defer native registrations: that ordering used to leave
+  // the policy-maintained member view without a Stream B witness.
   const server = await getJazzServerInfo(
     `019d4a17-4591-7c0a-a320-${crypto.randomUUID().slice(0, 12)}`,
   );

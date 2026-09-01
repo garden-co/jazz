@@ -15,6 +15,25 @@ export type WireError = {
   message: string;
 };
 
+/** A valid structured server error received before wire negotiation completed. */
+export class PreHelloWireError extends Error {
+  readonly wireError: WireError;
+
+  constructor(wireError: WireError) {
+    super(`websocket ${wireError.code} before server hello: ${wireError.message}`);
+    this.name = "PreHelloWireError";
+    this.wireError = wireError;
+  }
+}
+
+export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
+  return (
+    error instanceof PreHelloWireError &&
+    error.wireError.code === "not_ready" &&
+    error.wireError.retry === "later"
+  );
+}
+
 export type WebSocketNegotiation = {
   protocolVersion: number;
   features: number;
@@ -24,6 +43,8 @@ export type WebSocketNegotiation = {
 export type WebSocketCarrierOptions = {
   endpointUrl: string;
   peerIdentity: Uint8Array;
+  /** Features supported by the native runtime that will receive this link. */
+  features?: number;
   authJson?: string;
   onFrame: WebSocketFrameHandler;
   onError?: WebSocketErrorHandler;
@@ -76,30 +97,69 @@ export const CLIENT_WIRE_FEATURES =
 const MAX_WEBSOCKET_BATCH_BYTES = 1 << 20;
 const POSTCARD_FRAME_LENGTH_RESERVE = 5;
 const POSTCARD_BATCH_LENGTH_RESERVE = 5;
+// Keep these fixed protocol limits aligned with jazz::protocol_limits. The
+// browser implementation cannot import the Rust core, so this boundary spells
+// them out beside the matching postcard carrier decoder.
+const MAX_WIRE_FRAME_BYTES = 2 * 1024 * 1024;
+const MAX_WIRE_BATCH_FRAMES = 4_096;
 
 export function webSocketUrl(serverUrl: string, appId: string): string {
   return httpUrlToWs(serverUrl, appId);
 }
 
 export function encodeWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
+  assertWebSocketFrameBatch(frames);
   const writer = new PostcardWriter();
   writer.vec((itemWriter, index) => itemWriter.bytes(frames[index]!), frames.length);
-  return writer.finish();
+  const batch = writer.finish();
+  if (batch.byteLength > MAX_WIRE_FRAME_BYTES) {
+    throw new Error(
+      `websocket frame batch exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`,
+    );
+  }
+  return batch;
 }
 
 export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
+  if (batch.byteLength > MAX_WIRE_FRAME_BYTES) {
+    throw new Error(
+      `websocket frame batch exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`,
+    );
+  }
   const reader = new PostcardReader(batch);
-  const frames = reader.readVec((itemReader) => itemReader.bytes());
+  const count = reader.u64();
+  if (count === 0 || count > MAX_WIRE_BATCH_FRAMES) {
+    throw new Error(`websocket frame batch exceeds frame-count limit of ${MAX_WIRE_BATCH_FRAMES}`);
+  }
+
+  // Do not use `readVec`: its Array.from({ length }) allocates against the
+  // untrusted count before a protocol adapter can apply this carrier limit.
+  const frames: Uint8Array[] = [];
+  for (let index = 0; index < count; index += 1) {
+    frames.push(reader.bytesAtMost(MAX_WIRE_FRAME_BYTES, "websocket frame"));
+  }
   assertReaderDone(reader, "websocket frame batch");
   return frames;
 }
 
-export function encodeWireClientHello(): Uint8Array {
+function assertWebSocketFrameBatch(frames: readonly Uint8Array[]): void {
+  if (frames.length === 0 || frames.length > MAX_WIRE_BATCH_FRAMES) {
+    throw new Error(`websocket frame batch exceeds frame-count limit of ${MAX_WIRE_BATCH_FRAMES}`);
+  }
+  for (const frame of frames) {
+    if (frame.byteLength > MAX_WIRE_FRAME_BYTES) {
+      throw new Error(`websocket frame exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`);
+    }
+  }
+}
+
+export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Array {
+  assertWireFeatures(features, "client wire features");
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
   writer.u64(MIN_WIRE_PROTOCOL_VERSION); // min_protocol_version
   writer.u64(MAX_WIRE_PROTOCOL_VERSION); // max_protocol_version
-  writer.u64(CLIENT_WIRE_FEATURES);
+  writer.u64(features);
   writer.u64(0); // WirePeerRole::Client
   // Browser carriers do not receive the authenticated session context needed
   // to validate scoped receipts. Do not self-assert an authority endpoint:
@@ -161,6 +221,7 @@ export class WebSocketCarrier {
   private readonly onFrame: WebSocketFrameHandler;
   private readonly onError?: WebSocketErrorHandler;
   private readonly onTerminal?: WebSocketTerminalHandler;
+  private readonly localFeatures: number;
   private readonly opened: Promise<WebSocketNegotiation>;
   private resolveNegotiation!: (value: WebSocketNegotiation) => void;
   private rejectNegotiation!: (reason: unknown) => void;
@@ -174,6 +235,8 @@ export class WebSocketCarrier {
     this.onFrame = options.onFrame;
     this.onError = options.onError;
     this.onTerminal = options.onTerminal;
+    this.localFeatures = options.features ?? CLIENT_WIRE_FEATURES;
+    assertWireFeatures(this.localFeatures, "client wire features");
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
     this.opened = new Promise<WebSocketNegotiation>((resolve, reject) => {
@@ -183,7 +246,7 @@ export class WebSocketCarrier {
     void waitForOpen(this.socket).then(
       () => {
         this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
-        this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+        this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
       },
       (error) => {
         this.reportTerminal({
@@ -235,7 +298,11 @@ export class WebSocketCarrier {
     let batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
     for (const frame of frames) {
       const frameBytes = frame.byteLength + POSTCARD_FRAME_LENGTH_RESERVE;
-      if (batch.length > 0 && batchBytes + frameBytes > MAX_WEBSOCKET_BATCH_BYTES) {
+      if (
+        batch.length > 0 &&
+        (batch.length >= MAX_WIRE_BATCH_FRAMES ||
+          batchBytes + frameBytes > MAX_WEBSOCKET_BATCH_BYTES)
+      ) {
         this.socket.send(encodeWebSocketFrameBatch(batch));
         batch = [];
         batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
@@ -281,7 +348,7 @@ export class WebSocketCarrier {
       if (isWireHello(frame)) {
         if (this.negotiated) continue;
         this.negotiated = true;
-        this.resolveNegotiation(decodeServerHello(frame));
+        this.resolveNegotiation(decodeServerHello(frame, this.localFeatures));
         continue;
       }
       if (!this.negotiated) {
@@ -295,6 +362,9 @@ export class WebSocketCarrier {
             this.close();
             return;
           }
+          this.reportTerminal(error, new PreHelloWireError(error));
+          this.close();
+          return;
         }
         this.reportTerminal(
           {
@@ -317,7 +387,10 @@ export class WebSocketCarrier {
   }
 }
 
-function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
+function decodeServerHello(
+  frame: Uint8Array,
+  localFeatures = CLIENT_WIRE_FEATURES,
+): WebSocketNegotiation {
   const reader = new PostcardReader(frame);
   if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
   const hello = readWireHelloBodyExact(reader);
@@ -327,12 +400,20 @@ function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
       `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${min}..=${max}`,
     );
   }
-  const unsupportedFeatures = features & ~BigInt(CLIENT_WIRE_FEATURES);
+  const unsupportedFeatures = features & ~BigInt(localFeatures);
   if (unsupportedFeatures !== 0n) {
-    throw new Error(`server accepted unsupported wire features 0x${features.toString(16)}`);
+    throw new Error(
+      `server accepted unsupported wire features 0x${unsupportedFeatures.toString(16)}`,
+    );
   }
   if (role !== 1) throw new Error("expected WirePeerRole::Core server hello");
   return { protocolVersion: WIRE_PROTOCOL_VERSION, features: Number(features), authority };
+}
+
+function assertWireFeatures(features: number, label: string): void {
+  if (!Number.isSafeInteger(features) || features < 0 || features > 0xffff_ffff) {
+    throw new Error(`${label} must be an unsigned 32-bit integer, got ${features}`);
+  }
 }
 
 function readWireHelloBodyExact(reader: PostcardReader): {
@@ -502,8 +583,10 @@ function wireErrorCodeName(tag: number): string {
       return "backpressure";
     case 5:
       return "internal";
+    case 6:
+      return "not_ready";
     default:
-      return `unknown_${tag}`;
+      throw new Error(`unknown WireErrorCode discriminant ${tag}`);
   }
 }
 
@@ -518,7 +601,7 @@ function wireRetryName(tag: number): string {
     case 3:
       return "later";
     default:
-      return `unknown_${tag}`;
+      throw new Error(`unknown WireRetry discriminant ${tag}`);
   }
 }
 

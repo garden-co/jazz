@@ -88,6 +88,12 @@ Use `cookieSession` only when your app authenticates sync with an HttpOnly cooki
 
 Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
 
+When you supply `driver: { type: "persistent", dbName }`, that name is one physical local
+database. Jazz permanently binds it to the first app/environment/account scope that opens it, so a
+different signed-in account is rejected rather than seeing or concurrently opening the old cache.
+Use a distinct name per intended cache, or explicitly wipe the old local storage during an account
+handoff.
+
 #### Browser storage eviction
 
 `{ type: "persistent" }` writes to [IndexedDB](https://developer.mozilla.org/docs/Web/API/IndexedDB_API). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the local-first secret) and any data owned only by that user wiped.

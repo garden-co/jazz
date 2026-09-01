@@ -20,7 +20,7 @@ export type AuxiliaryRelayTrace = Readonly<{
 }>;
 
 export interface PeerTransportRuntime {
-  onPeerTransportWork(listener: () => void): () => void;
+  onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void;
   notifyPeerTransportActivity?(): void;
   progressPeerTransport(): Promise<void>;
   retirePeerTransport(transport: Transport): Promise<void>;
@@ -40,6 +40,8 @@ export class BrowserWorkerTransportPump {
   private completedGeneration = 0;
   private readonly flushWaiters = new Set<{ target: number; resolve: () => void }>();
   private readonly removeWorkListener: () => void;
+  private readonly handleRuntimeWork = (requiresDistinctPass?: boolean) =>
+    this.schedule(requiresDistinctPass ?? false);
   constructor(
     private readonly runtime: PeerTransportRuntime,
     private readonly transport: Transport,
@@ -50,7 +52,7 @@ export class BrowserWorkerTransportPump {
     // The evaluator notifies every peer after a pass. This pump drains its
     // transport immediately after the pass it requested, so that notification
     // must not recursively request another identical pass.
-    this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule(false));
+    this.removeWorkListener = runtime.onPeerTransportWork(this.handleRuntimeWork);
     this.transport.setAuxiliaryTraceEnabled?.(onAuxiliaryTrace !== undefined);
     this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
     void this.watchAuxiliaryOutbound().catch((error) => {

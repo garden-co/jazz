@@ -9,6 +9,14 @@ Architecture docs live in `crates/jazz/SPEC/` and `crates/groove/SPEC/`
 top-level `specs/` directory anymore. Private-side strategy/infra specs live
 in the `jazz-private` repo.
 
+## Durable encoding review
+
+Whenever storage or wire formats are touched, explicitly review the change for
+unspecified or default serializer encodings. Every authoritative encoding must
+be named and versioned where appropriate, specified, and pinned by byte-level
+corpus fixtures or receipts; do not treat a serializer's incidental layout as
+a durable contract.
+
 ## Work style
 
 ### Durable follow-up and WIP visibility
@@ -34,6 +42,16 @@ worked examples for the normal path and meaningful edge, failure, retry, or
 handoff cases. For nuanced or large changes, make these concrete enough for an
 adversarial reviewer to verify the behavior and for a future reader to recover
 the decision without reconstructing it from the diff or conversation history.
+
+### Stack and restack preflight
+
+Before every `gh stack link`, `gh stack submit`, rebase, merge-based restack,
+or branch propagation, run `dev/gates/require-clean-worktree.sh <checkout>`
+against every checkout that the operation will mutate. It rejects staged index
+changes, unstaged tracked changes, and non-ignored untracked files. Do not
+interpret a clean `git diff` as sufficient: it deliberately does not report a
+dirty index. Preserve or commit the state first; never let a stack operation
+implicitly carry it across branches.
 
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
@@ -65,13 +83,30 @@ must never call a focused, crate-only, or partial-artifact receipt
 CI-equivalent. Use `--ci-partition <name>` only when reproducing one named CI
 job during diagnosis; it is likewise not a full CI-equivalent result.
 
-**Generated correctness bindings.** `pnpm build:test-artifacts` seals the
-fast-WASM/release-NAPI pair into a fingerprint-addressed store under the
-current worktree's ignored `target/` directory. Browser and native correctness
-tests consume that immutable pair, not the mutable package output directories. Do not copy
-or share generated `pkg/` or NAPI generations between lanes; rebuild in the
-checkout whose tests you are running. The explicit ABI/provenance preflight is
-intentional and must remain fail-closed.
+**Generated correctness bindings.** `pnpm build:correctness-artifacts` is the
+native producer: it builds and seals the fast-WASM/release-NAPI pair into a
+fingerprint-addressed read-only store under this
+worktree's ignored `target/`, and writes a producer manifest bound to the exact
+checkout SHA and artifact hashes. `pnpm test:typescript-consumers` is the
+consumer: it rejects a missing, stale, or mismatched manifest before and after
+building Jazz Tools and launching TS/browser suites. This protects against
+accidental concurrent builds or workspace mutation, not a hostile same-UID
+process: portable path-based WASM/NAPI consumers cannot provide that security
+boundary. Do not copy or share generated
+`pkg/`, NAPI generations, snapshots, or producer manifests between lanes;
+rebuild in the checkout whose tests you are running. The boundary is deliberate
+and fail-closed: native production can succeed even when a TypeScript consumer
+build/test subsequently fails.
+
+**Correctness-artifact cache boundary.** Native/WASM generations are producer
+state, not Turbo cache entries. A NAPI generation can retain many GiB of Cargo
+products, so Turbo's local/remote archives would both be unbounded and unsafe
+to restore as correctness authority. Keep `jazz-napi#build`,
+`jazz-wasm#build`, `jazz-wasm#build:fast`, and `jazz-tools#build` explicitly
+`cache: false`; preserve the resolved-Turbo-graph assertion when changing this
+boundary. Ordinary small package builds may use Turbo normally, but must never
+add `.native-artifacts/**`, WASM `pkg/**`, or the correctness-artifact store as
+cacheable outputs.
 
 - `cargo test -p jazz`
 - `cargo test -p groove`

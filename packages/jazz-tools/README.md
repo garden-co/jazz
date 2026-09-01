@@ -20,7 +20,6 @@ npx jazz-tools@2.0.0-alpha.0 server
 - macOS x64
 - Linux x64
 - Linux arm64
-- Windows x64
 
 If your platform is not supported in the npm package, install with Cargo from source.
 

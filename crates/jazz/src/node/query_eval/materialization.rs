@@ -411,6 +411,17 @@ where
         local: &LocalMaintainedViewSubscription,
     ) -> Result<LocalMaintainedMaterializationCache, Error> {
         let mut cache = LocalMaintainedMaterializationCache::default();
+        // Storage-backed root subscriptions carry exact result-member
+        // identities, not a source-wide witness cache. Loading the whole
+        // transaction set here would silently recreate the retained-source
+        // cost at every reset; the per-member path below performs an exact
+        // `(table, row, tx)` lookup instead.
+        if local
+            .maintained
+            .uses_storage_backed_result_materialization()
+        {
+            return Ok(cache);
+        }
         let mut tx_ids = BTreeSet::new();
         for member in &local.result_set {
             let Some((_, _, tx_id)) = member.as_row() else {
@@ -537,7 +548,19 @@ where
                 // bundle; use that member's exact `(table, row, tx)` witness
                 // to materialize the newly admitted row. This is payload
                 // lookup, not a facade-side query or recompute.
-                let tx_versions = self.query_versions_for_tx(entry.2).await?;
+                let tx_versions = if local
+                    .maintained
+                    .uses_storage_backed_result_materialization()
+                {
+                    self.storage_backed_maintained_result_versions(
+                        entry.0.as_str(),
+                        entry.1,
+                        entry.2,
+                    )
+                    .await?
+                } else {
+                    self.query_versions_for_tx(entry.2).await?
+                };
                 let Some(version) = self.maintained_witness_for_result_member(
                     &tx_versions,
                     local.result_schema_version,
@@ -615,7 +638,15 @@ where
         )? {
             version.clone()
         } else {
-            let tx_versions = self.query_versions_for_tx(entry.2).await?;
+            let tx_versions = if local
+                .maintained
+                .uses_storage_backed_result_materialization()
+            {
+                self.storage_backed_maintained_result_versions(entry.0.as_str(), entry.1, entry.2)
+                    .await?
+            } else {
+                self.query_versions_for_tx(entry.2).await?
+            };
             let Some(version) = self.maintained_witness_for_result_member(
                 &tx_versions,
                 local.result_schema_version,
@@ -645,6 +676,28 @@ where
             .entry(tx_id)
             .or_insert_with(|| local.maintained.versions_by_tx(tx_id))
             .as_slice()
+    }
+
+    /// Load only the immutable content/deletion cells for one delivered
+    /// result-member identity.  This is deliberately narrower than
+    /// `query_versions_for_tx`: a multi-row transaction must not turn a
+    /// one-row subscription entry into a whole-transaction materialization.
+    async fn storage_backed_maintained_result_versions(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        tx_id: TxId,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let stored_tx = self
+            .query_transaction(tx_id)
+            .await?
+            .ok_or(Error::MissingTransaction(tx_id))?;
+        self.query_versions_for_tx_rows_by_alias(
+            tx_id,
+            stored_tx.node_alias,
+            &BTreeSet::from([(table.to_owned(), row_uuid)]),
+        )
+        .await
     }
 
     async fn preload_tx_versions_for_materialization(

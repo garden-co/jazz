@@ -536,6 +536,7 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners_inner() {
 /// alice(writer) ──create doc folder=bogus_id─────────────────► hidden
 /// alice(reader) ──query docs─────────────────────────────────► sees only shared doc
 /// alice(writer) ──delete shared folder───────────────────────► server
+/// alice(reader) ──existing docs query─────────────────────────► sees removal
 /// bob(fresh) ─────query docs─────────────────────────────────► sees nothing
 /// ```
 #[tokio::test]
@@ -640,6 +641,19 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     alice_writer
         .delete(folder_id)
         .expect("delete inherited parent folder");
+    let alice_rows_after_delete = wait_for_query(
+        &alice_reader,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "alice's retained document view removes the deleted-parent document",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(
+        alice_rows_after_delete.is_empty(),
+        "a retained document view must not preserve a row after its inherited parent is deleted: {alice_rows_after_delete:?}"
+    );
     let bob = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)

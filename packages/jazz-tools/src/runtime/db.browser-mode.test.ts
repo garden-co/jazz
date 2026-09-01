@@ -41,7 +41,10 @@ describe("createDb browser mode", () => {
     (globalThis as Record<string, unknown>).Worker = class {};
 
     const createdDb = {} as Db;
-    const createSpy = vi.spyOn(Db, "create").mockReturnValue(createdDb);
+    // Direct creation is now asynchronous so a Node foreground lease can be
+    // acquired before any runtime is materialized. Memory-mode browser Dbs
+    // still use that direct (non-worker) path, but do not acquire a lease.
+    const createSpy = vi.spyOn(Db, "createWithDirectConnection").mockResolvedValue(createdDb);
 
     const result = await createDb({
       appId: "driver-mode-memory",

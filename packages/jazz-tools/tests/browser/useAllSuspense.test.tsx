@@ -7,6 +7,7 @@ import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/d
 import { createJazzClient, type JazzClient } from "../../src/react/create-jazz-client.js";
 import { JazzClientProvider as JazzProvider } from "../../src/react-core/provider.js";
 import { useAllSuspense } from "../../src/react-core/use-all.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 
 const schema: WasmSchema = {
   orgs: {
@@ -486,7 +487,7 @@ describe("useAllSuspense browser integration", () => {
       <JazzProvider client={client}>
         <UseAllProbe
           query={makeQuery<Todo>("todos", {})}
-          options={{ localUpdates: "deferred", propagation: "full" }}
+          options={{ propagation: "full" }}
           pick={(row) => row.title}
         />
       </JazzProvider>,
@@ -507,7 +508,7 @@ describe("useAllSuspense browser integration", () => {
     );
   });
 
-  it("supports local-only read propagation", async () => {
+  it("supports the internal local-only read tier", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("local-only"),
@@ -524,7 +525,7 @@ describe("useAllSuspense browser integration", () => {
     });
 
     await expect(
-      client.db.all(makeQuery<Todo>("todos", {}), { propagation: "local-only" }),
+      client.db.all(makeQuery<Todo>("todos", {}), inspectorLocalQueryOptions()),
     ).resolves.toEqual([expect.objectContaining({ title: "local-only-task" })]);
   });
 
@@ -669,21 +670,36 @@ describe("useAllSuspense browser integration", () => {
       "expected suspense rows mount for gather query",
     );
 
-    const {
-      value: { id: rootId },
-    } = await client.db.insert(teams, {
+    const root = await client.db.insert(teams, {
       name: "root",
       org_id: undefined,
       parent_id: undefined,
     });
-    const {
-      value: { id: midId },
-    } = await client.db.insert(teams, {
+    const rootId = root.value.id;
+    const mid = await client.db.insert(teams, {
       name: "mid",
       org_id: undefined,
       parent_id: rootId,
     });
-    await client.db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
+    const midId = mid.value.id;
+    const leaf = await client.db.insert(teams, {
+      name: "leaf",
+      org_id: undefined,
+      parent_id: midId,
+    });
+
+    // A cold recursive gather may hydrate over several owner turns. Its work
+    // must never starve unrelated local writes or their receipts.
+    const waitForLocal = (label: string, wait: Promise<void>) =>
+      Promise.race([
+        wait,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${label} local acknowledgement timed out`)), 5_000),
+        ),
+      ]);
+    await waitForLocal("root", root.wait({ tier: "local" }));
+    await waitForLocal("mid", mid.wait({ tier: "local" }));
+    await waitForLocal("leaf", leaf.wait({ tier: "local" }));
 
     await waitForCondition(
       () => {
