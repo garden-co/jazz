@@ -880,7 +880,7 @@ struct QueryServing {
 /// membership meaningful after a reconnect or durable reopen.  Nothing in
 /// this aggregate is an ordinary local maintained-view cache.
 #[derive(Clone, Debug, Default)]
-struct AuthorityResultState {
+pub(crate) struct AuthorityResultState {
     /// Monotonically increasing receipt for received ViewUpdates.
     applied_view_update_generation: u64,
     /// Exact authoritative membership and an occurrence index for replacement.

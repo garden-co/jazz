@@ -386,6 +386,18 @@ where
         matches.next().is_none().then_some(first)
     }
 
+    /// Borrow a result only when its canonical binding names one exact
+    /// authority scope. Binding-only client helpers must fail closed in a
+    /// multiplexed relay rather than selecting whichever session arrived
+    /// last. Relay serving paths carry `AuthorityResultKey` explicitly.
+    pub(crate) fn authority_result_state_for_binding_view(
+        &self,
+        binding_view: BindingViewKey,
+    ) -> Option<&AuthorityResultState> {
+        self.unique_authority_result_key_for_binding_view(binding_view)
+            .and_then(|key| self.query.authority_results.get(&key))
+    }
+
     fn drain_parked_binding_deltas_for_shape(&mut self, shape_id: ShapeId) -> Result<(), Error> {
         let Some(deltas) = self.parking.parked_binding_deltas.remove(&shape_id) else {
             return Ok(());
@@ -694,11 +706,15 @@ where
             self.insert_settled_result_member_indexed(authority_result_key.clone(), member);
         }
         self.query
-            .settled_through_by_binding_view
-            .insert(binding_view_key, settled_through);
+            .authority_results
+            .entry(authority_result_key)
+            .or_default()
+            .settled_through = Some(settled_through);
         self.query
-            .pending_authoritative_reset_binding_views
-            .insert(binding_view_key);
+            .authority_results
+            .entry(AuthorityResultKey::unscoped(binding_view_key))
+            .or_default()
+            .pending_authoritative_reset = true;
     }
 
     #[cfg(test)]
@@ -715,33 +731,59 @@ where
             settled_through,
         );
         self.query
-            .settled_program_facts
-            .insert(binding_view_key, program_facts.into_iter().collect());
+            .authority_results
+            .entry(AuthorityResultKey::unscoped(binding_view_key))
+            .or_default()
+            .settled_program_facts = program_facts.into_iter().collect();
     }
 
     pub(crate) fn take_pending_authoritative_reset_binding_views(
         &mut self,
     ) -> BTreeSet<BindingViewKey> {
-        std::mem::take(&mut self.query.pending_authoritative_reset_binding_views)
+        self.query
+            .authority_results
+            .iter_mut()
+            .filter_map(|(key, state)| {
+                state.pending_authoritative_reset.then(|| {
+                    state.pending_authoritative_reset = false;
+                    key.binding_view
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn take_pending_terminal_operations(
         &mut self,
         binding_view_key: BindingViewKey,
     ) -> Vec<groove::ivm::TerminalOperation> {
-        self.query
-            .pending_terminal_operations_by_binding_view
-            .remove(&binding_view_key)
-            .unwrap_or_default()
+        let Some(authority_result_key) =
+            self.unique_authority_result_key_for_binding_view(binding_view_key)
+        else {
+            return Vec::new();
+        };
+        std::mem::take(
+            &mut self
+                .query
+                .authority_results
+                .entry(authority_result_key)
+                .or_default()
+                .pending_terminal_operations,
+        )
     }
 
     pub(crate) fn defer_authoritative_reset_for_binding_view(
         &mut self,
         binding_view_key: BindingViewKey,
     ) {
-        self.query
-            .pending_authoritative_reset_binding_views
-            .insert(binding_view_key);
+        if let Some(authority_result_key) =
+            self.unique_authority_result_key_for_binding_view(binding_view_key)
+        {
+            self.query
+                .authority_results
+                .entry(authority_result_key)
+                .or_default()
+                .pending_authoritative_reset = true;
+        }
     }
 
     #[cfg(test)]
@@ -749,27 +791,24 @@ where
         &self,
         binding_view_key: BindingViewKey,
     ) -> bool {
-        self.query
-            .pending_authoritative_reset_binding_views
-            .contains(&binding_view_key)
+        self.authority_result_state_for_binding_view(binding_view_key)
+            .is_some_and(|state| state.pending_authoritative_reset)
     }
 
     pub(crate) fn publication_deferred_for_binding_view(
         &self,
         binding_view_key: BindingViewKey,
     ) -> bool {
-        self.query
-            .deferred_publication_binding_views
-            .contains(&binding_view_key)
+        self.authority_result_state_for_binding_view(binding_view_key)
+            .is_some_and(|state| state.deferred_publication)
     }
 
     pub(crate) fn opening_pending_for_binding_view(
         &self,
         binding_view_key: BindingViewKey,
     ) -> bool {
-        self.query
-            .pending_opening_binding_views
-            .contains(&binding_view_key)
+        self.authority_result_state_for_binding_view(binding_view_key)
+            .is_some_and(|state| state.pending_opening)
     }
 
     pub(crate) fn settled_result_transitions_for_subscription(
@@ -891,20 +930,12 @@ where
         shape: &ValidatedQuery,
         binding_view_key: BindingViewKey,
     ) -> Result<Option<RelationSnapshot>, Error> {
-        let Some(result_members) = self
-            .query
-            .settled_result_sets
-            .get(&binding_view_key)
-            .cloned()
+        let Some(authority_result) = self.authority_result_state_for_binding_view(binding_view_key)
         else {
             return Ok(None);
         };
-        let program_facts = self
-            .query
-            .settled_program_facts
-            .get(&binding_view_key)
-            .cloned()
-            .unwrap_or_default();
+        let result_members = authority_result.settled_result_set.clone();
+        let program_facts = authority_result.settled_program_facts.clone();
         let result_payloads = program_facts
             .iter()
             .filter_map(|fact| match fact {
@@ -977,10 +1008,8 @@ where
         &self,
         binding_view_key: BindingViewKey,
     ) -> Option<GlobalTime> {
-        self.query
-            .settled_through_by_binding_view
-            .get(&binding_view_key)
-            .copied()
+        self.authority_result_state_for_binding_view(binding_view_key)
+            .and_then(|state| state.settled_through)
     }
 
     pub(crate) async fn known_state_declaration_for_subscription(
@@ -1008,10 +1037,8 @@ where
         }
         if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
             let authorization_progress = self
-                .query
-                .authorization_progress_by_binding_view
-                .get(&binding_view_key)
-                .copied();
+                .authority_result_state_for_binding_view(binding_view_key)
+                .and_then(|state| state.authorization_progress);
             return Ok(Some(match authorization_progress {
                 Some(authorization_progress) => {
                     KnownStateDeclaration::FastWithAuthorizationProgress {

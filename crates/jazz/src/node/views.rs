@@ -1284,19 +1284,25 @@ where
         self.validate_view_update_payloads(&updates)?;
         let mut all_bundle_refs = Vec::new();
         let mut bulk_candidates = Vec::new();
-        let mut initial_hydration_binding_views =
-            self.query.initial_hydration_binding_views.clone();
+        let mut initial_hydration_authority_results = self
+            .query
+            .authority_results
+            .iter()
+            .filter_map(|(key, state)| state.initial_hydration.then_some(key.clone()))
+            .collect::<BTreeSet<_>>();
         for update in &updates {
-            let Ok(binding_view_key) = self.binding_view_key_for_subscription(update.subscription)
+            let Ok(authority_result_key) =
+                self.authority_result_key_for_subscription(update.subscription)
             else {
                 continue;
             };
             if update.reset_result_set {
-                initial_hydration_binding_views.insert(binding_view_key);
+                initial_hydration_authority_results.insert(authority_result_key.clone());
             }
             let version_bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
             all_bundle_refs.extend(version_bundle_refs.iter().copied());
-            let in_initial_hydration = initial_hydration_binding_views.contains(&binding_view_key);
+            let in_initial_hydration =
+                initial_hydration_authority_results.contains(&authority_result_key);
             if update.reset_result_set
                 && update.peer_complete_tx_payload_refs.is_empty()
                 && update.result_member_removes.is_empty()
@@ -1307,7 +1313,7 @@ where
                 && version_bundle_refs.is_empty()
                 && (!update.reset_result_set || update.peer_complete_tx_payload_refs.is_empty())
             {
-                initial_hydration_binding_views.remove(&binding_view_key);
+                initial_hydration_authority_results.remove(&authority_result_key);
             }
         }
         let preflight = self
@@ -1396,7 +1402,13 @@ where
             self.apply_view_update_inner(update, Some(&preloaded_tx_ids))
                 .await?;
         }
-        if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
+        if self.initial_sync_flush_active
+            && self
+                .query
+                .authority_results
+                .values()
+                .all(|state| !state.initial_hydration)
+        {
             self.finish_initial_sync_flush_cadence().await?;
         }
         Ok(())

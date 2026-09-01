@@ -401,9 +401,8 @@ where
         // policies. The occurrence sidecar describes only public query roots, matching
         // the authoritative snapshot's `root_count`, so exclude those support members.
         local.result_set = self
-            .query
-            .settled_result_sets
-            .get(&binding_view_key)
+            .authority_result_state_for_binding_view(binding_view_key)
+            .map(|state| &state.settled_result_set)
             .map(|members| {
                 members
                     .iter()
@@ -423,10 +422,8 @@ where
         local.authoritative_reconciliation_deferred = false;
         local.deferred_authoritative_row_keys.clear();
         local.program_facts = self
-            .query
-            .settled_program_facts
-            .get(&binding_view_key)
-            .cloned()
+            .authority_result_state_for_binding_view(binding_view_key)
+            .map(|state| state.settled_program_facts.clone())
             .unwrap_or_default();
         if local.result_query.aggregate.is_some() {
             local
@@ -484,10 +481,8 @@ where
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
     ) -> bool {
         let remote_members = self
-            .query
-            .settled_result_sets
-            .get(&binding_view_key)
-            .cloned()
+            .authority_result_state_for_binding_view(binding_view_key)
+            .map(|state| state.settled_result_set.clone())
             .unwrap_or_default();
         local
             .result_set
@@ -521,13 +516,11 @@ where
         self.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
         if local.result_query.aggregate.is_some()
-            && let Some(remote_members) =
-                self.query.settled_result_sets.get(&local.binding_view_key)
-            && let Some(remote_facts) = self
-                .query
-                .settled_program_facts
-                .get(&local.binding_view_key)
+            && let Some(authority_result) =
+                self.authority_result_state_for_binding_view(local.binding_view_key)
         {
+            let remote_members = &authority_result.settled_result_set;
+            let remote_facts = &authority_result.settled_program_facts;
             let visible_members = remote_members
                 .iter()
                 .filter(|member| {
@@ -622,17 +615,13 @@ where
                         .extend(local.deferred_authoritative_row_keys.iter().cloned());
                 }
                 let remote_members = self
-                    .query
-                    .settled_result_sets
-                    .get(&binding_view)
-                    .cloned()
+                    .authority_result_state_for_binding_view(binding_view)
+                    .map(|state| state.settled_result_set.clone())
                     .unwrap_or_default();
                 let remote_payloads = self
-                    .query
-                    .settled_program_facts
-                    .get(&binding_view)
+                    .authority_result_state_for_binding_view(binding_view)
                     .into_iter()
-                    .flatten()
+                    .flat_map(|state| state.settled_program_facts.iter())
                     .filter_map(|fact| match fact {
                         ProgramFactEntry::ResultPayload(payload) => {
                             Some((payload.member.clone(), payload.clone()))

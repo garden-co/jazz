@@ -222,10 +222,12 @@ where
             DurabilityTier::Global => {
                 let binding_view_key =
                     BindingViewKey::from_canonical_subscription_key(subscription);
-                let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view_key)
+                let Some(authority_result) =
+                    self.authority_result_state_for_binding_view(binding_view_key)
                 else {
                     return Ok(Vec::new());
                 };
+                let row_result_set = &authority_result.settled_result_set;
                 let row_entries = row_result_set
                     .iter()
                     .filter_map(ResultMemberEntry::as_row)

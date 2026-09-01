@@ -1565,6 +1565,7 @@ where
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
+        self.query.authority_results.clear();
         self.query.settled_result_sets.clear();
         self.query.local_materialized_window_binding_views.clear();
         self.query.settled_result_row_index.clear();

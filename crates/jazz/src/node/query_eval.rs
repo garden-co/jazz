@@ -1540,9 +1540,8 @@ where
             ReadViewKey::default(),
         );
         Ok(self
-            .query
-            .settled_result_sets
-            .contains_key(&binding_view_key)
+            .authority_result_state_for_binding_view(binding_view_key)
+            .is_some()
             .then_some(binding_view_key))
     }
 
@@ -1630,7 +1629,9 @@ where
             return None;
         }
         if tier == DurabilityTier::Local
-            && !self.query.settled_result_sets.contains_key(&binding_view)
+            && self
+                .authority_result_state_for_binding_view(binding_view)
+                .is_none()
         {
             // A store read may request a narrower window than the one the
             // browser worker already delivered. It is safe to reuse a source
@@ -1676,7 +1677,9 @@ where
                     binding.binding_id(),
                     read_view_key,
                 );
-                self.query.settled_result_sets.contains_key(&key).then_some(
+                self.authority_result_state_for_binding_view(key)
+                    .is_some()
+                    .then_some(
                     ClientSettledBindingView {
                         key,
                         relative_offset: target.offset - source.offset,
