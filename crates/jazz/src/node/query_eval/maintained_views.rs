@@ -19,9 +19,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) binding_view_key: BindingViewKey,
     pub(super) result_select: Option<Vec<String>>,
     pub(super) result_set: BTreeSet<ResultMemberEntry>,
-    pub(super) authoritative_result_generation: u64,
-    pub(super) authoritative_reconciliation_deferred: bool,
-    pub(super) deferred_authoritative_row_keys: BTreeSet<(String, RowUuid)>,
+    pub(super) local_authority: LocalAuthorityReconciliation,
     pub(super) result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     pub(super) program_facts: BTreeSet<ProgramFactEntry>,
     pub(super) root_occurrence_ids: Vec<OutputOccurrenceId>,
@@ -115,11 +113,12 @@ impl LocalMaintainedViewSubscription {
             .sum::<usize>()
             + self.program_facts.len() * 64;
         let deferred_authoritative_row_keys_bytes = self
-            .deferred_authoritative_row_keys
+            .local_authority
+            .deferred_row_keys()
             .iter()
             .map(|(table, _)| table.len() + std::mem::size_of::<RowUuid>())
             .sum::<usize>()
-            + self.deferred_authoritative_row_keys.len() * 64;
+            + self.local_authority.deferred_row_keys().len() * 64;
         let control_state_bytes = terminal_schemas.terminal_schemas_bytes
             + tables_bytes
             + self.result_table.len()
@@ -267,9 +266,7 @@ where
             }),
             result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
-            authoritative_result_generation: 0,
-            authoritative_reconciliation_deferred: false,
-            deferred_authoritative_row_keys: BTreeSet::new(),
+            local_authority: LocalAuthorityReconciliation::default(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
             root_occurrence_ids: Vec::new(),
@@ -419,10 +416,10 @@ where
                     .collect()
             })
             .unwrap_or_default();
-        local.authoritative_result_generation =
-            self.applied_authority_result_generation(authority_result_key);
-        local.authoritative_reconciliation_deferred = false;
-        local.deferred_authoritative_row_keys.clear();
+        local.local_authority.replace_source(
+            authority_result_key.clone(),
+            self.applied_authority_result_generation(authority_result_key),
+        );
         local.program_facts = self
             .query
             .authority_results
@@ -467,15 +464,19 @@ where
         local: &mut LocalMaintainedViewSubscription,
         authority_result_key: &AuthorityResultKey,
     ) {
-        local.authoritative_result_generation =
-            self.applied_authority_result_generation(authority_result_key);
+        local.local_authority.replace_source(
+            authority_result_key.clone(),
+            self.applied_authority_result_generation(authority_result_key),
+        );
     }
 
     pub(crate) fn defer_local_maintained_authority_reconciliation(
         &self,
         local: &mut LocalMaintainedViewSubscription,
     ) {
-        local.authoritative_reconciliation_deferred = true;
+        local
+            .local_authority
+            .defer(local.local_authority.deferred_row_keys().clone());
     }
 
     pub(crate) fn local_maintained_authority_reconciliation_conflicts(
@@ -501,9 +502,9 @@ where
         local: &LocalMaintainedViewSubscription,
         authority_result_key: &AuthorityResultKey,
     ) -> bool {
-        local.authoritative_reconciliation_deferred
+        local.local_authority.is_deferred()
             || self.applied_authority_result_generation(authority_result_key)
-                != local.authoritative_result_generation
+                != local.local_authority.generation()
     }
 
     async fn drain_local_maintained_view_subscription_transitions(
@@ -613,13 +614,13 @@ where
             // Local optimistic changes can advance the maintained graph
             // without any newer serving-peer membership decision. Keep them
             // visible until an authoritative generation advances.
-            if authoritative_generation != local.authoritative_result_generation
-                || local.authoritative_reconciliation_deferred
+            if authoritative_generation != local.local_authority.generation()
+                || local.local_authority.is_deferred()
             {
                 let mut protected_row_keys = preserved_row_keys.clone();
-                if authoritative_generation == local.authoritative_result_generation {
+                if authoritative_generation == local.local_authority.generation() {
                     protected_row_keys
-                        .extend(local.deferred_authoritative_row_keys.iter().cloned());
+                        .extend(local.local_authority.deferred_row_keys().iter().cloned());
                 }
                 let remote_members = self
                     .query
@@ -640,6 +641,27 @@ where
                         _ => None,
                     })
                     .collect::<BTreeMap<_, _>>();
+                let remote_facts = self
+                    .query
+                    .authority_results
+                    .get(&authority_result_key)
+                    .map(|state| state.settled_program_facts.clone())
+                    .unwrap_or_default();
+                let mut candidate_reconciliation = local.local_authority.clone();
+                if candidate_reconciliation.source() != Some(&authority_result_key) {
+                    candidate_reconciliation
+                        .replace_source(authority_result_key.clone(), authoritative_generation);
+                }
+                let authority_delta = candidate_reconciliation
+                    .reconcile(
+                        &authority_result_key,
+                        authoritative_generation,
+                        &local.result_set,
+                        &local.program_facts,
+                        remote_members,
+                        remote_facts,
+                    )
+                    .expect("the current exact authority source must reconcile");
                 // The local maintained graph may intentionally be behind the
                 // authority frontier (for example, an Edge-tier window over a
                 // client-local database).  An authoritative ViewUpdate is not
@@ -647,19 +669,19 @@ where
                 // decision for that frontier.  Import members newly admitted
                 // there so a row promoted across a TopBy boundary is delivered
                 // even though none of its locally-visible source facts changed.
-                for entry in remote_members.difference(&local.result_set) {
+                for entry in authority_delta.member_adds {
                     if let Some(row_key) =
-                        result_member_matching_row_key(entry, &protected_row_keys)
+                        result_member_matching_row_key(&entry, &protected_row_keys)
                     {
                         suppressed_authoritative_change = true;
                         suppressed_authoritative_row_keys.insert(row_key);
                         continue;
                     }
-                    if !local.result_set.contains(entry) {
-                        let materializable = if remote_payloads.contains_key(entry) {
+                    if !local.result_set.contains(&entry) {
+                        let materializable = if remote_payloads.contains_key(&entry) {
                             true
                         } else if let Some(row) = self
-                            .materialize_local_maintained_view_result_member(local, entry)
+                            .materialize_local_maintained_view_result_member(local, &entry)
                             .await?
                         {
                             let table = self.table(row.table())?;
@@ -682,20 +704,20 @@ where
                         authoritative_membership_changed = true;
                         authoritative_member_adds.insert(entry.clone());
                         states.insert(entry.clone(), (false, true));
-                        if let Some(payload) = remote_payloads.get(entry) {
+                        if let Some(payload) = remote_payloads.get(&entry) {
                             payload_states.insert(
                                 entry.clone(),
                                 (
-                                    local.result_payloads.get(entry).cloned(),
+                                    local.result_payloads.get(&entry).cloned(),
                                     Some(payload.clone()),
                                 ),
                             );
                         }
                     }
                 }
-                for entry in local.result_set.difference(&remote_members) {
+                for entry in authority_delta.member_removes {
                     if let Some(row_key) =
-                        result_member_matching_row_key(entry, &protected_row_keys)
+                        result_member_matching_row_key(&entry, &protected_row_keys)
                     {
                         suppressed_authoritative_change = true;
                         suppressed_authoritative_row_keys.insert(row_key);
@@ -705,23 +727,31 @@ where
                     // occurrence remains visible through a new content
                     // version. The snapshot reducer coalesces the matching
                     // occurrence add/remove into one replacement.
-                    if local.result_set.contains(entry) {
+                    if local.result_set.contains(&entry) {
                         authoritative_membership_changed = true;
                         states.insert(entry.clone(), (true, false));
-                        if local.result_payloads.contains_key(entry) {
+                        if local.result_payloads.contains_key(&entry) {
                             payload_states.insert(
                                 entry.clone(),
-                                (local.result_payloads.get(entry).cloned(), None),
+                                (local.result_payloads.get(&entry).cloned(), None),
                             );
                         }
                     }
                 }
-                local.authoritative_result_generation = authoritative_generation;
-                local.authoritative_reconciliation_deferred = suppressed_authoritative_change;
+                for fact in authority_delta.fact_adds {
+                    let before = local.program_facts.contains(&fact);
+                    fact_states.insert(fact, (before, true));
+                }
+                for fact in authority_delta.fact_removes {
+                    let before = local.program_facts.contains(&fact);
+                    fact_states.insert(fact, (before, false));
+                }
                 if suppressed_authoritative_change {
-                    local.deferred_authoritative_row_keys = suppressed_authoritative_row_keys;
+                    local
+                        .local_authority
+                        .defer(suppressed_authoritative_row_keys);
                 } else {
-                    local.deferred_authoritative_row_keys.clear();
+                    local.local_authority = candidate_reconciliation;
                 }
             }
         }

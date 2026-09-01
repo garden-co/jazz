@@ -230,6 +230,9 @@ mod subscriptions;
 
 mod maintained_views;
 
+mod local_authority_reconciliation;
+pub(crate) use local_authority_reconciliation::LocalAuthorityReconciliation;
+
 #[cfg(feature = "testing")]
 pub(crate) use maintained_views::LocalMaintainedViewSubscriptionFootprint;
 use maintained_views::SubscriptionPreparedPlan;

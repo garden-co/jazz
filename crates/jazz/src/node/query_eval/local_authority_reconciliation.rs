@@ -1,0 +1,169 @@
+//! Shared Local-plus-authority membership reconciliation.
+//!
+//! This state is deliberately independent of receiver ownership. Both the DB
+//! facade and peer publication keep their own receiver/materialization state,
+//! but authority provenance and source replacement must follow one contract.
+
+use super::*;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LocalAuthorityReconciliation {
+    source: Option<AuthorityResultKey>,
+    generation: u64,
+    confirmed_members: BTreeSet<ResultMemberEntry>,
+    confirmed_facts: BTreeSet<ProgramFactEntry>,
+    deferred: bool,
+    deferred_row_keys: BTreeSet<(String, RowUuid)>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LocalAuthorityDelta {
+    pub(crate) member_adds: Vec<ResultMemberEntry>,
+    pub(crate) member_removes: Vec<ResultMemberEntry>,
+    pub(crate) fact_adds: Vec<ProgramFactEntry>,
+    pub(crate) fact_removes: Vec<ProgramFactEntry>,
+}
+
+impl LocalAuthorityReconciliation {
+    pub(crate) fn source(&self) -> Option<&AuthorityResultKey> {
+        self.source.as_ref()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn is_deferred(&self) -> bool {
+        self.deferred
+    }
+
+    pub(crate) fn deferred_row_keys(&self) -> &BTreeSet<(String, RowUuid)> {
+        &self.deferred_row_keys
+    }
+
+    pub(crate) fn defer(&mut self, row_keys: BTreeSet<(String, RowUuid)>) {
+        self.deferred = true;
+        self.deferred_row_keys = row_keys;
+    }
+
+    pub(crate) fn replace_source(&mut self, source: AuthorityResultKey, generation: u64) {
+        if self.source.as_ref() != Some(&source) {
+            self.confirmed_members.clear();
+            self.confirmed_facts.clear();
+            self.deferred = false;
+            self.deferred_row_keys.clear();
+        }
+        self.source = Some(source);
+        self.generation = generation;
+    }
+
+    /// Reconcile one exact immutable source snapshot with the currently
+    /// visible Local result. Stale source/generation updates are ignored.
+    pub(crate) fn reconcile(
+        &mut self,
+        source: &AuthorityResultKey,
+        generation: u64,
+        visible_members: &BTreeSet<ResultMemberEntry>,
+        visible_facts: &BTreeSet<ProgramFactEntry>,
+        exact_members: BTreeSet<ResultMemberEntry>,
+        exact_facts: BTreeSet<ProgramFactEntry>,
+    ) -> Option<LocalAuthorityDelta> {
+        if self.source.as_ref() != Some(source) || generation < self.generation {
+            return None;
+        }
+        let delta = LocalAuthorityDelta {
+            member_adds: exact_members.difference(visible_members).cloned().collect(),
+            member_removes: self
+                .confirmed_members
+                .difference(&exact_members)
+                .cloned()
+                .collect(),
+            fact_adds: exact_facts.difference(visible_facts).cloned().collect(),
+            fact_removes: self
+                .confirmed_facts
+                .difference(&exact_facts)
+                .cloned()
+                .collect(),
+        };
+        self.generation = generation;
+        self.confirmed_members = exact_members;
+        self.confirmed_facts = exact_facts;
+        self.deferred = false;
+        self.deferred_row_keys.clear();
+        Some(delta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(byte: u8) -> ResultMemberEntry {
+        ResultMemberEntry::Synthetic {
+            table: "docs".to_owned(),
+            row: vec![byte],
+            replacement: SyntheticReplacementToken::from_encoded_record(vec![byte]),
+        }
+    }
+
+    fn source(byte: u8) -> AuthorityResultKey {
+        AuthorityResultKey::unscoped(BindingViewKey::new(
+            ShapeId(uuid::Uuid::from_bytes([byte; 16])),
+            BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            ReadViewKey::default(),
+        ))
+    }
+
+    #[test]
+    fn authority_echo_deduplicates_then_removal_retires_only_confirmed_member() {
+        let local = member(1);
+        let remote = member(2);
+        let key = source(3);
+        let mut state = LocalAuthorityReconciliation::default();
+        state.replace_source(key.clone(), 0);
+        let first = state
+            .reconcile(
+                &key,
+                1,
+                &BTreeSet::from([local.clone()]),
+                &BTreeSet::new(),
+                BTreeSet::from([local.clone(), remote.clone()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        assert_eq!(first.member_adds, vec![remote.clone()]);
+        let second = state
+            .reconcile(
+                &key,
+                2,
+                &BTreeSet::from([local.clone(), remote.clone()]),
+                &BTreeSet::new(),
+                BTreeSet::from([local.clone()]),
+                BTreeSet::new(),
+            )
+            .unwrap();
+        assert_eq!(second.member_removes, vec![remote]);
+    }
+
+    #[test]
+    fn source_replacement_preserves_unconfirmed_local_and_rejects_stale_source() {
+        let local = member(1);
+        let old = source(2);
+        let fresh = source(3);
+        let mut state = LocalAuthorityReconciliation::default();
+        state.replace_source(old.clone(), 1);
+        state.replace_source(fresh.clone(), 0);
+        assert!(
+            state
+                .reconcile(
+                    &old,
+                    2,
+                    &BTreeSet::from([local]),
+                    &BTreeSet::new(),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                )
+                .is_none()
+        );
+    }
+}

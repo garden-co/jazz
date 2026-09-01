@@ -45,28 +45,6 @@ fn reconcile_retained_members_after_initial_deletion_witness(
     }
 }
 
-/// Apply the same Local-plus-authority contract owned by
-/// `LocalMaintainedViewSubscription` at the facade boundary to the peer
-/// publication representation: exact authority adds augment Local knowledge,
-/// while authority removals affect only members that this exact source had
-/// previously confirmed. See #2492 for consolidating the two ownership types.
-fn local_overlay_authority_delta<T>(
-    previous: &BTreeSet<T>,
-    authority_confirmed: &BTreeSet<T>,
-    exact_authority: &BTreeSet<T>,
-) -> (Vec<T>, Vec<T>)
-where
-    T: Ord + Clone,
-{
-    (
-        exact_authority.difference(previous).cloned().collect(),
-        authority_confirmed
-            .difference(exact_authority)
-            .cloned()
-            .collect(),
-    )
-}
-
 /// Canonical reconciliation retained by the coverage-group owner while it
 /// publishes established siblings before attempting a fallible clone reset.
 pub(crate) struct ReconciledMaintainedSubscriptionClone {
@@ -382,14 +360,9 @@ impl PeerState {
         authority_result_key: AuthorityResultKey,
     ) {
         let state = self.publication_states.entry(subscription).or_default();
-        if state.authority_result_source.as_ref() != Some(&authority_result_key) {
-            // Confirmed provenance belongs to one immutable policy-scoped U.
-            // A refreshed capability starts with no confirmed members, while
-            // never-confirmed Local optimistic members remain in the ordinary
-            // publication result set.
-            state.authority_confirmed_result_members.clear();
-            state.authority_confirmed_program_facts.clear();
-        }
+        state
+            .local_authority
+            .replace_source(authority_result_key.clone(), 0);
         state.authority_result_source = Some(authority_result_key);
     }
 
@@ -1380,7 +1353,7 @@ impl PeerState {
             && let Some((mut settled, exact_members, exact_facts)) = node
                 .settled_result_transitions_for_subscription(
                 subscription,
-                source_authority_result,
+                source_authority_result.clone(),
                 &previous_member_result_set,
                 &previous_program_fact_set,
                 result_table_filter,
@@ -1388,34 +1361,28 @@ impl PeerState {
             )?
         {
             if reconciles_local_overlay {
-                let (confirmed_members, confirmed_facts) = self
-                    .publication_states
-                    .get(&subscription)
-                    .map(|state| {
-                        (
-                            state.authority_confirmed_result_members.clone(),
-                            state.authority_confirmed_program_facts.clone(),
-                        )
-                    })
+                let generation = source_authority_result
+                    .as_ref()
+                    .map(|source| node.applied_authority_result_generation(source))
                     .unwrap_or_default();
-                // Full propagation augments a Local result; it does not turn
-                // the first authority reset into a replacement for optimistic
-                // worker-local knowledge. Only members previously confirmed
-                // by this exact source are eligible for authority removal.
-                (settled.adds, settled.removes) = local_overlay_authority_delta(
-                    &previous_member_result_set,
-                    &confirmed_members,
-                    &exact_members,
-                );
-                (settled.program_fact_adds, settled.program_fact_removes) =
-                    local_overlay_authority_delta(
-                        &previous_program_fact_set,
-                        &confirmed_facts,
-                        &exact_facts,
-                    );
                 let state = self.publication_states.entry(subscription).or_default();
-                state.authority_confirmed_result_members = exact_members;
-                state.authority_confirmed_program_facts = exact_facts;
+                let source = source_authority_result
+                    .as_ref()
+                    .expect("local authority reconciliation requires an exact source");
+                state.local_authority.replace_source(source.clone(), generation);
+                let delta = state.local_authority.reconcile(
+                    source,
+                    generation,
+                    &previous_member_result_set,
+                    &previous_program_fact_set,
+                    exact_members,
+                    exact_facts,
+                )
+                .expect("the installed exact source and generation must reconcile");
+                settled.adds = delta.member_adds;
+                settled.removes = delta.member_removes;
+                settled.program_fact_adds = delta.fact_adds;
+                settled.program_fact_removes = delta.fact_removes;
             }
             allow_storage_witness_fallback |= settled.allow_storage_witness_fallback;
             for member in settled.adds {
@@ -1979,15 +1946,10 @@ impl PeerState {
             .get(&subscription)
             .map(|state| state.member_index.clone())
             .unwrap_or_default();
-        let previous_authority_confirmed_result_members = self
+        let previous_local_authority = self
             .publication_states
             .get(&subscription)
-            .map(|state| state.authority_confirmed_result_members.clone())
-            .unwrap_or_default();
-        let previous_authority_confirmed_program_facts = self
-            .publication_states
-            .get(&subscription)
-            .map(|state| state.authority_confirmed_program_facts.clone())
+            .map(|state| state.local_authority.clone())
             .unwrap_or_default();
         let known_state = self.downstream_known_states.get(&subscription).cloned();
         let retained_authorization = self.publication_states.get(&subscription).and_then(|state| {
@@ -2028,9 +1990,7 @@ impl PeerState {
         state.result_member_set = previous_member_result_set.clone();
         state.program_fact_set = previous_program_fact_set;
         state.member_index = previous_member_index;
-        state.authority_confirmed_result_members =
-            previous_authority_confirmed_result_members;
-        state.authority_confirmed_program_facts = previous_authority_confirmed_program_facts;
+        state.local_authority = previous_local_authority;
         state.policy_binding = Some(policy_binding);
         state.authority_result_source = authority_result_source;
         state.awaiting_selected_authority_source = awaiting_selected_authority_source;
@@ -2563,42 +2523,4 @@ impl PeerState {
         Ok(target_reset)
     }
 
-}
-
-#[cfg(test)]
-mod local_overlay_authority_tests {
-    use super::local_overlay_authority_delta;
-    use std::collections::BTreeSet;
-
-    fn set(values: &[u8]) -> BTreeSet<u8> {
-        values.iter().copied().collect()
-    }
-
-    #[test]
-    fn initial_authority_members_augment_never_confirmed_local_members() {
-        assert_eq!(
-            local_overlay_authority_delta(&set(&[1]), &set(&[]), &set(&[2])),
-            (vec![2], vec![]),
-        );
-    }
-
-    #[test]
-    fn authority_echo_deduplicates_and_later_removal_retires_confirmed_member() {
-        assert_eq!(
-            local_overlay_authority_delta(&set(&[1, 2]), &set(&[2]), &set(&[1, 2])),
-            (vec![], vec![]),
-        );
-        assert_eq!(
-            local_overlay_authority_delta(&set(&[1, 2]), &set(&[1, 2]), &set(&[1])),
-            (vec![], vec![2]),
-        );
-    }
-
-    #[test]
-    fn source_replacement_preserves_never_confirmed_local_members() {
-        assert_eq!(
-            local_overlay_authority_delta(&set(&[1]), &set(&[]), &set(&[])),
-            (vec![], vec![]),
-        );
-    }
 }
