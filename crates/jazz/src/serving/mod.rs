@@ -753,6 +753,30 @@ impl ShellPeerConnection {
             Self::Durable(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
         }
     }
+
+    #[cfg(test)]
+    fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
+        match self {
+            Self::Memory(connection) => {
+                crate::db::block_on(connection.lock()).scope_relay_admission_epoch_for_test()
+            }
+            Self::Durable(connection) => {
+                crate::db::block_on(connection.lock()).scope_relay_admission_epoch_for_test()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn scope_relay_binding_for_test(&self) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+        match self {
+            Self::Memory(connection) => {
+                crate::db::block_on(connection.lock()).scope_relay_binding_for_test()
+            }
+            Self::Durable(connection) => {
+                crate::db::block_on(connection.lock()).scope_relay_binding_for_test()
+            }
+        }
+    }
 }
 
 impl InMemoryServerShell {
@@ -1376,7 +1400,7 @@ impl InMemoryServerShell {
                 drain_state: self.drain_state,
             });
         }
-        let Some((identity, cursor)) = self.resume_cursors.remove(&resume.resume_token) else {
+        let Some((identity, mut cursor)) = self.resume_cursors.remove(&resume.resume_token) else {
             return Err(ShellError::InvalidResumeToken(resume.resume_token));
         };
         if identity != resume.identity {
@@ -1387,6 +1411,11 @@ impl InMemoryServerShell {
                 actual: resume.identity,
             });
         }
+        // A resume token only restores in-process state. It still attaches a
+        // fresh physical transport, so a scope-isolated relay retains its
+        // immutable authenticated binding but not the capability epoch issued
+        // to the detached connection.
+        cursor.refresh_scope_relay_admission_epoch();
         let transport = SharedWireTransport::default();
         let connection = self.db.accept_subscriber_with_claims(
             Box::new(WireTransportAdapter::current(transport.clone())),
@@ -2266,6 +2295,72 @@ mod tests {
                     .column("done", PublicColumnType::Boolean),
             ),
         )
+    }
+
+    #[test]
+    fn scope_isolated_relay_resume_preserves_binding_and_rotates_attachment_capability() {
+        let identity = DbIdentity {
+            node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let viewer = AuthorSubject::for_test_bytes([0x77; 16]);
+        let mut shell =
+            InMemoryServerShell::start(InMemoryServerShellConfig::new(simple_schema(), identity))
+                .expect("scope relay shell starts");
+        let claims = BTreeMap::from([("role".to_owned(), Value::String("viewer".to_owned()))]);
+        let session = shell
+            .accept_subscriber_session_with_claims_and_trust_and_context(
+                viewer,
+                claims.clone(),
+                CommitUnitTrust::Session,
+                crate::wire::current_wire_features(),
+                None,
+                ServerLinkAdmission::ScopeIsolatedClientRelay {
+                    admission_epoch: 41,
+                },
+            )
+            .expect("scope relay session is admitted");
+        let old_epoch = shell.sessions[session.transport()]
+            .as_ref()
+            .expect("live session")
+            .connection
+            .scope_relay_admission_epoch_for_test()
+            .expect("scope relay capability");
+        let old_binding = shell.sessions[session.transport()]
+            .as_ref()
+            .expect("live session")
+            .connection
+            .scope_relay_binding_for_test()
+            .expect("scope relay binding");
+
+        let resume = shell
+            .disconnect_session_for_resume(session)
+            .expect("detached scope relay can resume");
+        assert!(shell.sessions[session.transport()].is_none());
+        let resumed = shell
+            .resume_subscriber_session(resume)
+            .expect("one-shot matching resume is accepted");
+        assert_eq!(resumed.identity(), viewer);
+        let resumed_epoch = shell.sessions[resumed.transport()]
+            .as_ref()
+            .expect("resumed session")
+            .connection
+            .scope_relay_admission_epoch_for_test()
+            .expect("resumed scope relay capability");
+        let resumed_binding = shell.sessions[resumed.transport()]
+            .as_ref()
+            .expect("resumed session")
+            .connection
+            .scope_relay_binding_for_test()
+            .expect("resumed scope relay binding");
+
+        // The old capability was moved out with the detached transport and is
+        // not reusable on the resumed link. Only the exact authenticated
+        // binding survives, represented here by the same resumed identity.
+        assert_eq!(old_epoch, 41);
+        assert_eq!(resumed_epoch, old_epoch + 1);
+        assert_eq!(old_binding, (viewer, claims));
+        assert_eq!(resumed_binding, old_binding);
     }
 
     #[test]

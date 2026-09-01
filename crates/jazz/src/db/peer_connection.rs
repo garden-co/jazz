@@ -829,6 +829,16 @@ pub struct ResumeCursor {
     pub(super) session_claim_revision: u64,
 }
 
+impl ResumeCursor {
+    /// Resume attaches the saved peer to a new physical transport. Preserve
+    /// the server-authenticated scope binding while replacing its old
+    /// per-attachment admission capability.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn refresh_scope_relay_admission_epoch(&mut self) -> bool {
+        self.peer.refresh_scope_relay_admission_epoch()
+    }
+}
+
 impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -1392,6 +1402,24 @@ where
     /// sent by this connection.
     pub fn last_resume_bytes(&self) -> Option<usize> {
         self.last_resume_bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
+        let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {
+            return None;
+        };
+        peer.scope_relay_admission_epoch_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope_relay_binding_for_test(
+        &self,
+    ) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+        let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {
+            return None;
+        };
+        peer.scope_relay_binding_for_test()
     }
 
     /// Return a receipt only after this connection applied its matching

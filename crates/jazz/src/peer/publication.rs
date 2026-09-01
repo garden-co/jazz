@@ -195,6 +195,46 @@ impl PeerState {
         }
     }
 
+    /// Replace the per-attachment capability epoch after the server has
+    /// detached and resumed this scope-isolated relay. The authenticated
+    /// binding stays immutable, but a resumed transport must never retain the
+    /// capability issued to its previous physical attachment.
+    ///
+    /// This intentionally offers no caller-provided epoch: only the server's
+    /// resume path can advance a capability it already admitted.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn refresh_scope_relay_admission_epoch(&mut self) -> bool {
+        let RelayTransportCapability::ScopeIsolatedClientRelay {
+            admission_epoch, ..
+        } = &mut self.transport_capability
+        else {
+            return false;
+        };
+        *admission_epoch = admission_epoch
+            .checked_add(1)
+            .expect("scope-isolated relay admission epoch exhausted");
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
+        match self.transport_capability {
+            RelayTransportCapability::ScopeIsolatedClientRelay {
+                admission_epoch, ..
+            } => Some(admission_epoch),
+            RelayTransportCapability::OrdinarySession
+            | RelayTransportCapability::MultiplexedRelay => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope_relay_binding_for_test(
+        &self,
+    ) -> Option<(AuthorSubject, BTreeMap<String, groove::records::Value>)> {
+        self.admitted_scope_relay_binding()
+            .map(|binding| (binding.identity, binding.claims.clone()))
+    }
+
     pub(crate) fn rejects_raw_session_claims(&self) -> bool {
         matches!(
             self.transport_capability,
