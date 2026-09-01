@@ -448,6 +448,34 @@ where
         if permission_subject.is_anonymous() {
             return Ok(false);
         }
+        // Branch-view copy evidence is non-causal, but it is still an
+        // authority-verifiable claim about a particular first head overlay.
+        // Reject rather than ignore a malformed, detached, or stale claim:
+        // accepting it would let a client turn a base-row read into an
+        // unaudited insert-shaped head write.
+        if let Some(provenance) = &tx.contribution_merge {
+            for evidence in &provenance.branch_view_copies {
+                let Some(version) = versions.iter().find(|version| {
+                    version.table() == evidence.table
+                        && version.row_uuid() == evidence.row_uuid
+                        && version.branch_key() == &evidence.head
+                }) else {
+                    return Ok(false);
+                };
+                if !version.parents().is_empty()
+                    || version.deletion() == Some(DeletionEvent::Deleted)
+                    || !self
+                        .branch_view_copy_satisfies_read_for_write_visibility(
+                            evidence,
+                            permission_subject,
+                            Some(tx.tx_id),
+                        )
+                        .await?
+                {
+                    return Ok(false);
+                }
+            }
+        }
         for version in versions {
             if tx.kind == TxKind::Mergeable
                 && !self

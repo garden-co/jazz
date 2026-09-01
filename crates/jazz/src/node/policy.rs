@@ -191,6 +191,49 @@ where
         .await
     }
 
+    /// Prove read-for-write visibility of the logical branch-view source that
+    /// was copied into a first physical head overlay.
+    ///
+    /// A normal mergeable update obtains its prior row from the target's
+    /// physical history. A first branch overlay has intentionally no
+    /// cross-branch parent, so that lookup says "insert". Its separately
+    /// versioned evidence lets the authority resolve the inherited source and
+    /// evaluate the ordinary read policy against it without turning the source
+    /// into a causal dependency or exposing policy support to the client.
+    pub(super) async fn branch_view_copy_satisfies_read_for_write_visibility(
+        &mut self,
+        evidence: &crate::tx::BranchViewCopyEvidence,
+        author: AuthorSubject,
+        candidate_tx_id: Option<TxId>,
+    ) -> Result<bool, Error> {
+        if author == AuthorSubject::SYSTEM {
+            return Ok(true);
+        }
+        let Some(source) = self
+            .resolve_branch_view_copy_evidence(evidence, candidate_tx_id)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let source = self.version_record_from_row(&source)?;
+        let (policy_schema_version, table, cells) =
+            self.policy_projection_for_version_record(&source)?;
+        let Some(read_policy) = table.read_policy.clone() else {
+            return Ok(true);
+        };
+        let provenance = version_provenance(&source);
+        self.read_policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            &table,
+            &read_policy,
+            source.row_uuid(),
+            &cells,
+            author,
+            provenance,
+        )
+        .await
+    }
+
     async fn write_policy_allows_version_record_for_view(
         &mut self,
         version: &VersionRecord,

@@ -343,6 +343,25 @@ may materialize inherited values needed by a merge strategy, but the first head
 version has no cross-branch-key causal parent. Source derivation may be retained
 only as typed non-causal provenance.
 
+For a mergeable update or existing-target upsert that creates that first head
+overlay, the commit unit carries **branch-view copy evidence v1**. It names the
+projected target head key, either a live current base key or a frozen
+`SnapshotRef` base, table, `RowUuid`, and the exact selected source content
+`TxId`. It is an authority-verifiable operation descriptor: at admission the
+authority resolves the stated base, requires that exact source to still be its
+selected non-deleted winner, requires no physical content or deletion winner at
+the stated head row, and evaluates the ordinary source-row read policy for the
+write's permission subject. A malformed, detached, stale, or policy-denied
+descriptor rejects the whole transaction without disclosing the source or its
+policy-support rows.
+
+This descriptor is neither a version parent nor a transaction read set, CAS
+condition, history edge, or contribution-merge dependency. It therefore does
+not park on source history, create cross-branch causality, or make the source
+currentness a serializability condition beyond the authority's one-time
+admission check. Root/head-local mutations and exclusive transactions continue
+to use their ordinary existing validation paths.
+
 For example, when `R` is inherited from `Main` and an update is requested in
 `Draft` over `Main`, the new version is addressed by `(T, DraftKey, R)` with
 no `Main` parent. A subsequent `Draft` read projects `Draft` branch-column

@@ -1679,6 +1679,53 @@ fn contribution_merge_column() -> GrooveColumnType {
             ])))
             .array_of(),
         ),
+        // Versioned non-causal authorization evidence for a first head
+        // overlay. This is a normal Groove record, not an opaque postcard
+        // payload: every field remains inspectable by authority admission.
+        (
+            "branch_view_copy_v1",
+            GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+                ("version", ValueType::U8),
+                ("head", ValueType::Bytes),
+                (
+                    "base",
+                    GrooveColumnType::Enum(Box::new(
+                        EnumSchema::new(
+                            "jazz_branch_view_copy_base_v1",
+                            [
+                                EnumCase::new(
+                                    "current",
+                                    RecordDescriptor::new([("branch", ValueType::Bytes)]),
+                                ),
+                                EnumCase::new(
+                                    "snapshot",
+                                    RecordDescriptor::new([
+                                        ("branch", ValueType::Bytes),
+                                        ("owner", ValueType::Uuid),
+                                        ("global_base", ValueType::U64),
+                                        ("local_base", ValueType::U64),
+                                        (
+                                            "dots",
+                                            ValueType::Record(Box::new(RecordDescriptor::new([
+                                                ("time", ValueType::U64),
+                                                ("node", ValueType::Uuid),
+                                            ])))
+                                            .array_of(),
+                                        ),
+                                    ]),
+                                ),
+                            ],
+                        )
+                        .expect("valid branch-view copy base enum"),
+                    )),
+                ),
+                ("table", ValueType::String),
+                ("row_uuid", ValueType::Uuid),
+                ("source_time", ValueType::U64),
+                ("source_node", ValueType::Uuid),
+            ])))
+            .array_of(),
+        ),
     ])))
     .nullable()
 }

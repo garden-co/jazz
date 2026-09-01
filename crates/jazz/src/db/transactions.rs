@@ -253,6 +253,7 @@ where
             known_fresh_row,
             None,
             false,
+            None,
         )
         .await
     }
@@ -271,6 +272,7 @@ where
         known_fresh_row: bool,
         verified_inherited_cells: Option<RowCells>,
         replace_pending_deletion: bool,
+        branch_view_copy: Option<crate::tx::BranchViewCopyEvidence>,
     ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
@@ -290,6 +292,7 @@ where
             known_fresh_row,
             verified_inherited_cells,
             replace_pending_deletion,
+            branch_view_copy,
         )?;
         Ok(())
     }
@@ -361,6 +364,11 @@ where
             ));
         };
         let verified_inherited_cells = inherited.clone();
+        let branch_view_copy = self
+            .lock_for_transaction_operation(tx_id)
+            .await?
+            .inherited_branch_view_copy_evidence(table, &head, base.as_ref(), row)
+            .await?;
         inherited.extend(patch);
         self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
             tx_id,
@@ -372,6 +380,7 @@ where
             false,
             Some(verified_inherited_cells),
             false,
+            branch_view_copy,
         )
         .await
     }
@@ -452,6 +461,14 @@ where
         }
 
         let verified_inherited_cells = inherited.clone();
+        let branch_view_copy = if inherited.is_some() {
+            self.lock_for_transaction_operation(tx_id)
+                .await?
+                .inherited_branch_view_copy_evidence(table, &head, base.as_ref(), row)
+                .await?
+        } else {
+            None
+        };
         let mut inserted = inherited.unwrap_or_default();
         inserted.extend(cells);
         self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
@@ -464,6 +481,7 @@ where
             false,
             verified_inherited_cells,
             replace_pending_deletion,
+            branch_view_copy,
         )
         .await
     }

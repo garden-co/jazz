@@ -6,6 +6,7 @@
 //! writes become protocol commit units.
 
 use super::*;
+use crate::tx::BranchViewCopyEvidence;
 
 impl<S> NodeState<S>
 where
@@ -472,6 +473,7 @@ where
             refresh_parents_at_commit: false,
             known_fresh_row: false,
             verified_inherited_cells: None,
+            branch_view_copy: None,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
@@ -575,6 +577,7 @@ where
             known_fresh_row,
             None,
             false,
+            None,
         )
     }
 
@@ -598,6 +601,7 @@ where
         known_fresh_row: bool,
         verified_inherited_cells: Option<BTreeMap<String, Value>>,
         replace_pending_deletion: bool,
+        branch_view_copy: Option<BranchViewCopyEvidence>,
     ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
@@ -624,6 +628,7 @@ where
                 refresh_parents_at_commit,
                 known_fresh_row,
                 verified_inherited_cells,
+                branch_view_copy,
             },
             replace_pending_deletion,
         )
@@ -713,6 +718,7 @@ where
                 refresh_parents_at_commit: false,
                 known_fresh_row: false,
                 verified_inherited_cells: None,
+                branch_view_copy: None,
             },
             replace_pending_deletion,
         )
@@ -817,6 +823,11 @@ where
                     && pending.verified_inherited_cells.is_none()
                 {
                     pending.verified_inherited_cells = existing.verified_inherited_cells.clone();
+                }
+                if matches!(pending.cells, PendingCells::Patch(_))
+                    && pending.branch_view_copy.is_none()
+                {
+                    pending.branch_view_copy = existing.branch_view_copy.clone();
                 }
                 let cells = match (&existing.cells, &pending.cells) {
                     (PendingCells::Replace(existing), PendingCells::Patch(patch)) => {
@@ -1190,6 +1201,11 @@ where
                 "open transaction is not mergeable",
             ));
         };
+        let branch_view_copies = open_tx
+            .writes
+            .iter()
+            .filter_map(|write| write.branch_view_copy.clone())
+            .collect::<Vec<_>>();
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
             let parents = if write.refresh_parents_at_commit {
@@ -1299,8 +1315,17 @@ where
             }
             None => self.mint_tx_time(first.1.now_ms)?,
         };
+        let contribution_merge = branch_view_copies.first().cloned().map(|first| {
+            let mut provenance = ContributionMergeProvenance::branch_view_copy(first);
+            provenance.branch_view_copies = branch_view_copies;
+            provenance
+        });
         let committed = self
-            .commit_mergeable_many_at_with_schema_versions(commits, made_at)
+            .commit_mergeable_many_at_with_schema_versions_and_provenance(
+                commits,
+                made_at,
+                contribution_merge,
+            )
             .await?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
@@ -1680,6 +1705,9 @@ pub(super) struct PendingWrite {
     /// Engine-private cells read from a branch-view base while creating the
     /// first target-branch overlay. This never originates in public input.
     verified_inherited_cells: Option<BTreeMap<String, Value>>,
+    /// Exact logical source used to create this first head overlay. It is
+    /// carried to authority admission but never made causal.
+    branch_view_copy: Option<BranchViewCopyEvidence>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

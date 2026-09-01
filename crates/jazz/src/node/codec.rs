@@ -18,6 +18,7 @@ use crate::protocol::{
 };
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
+use crate::tx::{BranchViewCopyBase, BranchViewCopyEvidence};
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
@@ -266,10 +267,46 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    pub(super) struct ContributionMergeStorageRecord {
+pub(super) struct ContributionMergeStorageRecord {
         0 => source: Vec<u8>,
         1 => target: Vec<u8>,
         2 => substitutions: Vec<Value>,
+        3 => branch_view_copy_v1: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchViewCopyStorageRecord {
+        0 => version: u8,
+        1 => head: Vec<u8>,
+        2 => base: records::EnumValue,
+        3 => table: String,
+        4 => row_uuid: uuid::Uuid,
+        5 => source_time: u64,
+        6 => source_node: uuid::Uuid,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchViewCopyCurrentBaseStorageRecord {
+        0 => branch: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchViewCopySnapshotBaseStorageRecord {
+        0 => branch: Vec<u8>,
+        1 => owner: uuid::Uuid,
+        2 => global_base: u64,
+        3 => local_base: u64,
+        4 => dots: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchViewCopyDotStorageRecord {
+        0 => time: u64,
+        1 => node: uuid::Uuid,
     }
 }
 
@@ -2622,6 +2659,156 @@ fn contribution_merge_descriptor() -> &'static records::RecordDescriptor {
     &DESCRIPTOR
 }
 
+fn branch_view_copy_descriptor() -> &'static records::RecordDescriptor {
+    let descriptor = contribution_merge_descriptor();
+    let records::ValueType::Array(inner) = record_field_type(descriptor, 3) else {
+        unreachable!("branch-view copy is an array")
+    };
+    let records::ValueType::Record(descriptor) = &**inner else {
+        unreachable!("branch-view copy is a record")
+    };
+    descriptor
+}
+
+fn branch_view_copy_base_schema() -> &'static records::EnumSchema {
+    let records::ValueType::Enum(schema) = record_field_type(branch_view_copy_descriptor(), 2)
+    else {
+        unreachable!("branch-view copy base is an enum")
+    };
+    schema
+}
+
+fn branch_view_copy_base_storage_value(
+    base: &BranchViewCopyBase,
+) -> Result<records::EnumValue, Error> {
+    let schema = branch_view_copy_base_schema();
+    match base {
+        BranchViewCopyBase::Current(branch) => {
+            let tag = schema.tag("current").expect("declared current base");
+            let payload = &schema.case(tag).expect("declared current base").payload;
+            let record =
+                BranchViewCopyCurrentBaseStorageRecord::encode(payload, branch.canonical_bytes())?
+                    .record()
+                    .clone();
+            Ok(records::EnumValue::new(tag, record))
+        }
+        BranchViewCopyBase::Snapshot { branch, snapshot } => {
+            let tag = schema.tag("snapshot").expect("declared snapshot base");
+            let payload = &schema.case(tag).expect("declared snapshot base").payload;
+            let dots_type = record_field_type(payload, 4);
+            let dot_descriptor = nested_record_descriptor(array_element_type(dots_type));
+            let dots = snapshot
+                .dots
+                .iter()
+                .map(|dot| {
+                    BranchViewCopyDotStorageRecord::encode(dot_descriptor, dot.time.0, dot.node.0)
+                        .map(|record| Value::Record(record.record().clone()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let record = BranchViewCopySnapshotBaseStorageRecord::encode(
+                payload,
+                branch.canonical_bytes(),
+                snapshot.owner.0,
+                snapshot.global_base.0,
+                snapshot.local_base.0,
+                dots,
+            )?
+            .record()
+            .clone();
+            Ok(records::EnumValue::new(tag, record))
+        }
+    }
+}
+
+fn branch_view_copy_storage_record(
+    evidence: &BranchViewCopyEvidence,
+) -> Result<OwnedRecord, Error> {
+    let descriptor = branch_view_copy_descriptor();
+    Ok(BranchViewCopyStorageRecord::encode(
+        descriptor,
+        evidence.version,
+        evidence.head.canonical_bytes(),
+        branch_view_copy_base_storage_value(&evidence.base)?,
+        evidence.table.clone(),
+        evidence.row_uuid.0,
+        evidence.source_version.time.0,
+        evidence.source_version.node.0,
+    )?
+    .record()
+    .clone())
+}
+
+fn branch_view_copy_from_storage_record(
+    record: OwnedRecord,
+) -> Result<BranchViewCopyEvidence, Error> {
+    let descriptor = branch_view_copy_descriptor();
+    if record.descriptor() != descriptor {
+        return Err(Error::InvalidStoredValue(
+            "branch-view copy evidence must be a v1 record",
+        ));
+    }
+    let record = BranchViewCopyStorageRecord::new(record);
+    let base_schema = branch_view_copy_base_schema();
+    let base_value = record.base()?;
+    let base_case = base_schema
+        .case(base_value.tag())
+        .map_err(|_| Error::InvalidStoredValue("branch-view copy base tag is invalid"))?;
+    let base = match base_case.name.as_str() {
+        "current" => {
+            let payload = BranchViewCopyCurrentBaseStorageRecord::new(base_value.into_record());
+            BranchViewCopyBase::Current(
+                BranchKey::from_canonical_bytes(&payload.branch()?).map_err(|_| {
+                    Error::InvalidStoredValue("branch-view copy current branch is invalid")
+                })?,
+            )
+        }
+        "snapshot" => {
+            let payload = BranchViewCopySnapshotBaseStorageRecord::new(base_value.into_record());
+            let dots = payload
+                .dots()?
+                .into_iter()
+                .map(|value| match value {
+                    Value::Record(record) => {
+                        let dot = BranchViewCopyDotStorageRecord::new(record);
+                        Ok(TxId::new(TxTime(dot.time()?), NodeUuid(dot.node()?)))
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "branch-view copy snapshot dot must be a record",
+                    )),
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            BranchViewCopyBase::Snapshot {
+                branch: BranchKey::from_canonical_bytes(&payload.branch()?).map_err(|_| {
+                    Error::InvalidStoredValue("branch-view copy snapshot branch is invalid")
+                })?,
+                snapshot: SnapshotRef {
+                    owner: NodeUuid(payload.owner()?),
+                    global_base: GlobalTime(payload.global_base()?),
+                    local_base: TxTime(payload.local_base()?),
+                    dots,
+                },
+            }
+        }
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "branch-view copy base tag is invalid",
+            ));
+        }
+    };
+    Ok(BranchViewCopyEvidence {
+        version: record.version()?,
+        head: BranchKey::from_canonical_bytes(&record.head()?)
+            .map_err(|_| Error::InvalidStoredValue("branch-view copy head is invalid"))?,
+        base,
+        table: record.table()?,
+        row_uuid: RowUuid(record.row_uuid()?),
+        source_version: TxId::new(
+            TxTime(record.source_time()?),
+            NodeUuid(record.source_node()?),
+        ),
+    })
+}
+
 pub(super) fn record_field_type(
     descriptor: &records::RecordDescriptor,
     index: usize,
@@ -2806,6 +2993,11 @@ pub(super) fn contribution_merge_storage_value(
                         .map(Value::Record)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
+                provenance
+                    .branch_view_copies
+                    .iter()
+                    .map(|evidence| branch_view_copy_storage_record(evidence).map(Value::Record))
+                    .collect::<Result<Vec<_>, _>>()?,
             )?
             .record()
             .clone())
@@ -2970,6 +3162,16 @@ pub(super) fn contribution_merge_from_storage_record(
                 ),
                 _ => Err(Error::InvalidStoredValue(
                     "transaction contribution substitution must be a record",
+                )),
+            })
+            .collect::<Result<_, _>>()?,
+        branch_view_copies: record
+            .branch_view_copy_v1()?
+            .into_iter()
+            .map(|value| match value {
+                Value::Record(record) => branch_view_copy_from_storage_record(record),
+                _ => Err(Error::InvalidStoredValue(
+                    "branch-view copy evidence must be a record",
                 )),
             })
             .collect::<Result<_, _>>()?,

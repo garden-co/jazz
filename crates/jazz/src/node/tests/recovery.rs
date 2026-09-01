@@ -1,6 +1,6 @@
 use crate::tx::{
-    ContributionComponent, ContributionCoordinate, ContributionDot, ContributionMergeProvenance,
-    ContributionSubstitution,
+    BranchViewCopyBase, BranchViewCopyEvidence, ContributionComponent, ContributionCoordinate,
+    ContributionDot, ContributionMergeProvenance, ContributionSubstitution,
 };
 
 #[test]
@@ -252,6 +252,37 @@ fn contribution_merge_provenance_survives_reopen() {
             .contribution_merge,
         Some(provenance)
     );
+}
+
+/// Storage-format corpus for the v1 branch-view copy evidence carried in the
+/// existing non-causal provenance column. This stays at the codec boundary:
+/// public mutation APIs intentionally cannot hand-author physical evidence.
+#[test]
+fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
+    let schema = schema();
+    let (_dir, core) = open_node_with_schema(node(0x31), schema);
+    let source = TxId::new(TxTime::from(31), node(0x32));
+    let evidence = BranchViewCopyEvidence {
+        version: 1,
+        head: BranchKey::default(),
+        base: BranchViewCopyBase::Current(BranchKey::default()),
+        table: "todos".to_owned(),
+        row_uuid: row(0x33),
+        source_version: source,
+    };
+    let provenance = ContributionMergeProvenance::branch_view_copy(evidence.clone());
+    let stored = core
+        .contribution_merge_storage_value(Some(&provenance))
+        .unwrap();
+    let Value::Nullable(Some(record)) = stored else {
+        panic!("branch-view evidence must use the optional contribution record");
+    };
+    let Value::Record(record) = *record else {
+        panic!("contribution provenance must be a normal Groove record");
+    };
+    let decoded = core.contribution_merge_from_storage_record(record).unwrap();
+    assert_eq!(decoded.branch_view_copies, vec![evidence]);
+    assert!(decoded.substitutions.is_empty());
 }
 
 #[test]
@@ -845,6 +876,7 @@ fn with_stored_contribution_coordinate_ids(
         record.source().unwrap(),
         record.target().unwrap(),
         substitutions,
+        Vec::new(),
     )
     .unwrap()
     .record()

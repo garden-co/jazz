@@ -369,7 +369,11 @@ slots do not make their semantics interchangeable:
   serializability if encountered on a mergeable receipt. An authority MUST NOT
   interpret either those values or mergeable parents as compare-and-swap
   evidence. Optional `contribution_merge` is non-causal, field-grained
-  calculated-merge provenance, not a read dependency.
+  calculated-merge provenance, not a read dependency. It may also carry
+  versioned branch-view copy evidence: exact target/base coordinates, source
+  row, and source content version for a first inherited head overlay. That is
+  authority-checked operation provenance, never a parent, history dependency,
+  or serializability read.
 - An `Exclusive` transaction carries its table-bound compare-and-swap evidence:
   `base_snapshot`, point reads `(table, row_uuid, observed TxId)`, absent reads
   `(table, row_uuid)`, and predicate reads `(table, shape_id, canonical query,

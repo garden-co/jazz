@@ -6,7 +6,7 @@
 //! are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
-use crate::protocol::BranchKey;
+use crate::protocol::{BranchKey, SnapshotRef};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};
@@ -54,6 +54,49 @@ pub struct ContributionMergeProvenance {
     pub target: BranchKey,
     /// Field-grained substitutions emitted by this transaction.
     pub substitutions: Vec<ContributionSubstitution>,
+    /// Non-causal authorization evidence for a first head overlay copied from
+    /// an inherited branch-view row.  It deliberately shares the existing
+    /// non-causal transaction-provenance carrier with calculated merge
+    /// substitutions: neither form is a history edge, merge dependency, read
+    /// set, or CAS condition.
+    pub branch_view_copies: Vec<BranchViewCopyEvidence>,
+}
+
+/// Version-one, authority-verifiable logical source of a first head overlay.
+///
+/// A physical first write in `head` has no legal cross-branch history parent.
+/// This descriptor therefore records the independently verifiable *logical*
+/// source used for read-for-write authorization without changing causality.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchViewCopyEvidence {
+    /// Explicit durable schema for this evidence; never infer a serializer
+    /// layout or unversioned variant from the enclosing transaction.
+    pub version: u8,
+    /// Newly materialized target branch coordinate.
+    pub head: BranchKey,
+    /// Live or frozen branch-view base from which the source was selected.
+    pub base: BranchViewCopyBase,
+    /// Logical table containing the inherited source row.
+    pub table: String,
+    /// Logical row identity copied into the head.
+    pub row_uuid: RowUuid,
+    /// Exact admitted source content-version identity.
+    pub source_version: TxId,
+}
+
+/// Canonical branch coordinates of the inherited source, with the only two
+/// branch-view base modes represented explicitly.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum BranchViewCopyBase {
+    /// Read the current winner in this base branch.
+    Current(BranchKey),
+    /// Read the winner at this exact frozen base snapshot.
+    Snapshot {
+        /// Base branch projected through the write schema.
+        branch: BranchKey,
+        /// Exact frozen frontier used to select the inherited source.
+        snapshot: SnapshotRef,
+    },
 }
 
 impl ContributionMergeProvenance {
@@ -81,7 +124,25 @@ impl ContributionMergeProvenance {
             source,
             target,
             substitutions,
+            branch_view_copies: Vec::new(),
         })
+    }
+
+    /// Construct the non-causal provenance carried by an inherited
+    /// branch-view update or existing-target upsert.
+    pub fn branch_view_copy(evidence: BranchViewCopyEvidence) -> Self {
+        Self {
+            // Calculated contribution merges use these coordinates as part of
+            // their substitution algebra. A branch-view copy is only
+            // authorization evidence, and its per-write coordinates live in
+            // `branch_view_copies`; do not accidentally make a multi-table
+            // branch-view transaction pretend it has one shared source or
+            // target branch.
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: vec![evidence],
+        }
     }
 
     /// Reject non-canonical or incomplete provenance received from a helper.
@@ -91,8 +152,27 @@ impl ContributionMergeProvenance {
             self.target.clone(),
             self.substitutions.clone(),
         )?;
-        if &canonical != self {
+        if self.branch_view_copies.is_empty() && &canonical != self {
             return Err("contribution merge provenance must be canonical");
+        }
+        if !self.branch_view_copies.is_empty()
+            && (!self.substitutions.is_empty()
+                || self.source != BranchKey::default()
+                || self.target != BranchKey::default())
+        {
+            return Err("branch-view copy evidence must not carry contribution substitutions");
+        }
+        let mut seen = BTreeSet::new();
+        for evidence in &self.branch_view_copies {
+            if evidence.version != 1
+                || !seen.insert((
+                    evidence.table.clone(),
+                    evidence.row_uuid,
+                    evidence.head.clone(),
+                ))
+            {
+                return Err("branch-view copy evidence must be canonical v1 provenance");
+            }
         }
         Ok(())
     }
