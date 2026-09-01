@@ -238,10 +238,19 @@ where
             SyncMessage::CommitUnit { tx, versions } if local_receiver => {
                 let tx_id = tx.tx_id;
                 register_local_fate_route(local_fate_routes, tx_id, downstream_fates);
-                node.lock()
-                    .await
-                    .ingest_relay_commit_unit(tx, versions)
+                let mut state = node.lock().await;
+                let same_scope_author = state.client_relay_scope().is_some_and(|scope| {
+                    scope.admits_session(session_claim_binding.0)
+                        && tx.made_by == session_claim_binding.0
+                });
+                state
+                    .ingest_relay_commit_unit(tx.clone(), versions.clone())
                     .await?;
+                if same_scope_author {
+                    state
+                        .record_scope_relay_authored_pending_versions(&tx, &versions)
+                        .await?;
+                }
                 Ok(PublicationOutcome::settled(Vec::new()))
             }
             SyncMessage::CommitUnit { tx, versions }

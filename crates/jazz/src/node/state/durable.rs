@@ -36,6 +36,49 @@ where
         Ok(())
     }
 
+    /// Record a foreground transaction once this exact scope's durable relay
+    /// has accepted it locally. Its caller establishes the live admitted
+    /// session and author ownership; this helper only persists the immutable
+    /// row-version identities.
+    pub(crate) async fn record_scope_relay_authored_pending_versions(
+        &self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        let Some(scope) = self.client_relay_scope() else {
+            return Ok(());
+        };
+        let (owner, subject) = scope.durable_components();
+        let digest = scope.durable_digest();
+        let store = self.database.direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
+        let mut writes = Vec::new();
+        for version in versions {
+            let table_id = self
+                .physical_table_id_for_schema(version.schema_version(), version.table())?;
+            writes.push(DirectRecordStoreWrite::Set {
+                key: vec![
+                    Value::Bytes(digest.to_vec()),
+                    Value::U64(table_id.0),
+                    Value::Uuid(version.row_uuid().0),
+                    Value::U64(tx.tx_id.time.0),
+                    Value::Uuid(tx.tx_id.node.0),
+                ],
+                value: vec![
+                    Value::String(owner.to_owned()),
+                    Value::Nullable(
+                        subject
+                            .as_ref()
+                            .map(|value| Box::new(Value::String(value.clone()))),
+                    ),
+                ],
+            });
+        }
+        if !writes.is_empty() {
+            store.write_many(&writes).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn scope_relay_repair_ledger_contains(
         &self,
         table_id: PhysicalTableId,
