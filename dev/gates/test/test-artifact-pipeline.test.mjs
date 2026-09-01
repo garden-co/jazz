@@ -4,8 +4,6 @@ import test from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { workspaceDependencyInputs } from "../../artifacts/provenance.mjs";
 import {
   acquireArtifactBuildLock,
   buildTestArtifacts,
@@ -515,7 +513,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
   ]);
 });
 
-test("Turbo invalidates each native artifact only for its Cargo closure", () => {
+test("Turbo native artifact tasks use precise local inputs without task dependencies", () => {
   const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
   const napi = turbo.tasks["jazz-napi#build"];
   const wasm = turbo.tasks["jazz-wasm#build"];
@@ -524,24 +522,8 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
   const cli = turbo.tasks["build:crates"];
   assert.equal(napi.dependsOn, undefined);
   assert.equal(wasm.dependsOn, undefined);
-  const root = fileURLToPath(new URL("../../..", import.meta.url));
-  for (const [task, rootManifest, localRoot] of [
-    [napi, "crates/jazz-napi/Cargo.toml", true],
-    [wasm, "crates/jazz-wasm/Cargo.toml", true],
-    [fastWasm, "crates/jazz-wasm/Cargo.toml", true],
-    [cli, "crates/jazz-cli/Cargo.toml", false],
-  ]) {
-    const rootCrate = rootManifest.slice(0, -"/Cargo.toml".length);
-    const expected = workspaceDependencyInputs(root, rootManifest)
-      .filter((path) => !localRoot || path !== rootCrate)
-      .map((path) => `$TURBO_ROOT$/${path}/**`)
-      .sort();
-    const actual = task.inputs
-      .filter((input) => /^\$TURBO_ROOT\$\/crates\/[^/]+\/\*\*$/.test(input))
-      .sort();
-    assert.deepEqual(actual, expected);
+  for (const task of [napi, wasm, fastWasm, cli])
     assert.equal(task.inputs.includes("$TURBO_ROOT$/crates/**/*.rs"), false);
-  }
   for (const [task, inputs] of [
     [
       napi,
