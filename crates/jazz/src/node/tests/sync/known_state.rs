@@ -1406,6 +1406,7 @@ fn assert_eviction_failure_contract(
             subscription,
             &[],
             AuthorSubject::SYSTEM,
+            None,
         )
         .unwrap();
     assert!(!matches!(
