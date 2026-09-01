@@ -10,10 +10,11 @@ use futures::executor::block_on;
 use futures::task::{ArcWake, noop_waker, waker};
 use groove::db::{
     Database, Error as DatabaseError, GraphBuilder, NotificationTiming, PrimaryKeyValue,
+    PublicationUpdate, Subscription,
 };
 use groove::ivm::{
     AggregateExpr, AggregateFunction, LiteralValue, PlanExpr, ProjectField, PublicationId,
-    StaticScanSpec,
+    RecordDeltas, StaticScanSpec,
 };
 use groove::records::{RecordDescriptor, Value, ValueType, VariantRecord};
 use groove::schema::{
@@ -129,6 +130,40 @@ fn metric_aggregate(table: &str) -> GraphBuilder {
             output_name: Some("sum_score".to_owned()),
         }],
     )
+}
+
+fn album_counts_by_title() -> GraphBuilder {
+    GraphBuilder::aggregate(
+        GraphBuilder::table("albums"),
+        ["title"],
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("album_count".to_owned()),
+        }],
+    )
+}
+
+fn next_subscription_with_publication_bounded(
+    database: &mut Database,
+    subscription: &Subscription,
+    description: &str,
+) -> PublicationUpdate<RecordDeltas> {
+    const POLL_LIMIT: usize = 256;
+
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..POLL_LIMIT {
+        match database.poll_subscription_with_publication(subscription, &mut context) {
+            Poll::Ready(Ok(update)) => return update,
+            Poll::Ready(Err(error)) => {
+                panic!("{description} failed while polling through Database: {error:?}")
+            }
+            Poll::Pending => {}
+        }
+    }
+    panic!("{description} remained pending after {POLL_LIMIT} deterministic Database polls")
 }
 
 fn edge_pairs() -> GraphBuilder {
@@ -991,6 +1026,220 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
         let persistence = block_on(publication.persist());
         database.finish_persistence(persistence).unwrap();
     }
+}
+
+#[test]
+fn resumed_recursive_slice_preserves_later_publications_and_live_retainers() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let frontier_before_suspension = database.durable_publication_frontier();
+
+    let albums = block_on(database.subscribe_one_sink(album_counts_by_title())).unwrap();
+    assert!(
+        block_on(database.next_subscription(&albums))
+            .unwrap()
+            .is_empty()
+    );
+    let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(
+        block_on(database.next_subscription(&reach))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
+
+    storage.evict_scans("edges");
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut first = database.open_batch();
+    first.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    first.delete("edges", PrimaryKeyValue::U64(2));
+    let mut first = Box::pin(database.apply_batch(first));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let first_applied = match first.as_mut().poll(&mut context) {
+        Poll::Ready(Ok(applied)) => applied,
+        _ => panic!("resident application must complete while recursion is suspended"),
+    };
+    drop(first);
+    let first_publication = first_applied.publication();
+    let mut expected_album_publications = vec![first_publication];
+    let mut later_applied_batches = Vec::new();
+
+    for id in 2..=33 {
+        let mut later = database.open_batch();
+        later.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("resident-{id}"))],
+        );
+        let mut later = Box::pin(database.apply_batch(later));
+        let later_applied = match later.as_mut().poll(&mut context) {
+            Poll::Ready(Ok(applied)) => applied,
+            _ => panic!("later disjoint resident application must complete immediately"),
+        };
+        drop(later);
+        let later_publication = later_applied.publication();
+        expected_album_publications.push(later_publication);
+
+        later_applied_batches.push(later_applied);
+    }
+    let later_persistence_futures = later_applied_batches
+        .iter()
+        .map(|applied| applied.persist())
+        .collect::<Vec<_>>();
+    let last_later_publication = *expected_album_publications.last().unwrap();
+    assert_eq!(
+        database.durable_publication_frontier(),
+        frontier_before_suspension,
+        "later durable publications must not advance the frontier past the suspended predecessor"
+    );
+    assert!(reach.try_recv().is_err());
+
+    let mut later_albums_open = Box::pin(database.subscribe_one_sink(album_counts_by_title()));
+    let later_albums = match later_albums_open.as_mut().poll(&mut context) {
+        Poll::Ready(Ok(subscription)) => subscription,
+        Poll::Ready(Err(error)) => {
+            panic!("later aggregate subscription failed during suspended recursion: {error:?}")
+        }
+        Poll::Pending => {
+            panic!(
+                "later aggregate subscription must complete without waiting for suspended recursion"
+            )
+        }
+    };
+    drop(later_albums_open);
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    let resumed = next_subscription_with_publication_bounded(
+        &mut database,
+        &reach,
+        "resumed recursive predecessor",
+    );
+    assert_eq!(resumed.publication, Some(first_publication));
+    assert_eq!(resumed.deltas.deltas.len(), 2);
+
+    for expected_publication in expected_album_publications.iter().copied() {
+        let update = next_subscription_with_publication_bounded(
+            &mut database,
+            &albums,
+            "ordered original aggregate update",
+        );
+        assert_eq!(update.publication, Some(expected_publication));
+        assert_eq!(update.deltas.deltas.len(), 1);
+    }
+    let later_hydration = next_subscription_with_publication_bounded(
+        &mut database,
+        &later_albums,
+        "later aggregate hydration",
+    );
+    assert_eq!(later_hydration.publication, None);
+    assert_eq!(later_hydration.deltas.deltas.len(), 33);
+    assert_eq!(
+        database.durable_publication_frontier(),
+        frontier_before_suspension,
+        "resuming the predecessor must not skip ordered persistence"
+    );
+
+    let first_persistence = block_on(first_applied.persist());
+    assert_eq!(
+        database.finish_persistence(first_persistence).unwrap(),
+        first_publication
+    );
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(first_publication),
+        "persisting the resumed predecessor must not skip unpersisted later publications"
+    );
+
+    for (persistence, expected_publication) in later_persistence_futures
+        .into_iter()
+        .zip(expected_album_publications.iter().copied().skip(1))
+    {
+        let persistence = block_on(persistence);
+        assert_eq!(
+            database.finish_persistence(persistence).unwrap(),
+            expected_publication
+        );
+    }
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(last_later_publication),
+        "finishing the retained later persistence receipts must release the contiguous frontier"
+    );
+
+    let mut latest = database.open_batch();
+    latest.update(
+        "albums",
+        vec![Value::U64(33), Value::String("latest-33".into())],
+    );
+    latest.insert("edges", vec![Value::U64(3), Value::U64(2), Value::U64(4)]);
+    let latest = block_on(database.apply_batch(latest)).unwrap();
+    let latest_publication = latest.publication();
+
+    for (subscription, description) in [
+        (&albums, "original aggregate post-resume update"),
+        (&later_albums, "later aggregate post-resume update"),
+    ] {
+        let update =
+            next_subscription_with_publication_bounded(&mut database, subscription, description);
+        assert_eq!(update.publication, Some(latest_publication));
+        assert_eq!(update.deltas.deltas.len(), 2);
+    }
+    let reach_update = next_subscription_with_publication_bounded(
+        &mut database,
+        &reach,
+        "recursive post-resume update",
+    );
+    assert_eq!(reach_update.publication, Some(latest_publication));
+    assert_eq!(reach_update.deltas.deltas.len(), 2);
+
+    let album_rows = block_on(database.query_graph(album_counts_by_title()))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(album_rows.len(), 33);
+    assert!(album_rows.iter().any(|(row, weight)| {
+        *weight == 1 && row == &vec![Value::String("resident-2".into()), Value::U64(1)]
+    }));
+    assert!(album_rows.iter().any(|(row, weight)| {
+        *weight == 1 && row == &vec![Value::String("latest-33".into()), Value::U64(1)]
+    }));
+
+    let reach_rows = block_on(database.query_graph(reachability_graph()))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(reach_rows.len(), 3);
+    for expected in [
+        vec![Value::U64(1), Value::U64(2)],
+        vec![Value::U64(1), Value::U64(4)],
+        vec![Value::U64(2), Value::U64(4)],
+    ] {
+        assert!(
+            reach_rows
+                .iter()
+                .any(|(row, weight)| *weight == 1 && row == &expected),
+            "latest recursive result must contain {expected:?}"
+        );
+    }
+
+    let persistence = block_on(latest.persist());
+    assert_eq!(
+        database.finish_persistence(persistence).unwrap(),
+        latest_publication
+    );
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(latest_publication)
+    );
 }
 
 #[test]
