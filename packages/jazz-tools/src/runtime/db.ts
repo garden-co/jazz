@@ -233,7 +233,18 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
     base?: unknown;
   };
   const lowered: InternalDbQueryOptions = {};
-  if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
+  if (isPublicQueryReadTier(candidate.tier)) {
+    lowered.tier = candidate.tier;
+    // Local-first is a request for the replica's currently known state. A
+    // browser foreground still sends that request to its durable worker, but
+    // the worker must not turn the public Local tier into an authority-coverage
+    // wait. This boundary deliberately leaves private local overlays alone:
+    // an Edge/Remote owner supplies their propagation separately after public
+    // options have been lowered.
+    if (candidate.tier === ReadTier.LocalFirst || candidate.tier === "local") {
+      lowered.propagation = "local-only";
+    }
+  }
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
   if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";

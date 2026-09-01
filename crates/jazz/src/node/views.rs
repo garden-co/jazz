@@ -1481,6 +1481,8 @@ where
             }
             Err(error) => return Err(error),
         };
+        #[cfg(not(debug_assertions))]
+        let _ = &binding_view_key;
         // Wire updates name a usage subscription only.  Resolve the complete
         // policy-scoped authority identity captured when that subscription was
         // admitted; never reconstruct or share it through BindingViewKey.
