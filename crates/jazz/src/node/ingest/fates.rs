@@ -448,31 +448,76 @@ where
         if permission_subject.is_anonymous() {
             return Ok(false);
         }
-        // Branch-view copy evidence is non-causal, but it is still an
-        // authority-verifiable claim about a particular first head overlay.
-        // Reject rather than ignore a malformed, detached, or stale claim:
-        // accepting it would let a client turn a base-row read into an
-        // unaudited insert-shaped head write.
-        if let Some(provenance) = &tx.contribution_merge {
-            for evidence in &provenance.branch_view_copies {
-                let Some(version) = versions.iter().find(|version| {
-                    version.table() == evidence.table
-                        && version.row_uuid() == evidence.row_uuid
-                        && version.branch_key() == &evidence.head
+        // Non-root branch writes have mandatory canonical operation intent.
+        // Do not treat an absent descriptor as an ordinary insert: that would
+        // let a raw sender relabel an inherited first-head overlay and bypass
+        // source read policy. The intent binds to the exact authored version,
+        // and only the authority proves its declared source/existence facts.
+        let branch_versions = versions
+            .iter()
+            .filter(|version| !version.branch_key().values.is_empty())
+            .collect::<Vec<_>>();
+        if !branch_versions.is_empty() {
+            if tx.kind != TxKind::Mergeable {
+                return Ok(false);
+            }
+            let Some(provenance) = &tx.contribution_merge else {
+                return Ok(false);
+            };
+            if provenance.branch_write_intents.len() != branch_versions.len() {
+                return Ok(false);
+            }
+            for intent in &provenance.branch_write_intents {
+                let Some(version) = branch_versions.iter().copied().find(|version| {
+                    version.schema_version() == intent.authored_schema
+                        && version.row_uuid() == intent.row_uuid
+                        && version.branch_key() == &intent.head
+                        && self
+                            .physical_table_id_for_schema(version.schema_version(), version.table())
+                            .ok()
+                            == Some(intent.physical_table_id)
                 }) else {
                     return Ok(false);
                 };
-                if !version.parents().is_empty()
-                    || version.deletion() == Some(DeletionEvent::Deleted)
-                    || !self
-                        .branch_view_copy_satisfies_read_for_write_visibility(
-                            evidence,
-                            permission_subject,
-                            Some(tx.tx_id),
-                        )
-                        .await?
-                {
-                    return Ok(false);
+                match &intent.operation {
+                    crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence) => {
+                        if !version.parents().is_empty()
+                            || version.deletion() == Some(DeletionEvent::Deleted)
+                            || !self
+                                .branch_view_copy_satisfies_read_for_write_visibility(
+                                    evidence,
+                                    permission_subject,
+                                    Some(tx.tx_id),
+                                )
+                                .await?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    crate::tx::BranchWriteOperation::ExactHeadInsert => {
+                        if !version.parents().is_empty() {
+                            return Ok(false);
+                        }
+                        let (content, deletions) = self
+                            .branch_winners_for_schema(
+                                version.table(),
+                                version.schema_version(),
+                                DurabilityTier::Local,
+                                version.branch_key(),
+                                None,
+                            )
+                            .await?;
+                        if content.contains_key(&version.row_uuid())
+                            || deletions.contains_key(&version.row_uuid())
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    crate::tx::BranchWriteOperation::ExactHeadUpdate => {
+                        if version.parents().is_empty() {
+                            return Ok(false);
+                        }
+                    }
                 }
             }
         }

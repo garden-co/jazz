@@ -6,7 +6,7 @@
 //! writes become protocol commit units.
 
 use super::*;
-use crate::tx::BranchViewCopyEvidence;
+use crate::tx::{BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation};
 
 impl<S> NodeState<S>
 where
@@ -1206,6 +1206,57 @@ where
             .iter()
             .filter_map(|write| write.branch_view_copy.clone())
             .collect::<Vec<_>>();
+        // A non-root branch version must never arrive at authority as an
+        // unclassified insert-shaped overlay.  Capture a sorted exact-version
+        // intent before lowering pending writes; this is non-causal metadata
+        // carried through the ordinary transaction/outbox/relay path.
+        let mut branch_write_intents = open_tx
+            .writes
+            .iter()
+            .filter(|write| !write.branch.values.is_empty())
+            .map(|write| {
+                let schema = self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&write.schema_version)
+                    .ok_or(Error::InvalidStoredValue("write schema is missing"))?
+                    .schema
+                    .clone();
+                let table = self.table_in_schema(&write.table, write.schema_version)?;
+                let (head, _) = schema
+                    .project_branch_view_selector(&table, &write.branch)
+                    .map_err(Error::InvalidBranchKey)?;
+                Ok(BranchWriteIntent {
+                    version: 1,
+                    physical_table_id: self
+                        .physical_table_id_for_schema(write.schema_version, &write.table)?,
+                    authored_schema: write.schema_version,
+                    row_uuid: write.row_uuid,
+                    head,
+                    operation: match (&write.cells, &write.branch_view_copy) {
+                        (_, Some(evidence)) => {
+                            BranchWriteOperation::ViewUpdateCopy(evidence.clone())
+                        }
+                        (PendingCells::Patch(_), None) => BranchWriteOperation::ExactHeadUpdate,
+                        (PendingCells::Replace(_), None) => BranchWriteOperation::ExactHeadInsert,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        branch_write_intents.sort_by(|left, right| {
+            (
+                left.physical_table_id,
+                left.authored_schema,
+                left.row_uuid,
+                &left.head,
+            )
+                .cmp(&(
+                    right.physical_table_id,
+                    right.authored_schema,
+                    right.row_uuid,
+                    &right.head,
+                ))
+        });
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
             let parents = if write.refresh_parents_at_commit {
@@ -1315,11 +1366,18 @@ where
             }
             None => self.mint_tx_time(first.1.now_ms)?,
         };
-        let contribution_merge = branch_view_copies.first().cloned().map(|first| {
-            let mut provenance = ContributionMergeProvenance::branch_view_copy(first);
-            provenance.branch_view_copies = branch_view_copies;
-            provenance
-        });
+        let contribution_merge = if branch_view_copies.is_empty() && branch_write_intents.is_empty()
+        {
+            None
+        } else {
+            Some(ContributionMergeProvenance {
+                source: BranchKey::default(),
+                target: BranchKey::default(),
+                substitutions: Vec::new(),
+                branch_view_copies,
+                branch_write_intents,
+            })
+        };
         let committed = self
             .commit_mergeable_many_at_with_schema_versions_and_provenance(
                 commits,

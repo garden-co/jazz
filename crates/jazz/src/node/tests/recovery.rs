@@ -877,6 +877,7 @@ fn with_stored_contribution_coordinate_ids(
         record.target().unwrap(),
         substitutions,
         Vec::new(),
+        Vec::new(),
     )
     .unwrap()
     .record()

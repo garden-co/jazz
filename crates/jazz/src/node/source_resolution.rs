@@ -357,7 +357,7 @@ where
             }))
     }
 
-    async fn branch_winners_for_schema(
+    pub(super) async fn branch_winners_for_schema(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,

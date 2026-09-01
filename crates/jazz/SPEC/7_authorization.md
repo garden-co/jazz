@@ -206,7 +206,9 @@ privilege does not make a read-hidden row updateable by a session.
 
 The first physical overlay for a branch-view update or existing-target upsert
 has no target-row history predecessor even though it read an inherited source.
-Its v1 branch-view copy descriptor (ch. 11) is the only additional proof that
+Every non-root mergeable branch version has mandatory canonical branch-write
+intent (ch. 11), so an omitted or relabelled copy cannot be admitted as an
+ordinary insert. Its v1 branch-view copy descriptor is the only additional proof that
 may satisfy this rule: the authority re-resolves its exact live or frozen source
 and evaluates that source's ordinary read policy. The client does not evaluate
 or receive policy support, and the descriptor is not a causal dependency,

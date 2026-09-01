@@ -18,7 +18,9 @@ use crate::protocol::{
 };
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
-use crate::tx::{BranchViewCopyBase, BranchViewCopyEvidence};
+use crate::tx::{
+    BranchViewCopyBase, BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation,
+};
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
@@ -272,6 +274,18 @@ pub(super) struct ContributionMergeStorageRecord {
         1 => target: Vec<u8>,
         2 => substitutions: Vec<Value>,
         3 => branch_view_copy_v1: Vec<Value>,
+        4 => branch_write_intent_v1: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchWriteIntentStorageRecord {
+        0 => version: u8,
+        1 => physical_table_id: u64,
+        2 => authored_schema: uuid::Uuid,
+        3 => row_uuid: uuid::Uuid,
+        4 => head: Vec<u8>,
+        5 => operation: records::EnumValue,
     }
 }
 
@@ -2670,6 +2684,116 @@ fn branch_view_copy_descriptor() -> &'static records::RecordDescriptor {
     descriptor
 }
 
+fn branch_write_intent_descriptor() -> &'static records::RecordDescriptor {
+    let descriptor = contribution_merge_descriptor();
+    let records::ValueType::Array(inner) = record_field_type(descriptor, 4) else {
+        unreachable!("branch write intent is an array")
+    };
+    let records::ValueType::Record(descriptor) = &**inner else {
+        unreachable!("branch write intent is a record")
+    };
+    descriptor
+}
+
+fn branch_write_operation_schema() -> &'static records::EnumSchema {
+    let records::ValueType::Enum(schema) = record_field_type(branch_write_intent_descriptor(), 5)
+    else {
+        unreachable!("branch write operation is an enum")
+    };
+    schema
+}
+
+fn branch_write_intent_storage_record(
+    intent: &BranchWriteIntent,
+    evidence_index: Option<u32>,
+) -> Result<OwnedRecord, Error> {
+    let schema = branch_write_operation_schema();
+    let (name, values): (&str, Vec<Value>) = match (&intent.operation, evidence_index) {
+        (BranchWriteOperation::ExactHeadInsert, None) => ("exact_head_insert", Vec::new()),
+        (BranchWriteOperation::ExactHeadUpdate, None) => ("exact_head_update", Vec::new()),
+        (BranchWriteOperation::ViewUpdateCopy(_), Some(index)) => {
+            ("view_update_copy", vec![Value::U32(index)])
+        }
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "branch write intent evidence binding is invalid",
+            ));
+        }
+    };
+    let tag = schema.tag(name).expect("declared branch write operation");
+    let payload = &schema
+        .case(tag)
+        .expect("declared branch write operation")
+        .payload;
+    let payload = OwnedRecord::new(payload.create(&values)?, payload.clone());
+    Ok(BranchWriteIntentStorageRecord::encode(
+        branch_write_intent_descriptor(),
+        intent.version,
+        intent.physical_table_id.0,
+        intent.authored_schema.0,
+        intent.row_uuid.0,
+        intent
+            .head
+            .try_canonical_bytes()
+            .map_err(|_| Error::InvalidStoredValue("branch write intent head is invalid"))?,
+        records::EnumValue::new(tag, payload),
+    )
+    .map(|record| record.record().clone())?)
+}
+
+fn branch_write_intent_from_storage_record(
+    record: OwnedRecord,
+    copies: &[BranchViewCopyEvidence],
+) -> Result<BranchWriteIntent, Error> {
+    if record.descriptor() != branch_write_intent_descriptor() {
+        return Err(Error::InvalidStoredValue(
+            "branch write intent must be a v1 record",
+        ));
+    }
+    let record = BranchWriteIntentStorageRecord::new(record);
+    let operation_value = record.operation()?;
+    let schema = branch_write_operation_schema();
+    let case = schema
+        .case(operation_value.tag())
+        .map_err(|_| Error::InvalidStoredValue("branch write operation tag is invalid"))?;
+    let operation = match case.name.as_str() {
+        "exact_head_insert" => BranchWriteOperation::ExactHeadInsert,
+        "exact_head_update" => BranchWriteOperation::ExactHeadUpdate,
+        "view_update_copy" => {
+            let payload = operation_value.into_record();
+            let index = payload
+                .get_idx(0)
+                .map_err(|_| Error::InvalidStoredValue("branch write copy index is invalid"))?;
+            let Value::U32(index) = index else {
+                return Err(Error::InvalidStoredValue(
+                    "branch write copy index is invalid",
+                ));
+            };
+            let evidence = copies
+                .get(index as usize)
+                .cloned()
+                .ok_or(Error::InvalidStoredValue(
+                    "branch write copy evidence is missing",
+                ))?;
+            BranchWriteOperation::ViewUpdateCopy(evidence)
+        }
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "branch write operation tag is invalid",
+            ));
+        }
+    };
+    Ok(BranchWriteIntent {
+        version: record.version()?,
+        physical_table_id: PhysicalTableId(record.physical_table_id()?),
+        authored_schema: SchemaVersionId(record.authored_schema()?),
+        row_uuid: RowUuid(record.row_uuid()?),
+        head: BranchKey::from_canonical_bytes(&record.head()?)
+            .map_err(|_| Error::InvalidStoredValue("branch write intent head is invalid"))?,
+        operation,
+    })
+}
+
 fn branch_view_copy_base_schema() -> &'static records::EnumSchema {
     let records::ValueType::Enum(schema) = record_field_type(branch_view_copy_descriptor(), 2)
     else {
@@ -2998,6 +3122,25 @@ pub(super) fn contribution_merge_storage_value(
                     .iter()
                     .map(|evidence| branch_view_copy_storage_record(evidence).map(Value::Record))
                     .collect::<Result<Vec<_>, _>>()?,
+                provenance
+                    .branch_write_intents
+                    .iter()
+                    .map(|intent| {
+                        let index = match &intent.operation {
+                            BranchWriteOperation::ViewUpdateCopy(evidence) => provenance
+                                .branch_view_copies
+                                .iter()
+                                .position(|candidate| {
+                                    candidate.table == evidence.table
+                                        && candidate.row_uuid == evidence.row_uuid
+                                        && candidate.head == evidence.head
+                                })
+                                .map(|index| index as u32),
+                            _ => None,
+                        };
+                        branch_write_intent_storage_record(intent, index).map(Value::Record)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
             )?
             .record()
             .clone())
@@ -3175,6 +3318,23 @@ pub(super) fn contribution_merge_from_storage_record(
                 )),
             })
             .collect::<Result<_, _>>()?,
+        branch_write_intents: Vec::new(),
+    };
+    let branch_write_intents = record
+        .branch_write_intent_v1()?
+        .into_iter()
+        .map(|value| match value {
+            Value::Record(record) => {
+                branch_write_intent_from_storage_record(record, &provenance.branch_view_copies)
+            }
+            _ => Err(Error::InvalidStoredValue(
+                "branch write intent must be a record",
+            )),
+        })
+        .collect::<Result<_, _>>()?;
+    let provenance = ContributionMergeProvenance {
+        branch_write_intents,
+        ..provenance
     };
     provenance.validate().map_err(|_| {
         Error::InvalidStoredValue("transaction contribution provenance must be canonical")

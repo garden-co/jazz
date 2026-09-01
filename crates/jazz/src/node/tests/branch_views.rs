@@ -314,6 +314,9 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         )
         .unwrap();
     let table = schema.tables.iter().find(|table| table.name == "todos").unwrap();
+    let physical_table_id = authority
+        .physical_table_id_for_schema(schema.version_id(), "todos")
+        .unwrap();
     let base_key = schema.project_branch_view_selector(table, &base).unwrap().0;
     let head_key = schema.project_branch_view_selector(table, &head).unwrap().0;
     let make_unit = |tx_id: TxId,
@@ -358,9 +361,20 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            contribution_merge: Some(crate::tx::ContributionMergeProvenance::branch_view_copy(
-                evidence,
-            )),
+            contribution_merge: Some(crate::tx::ContributionMergeProvenance {
+                source: BranchKey::default(),
+                target: BranchKey::default(),
+                substitutions: Vec::new(),
+                branch_view_copies: vec![evidence.clone()],
+                branch_write_intents: vec![crate::tx::BranchWriteIntent {
+                    version: 1,
+                    physical_table_id,
+                    authored_schema: schema.version_id(),
+                    row_uuid: source_row,
+                    head: evidence.head.clone(),
+                    operation: crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence),
+                }],
+            }),
         };
         (tx, vec![version])
     };
@@ -379,6 +393,35 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
     assert!(matches!(
         authority.transaction_state_settled(allowed_tx.tx_id),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    // Planted sensitive negative: a raw sender cannot erase the operation
+    // intent and have this first-head inherited copy reclassified as an
+    // ordinary insert. If the mandatory-intent check is removed, this becomes
+    // accepted under the write policy without proving source read access.
+    let omitted_head = branch_selector(0x56);
+    let omitted_head_key = schema
+        .project_branch_view_selector(table, &omitted_head)
+        .unwrap()
+        .0;
+    let (mut omitted_tx, omitted_versions) = make_unit(
+        TxId::new(TxTime::from(25), node(0x57)),
+        denied,
+        source_tx,
+        omitted_head_key,
+        uuid::Uuid::from_bytes([0x56; 16]),
+    );
+    omitted_tx.contribution_merge = None;
+    let omitted_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        omitted_tx.clone(),
+        omitted_versions,
+        25,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, omitted_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(omitted_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
     ));
 
     // A distinct target keeps the denial independent of the accepted head
@@ -423,8 +466,18 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         .contribution_merge
         .as_mut()
         .unwrap()
-        .branch_view_copies[0]
-        .source_version = TxId::new(TxTime::from(999), node(0x55));
+        .branch_write_intents[0]
+        .operation = crate::tx::BranchWriteOperation::ViewUpdateCopy(
+        crate::tx::BranchViewCopyEvidence {
+            source_version: TxId::new(TxTime::from(999), node(0x55)),
+            ..tampered_tx
+                .contribution_merge
+                .as_ref()
+                .unwrap()
+                .branch_view_copies[0]
+                .clone()
+        },
+    );
     let tampered_outcome = crate::db::block_on(authority.ingest_commit_unit(
         tampered_tx.clone(),
         tampered_versions,

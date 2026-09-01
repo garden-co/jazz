@@ -5,7 +5,7 @@
 //! [`crate::node::open_tx`], and [`crate::protocol`]. Merge and currency rules
 //! are grounded in `jazz/README.md`.
 
-use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
+use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowUuid, SchemaVersionId};
 use crate::protocol::{BranchKey, SnapshotRef};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
@@ -60,6 +60,41 @@ pub struct ContributionMergeProvenance {
     /// substitutions: neither form is a history edge, merge dependency, read
     /// set, or CAS condition.
     pub branch_view_copies: Vec<BranchViewCopyEvidence>,
+    /// Mandatory, canonical operation classification for every non-root
+    /// branch write in this transaction. This is authorization metadata, not
+    /// a history edge or a caller-trusted hint: admission matches it to the
+    /// exact authored version and independently proves the declared case.
+    #[serde(default)]
+    pub branch_write_intents: Vec<BranchWriteIntent>,
+}
+
+/// Version-one operation intent for one branch-local row version.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchWriteIntent {
+    /// Explicit durable layout version for this intent.
+    pub version: u8,
+    /// Stable physical table identity, paired with the schema that authored
+    /// the version so renamed logical tables remain resolvable.
+    pub physical_table_id: PhysicalTableId,
+    /// Schema version that supplied the logical coordinate.
+    pub authored_schema: SchemaVersionId,
+    /// Row coordinate within the physical table and head.
+    pub row_uuid: RowUuid,
+    /// Canonical exact target head coordinate.
+    pub head: BranchKey,
+    /// Authority-verifiable operation classification.
+    pub operation: BranchWriteOperation,
+}
+
+/// The authority-verifiable meaning of a branch-local write.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum BranchWriteOperation {
+    /// A genuinely new row at this exact physical head.
+    ExactHeadInsert,
+    /// A write replacing an already-present exact head row.
+    ExactHeadUpdate,
+    /// A first head overlay that copied an inherited source from a view base.
+    ViewUpdateCopy(BranchViewCopyEvidence),
 }
 
 /// Version-one, authority-verifiable logical source of a first head overlay.
@@ -125,6 +160,7 @@ impl ContributionMergeProvenance {
             target,
             substitutions,
             branch_view_copies: Vec::new(),
+            branch_write_intents: Vec::new(),
         })
     }
 
@@ -142,6 +178,7 @@ impl ContributionMergeProvenance {
             target: BranchKey::default(),
             substitutions: Vec::new(),
             branch_view_copies: vec![evidence],
+            branch_write_intents: Vec::new(),
         }
     }
 
@@ -152,7 +189,10 @@ impl ContributionMergeProvenance {
             self.target.clone(),
             self.substitutions.clone(),
         )?;
-        if self.branch_view_copies.is_empty() && &canonical != self {
+        if self.branch_view_copies.is_empty()
+            && self.branch_write_intents.is_empty()
+            && &canonical != self
+        {
             return Err("contribution merge provenance must be canonical");
         }
         if !self.branch_view_copies.is_empty()
@@ -173,6 +213,34 @@ impl ContributionMergeProvenance {
             {
                 return Err("branch-view copy evidence must be canonical v1 provenance");
             }
+        }
+        let mut intents = self.branch_write_intents.clone();
+        intents.sort_by(|left, right| {
+            (
+                left.physical_table_id,
+                left.authored_schema,
+                left.row_uuid,
+                &left.head,
+            )
+                .cmp(&(
+                    right.physical_table_id,
+                    right.authored_schema,
+                    right.row_uuid,
+                    &right.head,
+                ))
+        });
+        if intents != self.branch_write_intents
+            || intents.windows(2).any(|pair| {
+                pair[0].physical_table_id == pair[1].physical_table_id
+                    && pair[0].authored_schema == pair[1].authored_schema
+                    && pair[0].row_uuid == pair[1].row_uuid
+                    && pair[0].head == pair[1].head
+            })
+            || intents
+                .iter()
+                .any(|intent| intent.version != 1 || intent.head.values.is_empty())
+        {
+            return Err("branch write intents must be canonical v1 coordinates");
         }
         Ok(())
     }

@@ -343,8 +343,19 @@ may materialize inherited values needed by a merge strategy, but the first head
 version has no cross-branch-key causal parent. Source derivation may be retained
 only as typed non-causal provenance.
 
+Every non-root mergeable branch version carries one canonical **branch write
+intent v1**, keyed by its stable physical table identity, authored schema,
+`RowUuid`, and exact head key. The intent is sorted and unique by that exact
+version coordinate. It distinguishes a genuinely absent exact-head insert, an
+exact-head update, and a branch-view copy. Missing, duplicate, malformed, or
+mismatched intent rejects the transaction; a sender cannot relabel a view copy
+as an insert by omitting optional provenance. The authority validates branch
+keys against the authored physical table before storage, so hostile unknown,
+missing, wrongly typed, or reordered components are malformed input rather
+than codec failures.
+
 For a mergeable update or existing-target upsert that creates that first head
-overlay, the commit unit carries **branch-view copy evidence v1**. It names the
+overlay, its branch-write intent carries **branch-view copy evidence v1**. It names the
 projected target head key, either a live current base key or a frozen
 `SnapshotRef` base, table, `RowUuid`, and the exact selected source content
 `TxId`. It is an authority-verifiable operation descriptor: at admission the

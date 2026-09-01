@@ -1726,6 +1726,53 @@ fn contribution_merge_column() -> GrooveColumnType {
             ])))
             .array_of(),
         ),
+        // Every non-root mergeable branch write carries one canonical intent.
+        // Its table identity is physical; the authored schema disambiguates
+        // historical logical names when admission resolves it.
+        (
+            "branch_write_intent_v1",
+            GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+                ("version", ValueType::U8),
+                ("physical_table_id", ValueType::U64),
+                ("authored_schema", ValueType::Uuid),
+                ("row_uuid", ValueType::Uuid),
+                ("head", ValueType::Bytes),
+                (
+                    "operation",
+                    GrooveColumnType::Enum(
+                        Box::new(
+                            EnumSchema::new(
+                                "jazz_branch_write_operation_v1",
+                                [
+                                    EnumCase::new(
+                                        "exact_head_insert",
+                                        RecordDescriptor::new(std::iter::empty::<(
+                                            String,
+                                            ValueType,
+                                        )>(
+                                        )),
+                                    ),
+                                    EnumCase::new(
+                                        "exact_head_update",
+                                        RecordDescriptor::new(std::iter::empty::<(
+                                            String,
+                                            ValueType,
+                                        )>(
+                                        )),
+                                    ),
+                                    EnumCase::new(
+                                        "view_update_copy",
+                                        RecordDescriptor::new([("evidence_index", ValueType::U32)]),
+                                    ),
+                                ],
+                            )
+                            .expect("valid branch write operation enum"),
+                        ),
+                    ),
+                ),
+            ])))
+            .array_of(),
+        ),
     ])))
     .nullable()
 }
