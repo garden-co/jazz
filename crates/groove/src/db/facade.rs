@@ -415,6 +415,18 @@ impl Database {
         Ok(self.storage.approximate_class_bytes(cf.to_owned()).await?)
     }
 
+    /// Return aggregate approximate live bytes for supplied logical column
+    /// families, counting shared backing classes only once.
+    pub async fn approximate_class_bytes_for_logical_families<'a>(
+        &self,
+        logical_families: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Option<u64>, Error> {
+        Ok(self
+            .storage
+            .approximate_class_bytes_for_logical_families(logical_families)
+            .await?)
+    }
+
     /// Return the durable ordered key/value bytes of Groove's engine-owned
     /// large-value metadata class for a compatibility receipt.
     ///

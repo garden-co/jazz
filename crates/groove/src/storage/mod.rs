@@ -823,6 +823,31 @@ impl LayoutStorage {
         Ok(storage)
     }
 
+    /// Aggregate approximate live bytes for the supplied logical column
+    /// families, counting each mapped physical class at most once.
+    pub(crate) async fn approximate_class_bytes_for_logical_families<'a>(
+        &self,
+        logical_families: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Option<u64>, Error> {
+        let mut physical_families = BTreeSet::new();
+        for logical_cf in logical_families {
+            physical_families.insert(self.layout.map_cf(logical_cf)?.physical_cf);
+        }
+
+        let mut bytes = 0_u64;
+        for physical_cf in physical_families {
+            let Some(class_bytes) = self
+                .inner
+                .approximate_class_bytes(physical_cf.to_owned())
+                .await?
+            else {
+                return Ok(None);
+            };
+            bytes = bytes.saturating_add(class_bytes);
+        }
+        Ok(Some(bytes))
+    }
+
     pub fn into_inner(self) -> BoxedStorage {
         self.inner
     }
@@ -2359,6 +2384,242 @@ mod tests {
         ) -> StorageFuture<'static, Result<Self, Error>> {
             Box::pin(async move { Ok(Self(self.0.reopen(column_families).await?)) })
         }
+    }
+
+    #[derive(Clone)]
+    struct MeteredStorage {
+        inner: MemoryStorage,
+        calls: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl MeteredStorage {
+        fn new() -> (Self, Rc<RefCell<Vec<String>>>) {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let inner = MemoryStorage::new(&[
+                CLASS_HISTORY_CF,
+                CLASS_REGISTER_CF,
+                CLASS_GLOBAL_CURRENT_CF,
+                CLASS_AHEAD_CURRENT_CF,
+                CLASS_CHANGES_CF,
+                CLASS_INDICES_CF,
+                CLASS_META_CF,
+            ])
+            .expect("valid physical class families");
+            (
+                Self {
+                    inner,
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    impl OrderedKvStorage for MeteredStorage {
+        fn get(
+            &self,
+            cf: String,
+            key: Vec<u8>,
+        ) -> StorageFuture<'_, Result<Option<super::Value>, Error>> {
+            self.inner.get(cf, key)
+        }
+
+        fn put_if_absent(
+            &self,
+            cf: String,
+            key: Vec<u8>,
+            value: Vec<u8>,
+        ) -> StorageFuture<'_, Result<Option<super::Value>, Error>> {
+            self.inner.put_if_absent(cf, key, value)
+        }
+
+        fn compare_and_delete(
+            &self,
+            cf: String,
+            key: Vec<u8>,
+            expected: Vec<u8>,
+        ) -> StorageFuture<'_, Result<bool, Error>> {
+            self.inner.compare_and_delete(cf, key, expected)
+        }
+
+        fn set(
+            &self,
+            cf: String,
+            key: Vec<u8>,
+            value: Vec<u8>,
+        ) -> StorageFuture<'_, Result<(), Error>> {
+            self.inner.set(cf, key, value)
+        }
+
+        fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+            self.inner.delete(cf, key)
+        }
+
+        fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+            self.inner.scan(request)
+        }
+
+        fn write_many(
+            &self,
+            operations: Vec<OwnedWriteOperation>,
+        ) -> StorageFuture<'_, Result<(), Error>> {
+            self.inner.write_many(operations)
+        }
+
+        fn approximate_class_bytes(
+            &self,
+            cf: String,
+        ) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+            Box::pin(async move {
+                self.calls.borrow_mut().push(cf.clone());
+                match cf.as_str() {
+                    CLASS_HISTORY_CF => Ok(Some(40)),
+                    CLASS_REGISTER_CF => Err(Error::Backend {
+                        backend: "metered-test",
+                        message: "injected metering failure".to_owned(),
+                    }),
+                    CLASS_GLOBAL_CURRENT_CF => Ok(Some(u64::MAX)),
+                    CLASS_CHANGES_CF => Ok(None),
+                    CLASS_META_CF => Ok(Some(999)),
+                    _ => Ok(Some(1)),
+                }
+            })
+        }
+
+        fn column_family_names(&self) -> Option<Vec<String>> {
+            self.inner.column_family_names()
+        }
+    }
+
+    impl ReopenableStorage for MeteredStorage {
+        fn reopen(
+            self,
+            column_families: Vec<String>,
+        ) -> StorageFuture<'static, Result<Self, Error>> {
+            Box::pin(async move {
+                Ok(Self {
+                    inner: self.inner.reopen(column_families).await?,
+                    calls: self.calls,
+                })
+            })
+        }
+    }
+
+    async fn metered_class_layout() -> (LayoutStorage, Rc<RefCell<Vec<String>>>) {
+        let (backend, calls) = MeteredStorage::new();
+        let storage = LayoutStorage::new(backend, StorageLayout::jazz_class_v1())
+            .await
+            .expect("class layout opens");
+        (storage, calls)
+    }
+
+    #[futures_test::test]
+    async fn aggregate_meters_duplicate_logical_family_once() {
+        let (storage, calls) = metered_class_layout().await;
+
+        let bytes = storage
+            .approximate_class_bytes_for_logical_families([
+                "jazz_albums_history",
+                "jazz_albums_history",
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(bytes, Some(40));
+        assert_eq!(calls.borrow().as_slice(), [CLASS_HISTORY_CF]);
+    }
+
+    #[futures_test::test]
+    async fn aggregate_meters_shared_physical_history_class_once() {
+        let (storage, calls) = metered_class_layout().await;
+
+        let bytes = storage
+            .approximate_class_bytes_for_logical_families([
+                "jazz_albums_history",
+                "jazz_tracks_history",
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(bytes, Some(40));
+        assert_eq!(calls.borrow().as_slice(), [CLASS_HISTORY_CF]);
+    }
+
+    #[futures_test::test]
+    async fn aggregate_of_empty_logical_family_set_is_zero() {
+        let (storage, calls) = metered_class_layout().await;
+
+        let bytes = storage
+            .approximate_class_bytes_for_logical_families(std::iter::empty())
+            .await
+            .unwrap();
+
+        assert_eq!(bytes, Some(0));
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[futures_test::test]
+    async fn aggregate_does_not_implicitly_meter_layout_metadata() {
+        let (storage, calls) = metered_class_layout().await;
+
+        let bytes = storage
+            .approximate_class_bytes_for_logical_families(["jazz_albums_history"])
+            .await
+            .unwrap();
+
+        assert_eq!(bytes, Some(40));
+        assert_eq!(calls.borrow().as_slice(), [CLASS_HISTORY_CF]);
+    }
+
+    #[futures_test::test]
+    async fn aggregate_returns_none_when_one_physical_class_cannot_be_metered() {
+        let (storage, calls) = metered_class_layout().await;
+
+        let bytes = storage
+            .approximate_class_bytes_for_logical_families(["jazz_global_changes"])
+            .await
+            .unwrap();
+
+        assert_eq!(bytes, None);
+        assert_eq!(calls.borrow().as_slice(), [CLASS_CHANGES_CF]);
+    }
+
+    #[futures_test::test]
+    async fn aggregate_propagates_backend_metering_error() {
+        let (storage, calls) = metered_class_layout().await;
+
+        let error = storage
+            .approximate_class_bytes_for_logical_families(["jazz_albums_register"])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Backend {
+                backend: "metered-test",
+                ..
+            }
+        ));
+        assert_eq!(calls.borrow().as_slice(), [CLASS_REGISTER_CF]);
+    }
+
+    #[futures_test::test]
+    async fn aggregate_saturates_physical_class_sum() {
+        let (storage, calls) = metered_class_layout().await;
+
+        let bytes = storage
+            .approximate_class_bytes_for_logical_families([
+                "jazz_albums_history",
+                "jazz_albums_global_current",
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(bytes, Some(u64::MAX));
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF]
+        );
     }
 
     #[test]
