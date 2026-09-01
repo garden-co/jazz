@@ -317,6 +317,50 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
     let physical_table_id = authority
         .physical_table_id_for_schema(schema.version_id(), "todos")
         .unwrap();
+    // The authority has moved its write pointer through a table rename before
+    // it receives the old-authored branch version below. The intent's stable
+    // physical table id plus authored schema must resolve `todos`, rather than
+    // interpreting the evidence through the current `tasks` spelling.
+    let renamed_schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .branch_by("branch_id")
+                .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
+        ),
+    );
+    let renamed = SchemaVersion::new(renamed_schema);
+    publish_schema_lineage(
+        &mut authority,
+        renamed.clone(),
+        MigrationLens::new(
+            schema.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![LensOp::RenameTable {
+                    from: "todos".to_owned(),
+                    to: "tasks".to_owned(),
+                }],
+            }],
+        )
+        .expect("valid table-rename lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    authority
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorSubject::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: renamed.id,
+            },
+        })
+        .unwrap();
     let base_key = schema.project_branch_view_selector(table, &base).unwrap().0;
     let head_key = schema.project_branch_view_selector(table, &head).unwrap().0;
     let make_unit = |tx_id: TxId,
