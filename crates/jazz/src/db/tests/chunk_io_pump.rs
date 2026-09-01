@@ -7,7 +7,10 @@ use std::task::{Context, Poll, Waker};
 use groove::chunks::{ChunkKvStorage, ChunkProvider, ChunkStorage, MissingChunkResolver};
 
 use super::super::*;
-use super::{duplex, open_db, schema};
+use super::{
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, duplex,
+    encode_frame, open_db, schema,
+};
 
 #[derive(Default)]
 struct DeferredChunkStorage {
@@ -1143,5 +1146,61 @@ fn a_later_registered_upstream_retries_demand_drained_by_a_disconnected_predeces
             .await
             .unwrap();
         assert_eq!(pending.await.unwrap().as_ref(), &[2]);
+    });
+}
+
+#[test]
+fn complete_auxiliary_response_with_wrong_protocol_version_is_rejected_without_resolving_pending_chunk()
+ {
+    crate::db::block_on(async {
+        let resolver = PeerChunkResolver::default();
+        let database = groove::db::Database::new(
+            groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
+        )
+        .await
+        .unwrap();
+        let pump = PeerIoPump::new(
+            resolver.clone(),
+            database.local_chunk_reader(),
+            51,
+            PeerIoPumpRole::Upstream,
+        );
+        let mut pending = resolver.resolve(groove::chunks::ChunkRequest {
+            object_hash: [0x51; 32],
+            locator: groove::large_values::Locator::random(),
+        });
+        let request_id = match pump.take_outbound(1).unwrap() {
+            SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
+            _ => unreachable!(),
+        };
+        let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_AUXILIARY_CHUNKS;
+        let payload = crate::wire::encode_sync_message(&SyncMessage::ChunkResponseBatch(
+            ChunkResponseBatch {
+                responses: vec![ChunkResponseEntry {
+                    request_id,
+                    result: ChunkResponse::Found(vec![0x51]),
+                }],
+            },
+        ))
+        .unwrap();
+        let frame = encode_frame(&WireFrame::Message(WireEnvelope::new(
+            WIRE_PROTOCOL_VERSION + 1,
+            features,
+            payload,
+        )))
+        .unwrap();
+
+        let route = pump.route_incoming_wire_frame(frame, features).await;
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let pending_is_unchanged =
+            matches!(Pin::new(&mut pending).poll(&mut context), Poll::Pending);
+
+        assert!(
+            route.is_err() && pending_is_unchanged,
+            "a response from another protocol version must be rejected before resolving its chunk"
+        );
     });
 }
