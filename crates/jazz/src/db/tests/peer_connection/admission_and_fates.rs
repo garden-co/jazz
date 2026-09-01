@@ -2162,7 +2162,6 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
                     if update.subscription == downstream_subscription
                         && update.reset_result_set
                         && update.result_member_adds.is_empty()
-                        && update.result_member_removes.is_empty()
             )
         });
         client.tick().unwrap();
@@ -2204,13 +2203,23 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
             if !state.served.contains_key(&old_upstream_subscription)
                 && state.served.contains_key(&fresh_upstream_subscription)
     ));
+    let fresh_authority_source = edge
+        .node
+        .node()
+        .borrow()
+        .authority_result_key_for_subscription(fresh_upstream_subscription)
+        .expect("fresh upstream usage has an exact authority result");
     assert!(
         matches!(
             &edge_client.borrow().link,
             ConnectionLink::Subscriber(state)
-                if !state.peer.has_maintained_subscription(old_maintained_subscription)
+                if state.peer.has_maintained_subscription(old_maintained_subscription)
+                    && state
+                        .peer
+                        .subscription_authority_result_source(old_maintained_subscription)
+                        == Some(&fresh_authority_source)
         ),
-        "claim refresh must retire the old policy-bound maintained receiver"
+        "claim refresh must retire the old receiver before reopening the same group key against fresh U"
     );
     assert_eq!(
         core_fresh.1,

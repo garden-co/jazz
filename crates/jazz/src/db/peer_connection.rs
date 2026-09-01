@@ -1068,6 +1068,7 @@ where
         // one usage site and allocate a fresh opaque handle whose identity
         // includes the new immutable delegated snapshot.
         let mut upstream_replacements = Vec::new();
+        let mut refreshed_authority_sources = BTreeMap::new();
         let groups = coverage_groups
             .iter_mut()
             .map(|(coverage, group)| {
@@ -1096,6 +1097,20 @@ where
                                 "only a non-authoritative relay refreshes an upstream authority source"
                             );
                             group.authority_result_subscription = fresh_upstream_subscription;
+                            refreshed_authority_sources.insert(
+                                coverage.clone(),
+                                crate::protocol::AuthorityResultKey::policy_scoped(
+                                    BindingViewKey {
+                                        shape_id: group.shape.shape_id(),
+                                        binding_id: group.binding.binding_id(),
+                                        read_view: group.upstream_opts.read_view_key(),
+                                    },
+                                    crate::protocol::PolicyBindingKey::from_canonical_parts(
+                                        refreshed_direct_binding.0,
+                                        refreshed_direct_binding.1.clone(),
+                                    ),
+                                ),
+                            );
                             group.awaiting_upstream_settlement = true;
                             // Do not let the next owner-loop pass rehydrate a
                             // subscriber from the old result set. Once the
@@ -1146,6 +1161,18 @@ where
             downstream_subscriptions,
         ) in upstream_replacements
         {
+            // A direct coverage key is not itself policy-partitioned, so a
+            // claim refresh can replace U without changing the group key.
+            // In that case the old receiver would otherwise remain attached
+            // to B1 and later publish its stale membership as B2. Retire the
+            // group-owned receiver explicitly; it will reopen only after the
+            // fresh exact U settles.
+            let maintained_subscription = coverage_group_subscription_key(&coverage);
+            {
+                let mut node = self.node.borrow_mut();
+                node.apply_unsubscribe(maintained_subscription);
+                peer.forget_subscription_with_node(&mut node, maintained_subscription);
+            }
             let old_owner = retire_relay_upstream_subscription(
                 &self.relay_upstream_subscription_owners,
                 old_upstream_subscription,
@@ -1223,6 +1250,21 @@ where
                 }
             }
             if deferred_rehydrates.contains(&coverage) {
+                let source = refreshed_authority_sources
+                    .get(&coverage)
+                    .expect("every deferred relay refresh selects a new exact U source")
+                    .clone();
+                peer.set_subscription_authority_result_source(
+                    maintained_subscription,
+                    source.clone(),
+                );
+                peer.set_subscription_awaiting_selected_authority_source(
+                    maintained_subscription,
+                    true,
+                );
+                for subscription in &subscribers {
+                    peer.set_subscription_authority_result_source(*subscription, source.clone());
+                }
                 // The old maintained group was fed by the old upstream usage
                 // and may still contain rows now forbidden by the refreshed
                 // session. Tear it down rather than rehydrating from that
@@ -6559,10 +6601,12 @@ where
             .as_ref()
             .is_some_and(|source| node.borrow().has_settled_authority_result(source));
         eprintln!(
-            "RELTRACE scope-send subscription={:?} source={source:?} source-settled={source_settled} reset={} opening={}",
+            "RELTRACE scope-send subscription={:?} source={source:?} source-settled={source_settled} reset={} opening={} adds={} removes={}",
             payload.subscription,
             payload.reset_result_set,
             payload.peer_payload_inventory.opening_pending,
+            payload.result_member_adds.len(),
+            payload.result_member_removes.len(),
         );
         if source.is_some() && !source_settled {
             // This D belongs to a non-authoritative scope relay. Its selected U
