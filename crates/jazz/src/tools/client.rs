@@ -3563,10 +3563,148 @@ mod tests {
     use crate::groove::storage::{Error as StorageError, StorageFactory, StorageFuture};
     use crate::ids::NodeUuid;
     use crate::tools::AppId;
+    use crate::tools::native_transport_connector::{
+        ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportError,
+        NativeTransportFuture, NativeTransportTerminal, NativeTransportTerminalFuture,
+    };
     use crate::tools::public_schema::Schema;
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
+    use crate::wire::{TransportError, WireTransport};
     use serde_json::json;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
+
+    struct NoopNativeWireTransport;
+
+    impl WireTransport for NoopNativeWireTransport {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> std::result::Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    struct ControlledTerminal {
+        sender: Option<oneshot::Sender<NativeTransportTerminal>>,
+        observed: Arc<AtomicBool>,
+    }
+    impl ControlledTerminal {
+        fn send(&mut self, terminal: NativeTransportTerminal) {
+            let _ = self
+                .sender
+                .take()
+                .expect("controlled terminal sender is used once")
+                .send(terminal);
+        }
+    }
+
+    struct ControlledNativeConnector {
+        connect_count: AtomicUsize,
+        terminals: Mutex<VecDeque<(oneshot::Receiver<NativeTransportTerminal>, Arc<AtomicBool>)>>,
+    }
+
+    impl ControlledNativeConnector {
+        fn new(
+            terminals: Vec<(oneshot::Receiver<NativeTransportTerminal>, Arc<AtomicBool>)>,
+        ) -> Self {
+            Self {
+                connect_count: AtomicUsize::new(0),
+                terminals: Mutex::new(terminals.into()),
+            }
+        }
+
+        fn connect_count(&self) -> usize {
+            self.connect_count.load(Ordering::Acquire)
+        }
+    }
+
+    impl NativeTransportConnector for ControlledNativeConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.connect_count.fetch_add(1, Ordering::AcqRel);
+            let (receiver, observed) = self
+                .terminals
+                .lock()
+                .expect("take controlled terminal")
+                .pop_front()
+                .expect("test connector has a terminal for every connection");
+            let terminal: NativeTransportTerminalFuture = Box::pin(async move {
+                observed.store(true, Ordering::Release);
+                receiver
+                    .await
+                    .expect("controlled terminal sender remains alive")
+            });
+            Box::pin(async move {
+                Ok(ConnectedNativeTransport {
+                    transport: Box::new(NoopNativeWireTransport),
+                    protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+                    features: crate::wire::FEATURE_NONE,
+                    session_context: None,
+                    permits_delegated_sessions: false,
+                    terminal,
+                })
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            Box::pin(async {
+                Err(NativeTransportError(
+                    "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
+                ))
+            })
+        }
+    }
+
+    fn controlled_terminal() -> (
+        ControlledTerminal,
+        oneshot::Receiver<NativeTransportTerminal>,
+    ) {
+        let (sender, receiver) = oneshot::channel();
+        let observed = Arc::new(AtomicBool::new(false));
+        (
+            ControlledTerminal {
+                sender: Some(sender),
+                observed,
+            },
+            receiver,
+        )
+    }
+
+    async fn wait_for_connect_count(connector: &ControlledNativeConnector, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while connector.connect_count() < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection replacement must not deadlock");
+    }
+
+    async fn wait_for_terminal_observation(observed: &AtomicBool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !observed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal watcher must poll the controlled terminal future");
+    }
+
+    fn make_native_context(name: &str) -> AppContext {
+        let mut context = make_offline_context(
+            AppId::from_name(name),
+            std::path::PathBuf::new(),
+            declared_todo_schema(),
+        );
+        context.server_url = "ws://native-transport.test".to_owned();
+        context
+    }
 
     #[derive(Debug)]
     struct YieldingStorageFactory;
@@ -4479,6 +4617,96 @@ mod tests {
                     .shutdown()
                     .await
                     .expect("close reopened persistent client");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_peer_closed_terminal_reconnects_without_semantic_traffic() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut first, first_receiver) = controlled_terminal();
+                let first_observed = Arc::clone(&first.observed);
+                let (_replacement, replacement_receiver) = controlled_terminal();
+                let connector = Arc::new(ControlledNativeConnector::new(vec![
+                    (first_receiver, first_observed.clone()),
+                    (replacement_receiver, Arc::new(AtomicBool::new(false))),
+                ]));
+                let client = JazzClient::connect_with_native_transport(
+                    make_native_context("idle-peer-closed-reconnect"),
+                    connector.clone(),
+                )
+                .await
+                .expect("connect native client");
+
+                assert_eq!(connector.connect_count(), 1);
+                first.send(NativeTransportTerminal::PeerClosed(
+                    "idle peer closed".to_owned(),
+                ));
+                wait_for_terminal_observation(&first_observed).await;
+                wait_for_connect_count(&connector, 2).await;
+
+                client.shutdown().await.expect("shutdown native client");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owner_dropped_terminal_does_not_reconnect() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut terminal, receiver) = controlled_terminal();
+                let observed = Arc::clone(&terminal.observed);
+                let connector = Arc::new(ControlledNativeConnector::new(vec![(
+                    receiver,
+                    observed.clone(),
+                )]));
+                let client = JazzClient::connect_with_native_transport(
+                    make_native_context("owner-dropped-no-reconnect"),
+                    connector.clone(),
+                )
+                .await
+                .expect("connect native client");
+
+                terminal.send(NativeTransportTerminal::OwnerDropped);
+                wait_for_terminal_observation(&observed).await;
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    connector.connect_count(),
+                    1,
+                    "deliberately dropped transport must not reconnect"
+                );
+
+                client.shutdown().await.expect("shutdown native client");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_does_not_reconnect_after_terminal() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut terminal, receiver) = controlled_terminal();
+                let observed = Arc::clone(&terminal.observed);
+                let connector =
+                    Arc::new(ControlledNativeConnector::new(vec![(receiver, observed)]));
+                let client = JazzClient::connect_with_native_transport(
+                    make_native_context("shutdown-no-reconnect"),
+                    connector.clone(),
+                )
+                .await
+                .expect("connect native client");
+
+                client.shutdown().await.expect("shutdown native client");
+                terminal.send(NativeTransportTerminal::PeerClosed(
+                    "terminal raced shutdown".to_owned(),
+                ));
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    connector.connect_count(),
+                    1,
+                    "shutdown must prevent terminal-triggered reconnection"
+                );
             })
             .await;
     }
