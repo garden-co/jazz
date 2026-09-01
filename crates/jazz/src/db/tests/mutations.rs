@@ -208,7 +208,9 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
 }
 
 /// A session that can satisfy `UPDATE` policy but cannot select a branch row
-/// cannot update it through either the facade or a mergeable transaction.
+/// cannot update it through the immediate facade. A mergeable transaction may
+/// stage the same structural mutation, but the fate authority must reject it
+/// from its complete policy inputs.
 ///
 /// mallory ──update branch row──► read-hidden source ──► denied
 #[test]
@@ -304,7 +306,7 @@ fn session_branch_updates_require_read_visibility_before_staging() {
     assert_eq!(upsert_error.code, crate::db::ErrorCode::WriteRejected);
     assert!(upsert_error.message.contains("UPSERT"));
 
-    let transaction_error = block_on(db.transaction_for_identity(writer, async |tx| {
+    let (_, tx_id) = block_on(db.transaction_for_identity(writer, async |tx| {
         tx.update(
             "todos",
             row_id,
@@ -319,9 +321,17 @@ fn session_branch_updates_require_read_visibility_before_staging() {
         )
         .await
     }))
-    .expect_err("transaction branch update must require read visibility");
-    assert_eq!(transaction_error.code, crate::db::ErrorCode::WriteRejected);
-    assert!(transaction_error.message.contains("UPDATE"));
+    .expect("mergeable client staging must not issue a policy verdict");
+    db.finalize_local_mergeable_commit_for_test(tx_id)
+        .expect("history-complete fate authority settles the staged write");
+    let transaction_state = db.write_state(tx_id).expect("staged transaction state");
+    assert!(matches!(
+        transaction_state,
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        }
+    ));
 
     assert!(
         block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))

@@ -234,6 +234,60 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
     ), "the predecessor remains independently pending");
 }
 
+/// INV-RLS-24 moves read-for-write authorization only for mergeable staging.
+/// Exclusive transactions retain their existing snapshot/read-set contract;
+/// the shared write-policy admission helper must not silently add the new
+/// mergeable prior-row read check to them.
+///
+/// This stays internal because the regression is the transaction-kind gate on
+/// the common authority helper, before exclusive conflict validation runs.
+#[test]
+fn authority_read_for_write_check_is_mergeable_only() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_select(PublicPolicyExpr::False)
+                    .with_insert(PublicPolicyExpr::True)
+                    .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x95);
+    let base = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", target, 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("before".to_owned()),
+        )])),
+    );
+    let (_, unit) = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 11)
+                .made_by(user(0xa5))
+                .parents(vec![base])
+                .cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("after".to_owned()),
+                )])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        versions,
+    } = unit
+    else {
+        panic!("commit helper must emit one commit unit");
+    };
+    tx.kind = TxKind::Exclusive;
+    assert!(
+        crate::db::block_on(core.commit_unit_satisfies_write_policies(&tx, &versions, None))
+            .unwrap(),
+        "exclusive admission keeps its pre-existing write-policy-only helper semantics"
+    );
+}
+
 /// This stays at the node boundary because admission evaluates policy-pinned
 /// inline rows before a public client receives a write outcome. It proves the
 /// provenance visible to that inline program matches the public milliseconds

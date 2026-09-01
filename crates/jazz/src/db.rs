@@ -3231,7 +3231,7 @@ where
             WriteTarget::Root => {
                 let exists = self
                     .db()
-                    .require_mergeable_transaction_upsert_visibility(self.tx_id(), table, row)
+                    .mergeable_transaction_upsert_exists(self.tx_id(), table, row)
                     .await?;
                 if exists {
                     self.db()

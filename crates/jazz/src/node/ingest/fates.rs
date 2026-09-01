@@ -449,6 +449,17 @@ where
             return Ok(false);
         }
         for version in versions {
+            if tx.kind == TxKind::Mergeable
+                && !self
+                    .version_satisfies_read_for_write_visibility(
+                        version,
+                        permission_subject,
+                        Some(tx.tx_id),
+                    )
+                    .await?
+            {
+                return Ok(false);
+            }
             if !self
                 .version_satisfies_write_policy(version, permission_subject, tx.tx_id)
                 .await?

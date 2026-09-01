@@ -302,8 +302,6 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPDATE")
-            .await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.lock_for_transaction_operation(tx_id)
             .await?
@@ -328,17 +326,6 @@ where
                 ErrorCode::Schema,
                 "branch-view update requires at least one authored column",
             ));
-        }
-        let permission_subject = self
-            .node
-            .node
-            .lock()
-            .await
-            .mergeable_transaction_permission_subject(tx_id)?;
-        if let Some(identity) = permission_subject {
-            self.visible_branch_view_cells_for_identity(table, &head, base.as_ref(), row, identity)
-                .await?
-                .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let head_cells = self
@@ -389,7 +376,7 @@ where
         .await
     }
 
-    pub(super) async fn require_mergeable_transaction_upsert_visibility(
+    pub(super) async fn mergeable_transaction_upsert_exists(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -399,54 +386,7 @@ where
         if !exists {
             self.ensure_row_not_deleted(table, row).await?;
         }
-        self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPSERT")
-            .await?;
         Ok(exists)
-    }
-
-    async fn require_mergeable_transaction_read_visibility(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row: RowUuid,
-        operation: &str,
-    ) -> Result<(), Error> {
-        let permission_subject = self
-            .lock_for_transaction_operation(tx_id)
-            .await?
-            .mergeable_transaction_permission_subject(tx_id)?;
-        let Some(identity) = permission_subject else {
-            return Ok(());
-        };
-        // Resolve against this transaction's fixed snapshot plus its staged
-        // overlay. A session may update/upsert a row it inserted earlier in
-        // the same transaction, while a hidden snapshot or overlay row still
-        // follows the same non-disclosing denial path.
-        let target = self.transaction_read(tx_id, table, row).await?;
-        let visible = match (&target, self.table_schema(table)?.read_policy.clone()) {
-            (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
-            (Some(_), None) => true,
-            (Some(_), Some(policy)) => {
-                self.lock_for_transaction_operation(tx_id)
-                    .await?
-                    .read_policy_query_allows_open_tx_row(
-                        tx_id,
-                        &policy,
-                        self.schema_version_id,
-                        row,
-                        identity,
-                    )
-                    .await?
-            }
-            (None, _) => false,
-        };
-        if target.is_some() && visible {
-            return Ok(());
-        }
-        if target.is_some() || operation == "UPDATE" {
-            return Err(read_for_write_denied(operation, table));
-        }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -463,26 +403,19 @@ where
         self.reject_attributed_mergeable_branch(tx_id).await?;
         self.ensure_branch_view_row_not_deleted(table, &head, base.as_ref(), row)
             .await?;
-        let permission_subject = self
-            .node
-            .node
-            .lock()
-            .await
-            .mergeable_transaction_permission_subject(tx_id)?;
         let mut node = self.node.node.lock().await;
-        let (head_exists, staged_head, replace_pending_deletion) = match node
+        let (head_exists, replace_pending_deletion) = match node
             .tx_current_row_state_in_branch(tx_id, table, row, &head)
             .await?
         {
-            TransactionBranchRowState::Visible { staged, .. } => (true, staged, false),
+            TransactionBranchRowState::Visible { .. } => (true, false),
             TransactionBranchRowState::PendingDeletion => (
                 node.visible_current_cells_in_branch(table, &head, row)
                     .await?
                     .is_some(),
-                false,
                 true,
             ),
-            TransactionBranchRowState::Absent => (false, false, false),
+            TransactionBranchRowState::Absent => (false, false),
         };
         let inherited = if head_exists {
             None
@@ -493,41 +426,6 @@ where
         drop(node);
 
         if head_exists {
-            if let Some(identity) = permission_subject {
-                let visible = if staged_head {
-                    match self.table_schema(table)?.read_policy.clone() {
-                        None => true,
-                        Some(_) if identity == AuthorSubject::SYSTEM => true,
-                        Some(policy) => {
-                            self.node
-                                .node
-                                .lock()
-                                .await
-                                .read_policy_query_allows_open_tx_row(
-                                    tx_id,
-                                    &policy,
-                                    self.schema_version_id,
-                                    row,
-                                    identity,
-                                )
-                                .await?
-                        }
-                    }
-                } else {
-                    self.visible_branch_view_cells_for_identity(
-                        table,
-                        &head,
-                        base.as_ref(),
-                        row,
-                        identity,
-                    )
-                    .await?
-                    .is_some()
-                };
-                if !visible {
-                    return Err(read_for_write_denied("UPSERT", table));
-                }
-            }
             if cells.is_empty() {
                 return Err(Error::new(
                     ErrorCode::Schema,
@@ -553,15 +451,6 @@ where
             return Ok(());
         }
 
-        if inherited.is_some()
-            && let Some(identity) = permission_subject
-            && self
-                .visible_branch_view_cells_for_identity(table, &head, base.as_ref(), row, identity)
-                .await?
-                .is_none()
-        {
-            return Err(read_for_write_denied("UPSERT", table));
-        }
         let verified_inherited_cells = inherited.clone();
         let mut inserted = inherited.unwrap_or_default();
         inserted.extend(cells);

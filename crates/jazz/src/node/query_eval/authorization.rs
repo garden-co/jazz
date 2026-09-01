@@ -562,6 +562,57 @@ where
         insert_candidate: bool,
         provenance: RowProvenance,
     ) -> Result<bool, Error> {
+        self.policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            insert_candidate,
+            provenance,
+            PolicyDecisionRole::Write,
+        )
+        .await
+    }
+
+    pub(in crate::node) async fn read_policy_query_allows_candidate_with_provenance_for_schema(
+        &mut self,
+        policy_schema_version: SchemaVersionId,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorSubject,
+        provenance: RowProvenance,
+    ) -> Result<bool, Error> {
+        self.policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            false,
+            provenance,
+            PolicyDecisionRole::Read,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn policy_query_allows_candidate_with_provenance_for_schema(
+        &mut self,
+        policy_schema_version: SchemaVersionId,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorSubject,
+        insert_candidate: bool,
+        provenance: RowProvenance,
+        role: PolicyDecisionRole,
+    ) -> Result<bool, Error> {
         let mut policy = policy.clone();
         if insert_candidate {
             for inherits in &mut policy.inherits {
@@ -621,7 +672,7 @@ where
                 attribution,
             } => PolicyContext::AuthorizationSubplan {
                 protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Write,
+                role,
                 mode,
                 permission_subject,
                 claims,
