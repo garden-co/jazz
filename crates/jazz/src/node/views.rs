@@ -1691,11 +1691,18 @@ where
                 .pending_authoritative_reset = true;
         }
         if !defer_settlement {
-            self.query
+            let state = self
+                .query
                 .authority_results
                 .entry(authority_result_key.clone())
-                .or_default()
-                .settled_through = Some(settled_through);
+                .or_default();
+            // A complete inbound receipt makes this exact result live for
+            // the current process even when it has no usable fast cursor.
+            // `GlobalTime::default()` is the protocol's cursorless settlement
+            // marker: it permits an exact known-state declaration but must
+            // not claim a fast current-membership position.
+            state.live_settled = true;
+            state.settled_through = (settled_through.0 != 0).then_some(settled_through);
             // A reset is an authoritative membership rebuild, including when
             // it carries retractions. The public subscription materializes its
             // replacement snapshot below, rather than attempting to apply a

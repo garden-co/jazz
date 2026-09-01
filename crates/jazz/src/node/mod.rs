@@ -883,12 +883,19 @@ struct QueryServing {
 pub(crate) struct AuthorityResultState {
     /// Monotonically increasing receipt for received ViewUpdates.
     applied_view_update_generation: u64,
+    /// This process has received a complete, exact authority settlement for
+    /// this result since it was opened. It is deliberately live-only: durable
+    /// membership recovered after a restart is useful cache material, but it
+    /// is not evidence that a newly opened usage may skip fresh authority
+    /// coverage.
+    live_settled: bool,
     /// Exact authoritative membership and an occurrence index for replacement.
     settled_result_set: BTreeSet<ResultMemberEntry>,
     settled_result_row_index: BTreeMap<ResultRowMembershipKey, ResultMemberEntry>,
     /// Non-row facts paired with the membership.
     settled_program_facts: BTreeSet<ViewFactEntry>,
-    /// Server settlement and authorization receipts.
+    /// Optional fast cursor and authorization receipt. The cursor is durable
+    /// cache metadata; only `live_settled` permits a new known-state claim.
     settled_through: Option<GlobalTime>,
     authorization_progress: Option<u64>,
     /// Per-subscription lifecycle state.  It remains policy-scoped because a

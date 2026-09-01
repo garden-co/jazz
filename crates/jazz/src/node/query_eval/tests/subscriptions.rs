@@ -118,6 +118,7 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         .validate(&relay.catalogue.schema)
         .unwrap();
     register_query_shape(&mut relay, &shape, RegisterShapeOptions::default());
+    let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let subscription = |byte, identity| Subscribe {
         shape_id: shape.shape_id(),
@@ -221,6 +222,48 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         peer.canonical_subscription_settlement_time(&relay, bob_subscribe.subscription),
         crate::time::GlobalTime(29),
         "Bob retains his own authority watermark"
+    );
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                alice_subscribe.subscription,
+                &[],
+                alice,
+                Some(&(alice, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        Some(
+            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalTime(37),
+                authorization_progress: 3,
+            }
+        ),
+        "Alice's known state must use her exact receipt, not Bob's watermark"
+    );
+    assert_eq!(
+        relay
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                bob_subscribe.subscription,
+                &[],
+                bob,
+                Some(&(bob, BTreeMap::new())),
+            )
+            .resolve()
+            .unwrap(),
+        Some(
+            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                position: crate::time::GlobalTime(29),
+                authorization_progress: 3,
+            }
+        ),
+        "Bob's known state remains independent from Alice's later receipt"
     );
     assert_eq!(
         relay.query.authority_results[&alice_key].settled_result_set,
