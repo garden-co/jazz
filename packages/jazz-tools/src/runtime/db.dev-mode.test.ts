@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { type Db, type QueryBuilder } from "./db.js";
-import { createDb } from "./default-create-db.js";
+import { createDb, type Db, type QueryBuilder } from "./db.js";
+import { createInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const schema: WasmSchema = {
@@ -81,27 +81,28 @@ describe("Db devMode active query tracing", () => {
     stop();
   });
 
-  it("filters hidden subscriptions out of the inspector list", async () => {
+  it("does not report local-only subscriptions", async () => {
     const db = await makeDb(true);
 
-    const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
-      visibility: "hidden_from_live_query_list",
-    });
+    const unsubscribe = db.subscribe(
+      makeQuery(),
+      () => undefined,
+      createInspectorLocalQueryOptions(),
+    );
 
     expect(db.getActiveQuerySubscriptions()).toEqual([]);
 
     unsubscribe();
   });
 
-  it("records explicit tier overrides", async () => {
+  it("records explicit public tier overrides", async () => {
     const db = await makeDb(true);
     const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
       tier: "edge",
-      propagation: "local-only",
     });
 
     expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("edge");
-    expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("local-only");
+    expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("full");
 
     unsubscribe();
   });

@@ -66,12 +66,12 @@ declare module "jazz-wasm" {
     base?: unknown;
   };
 
-  export type UpsertOptions = WriteOptions & {
-    branch?: unknown;
-  };
+  export type UpsertOptions = UpdateOptions;
 
   export type DeleteOptions = UpdateOptions;
-  export type RestoreOptions = UpsertOptions;
+  export type RestoreOptions = WriteOptions & {
+    branch?: unknown;
+  };
 
   export class WasmTx {
     insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
@@ -288,7 +288,13 @@ declare module "jazz-wasm" {
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
+    /** @internal Foreground node-lease handoff only. */
+    foregroundTxTimeHighWater(): bigint;
+    /** @internal Foreground node-lease bootstrap only. */
+    seedForegroundTxTimeHighWater(highWater: bigint): void;
     setRelayAuthoritySessionOwner(): void;
+    /** Exact wire features compiled into this WASM artifact. */
+    wireFeatures(): number;
     close(): Promise<boolean>;
     connectUpstream(): WasmTransport;
     connectUpstreamWithSession(

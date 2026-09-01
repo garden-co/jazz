@@ -237,6 +237,20 @@ where
             .map_err(Into::into)
     }
 
+    /// Resolve provenance after a storage-suspended node turn releases its
+    /// owner mutex.
+    pub async fn row_provenance_async(
+        &self,
+        row: &CurrentRow,
+    ) -> Result<Option<RowProvenance>, Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .row_provenance(row)
+            .map_err(Into::into)
+    }
+
     /// Read local settled history at an exact global timestamp cut.
     ///
     /// History-incomplete facades return `HistoricalReadRequiresServer` from

@@ -18,10 +18,10 @@ use super::evaluation_session::EvaluationInputs;
 use super::subscriptions::BindingDelta;
 
 use super::{
-    ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
-    RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, VariantProjection,
-    VariantProjectionKey, consolidate_deltas, plan_expr_names, project_binding_source_deltas,
-    scan_bounds,
+    ArgByDirection, ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError,
+    NodeState, RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta,
+    VariantProjection, VariantProjectionKey, arg_by_candidate_replaces, consolidate_deltas,
+    encoded_record_key_part, plan_expr_names, project_binding_source_deltas, scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -38,6 +38,88 @@ pub(super) struct RecursiveState {
     /// not capture same-tick binding changes made while installing a prepared
     /// subscription.
     hydrated_input_generation: Option<u64>,
+    /// A retained, inputs-backed snapshot recomputation. Subscription opening
+    /// owns a disposable operator future, so recursive hydration must keep its
+    /// postorder traversal and frontier outside that future when it yields.
+    pending_hydration: Option<Box<PendingHydrationRecompute>>,
+}
+
+const MAX_HYDRATION_TRAVERSAL_NODES_PER_POLL: usize = 32;
+
+#[derive(Clone, Debug)]
+struct PendingHydrationRecompute {
+    /// A pending snapshot is tied to the exact input generation that started
+    /// it. A later binding/table generation must restart from a coherent
+    /// snapshot rather than blend old memoized subgraphs into new inputs.
+    input_generation: u64,
+    accumulated: HashMap<Bytes, i64>,
+    phase: PendingHydrationPhase,
+    traversal: Option<HydrationTraversal>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingHydrationPhase {
+    Seed,
+    Step {
+        frontier: RecordDeltas,
+        sub_tick: usize,
+    },
+    ReadyForArrangementHydration,
+}
+
+/// A postorder walk over one immutable graph/context snapshot. Discovering and
+/// evaluating are both explicitly bounded; `memo` makes a hash-consed child
+/// run once even when several parents reference it.
+#[derive(Clone, Debug)]
+struct HydrationTraversal {
+    root: NodeId,
+    context: EvalContext,
+    discovery: Vec<HydrationTraversalFrame>,
+    discovered: HashSet<NodeId>,
+    visiting: HashSet<NodeId>,
+    order: Vec<NodeId>,
+    next_evaluation: usize,
+    memo: HashMap<NodeId, RecordDeltas>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HydrationTraversalFrame {
+    Visit(NodeId),
+    Evaluate(NodeId),
+}
+
+#[derive(Clone, Debug)]
+enum HydrationTraversalProgress {
+    Yield,
+    Ready(RecordDeltas),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HydrationRecomputeProgress {
+    Yield,
+    ReadyForArrangementHydration,
+}
+
+/// A live recursive tick either has its public delta ready or has saved its
+/// snapshot traversal in [`RecursiveState`] and must yield to the owner.
+pub(super) enum RecursiveDeltaProgress {
+    Yield,
+    Ready(Vec<RecordDelta>),
+}
+
+pub(super) struct HydrationRecomputeContext<'a> {
+    pub(super) schema: &'a crate::schema::DatabaseSchema,
+    pub(super) graph: &'a IvmGraph,
+    pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
+    /// `Some` routes source reads through the session request registry; `None`
+    /// is the direct-storage path used by a live tick that must still retain
+    /// its bounded graph traversal across cooperative yields.
+    pub(super) inputs: Option<&'a mut EvaluationInputs>,
+    pub(super) table_deltas: Option<&'a [TableDelta]>,
+    pub(super) storage: &'a dyn OrderedKvStorage,
+    pub(super) binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    pub(super) scope: ScopeId,
+    pub(super) input_generation: u64,
 }
 
 impl RecursiveState {
@@ -70,6 +152,67 @@ impl RecursiveState {
 
     pub(super) fn mark_hydrated_input_generation(&mut self, generation: u64) {
         self.hydrated_input_generation = Some(generation);
+    }
+
+    pub(super) fn has_pending_hydration(&self) -> bool {
+        self.pending_hydration.is_some()
+    }
+
+    pub(super) fn has_pending_hydration_for(&self, generation: u64) -> bool {
+        self.pending_hydration
+            .as_ref()
+            .is_some_and(|pending| pending.input_generation == generation)
+    }
+
+    fn begin_hydration_recompute(&mut self, input_generation: u64) {
+        self.pending_hydration = Some(Box::new(PendingHydrationRecompute {
+            input_generation,
+            accumulated: HashMap::default(),
+            phase: PendingHydrationPhase::Seed,
+            traversal: None,
+        }));
+    }
+
+    fn pending_hydration_mut(&mut self) -> &mut PendingHydrationRecompute {
+        self.pending_hydration
+            .as_mut()
+            .expect("hydration recompute was initialized")
+    }
+
+    pub(super) fn pending_hydration_accumulated_deltas(
+        &self,
+        descriptor: RecordDescriptor,
+    ) -> RecordDeltas {
+        let pending = self
+            .pending_hydration
+            .as_ref()
+            .expect("hydration recompute was initialized");
+        RecordDeltas {
+            descriptor,
+            deltas: pending
+                .accumulated
+                .iter()
+                .filter_map(|(record, weight)| {
+                    (*weight > 0).then_some(RecordDelta {
+                        record: record.clone(),
+                        weight: *weight,
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn finish_hydration_recompute(&mut self) -> HashMap<Bytes, i64> {
+        let pending = self
+            .pending_hydration
+            .take()
+            .expect("hydration recompute was initialized");
+        debug_assert!(matches!(
+            pending.phase,
+            PendingHydrationPhase::ReadyForArrangementHydration
+        ));
+        debug_assert!(pending.traversal.is_none());
+        pending.accumulated
     }
 
     pub(super) fn accumulated_deltas(&self) -> Vec<RecordDelta> {
@@ -132,7 +275,220 @@ impl RecursiveState {
         }
         self.accumulated = Rc::new(next);
         self.step_arrangements_hydrated = false;
+        self.pending_hydration = None;
         consolidate_deltas(deltas)
+    }
+}
+
+impl HydrationTraversal {
+    fn new(root: NodeId, context: EvalContext) -> Self {
+        Self {
+            root,
+            context,
+            discovery: vec![HydrationTraversalFrame::Visit(root)],
+            discovered: HashSet::default(),
+            visiting: HashSet::default(),
+            order: Vec::new(),
+            next_evaluation: 0,
+            memo: HashMap::default(),
+        }
+    }
+
+    async fn poll(
+        &mut self,
+        context: &mut HydrationRecomputeContext<'_>,
+    ) -> Result<HydrationTraversalProgress, IvmRuntimeError> {
+        let mut remaining = MAX_HYDRATION_TRAVERSAL_NODES_PER_POLL;
+        while remaining > 0 {
+            if let Some(frame) = self.discovery.pop() {
+                remaining -= 1;
+                match frame {
+                    HydrationTraversalFrame::Visit(node) => {
+                        if !self.discovered.insert(node) {
+                            if self.visiting.contains(&node) {
+                                return Err(IvmRuntimeError::GraphCycle(node));
+                            }
+                            continue;
+                        }
+                        self.visiting.insert(node);
+                        let graph_node = context
+                            .graph
+                            .node(node)
+                            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+                        self.discovery.push(HydrationTraversalFrame::Evaluate(node));
+                        for input in graph_node.descriptor.inputs.iter().rev() {
+                            self.discovery.push(HydrationTraversalFrame::Visit(*input));
+                        }
+                    }
+                    HydrationTraversalFrame::Evaluate(node) => {
+                        debug_assert!(self.visiting.remove(&node));
+                        self.order.push(node);
+                    }
+                }
+                continue;
+            }
+
+            let Some(node) = self.order.get(self.next_evaluation).copied() else {
+                return self
+                    .memo
+                    .get(&self.root)
+                    .cloned()
+                    .map(HydrationTraversalProgress::Ready)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(self.root));
+            };
+            remaining -= 1;
+            let mut evaluator = HydrationEvaluator {
+                schema: context.schema,
+                graph: context.graph,
+                variant_projections: context.variant_projections,
+                table_deltas: context.table_deltas,
+                evaluation_inputs: context.inputs.as_deref_mut(),
+                storage: context.storage,
+                binding_snapshots: context.binding_snapshots,
+                context: self.context.clone(),
+                memo: std::mem::take(&mut self.memo),
+            };
+            let result = evaluator.eval_node(node).await;
+            self.memo = evaluator.memo;
+            let result = result?;
+            self.memo.insert(node, result);
+            self.next_evaluation += 1;
+        }
+        Ok(HydrationTraversalProgress::Yield)
+    }
+}
+
+/// Resume one bounded phase of an inputs-backed recursive snapshot. The caller
+/// owns the operator-state save/yield boundary; this helper only advances the
+/// retained postorder traversal or moves the fixpoint frontier forward.
+pub(super) async fn resume_inputs_hydration_recompute(
+    recursive_state: &mut RecursiveState,
+    mut context: HydrationRecomputeContext<'_>,
+    node: NodeId,
+    recursive: &RecursiveOp,
+    output_desc: RecordDescriptor,
+    seed: NodeId,
+    step: NodeId,
+) -> Result<HydrationRecomputeProgress, IvmRuntimeError> {
+    if recursive_state
+        .pending_hydration
+        .as_ref()
+        .is_none_or(|pending| pending.input_generation != context.input_generation)
+    {
+        recursive_state.begin_hydration_recompute(context.input_generation);
+    }
+    let phase = recursive_state.pending_hydration_mut().phase.clone();
+    match phase {
+        PendingHydrationPhase::Seed => {
+            let traversal = recursive_state
+                .pending_hydration_mut()
+                .traversal
+                .take()
+                .unwrap_or_else(|| HydrationTraversal::new(seed, EvalContext::root()));
+            let mut traversal = traversal;
+            let progress = match traversal.poll(&mut context).await {
+                Ok(progress) => progress,
+                // The session owns request registration, but this operator
+                // owns traversal continuation. Keep the exact postorder
+                // stack/memo across a cold source instead of replaying every
+                // resident ancestor once the request is ready.
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    recursive_state.pending_hydration_mut().traversal = Some(traversal);
+                    return Err(IvmRuntimeError::EvaluationBlocked);
+                }
+                Err(error) => return Err(error),
+            };
+            match progress {
+                HydrationTraversalProgress::Yield => {
+                    recursive_state.pending_hydration_mut().traversal = Some(traversal);
+                    Ok(HydrationRecomputeProgress::Yield)
+                }
+                HydrationTraversalProgress::Ready(frontier) => {
+                    if frontier.descriptor != output_desc {
+                        return Err(IvmRuntimeError::GraphOutputMismatch);
+                    }
+                    let accepted = accept_positive_into_set(
+                        &mut recursive_state.pending_hydration_mut().accumulated,
+                        frontier.deltas,
+                    )?;
+                    recursive_state.pending_hydration_mut().phase = if accepted.is_empty() {
+                        PendingHydrationPhase::ReadyForArrangementHydration
+                    } else {
+                        PendingHydrationPhase::Step {
+                            frontier: RecordDeltas {
+                                descriptor: output_desc,
+                                deltas: accepted,
+                            },
+                            sub_tick: 1,
+                        }
+                    };
+                    Ok(HydrationRecomputeProgress::Yield)
+                }
+            }
+        }
+        PendingHydrationPhase::Step { frontier, sub_tick } => {
+            if sub_tick > recursive.max_iters {
+                if recursive.truncate_at_max_iters {
+                    recursive_state.pending_hydration_mut().phase =
+                        PendingHydrationPhase::ReadyForArrangementHydration;
+                    return Ok(HydrationRecomputeProgress::ReadyForArrangementHydration);
+                }
+                return Err(IvmRuntimeError::RecursiveIterationLimit {
+                    node,
+                    max_iters: recursive.max_iters,
+                });
+            }
+            let eval_context = EvalContext::with_binding(
+                context.scope,
+                sub_tick as u64,
+                recursive.frontier.clone(),
+                frontier,
+            );
+            let traversal = recursive_state
+                .pending_hydration_mut()
+                .traversal
+                .take()
+                .unwrap_or_else(|| HydrationTraversal::new(step, eval_context));
+            let mut traversal = traversal;
+            let progress = match traversal.poll(&mut context).await {
+                Ok(progress) => progress,
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    recursive_state.pending_hydration_mut().traversal = Some(traversal);
+                    return Err(IvmRuntimeError::EvaluationBlocked);
+                }
+                Err(error) => return Err(error),
+            };
+            match progress {
+                HydrationTraversalProgress::Yield => {
+                    recursive_state.pending_hydration_mut().traversal = Some(traversal);
+                    Ok(HydrationRecomputeProgress::Yield)
+                }
+                HydrationTraversalProgress::Ready(step_delta) => {
+                    if step_delta.descriptor != output_desc {
+                        return Err(IvmRuntimeError::GraphOutputMismatch);
+                    }
+                    let accepted = accept_positive_into_set(
+                        &mut recursive_state.pending_hydration_mut().accumulated,
+                        step_delta.deltas,
+                    )?;
+                    recursive_state.pending_hydration_mut().phase = if accepted.is_empty() {
+                        PendingHydrationPhase::ReadyForArrangementHydration
+                    } else {
+                        PendingHydrationPhase::Step {
+                            frontier: RecordDeltas {
+                                descriptor: output_desc,
+                                deltas: accepted,
+                            },
+                            sub_tick: sub_tick + 1,
+                        }
+                    };
+                    Ok(HydrationRecomputeProgress::Yield)
+                }
+            }
+        }
+        PendingHydrationPhase::ReadyForArrangementHydration => {
+            Ok(HydrationRecomputeProgress::ReadyForArrangementHydration)
+        }
     }
 }
 
@@ -144,7 +500,7 @@ pub(super) async fn recursive_delta(
     output_desc: RecordDescriptor,
     seed: NodeId,
     step: NodeId,
-) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+) -> Result<RecursiveDeltaProgress, IvmRuntimeError> {
     let has_recompute_table_delta = has_recompute_table_delta_for_recursion(&runtime, seed, step)?;
     let has_table_delta = has_table_delta_for_cached_tables(&runtime, recursive);
     let has_recompute_binding_delta =
@@ -154,10 +510,13 @@ pub(super) async fn recursive_delta(
         || has_recompute_binding_delta
         || (!has_binding_deltas && recursive_state.is_empty())
         || !recursive_state.step_arrangements_hydrated()
+        || (recursive.truncate_at_max_iters && (has_table_delta || has_binding_deltas))
     {
         // Retractions are handled by full recompute + diff until we implement
         // DRed or DBSP-style nested negative deltas.
-        runtime.metrics.recursive_recomputes += 1;
+        if !recursive_state.has_pending_hydration_for(runtime.current_tick) {
+            runtime.metrics.recursive_recomputes += 1;
+        }
         if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
             eprintln!(
                 "CLOSURE_TRACE event=recursive_recompute node={node:?} scope={:?} has_recompute_table_delta={has_recompute_table_delta} has_table_delta={has_table_delta} has_recompute_binding_delta={has_recompute_binding_delta} has_binding_deltas={has_binding_deltas} state_empty={} step_hydrated={} total_recomputes={}",
@@ -167,22 +526,33 @@ pub(super) async fn recursive_delta(
                 runtime.metrics.recursive_recomputes,
             );
         }
-        let next = recompute_recursive(
-            runtime.schema,
-            runtime.graph,
-            runtime.variant_projections,
-            None,
-            runtime.evaluation_inputs.as_deref_mut(),
+        let progress = resume_inputs_hydration_recompute(
+            recursive_state,
+            HydrationRecomputeContext {
+                schema: runtime.schema,
+                graph: runtime.graph,
+                variant_projections: runtime.variant_projections,
+                inputs: runtime.evaluation_inputs.as_deref_mut(),
+                table_deltas: None,
+                storage: runtime.storage,
+                binding_snapshots: runtime.binding_snapshots,
+                scope: runtime.scope,
+                // The live tick's inputs are immutable while it is driven.
+                // Retrying after a cooperative yield can resume its exact
+                // traversal; a later tick restarts with a fresh snapshot.
+                input_generation: runtime.current_tick,
+            },
             node,
             recursive,
             output_desc,
+            seed,
             step,
-            runtime.storage,
-            runtime.binding_snapshots,
-            runtime.current_tick,
-            runtime.scope,
         )
         .await?;
+        if progress == HydrationRecomputeProgress::Yield {
+            return Ok(RecursiveDeltaProgress::Yield);
+        }
+        let next = recursive_state.finish_hydration_recompute();
         let accumulated = RecordDeltas {
             descriptor: output_desc,
             deltas: next
@@ -198,7 +568,7 @@ pub(super) async fn recursive_delta(
         let emitted = recursive_state.replace_with(next);
         hydrate_recursive_arrangements(&mut runtime, recursive, step, accumulated).await?;
         recursive_state.mark_step_arrangements_hydrated();
-        return Ok(emitted);
+        return Ok(RecursiveDeltaProgress::Ready(emitted));
     }
 
     let mut emitted = Vec::new();
@@ -263,6 +633,9 @@ pub(super) async fn recursive_delta(
     let mut must_run_step = true;
     loop {
         if sub_tick > recursive.max_iters {
+            if recursive.truncate_at_max_iters {
+                break;
+            }
             return Err(IvmRuntimeError::RecursiveIterationLimit {
                 node,
                 max_iters: recursive.max_iters,
@@ -291,7 +664,7 @@ pub(super) async fn recursive_delta(
         sub_tick += 1;
     }
 
-    Ok(consolidate_deltas(emitted))
+    Ok(RecursiveDeltaProgress::Ready(consolidate_deltas(emitted)))
 }
 
 fn has_table_delta_for_cached_tables(
@@ -689,77 +1062,6 @@ fn walk_input_graph(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn recompute_recursive(
-    schema: &crate::schema::DatabaseSchema,
-    graph: &IvmGraph,
-    variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
-    table_deltas: Option<&[TableDelta]>,
-    mut evaluation_inputs: Option<&mut EvaluationInputs>,
-    node: NodeId,
-    recursive: &RecursiveOp,
-    output_desc: RecordDescriptor,
-    step: NodeId,
-    storage: &dyn OrderedKvStorage,
-    binding_snapshots: &HashMap<String, RecordDeltas>,
-    _current_tick: u64,
-    scope: ScopeId,
-) -> Result<HashMap<Bytes, i64>, IvmRuntimeError> {
-    let recursive_node = graph
-        .node(node)
-        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-    let [seed, _] = recursive_node.descriptor.inputs.as_slice() else {
-        return Err(IvmRuntimeError::GraphInputArityMismatch(recursive_node.id));
-    };
-
-    let mut snapshot = HydrationEvaluator {
-        schema,
-        graph,
-        variant_projections,
-        table_deltas,
-        evaluation_inputs: evaluation_inputs.as_deref_mut(),
-        storage,
-        binding_snapshots,
-        context: EvalContext::root(),
-    };
-    let mut accumulated = HashMap::<Bytes, i64>::default();
-    let mut frontier = snapshot.eval_node(*seed).await?;
-    if frontier.descriptor != output_desc {
-        return Err(IvmRuntimeError::GraphOutputMismatch);
-    }
-    frontier.deltas = accept_positive_into_set(&mut accumulated, frontier.deltas)?;
-
-    let mut sub_tick = 1;
-    while !frontier.is_empty() {
-        if sub_tick > recursive.max_iters {
-            return Err(IvmRuntimeError::RecursiveIterationLimit {
-                node: recursive_node.id,
-                max_iters: recursive.max_iters,
-            });
-        }
-        let context =
-            EvalContext::with_binding(scope, sub_tick as u64, recursive.frontier.clone(), frontier);
-        let mut snapshot = HydrationEvaluator {
-            schema,
-            graph,
-            variant_projections,
-            table_deltas,
-            evaluation_inputs: evaluation_inputs.as_deref_mut(),
-            storage,
-            binding_snapshots,
-            context,
-        };
-        frontier = snapshot.eval_node(step).await?;
-        if frontier.descriptor != output_desc {
-            return Err(IvmRuntimeError::GraphOutputMismatch);
-        }
-        frontier.deltas = accept_positive_into_set(&mut accumulated, frontier.deltas)?;
-        sub_tick += 1;
-    }
-
-    Ok(accumulated)
-}
-
 fn accept_positive_into_set(
     multiset: &mut HashMap<Bytes, i64>,
     deltas: Vec<RecordDelta>,
@@ -791,6 +1093,53 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
     Ok(())
 }
 
+// Recursive full-snapshot evaluation may traverse ArgBy inside a seed or step.
+// Use the maintained operator's shared declared-key/full-record comparator so
+// winner selection cannot diverge by evaluation path.
+
+fn hydrated_arg_by_winners(
+    input: RecordDeltas,
+    output_desc: RecordDescriptor,
+    group_field_indices: &[usize],
+    comparison_field_indices: &[usize],
+    direction: ArgByDirection,
+) -> Result<RecordDeltas, IvmRuntimeError> {
+    let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
+    for delta in input.deltas {
+        if delta.weight <= 0 {
+            continue;
+        }
+        let group_key = encoded_record_key_part(output_desc, delta.raw(), group_field_indices)?;
+        let comparison_key =
+            encoded_record_key_part(output_desc, delta.raw(), comparison_field_indices)?;
+        match winners.entry(group_key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((comparison_key, delta.record));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let winner = entry.get_mut();
+                let replaces = arg_by_candidate_replaces(
+                    &comparison_key,
+                    &delta.record,
+                    &winner.0,
+                    &winner.1,
+                    direction,
+                );
+                if replaces {
+                    *winner = (comparison_key, delta.record);
+                }
+            }
+        }
+    }
+    Ok(RecordDeltas {
+        descriptor: output_desc,
+        deltas: winners
+            .into_values()
+            .map(|(_, record)| RecordDelta { record, weight: 1 })
+            .collect(),
+    })
+}
+
 /// Full-snapshot evaluator used by recursive recompute fallback.
 struct HydrationEvaluator<'a> {
     schema: &'a crate::schema::DatabaseSchema,
@@ -801,6 +1150,7 @@ struct HydrationEvaluator<'a> {
     storage: &'a dyn OrderedKvStorage,
     binding_snapshots: &'a HashMap<String, RecordDeltas>,
     context: EvalContext,
+    memo: HashMap<NodeId, RecordDeltas>,
 }
 
 impl HydrationEvaluator<'_> {
@@ -809,6 +1159,9 @@ impl HydrationEvaluator<'_> {
         node: NodeId,
     ) -> StorageFuture<'_, Result<RecordDeltas, IvmRuntimeError>> {
         Box::pin(async move {
+            if let Some(records) = self.memo.get(&node) {
+                return Ok(records.clone());
+            }
             let graph_node = self
                 .graph
                 .node(node)
@@ -921,63 +1274,23 @@ impl HydrationEvaluator<'_> {
                 }
                 OpType::ArgMaxBy(arg_max_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    let mut winners =
-                        std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-                    for delta in input.deltas {
-                        let group_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_max_by.group_field_indices,
-                        )?;
-                        let primary_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_max_by.primary_key_field_indices,
-                        )?;
-                        let entry = winners
-                            .entry(group_key)
-                            .or_insert_with(|| (primary_key.clone(), delta.record.clone()));
-                        if primary_key > entry.0 {
-                            *entry = (primary_key, delta.record);
-                        }
-                    }
-                    Ok(RecordDeltas {
-                        descriptor: output_desc,
-                        deltas: winners
-                            .into_values()
-                            .map(|(_, record)| RecordDelta { record, weight: 1 })
-                            .collect(),
-                    })
+                    hydrated_arg_by_winners(
+                        input,
+                        output_desc,
+                        &arg_max_by.group_field_indices,
+                        &arg_max_by.comparison_field_indices,
+                        ArgByDirection::Max,
+                    )
                 }
                 OpType::ArgMinBy(arg_min_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    let mut winners =
-                        std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-                    for delta in input.deltas {
-                        let group_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_min_by.group_field_indices,
-                        )?;
-                        let primary_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_min_by.primary_key_field_indices,
-                        )?;
-                        let entry = winners
-                            .entry(group_key)
-                            .or_insert_with(|| (primary_key.clone(), delta.record.clone()));
-                        if primary_key < entry.0 {
-                            *entry = (primary_key, delta.record);
-                        }
-                    }
-                    Ok(RecordDeltas {
-                        descriptor: output_desc,
-                        deltas: winners
-                            .into_values()
-                            .map(|(_, record)| RecordDelta { record, weight: 1 })
-                            .collect(),
-                    })
+                    hydrated_arg_by_winners(
+                        input,
+                        output_desc,
+                        &arg_min_by.group_field_indices,
+                        &arg_min_by.comparison_field_indices,
+                        ArgByDirection::Min,
+                    )
                 }
                 OpType::Union => {
                     let input_nodes = graph_node.descriptor.inputs.clone();
@@ -1100,34 +1413,10 @@ impl HydrationEvaluator<'_> {
                         deltas,
                     })
                 }
-                OpType::Recursive(recursive) => {
-                    let [_, step] = graph_node.descriptor.inputs.as_slice() else {
-                        return Err(IvmRuntimeError::GraphInputArityMismatch(node));
-                    };
-                    let accumulated = recompute_recursive(
-                        self.schema,
-                        self.graph,
-                        self.variant_projections,
-                        self.table_deltas,
-                        self.evaluation_inputs.as_deref_mut(),
-                        node,
-                        recursive,
-                        output_desc,
-                        *step,
-                        self.storage,
-                        self.binding_snapshots,
-                        0,
-                        self.context.scope.child(node),
-                    )
-                    .await?;
-                    Ok(RecordDeltas {
-                        descriptor: output_desc,
-                        deltas: accumulated
-                            .into_iter()
-                            .map(|(record, weight)| RecordDelta { record, weight })
-                            .collect(),
-                    })
-                }
+                // A nested recursive graph needs its own persisted frontier
+                // state. v0 deliberately rejects it rather than falling back
+                // to an unbounded private DFS inside this traversal.
+                OpType::Recursive(_) => Err(IvmRuntimeError::UnsupportedNestedRecursion),
                 OpType::Persist(_)
                 | OpType::StreamingChecksum(_)
                 | OpType::Distinct

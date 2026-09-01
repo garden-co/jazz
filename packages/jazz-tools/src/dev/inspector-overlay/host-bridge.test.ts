@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { installInspectorHost } from "./host-bridge.js";
 import { INSPECTOR_HOST_GLOBAL } from "./inspector-host-types.js";
+import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
 
 function makeFakeDb(overrides: Record<string, unknown> = {}) {
   let changeCb: () => void = () => {};
@@ -135,7 +136,7 @@ describe("installInspectorHost", () => {
     expect((window as any)[INSPECTOR_HOST_GLOBAL]).toBeUndefined();
   });
 
-  it("publishes persistent coordinates and forwards inspector control-port requests", async () => {
+  it("publishes the exact non-secret host physical namespace for the overlay", async () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const fake = makeFakeDb({
       getConfig: () => ({
@@ -157,7 +158,16 @@ describe("installInspectorHost", () => {
       driver: { type: "persistent", dbName: "a" },
     });
     expect(config.cookieSession).toBeUndefined();
-    expect(config.runtimeSources).toBeUndefined();
+    const expectedPhysicalDbName = resolveDefaultPersistentDbName((fake.db as any).getConfig());
+    expect(config.runtimeSources).toEqual({
+      inspectorHostPhysicalDbName: expectedPhysicalDbName,
+    });
+    expect(resolveDefaultPersistentDbName(config)).toBe(expectedPhysicalDbName);
+    expect(decodeURIComponent(config.runtimeSources!.inspectorHostPhysicalDbName!)).toContain(
+      '"auth":{"kind":"system"}',
+    );
+    expect(JSON.stringify(config.runtimeSources)).not.toContain(config.secret);
+    expect(JSON.stringify(config.runtimeSources)).not.toContain(config.adminSecret);
     await (window as any)[INSPECTOR_HOST_GLOBAL].openControlPort();
     expect((fake.db as any).openInspectorControlPort).toHaveBeenCalledOnce();
   });

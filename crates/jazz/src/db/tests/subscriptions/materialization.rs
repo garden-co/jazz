@@ -45,12 +45,189 @@ fn maintained_physical_point_subscription_stays_live_for_only_its_row() {
         Default::default(),
     )
     .unwrap();
-    let SubscriptionEvent::Delta { updated, .. } = block_on(subscription.next_raw()).unwrap()
+    let SubscriptionEvent::Delta { updated, .. } =
+        block_on(subscription.next_event()).expect("target-row point-subscription delta")
     else {
         panic!("expected target-row point-subscription delta");
     };
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0].row_uuid(), target);
+    assert_eq!(
+        updated[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("changed".to_owned()))
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the physical completion of an unchanged projection is not a public delta"
+    );
+
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("changed again".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    let SubscriptionEvent::Delta { updated, .. } =
+        block_on(subscription.next_event()).expect("second target-row point-subscription delta")
+    else {
+        panic!("expected second target-row point-subscription delta");
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row_uuid(), target);
+    assert_eq!(
+        updated[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("changed again".to_owned()))
+    );
+}
+
+/// A deferred local write refreshes a projected current-view subscription on
+/// its owning tick, even when the stream opened before that tick.
+///
+/// alice ──open projected view──► local current-view collector
+/// alice ──deferred insert──────► owner tick ──reset/delta──► subscription
+#[test]
+fn deferred_local_publication_refreshes_projected_current_view() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let db = open_db(0xc2, author, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default())
+        .expect("open projected local subscription");
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected empty opening projected-subscription delta");
+    };
+    assert!(added.is_empty());
+
+    let inserted = row(0x73);
+    db.insert(
+        "todos",
+        cells("settles after opening", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            ..Default::default()
+        },
+    )
+    .expect("queue deferred local insert");
+    db.tick()
+        .expect("settle deferred publication and refresh subscription");
+
+    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+        panic!("expected projected delta after deferred local insert");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [inserted]
+    );
+    db.tick()
+        .expect("quiet owner tick after projected publication");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the settlement refresh publishes the queued local write once"
+    );
+}
+
+/// Mergeable transaction publication takes the same deferred-local admission
+/// path as a direct write, including projection-only current views.
+#[test]
+fn deferred_mergeable_commit_refreshes_projected_current_view_once() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let db = open_db(0xc3, author, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default())
+        .expect("open projected local subscription");
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected empty opening projected-subscription delta");
+    };
+    assert!(added.is_empty());
+
+    let inserted = row(0x74);
+    let tx = db.mergeable_tx().expect("open mergeable transaction");
+    tx.insert(
+        "todos",
+        cells("mergeable after opening", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            ..Default::default()
+        },
+    )
+    .expect("stage deferred mergeable insert");
+    tx.commit()
+        .expect("admit deferred mergeable publication and refresh subscription");
+
+    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+        panic!("expected projected delta after deferred mergeable commit");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [inserted]
+    );
+    db.tick()
+        .expect("quiet owner tick after projected mergeable publication");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the mergeable settlement refresh publishes the queued local write once"
+    );
+}
+
+/// Exclusive transaction publication takes the same deferred-local admission
+/// path as a direct write, including projection-only current views.
+#[test]
+fn deferred_exclusive_commit_refreshes_projected_current_view_once() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let db = open_db(0xc4, author, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default())
+        .expect("open projected local subscription");
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected empty opening projected-subscription delta");
+    };
+    assert!(added.is_empty());
+
+    let inserted = row(0x75);
+    let tx = db.exclusive_tx().expect("open exclusive transaction");
+    tx.insert(
+        "todos",
+        cells("exclusive after opening", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            ..Default::default()
+        },
+    )
+    .expect("stage deferred exclusive insert");
+    tx.commit()
+        .expect("admit deferred exclusive publication and refresh subscription");
+
+    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+        panic!("expected projected delta after deferred exclusive commit");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [inserted]
+    );
+    db.tick()
+        .expect("quiet owner tick after projected exclusive publication");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the exclusive settlement refresh publishes the queued local write once"
+    );
 }
 
 #[test]

@@ -20,18 +20,73 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function excluded(pathname, pathspecs) {
+  return pathspecs.some((pathspec) => {
+    // This module owns the small pathspec vocabulary it accepts.  Keeping it
+    // here lets ls-tree/ls-files share the same exclusions even though
+    // `ls-tree` itself does not implement Git's exclude magic.
+    const expression = pathspec
+      .replace(/[|\\{}()[\]^$+?.]/g, "\\$&")
+      .replaceAll("**", "\\u0000")
+      .replaceAll("*", "[^/]*")
+      .replaceAll("\\u0000", ".*");
+    return new RegExp(`^${expression}$`).test(pathname);
+  });
+}
+
+function filteredRecords(buffer, pathspecs, pathFromRecord = (record) => record) {
+  const records = buffer.toString("utf8").split("\0").filter(Boolean);
+  return Buffer.from(
+    records
+      .filter((record) => !excluded(pathFromRecord(record), pathspecs))
+      .sort()
+      .join("\0"),
+  );
+}
+
 // This intentionally stores only opaque hashes. It distinguishes the checked
 // out HEAD tree, index tree, unstaged patch, and every untracked path/content
 // pair without placing source text or filenames in a receipt.
-export function sourceIdentity(root) {
-  const headTree = git(root, ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
-  const indexTree = git(root, ["write-tree"], { encoding: "utf8" }).trim();
-  const unstaged = sha256(git(root, ["diff", "--no-ext-diff", "--binary"]));
-  const untracked = git(root, ["ls-files", "--others", "--exclude-standard", "-z"])
+/**
+ * An opaque identity for all source inputs a caller considers relevant.
+ *
+ * `excludePathspecs` is deliberately a Git pathspec list rather than a
+ * post-hoc filename filter: tracked/index/unstaged and untracked sources must
+ * be measured with the same boundary.  Build products are not source merely
+ * because a developer has not happened to add the usual `.gitignore` yet.
+ */
+export function sourceIdentity(root, { excludePathspecs = [] } = {}) {
+  const pathspec = [".", ...excludePathspecs.map((value) => `:(exclude)${value}`)];
+  // Keep the historic object IDs for the common no-exclusions case.  A
+  // filtered view cannot use `write-tree` (it necessarily includes every
+  // staged path), so hash Git's canonical file records instead.
+  const headTree =
+    excludePathspecs.length === 0
+      ? git(root, ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim()
+      : sha256(
+          filteredRecords(git(root, ["ls-tree", "-r", "-z", "HEAD"]), excludePathspecs, (record) =>
+            record.slice(record.lastIndexOf("\t") + 1),
+          ),
+        );
+  const indexTree =
+    excludePathspecs.length === 0
+      ? git(root, ["write-tree"], { encoding: "utf8" }).trim()
+      : sha256(
+          filteredRecords(git(root, ["ls-files", "-s", "-z"]), excludePathspecs, (record) =>
+            record.slice(record.lastIndexOf("\t") + 1),
+          ),
+        );
+  const staged = sha256(
+    git(root, ["diff", "--cached", "--no-ext-diff", "--binary", "--", ...pathspec]),
+  );
+  const unstaged = sha256(git(root, ["diff", "--no-ext-diff", "--binary", "--", ...pathspec]));
+  const untracked = filteredRecords(
+    git(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
+    excludePathspecs,
+  )
     .toString("utf8")
     .split("\0")
-    .filter(Boolean)
-    .sort();
+    .filter(Boolean);
   const untrackedHash = crypto.createHash("sha256");
   for (const relative of untracked) {
     const content = fs.readFileSync(path.join(root, relative));
@@ -42,7 +97,7 @@ export function sourceIdentity(root) {
       .update("\0");
     untrackedHash.update(content.length.toString()).update("\0").update(content).update("\0");
   }
-  const fields = { headTree, indexTree, unstaged, untracked: untrackedHash.digest("hex") };
+  const fields = { headTree, indexTree, staged, unstaged, untracked: untrackedHash.digest("hex") };
   return {
     ...fields,
     fingerprint: sha256(
@@ -50,7 +105,7 @@ export function sourceIdentity(root) {
         .map(([key, value]) => `${key}\0${value}\0`)
         .join(""),
     ),
-    dirty: headTree !== indexTree || unstaged !== sha256("") || untracked.length !== 0,
+    dirty: staged !== sha256("") || unstaged !== sha256("") || untracked.length !== 0,
   };
 }
 

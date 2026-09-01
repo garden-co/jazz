@@ -45,6 +45,45 @@ pub const MAX_FRAGMENT_REASSEMBLY_AGE_MS: u64 = 5 * 60 * 1_000;
 /// before constructing registration options.
 pub const MAX_SHAPE_AST_BYTES: usize = 64 * 1024;
 
+/// Maximum recursive policy-predicate nodes on one root-to-leaf path.
+///
+/// Policy predicates are decoded with a bounded seed before a complete
+/// attacker-controlled tree exists. Keep this aligned with the executable
+/// `MAX_ROW_SET_NESTING_DEPTH` planning ceiling: valid generated policy shapes
+/// may reach that boundary before lowering.
+pub const MAX_POLICY_EXPRESSION_DEPTH: usize = 256;
+
+/// Maximum nodes in one recursively encoded policy expression.
+///
+/// This is independent of encoded bytes: compact `All`/`Any` children can
+/// otherwise create large retained trees below the shape byte ceiling. Keep
+/// this aligned with the established `MAX_CATALOGUE_COLLECTION_ITEMS` protocol
+/// tier rather than introducing a lower policy-only cardinality class.
+pub const MAX_POLICY_EXPRESSION_NODES: usize = 16_384;
+
+/// A named semantic limit crossed while decoding a recursive policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolicyExpressionLimitError {
+    /// Stable protocol-limit name.
+    pub limit: &'static str,
+    /// Configured inclusive boundary.
+    pub max: usize,
+    /// First observed value outside the boundary.
+    pub actual: usize,
+}
+
+impl std::fmt::Display for PolicyExpressionLimitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} exceeded: observed {}, maximum {}",
+            self.limit, self.actual, self.max
+        )
+    }
+}
+
+impl std::error::Error for PolicyExpressionLimitError {}
+
 /// Maximum postcard-encoded retained shape registration payload.
 ///
 /// Source: existing wire fixtures use tiny registrations; 64 KiB leaves
@@ -53,6 +92,21 @@ pub const MAX_SHAPE_AST_BYTES: usize = 64 * 1024;
 /// vector. Server shells may make this configurable later for unusually large
 /// generated schemas.
 pub const MAX_SHAPE_REGISTRATION_BYTES: usize = MAX_SHAPE_AST_BYTES;
+/// Maximum retained shape-registration keys for one live peer.
+///
+/// At the 64 KiB registration byte ceiling this caps one peer's retained
+/// registration payloads at 64 MiB while accommodating the existing
+/// 1,000-active-query single-peer topology. Re-registering the same
+/// shape/read-view key is idempotent and does not consume another slot.
+pub const MAX_SHAPE_REGISTRATIONS_PER_PEER: usize = 1024;
+
+/// Maximum distinct peer-owned shapes retained by one node.
+///
+/// Shared shapes consume one global slot regardless of owner count. Matching
+/// the per-peer ceiling prevents one peer from exceeding the node-wide bound,
+/// while the global check still caps combined distinct-shape retention at
+/// 64 MiB.
+pub const MAX_RETAINED_PEER_SHAPES: usize = 1024;
 
 /// Maximum number of row-version records in one commit unit.
 ///

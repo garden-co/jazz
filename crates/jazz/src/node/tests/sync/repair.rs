@@ -1,5 +1,26 @@
 // Authorized row-version fetch and canonical known-state repair.
 
+#[test]
+fn relay_row_version_fetch_helper_rejects_missing_policy_binding() {
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let mut relay = PeerState::relay();
+
+    assert!(matches!(
+        relay
+            .handle_row_versions_fetch(
+                &mut core,
+                SyncMessage::FetchRowVersions {
+                    requests: Vec::new(),
+                    delegated_session: None,
+                },
+            )
+            .resolve(),
+        Err(Error::InvalidStoredValue(
+            "relay row-version repair requires an explicit immutable policy binding"
+        ))
+    ));
+}
+
 /// A repair response preflights every requested bundle before ingesting any
 /// transaction. A malformed later carrier therefore cannot partially publish
 /// an earlier valid carrier from the same `RowVersionPayloads` frame.
@@ -23,12 +44,13 @@ fn repair_frame_rejects_late_invalid_provenance_before_any_ingest() {
         );
         requests.push(crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id));
     }
-    let mut peer = PeerState::relay();
+    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let messages = peer
         .handle_row_versions_fetch(
             &mut core,
             SyncMessage::FetchRowVersions {
                 requests: requests.clone(),
+                delegated_session: None,
             },
         )
         .unwrap();
@@ -115,6 +137,7 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
             &mut core,
             SyncMessage::FetchRowVersions {
                 requests: requests.clone(),
+                delegated_session: None,
             },
         )
         .unwrap();
@@ -134,7 +157,7 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
     assert!(matches!(
         alice_peer.handle_row_versions_fetch(
             &mut core,
-            SyncMessage::FetchRowVersions { requests: too_many },
+            SyncMessage::FetchRowVersions { requests: too_many, delegated_session: None },
         ).resolve(),
         Err(Error::UnsupportedSyncMessage(
             "row-version repair request exceeds limit"
@@ -195,12 +218,13 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
             "todos", row_uuid, tx_id
         )]
     );
-    let mut peer = PeerState::relay();
+    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let messages = peer
         .handle_row_versions_fetch(
             &mut core,
             SyncMessage::FetchRowVersions {
                 requests: missing.clone(),
+                delegated_session: None,
             },
         )
         .unwrap();
@@ -365,12 +389,13 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         vec![crate::protocol::RowVersionRef::new("tasks", row_uuid, tx_id)],
         "with no carrier, the update must issue FetchRowVersions"
     );
-    let mut peer = PeerState::relay();
+    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let messages = peer
         .handle_row_versions_fetch(
             &mut core,
             SyncMessage::FetchRowVersions {
                 requests: requests.clone(),
+                delegated_session: None,
             },
         )
         .unwrap();

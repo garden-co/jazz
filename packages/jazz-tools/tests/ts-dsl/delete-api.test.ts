@@ -81,12 +81,16 @@ describe("TS Delete API", () => {
     });
   });
 
-  it("trying to delete an already-deleted row fails", async () => {
+  it("reports an already-deleted rejection through the write handle", async () => {
     const project = insertProject(db);
     db.delete(app.projects, project.id);
 
-    expect(() => db.delete(app.projects, project.id)).toThrow(
-      `Delete failed: WriteError("row already deleted: ${project.id}")`,
+    await expect(db.delete(app.projects, project.id).wait({ tier: "local" })).rejects.toMatchObject(
+      {
+        name: "PersistedWriteRejectedError",
+        code: "write_rejected",
+        reason: `row already deleted: ${project.id}`,
+      },
     );
   });
 });

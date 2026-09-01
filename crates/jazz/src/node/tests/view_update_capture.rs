@@ -458,7 +458,8 @@ impl MaintainedSubscriptionViewSubscription {
                 complete_exclusive_payloads: false,
                 previous_result_set,
                 previous_program_facts: BTreeSet::new(),
-                flat_tuple_source_tables: Vec::new(),
+                flat_tuple_source_tables:
+                    crate::node::FlatTupleSourceTables::for_query(_shape),
                 result_member_adds: result_member_adds
                     .into_iter()
                     .map(crate::protocol::ResultMemberEntry::from)
@@ -872,7 +873,6 @@ fn recursive_rls_capture_schema() -> JazzSchema {
         "team",
         &[],
         &[],
-        "teams",
         "team_edges",
         "member",
         "parent",

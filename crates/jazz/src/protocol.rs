@@ -118,6 +118,9 @@ pub enum SyncMessage {
     FetchRowVersions {
         /// Exact version identities requested by the receiver.
         requests: Vec<RowVersionRef>,
+        /// Policy snapshot that made the originating subscription/view update
+        /// visible. Only a trusted relay may delegate this to its upstream.
+        delegated_session: Option<DelegatedSessionBinding>,
     },
     /// Repair-lane response carrying canonical row-version payloads.
     RowVersionPayloads {
@@ -1687,6 +1690,21 @@ pub struct CoverageKey {
     pub binding_id: BindingId,
     /// Registration options that affect the view or its upstream routing.
     pub opts: RegisterShapeOptions,
+    /// Exact logical policy context for a relay-multiplexed coverage group.
+    /// Empty for direct/local coverage, whose transport is already singular.
+    pub policy_binding: Option<PolicyBindingKey>,
+}
+
+/// Collision-safe canonical identity of a subscription policy snapshot.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PolicyBindingKey {
+    /// Logical session subject selected at subscription admission.
+    pub identity: AuthorSubject,
+    /// Canonical postcard bytes of the claims map; retained rather than hashed
+    /// so distinct snapshots can never share coverage on a hash collision.
+    pub canonical_claims: Vec<u8>,
 }
 
 /// Versioned query AST carried by shape registration.
@@ -1884,11 +1902,84 @@ impl ReadViewKey {
         if canonical == RegisterShapeOptions::default() {
             return Self::default();
         }
-        let bytes = postcard::to_allocvec(&canonical)
-            .expect("register shape options are postcard encodable");
+        let bytes = canonical_register_shape_options_v1_bytes(&canonical);
         Self {
             id: uuid::Uuid::new_v5(&READ_VIEW_NAMESPACE, &bytes),
         }
+    }
+}
+
+// Permanent canonical input to UUIDv5 `ReadViewKey` identities. These keys
+// enter durable settled-result rows, so they cannot inherit Rust/postcard enum
+// discriminants or field layout.
+const READ_VIEW_KEY_CODEC_MAGIC: &[u8; 4] = b"JRVK";
+const READ_VIEW_KEY_CODEC_VERSION: u8 = 1;
+
+fn canonical_register_shape_options_v1_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(READ_VIEW_KEY_CODEC_MAGIC);
+    bytes.push(READ_VIEW_KEY_CODEC_VERSION);
+    bytes.push(match options.tier {
+        DurabilityTier::None => 0,
+        DurabilityTier::Local => 1,
+        DurabilityTier::Edge => 2,
+        DurabilityTier::Global => 3,
+    });
+    bytes.push(u8::from(options.propagate_upstream));
+    bytes.push(match options.binding_source {
+        BindingSource::Ordinary => 0,
+        BindingSource::RelayAuthoritySession => 1,
+    });
+    put_read_view_source(&mut bytes, &options.read_view.source);
+    bytes
+}
+
+fn put_read_view_source(bytes: &mut Vec<u8>, source: &ReadViewSourceSpec) {
+    match source {
+        ReadViewSourceSpec::Current => bytes.push(0),
+        ReadViewSourceSpec::BranchView { head, base } => {
+            bytes.push(1);
+            put_branch_selector(bytes, head);
+            match base {
+                None => bytes.push(0),
+                Some(BranchViewBase::Current(branch)) => {
+                    bytes.push(1);
+                    put_branch_selector(bytes, branch);
+                }
+                Some(BranchViewBase::Snapshot { branch, snapshot }) => {
+                    bytes.push(2);
+                    put_branch_selector(bytes, branch);
+                    put_snapshot_ref(bytes, snapshot);
+                }
+            }
+        }
+        ReadViewSourceSpec::Snapshot { snapshot } => {
+            bytes.push(2);
+            put_snapshot_ref(bytes, snapshot);
+        }
+    }
+}
+
+fn put_branch_selector(bytes: &mut Vec<u8>, selector: &BranchSelector) {
+    put_len(bytes, selector.values.len());
+    for (name, value) in &selector.values {
+        put_str(bytes, name);
+        put_bytes(bytes, &value.0);
+    }
+}
+
+fn put_snapshot_ref(bytes: &mut Vec<u8>, snapshot: &SnapshotRef) {
+    bytes.extend_from_slice(snapshot.owner.0.as_bytes());
+    bytes.extend_from_slice(&snapshot.global_base.0.to_le_bytes());
+    bytes.extend_from_slice(&snapshot.local_base.0.to_le_bytes());
+    // Dots are a frontier set, not an ordered stream.  A caller can construct
+    // the same snapshot through differently ordered or repeated observations;
+    // JRVK therefore commits to the sorted unique TxId set.
+    let dots = snapshot.dots.iter().copied().collect::<BTreeSet<_>>();
+    put_len(bytes, dots.len());
+    for dot in dots {
+        bytes.extend_from_slice(&dot.time.0.to_le_bytes());
+        bytes.extend_from_slice(dot.node.0.as_bytes());
     }
 }
 
@@ -2297,6 +2388,25 @@ pub struct Subscribe {
     pub values: Vec<Value>,
     /// Optional fast known-state declaration for this usage-site subscription.
     pub known_state: Option<KnownStateDeclaration>,
+    /// Session policy context delegated by a trusted relay.
+    ///
+    /// Only a server-to-server relay link admitted as `SYSTEM` may carry this
+    /// field. Ordinary subscriber connections are authenticated by their
+    /// transport session instead and must never self-assert it.
+    pub delegated_session: Option<DelegatedSessionBinding>,
+}
+
+/// Immutable policy context attached to one relayed subscription.
+///
+/// This is intentionally a subscription-local snapshot rather than a lookup
+/// by identity: two active sessions may share an identity but carry different
+/// provider claims.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct DelegatedSessionBinding {
+    /// Identity whose `session` values the subscription may evaluate.
+    pub identity: AuthorSubject,
+    /// Already-admitted claims for that identity.
+    pub claims: BTreeMap<String, Value>,
 }
 
 /// Known-state declaration echoed by a subscriber on resubscribe.
@@ -3109,6 +3219,26 @@ fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
     serde_json::to_vec(schema.public_schema()).map_err(|error| error.to_string())
 }
 
+/// Canonical CATS v1 payload used by catalogue storage and publication identity.
+///
+/// This is deliberately a small explicit envelope rather than the serde layout
+/// of `SchemaVersion`: version, raw schema UUID, little-endian JSON length, and
+/// the canonical public-schema JSON bytes.
+pub(crate) fn canonical_catalogue_schema_v1_bytes(
+    schema: &SchemaVersion,
+) -> Result<Vec<u8>, String> {
+    const CATALOGUE_SCHEMA_VERSION: u8 = 1;
+    let public_schema = durable_public_schema_json(&schema.schema)?;
+    let length = u32::try_from(public_schema.len())
+        .map_err(|_| "catalogue public schema payload too large".to_owned())?;
+    let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
+    payload.push(CATALOGUE_SCHEMA_VERSION);
+    payload.extend_from_slice(schema.id.0.as_bytes());
+    payload.extend_from_slice(&length.to_le_bytes());
+    payload.extend_from_slice(&public_schema);
+    Ok(payload)
+}
+
 fn compile_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     crate::tools::public_schema_convert::decode_public_schema_json(bytes)
 }
@@ -3906,12 +4036,10 @@ impl SchemaLineagePublication {
         put_str(&mut bytes, "jazz-schema-lineage-publication-v1");
         put_bytes(
             &mut bytes,
-            &serde_json::to_vec(&self.schema).expect("schema publication serializes"),
+            &canonical_catalogue_schema_v1_bytes(&self.schema)
+                .expect("schema publication has a canonical CATS v1 payload"),
         );
-        put_bytes(
-            &mut bytes,
-            &serde_json::to_vec(&self.lens).expect("lineage lens serializes"),
-        );
+        put_bytes(&mut bytes, &canonical_lens_bytes(&self.lens));
         let mut new_tables = self.new_tables.clone();
         new_tables.sort();
         put_len(&mut bytes, new_tables.len());
@@ -5646,6 +5774,61 @@ mod tests {
 
         assert_ne!(key(live.clone()), key(sibling));
         assert_ne!(key(live), key(frozen));
+
+        // Internal format receipt: this UUID is stored in settled result
+        // entries, so the exact canonical preimage must be pinned below the
+        // public subscription API boundary.
+        let options = RegisterShapeOptions {
+            tier: DurabilityTier::Edge,
+            read_view: ReadViewSpec::branch_view(selector(1), None),
+            propagate_upstream: false,
+            binding_source: BindingSource::RelayAuthoritySession,
+        };
+        assert_eq!(
+            hex::encode(canonical_register_shape_options_v1_bytes(&options)),
+            "4a52564b010200010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+        );
+        assert_eq!(
+            options.read_view_key().id,
+            uuid::uuid!("ab3adac6-1943-535a-8983-1541732f0fb1")
+        );
+    }
+
+    #[test]
+    fn read_view_key_canonicalizes_snapshot_dot_set_order_and_duplicates() {
+        let dot_a = TxId::new(TxTime(7), NodeUuid::from_bytes([0x71; 16]));
+        let dot_b = TxId::new(TxTime(9), NodeUuid::from_bytes([0x72; 16]));
+        let snapshot = |dots| SnapshotRef {
+            owner: NodeUuid::from_bytes([0x70; 16]),
+            global_base: GlobalTime(5),
+            local_base: TxTime(6),
+            dots,
+        };
+        let options = |snapshot| RegisterShapeOptions {
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::Snapshot { snapshot },
+            },
+            ..RegisterShapeOptions::default()
+        };
+
+        let ordered = options(snapshot(vec![dot_a, dot_b]));
+        let permuted_and_duplicated = options(snapshot(vec![dot_b, dot_a, dot_b, dot_a]));
+        let ordered_bytes = canonical_register_shape_options_v1_bytes(&ordered);
+        let equivalent_bytes = canonical_register_shape_options_v1_bytes(&permuted_and_duplicated);
+
+        assert_eq!(ordered_bytes, equivalent_bytes);
+        assert_eq!(
+            hex::encode(ordered_bytes),
+            "4a52564b0103010002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
+        );
+        assert_eq!(
+            ordered.read_view_key(),
+            permuted_and_duplicated.read_view_key()
+        );
+        assert_eq!(
+            ordered.read_view_key().id,
+            uuid::uuid!("0227f6f4-5ca2-5778-9e6d-78f33a70d750")
+        );
     }
 
     #[test]

@@ -14,6 +14,26 @@ where
         Rc::ptr_eq(&self.node, &other.node)
     }
 
+    async fn lock_for_transaction_open(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        self.node
+            .as_ref()
+            .lock_for_transaction_open(open_tx_id, self.owner_operation_admitted)
+            .await
+    }
+
+    async fn lock_for_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        self.node
+            .as_ref()
+            .lock_for_transaction_operation(open_tx_id, self.owner_operation_admitted)
+            .await
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
@@ -76,10 +96,9 @@ where
     /// foreign-function call. Rust callers that want RAII should use
     /// [`Db::mergeable_tx`] instead.
     pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.node
-            .node
-            .lock()
-            .await
+        self.ensure_mutation_operation_admitted()?;
+        self.lock_for_transaction_open(id)
+            .await?
             .open_mergeable(id, self.identity.author, None)
             .await
             .map_err(Into::into)
@@ -93,10 +112,9 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.node
-            .node
-            .lock()
-            .await
+        self.ensure_mutation_operation_admitted()?;
+        self.lock_for_transaction_open(id)
+            .await?
             .open_mergeable(id, author, Some(author))
             .await
             .map_err(Into::into)
@@ -110,19 +128,54 @@ where
         id: OpenTransactionId,
         made_by: AuthorSubject,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         if made_by != self.identity.author && !self.backend_attribution {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
                 "attribution requires a trusted serving node",
             ));
         }
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_open(id)
+            .await?
             .open_mergeable(id, made_by, Some(self.identity.author))
             .await
             .map_err(Into::into)
+    }
+
+    /// Queue mergeable transaction admission behind earlier owner operations.
+    #[doc(hidden)]
+    pub fn enqueue_begin_mergeable(
+        &self,
+        id: OpenTransactionId,
+        author: Option<AuthorSubject>,
+        attribution: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
+        if attribution.is_some() && author.is_some() {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "attributed transaction cannot override admission identity",
+            ));
+        }
+        if let Some(made_by) = attribution
+            && made_by != self.identity.author
+            && !self.backend_attribution
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "attribution requires a trusted serving node",
+            ));
+        }
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                match (author, attribution) {
+                    (_, Some(attribution)) => db.begin_mergeable_attributed(id, attribution).await,
+                    (Some(author), None) => db.begin_mergeable_for_identity(id, author).await,
+                    (None, None) => db.begin_mergeable(id).await,
+                }
+            }),
+        )
     }
 
     /// Return a non-owning operations handle for an already-open mergeable transaction.
@@ -140,10 +193,8 @@ where
         tx_id: OpenTransactionId,
     ) -> Result<(), Error> {
         if self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(tx_id)
+            .await?
             .mergeable_transaction_is_attributed(tx_id)?
         {
             return Err(Error::new(
@@ -165,7 +216,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.lock().await;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         node.tx_write_mergeable_in_schema(
             tx_id,
             self.schema_version_id,
@@ -192,11 +243,40 @@ where
         now_ms: Option<u64>,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
+        self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+            tx_id,
+            table,
+            branch,
+            row,
+            cells,
+            now_ms,
+            known_fresh_row,
+            None,
+            false,
+        )
+        .await
+    }
+
+    /// Stage an exact branch write and, only for a branch-view fallback, carry
+    /// the engine-read base cells that may safely retain indirect values.
+    #[allow(clippy::too_many_arguments)]
+    async fn stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+        known_fresh_row: bool,
+        verified_inherited_cells: Option<RowCells>,
+        replace_pending_deletion: bool,
+    ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.lock().await;
-        node.tx_write_mergeable_in_schema_and_branch(
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        node.tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
             tx_id,
             self.schema_version_id,
             table,
@@ -208,6 +288,8 @@ where
             false,
             branch,
             known_fresh_row,
+            verified_inherited_cells,
+            replace_pending_deletion,
         )?;
         Ok(())
     }
@@ -223,10 +305,8 @@ where
         self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPDATE")
             .await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_operation(tx_id)
+            .await?
             .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
             .await
             .map_err(Into::into)
@@ -262,17 +342,13 @@ where
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let head_cells = self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(tx_id)
+            .await?
             .visible_current_cells_in_branch(table, &head, row)
             .await?;
         if head_cells.is_some() {
-            self.node
-                .node
-                .lock()
-                .await
+            self.lock_for_transaction_operation(tx_id)
+                .await?
                 .tx_patch_mergeable_in_schema_and_branch(
                     tx_id,
                     self.schema_version_id,
@@ -281,15 +357,14 @@ where
                     patch,
                     now_ms,
                     head,
+                    false,
                 )
                 .await?;
             return Ok(());
         }
         let Some(mut inherited) = self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(tx_id)
+            .await?
             .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
             .await?
         else {
@@ -298,9 +373,20 @@ where
                 format!("row is not visible in branch view: {}", row.0),
             ));
         };
+        let verified_inherited_cells = inherited.clone();
         inherited.extend(patch);
-        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms, false)
-            .await
+        self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+            tx_id,
+            table,
+            head,
+            row,
+            inherited,
+            now_ms,
+            false,
+            Some(verified_inherited_cells),
+            false,
+        )
+        .await
     }
 
     pub(super) async fn require_mergeable_transaction_upsert_visibility(
@@ -308,9 +394,14 @@ where
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
+        let exists = self.transaction_read(tx_id, table, row).await?.is_some();
+        if !exists {
+            self.ensure_row_not_deleted(table, row).await?;
+        }
         self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPSERT")
-            .await
+            .await?;
+        Ok(exists)
     }
 
     async fn require_mergeable_transaction_read_visibility(
@@ -321,10 +412,8 @@ where
         operation: &str,
     ) -> Result<(), Error> {
         let permission_subject = self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(tx_id)
+            .await?
             .mergeable_transaction_permission_subject(tx_id)?;
         let Some(identity) = permission_subject else {
             return Ok(());
@@ -338,10 +427,8 @@ where
             (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
             (Some(_), None) => true,
             (Some(_), Some(policy)) => {
-                self.node
-                    .node
-                    .lock()
-                    .await
+                self.lock_for_transaction_operation(tx_id)
+                    .await?
                     .read_policy_query_allows_open_tx_row(
                         tx_id,
                         &policy,
@@ -362,6 +449,136 @@ where
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn stage_mergeable_upsert_in_branch_view(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
+        self.ensure_branch_view_row_not_deleted(table, &head, base.as_ref(), row)
+            .await?;
+        let permission_subject = self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_permission_subject(tx_id)?;
+        let mut node = self.node.node.lock().await;
+        let (head_exists, staged_head, replace_pending_deletion) = match node
+            .tx_current_row_state_in_branch(tx_id, table, row, &head)
+            .await?
+        {
+            TransactionBranchRowState::Visible { staged, .. } => (true, staged, false),
+            TransactionBranchRowState::PendingDeletion => (
+                node.visible_current_cells_in_branch(table, &head, row)
+                    .await?
+                    .is_some(),
+                false,
+                true,
+            ),
+            TransactionBranchRowState::Absent => (false, false, false),
+        };
+        let inherited = if head_exists {
+            None
+        } else {
+            node.visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                .await?
+        };
+        drop(node);
+
+        if head_exists {
+            if let Some(identity) = permission_subject {
+                let visible = if staged_head {
+                    match self.table_schema(table)?.read_policy.clone() {
+                        None => true,
+                        Some(_) if identity == AuthorSubject::SYSTEM => true,
+                        Some(policy) => {
+                            self.node
+                                .node
+                                .lock()
+                                .await
+                                .read_policy_query_allows_open_tx_row(
+                                    tx_id,
+                                    &policy,
+                                    self.schema_version_id,
+                                    row,
+                                    identity,
+                                )
+                                .await?
+                        }
+                    }
+                } else {
+                    self.visible_branch_view_cells_for_identity(
+                        table,
+                        &head,
+                        base.as_ref(),
+                        row,
+                        identity,
+                    )
+                    .await?
+                    .is_some()
+                };
+                if !visible {
+                    return Err(read_for_write_denied("UPSERT", table));
+                }
+            }
+            if cells.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "branch upsert update requires at least one authored column",
+                ));
+            }
+            let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
+            self.node
+                .node
+                .lock()
+                .await
+                .tx_patch_mergeable_in_schema_and_branch(
+                    tx_id,
+                    self.schema_version_id,
+                    table,
+                    row,
+                    cells,
+                    now_ms,
+                    head,
+                    replace_pending_deletion,
+                )
+                .await?;
+            return Ok(());
+        }
+
+        if inherited.is_some()
+            && let Some(identity) = permission_subject
+            && self
+                .visible_branch_view_cells_for_identity(table, &head, base.as_ref(), row, identity)
+                .await?
+                .is_none()
+        {
+            return Err(read_for_write_denied("UPSERT", table));
+        }
+        let verified_inherited_cells = inherited.clone();
+        let mut inserted = inherited.unwrap_or_default();
+        inserted.extend(cells);
+        self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+            tx_id,
+            table,
+            head,
+            row,
+            inserted,
+            now_ms,
+            false,
+            verified_inherited_cells,
+            replace_pending_deletion,
+        )
+        .await
+    }
+
     pub(super) async fn stage_mergeable_delete(
         &self,
         tx_id: OpenTransactionId,
@@ -370,10 +587,8 @@ where
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_operation(tx_id)
+            .await?
             .tx_write_mergeable_in_schema(
                 tx_id,
                 self.schema_version_id,
@@ -401,10 +616,8 @@ where
     ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         if self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(tx_id)
+            .await?
             .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
             .await?
             .is_none()
@@ -415,10 +628,8 @@ where
             ));
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_operation(tx_id)
+            .await?
             .tx_write_mergeable_in_schema_and_branch(
                 tx_id,
                 self.schema_version_id,
@@ -446,7 +657,7 @@ where
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.lock().await;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let content_parents = node
             .local_content_winner_tx_id(table, row)
             .await?
@@ -497,7 +708,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.lock().await;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let content_parents = node
             .local_content_winner_tx_id_in_branch(table, &branch, row)
             .await?
@@ -543,16 +754,14 @@ where
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
         let published = self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(open_tx_id)
+            .await?
             .commit_mergeable_open(open_tx_id, || self.next_now_ms())
             .await?;
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
-            self.refresh_subscriptions().await?;
-            self.node.queue_local_publication(published, None);
+            self.finish_deferred_local_publication(published, None)
+                .await?;
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;
@@ -561,13 +770,65 @@ where
         Ok(tx_id)
     }
 
+    /// Reserve the final identity and retain mergeable commit/finalization on
+    /// the node owner. Binding callers use this after synchronous staging so
+    /// cold parent refresh or persistence cannot strand the commit future.
+    #[doc(hidden)]
+    pub fn enqueue_commit_mergeable_handle(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<WriteHandle<S>, Error> {
+        let now_ms = self.next_now_ms();
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_transaction_commit(
+            open_tx_id,
+            tx_id,
+            Box::pin(async move {
+                let published = db
+                    .lock_for_transaction_operation(open_tx_id)
+                    .await?
+                    .commit_mergeable_open_at(open_tx_id, tx_id, || now_ms)
+                    .await?;
+                debug_assert_eq!(published.tx_id, tx_id);
+                if db.node.defer_local_persistence.get() {
+                    db.node.queue_local_publication(published, None);
+                } else {
+                    db.finish_publication_outcome(PublicationOutcome::published((), published))
+                        .await?;
+                    db.finalize_local_commit(tx_id)?;
+                }
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status, None))
+    }
+
     /// Abandon an owned open transaction handle.
     pub fn abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) -> Result<(), Error> {
-        self.node
+        self.node.mark_transaction_abandoned(open_tx_id);
+        let result = self
+            .node
             .node
             .borrow_mut()
             .abandon_tx(open_tx_id)
-            .map_err(Into::into)
+            .map_err(Into::into);
+        self.node.clear_transaction_abandonment(open_tx_id);
+        result
+    }
+
+    /// Queue rollback after all earlier admission/staging work. Missing state
+    /// is accepted because a failed queued begin is already terminal.
+    #[doc(hidden)]
+    pub fn enqueue_abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_cleanup(Box::pin(async move {
+            let mut node = db.node.node.lock().await;
+            match node.abandon_tx(open_tx_id) {
+                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }));
     }
 
     /// Open an exclusive transaction over the current local snapshot.
@@ -593,6 +854,7 @@ where
     /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
     /// [`Db::exclusive_tx`] instead.
     pub async fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.open_exclusive_handle(id).await
     }
 
@@ -606,7 +868,27 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.open_exclusive_handle_for_identity(id, author).await
+    }
+
+    /// Queue exclusive snapshot admission behind earlier owner operations.
+    #[doc(hidden)]
+    pub fn enqueue_begin_exclusive(
+        &self,
+        id: OpenTransactionId,
+        author: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                match author {
+                    Some(author) => db.begin_exclusive_for_identity(id, author).await,
+                    None => db.begin_exclusive(id).await,
+                }
+            }),
+        )
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -619,14 +901,151 @@ where
         ExclusiveTxRef { db: self, tx_id }
     }
 
+    #[doc(hidden)]
+    pub fn enqueue_transaction_insert(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        cells: RowCells,
+        mut options: InsertOptions,
+    ) -> Result<RowUuid, Error> {
+        let row = options
+            .row_id
+            .unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
+        options.row_id = Some(row);
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id)
+                        .insert(&table, cells, options)
+                        .await?;
+                } else {
+                    db.mergeable_tx_ref(id)
+                        .insert(&table, cells, options)
+                        .await?;
+                }
+                Ok(())
+            }),
+        )?;
+        Ok(row)
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_update(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        row: RowUuid,
+        patch: RowCells,
+        options: UpdateOptions,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id)
+                        .update(&table, row, patch, options)
+                        .await
+                } else {
+                    db.mergeable_tx_ref(id)
+                        .update(&table, row, patch, options)
+                        .await
+                }
+            }),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_upsert(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        row: RowUuid,
+        cells: RowCells,
+        options: UpsertOptions,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id)
+                        .upsert(&table, row, cells, options)
+                        .await
+                } else {
+                    db.mergeable_tx_ref(id)
+                        .upsert(&table, row, cells, options)
+                        .await
+                }
+            }),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_delete(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        row: RowUuid,
+        options: DeleteOptions,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id).delete(&table, row, options).await
+                } else {
+                    db.mergeable_tx_ref(id).delete(&table, row, options).await
+                }
+            }),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_restore(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        row: RowUuid,
+        cells: Option<RowCells>,
+        options: RestoreOptions,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id)
+                        .restore(&table, row, cells, options)
+                        .await
+                } else {
+                    db.mergeable_tx_ref(id)
+                        .restore(&table, row, cells, options)
+                        .await
+                }
+            }),
+        )
+    }
+
     pub(super) async fn transaction_read(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
-        let mut cells = self.transaction_read_raw(tx_id, table, row).await?;
-        let node = self.node.node.lock().await;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        let mut cells = node
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?;
         if let Some(cells) = &mut cells {
             node.hydrate_large_value_cells(cells).await?;
         }
@@ -644,10 +1063,8 @@ where
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
         let cells = self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(tx_id)
+            .await?
             .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
             .await?;
         Ok(cells)
@@ -686,6 +1103,74 @@ where
         .await
     }
 
+    pub(super) async fn transaction_relation_snapshot(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.transaction_relation_snapshot_in_authorization_mode(
+            tx_id,
+            prepared,
+            self.identity.author,
+            opts,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
+    }
+
+    pub(crate) async fn transaction_relation_snapshot_for_identity(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.transaction_relation_snapshot_in_authorization_mode(
+            tx_id,
+            prepared,
+            author,
+            opts,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn transaction_relation_snapshot_in_authorization_mode(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, Error> {
+        ensure_default_read_view(&opts)?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        let mut snapshot = match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => node
+                .tx_relation_snapshot_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    opts.include_deleted,
+                )
+                .await
+                .map_err(Error::from)?,
+            QueryAuthorizationMode::TrustedServing => node
+                .tx_relation_snapshot_for_identity_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    author,
+                    opts.include_deleted,
+                )
+                .await
+                .map_err(Error::from)?,
+        };
+        node.hydrate_current_rows(&mut snapshot.rows).await?;
+        Ok(snapshot)
+    }
+
     async fn transaction_all_in_authorization_mode(
         &self,
         tx_id: OpenTransactionId,
@@ -695,7 +1180,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
-        let mut node = self.node.node.lock().await;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut rows = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_query_with_options(
@@ -726,7 +1211,7 @@ where
         tx_id: OpenTransactionId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut node = self.node.node.lock().await;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut rows = node.tx_current_rows(tx_id, table).await?;
         node.hydrate_current_rows(&mut rows).await?;
         Ok(rows)
@@ -742,10 +1227,8 @@ where
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_operation(tx_id)
+            .await?
             .tx_write_in_schema_at_ms(
                 tx_id,
                 self.schema_version_id,
@@ -773,10 +1256,8 @@ where
             .await?
             .expect("exclusive UPDATE requires a visible target");
         cells.extend(patch);
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_operation(tx_id)
+            .await?
             .tx_write_in_schema_at_ms(
                 tx_id,
                 self.schema_version_id,
@@ -805,10 +1286,8 @@ where
             .unwrap_or_default();
         cells.extend(patch);
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_operation(tx_id)
+            .await?
             .tx_write_in_schema_at_ms(
                 tx_id,
                 self.schema_version_id,
@@ -834,10 +1313,8 @@ where
         allow_absent: bool,
     ) -> Result<Option<RowCells>, Error> {
         let identity = self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(tx_id)
+            .await?
             .exclusive_transaction_bound_author(tx_id)?;
         let read_policy = self.table_schema(table)?.read_policy.clone();
         // This authoritative point read distinguishes a hidden target from a
@@ -848,10 +1325,8 @@ where
             (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
             (Some(_), None) => true,
             (Some(_), Some(policy)) => {
-                self.node
-                    .node
-                    .lock()
-                    .await
+                self.lock_for_transaction_operation(tx_id)
+                    .await?
                     .read_policy_query_allows_open_tx_row(
                         tx_id,
                         &policy,
@@ -877,10 +1352,8 @@ where
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_operation(tx_id)
+            .await?
             .tx_write_in_schema_at_ms(
                 tx_id,
                 self.schema_version_id,
@@ -904,7 +1377,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.lock().await;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         // Restore needs one content version and one deletion-register version:
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
@@ -938,13 +1411,39 @@ where
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
         let (published, unit) = self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(open_tx_id)
+            .await?
             .commit_exclusive_bound(open_tx_id, self.next_now_ms())
             .await?;
         self.finish_exclusive_publication(published, unit).await
+    }
+
+    /// Reserve the final identity and retain exclusive serializability,
+    /// publication, and finalization on the node owner.
+    #[doc(hidden)]
+    pub fn enqueue_commit_exclusive_handle(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<WriteHandle<S>, Error> {
+        let now_ms = self.next_now_ms();
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_transaction_commit(
+            open_tx_id,
+            tx_id,
+            Box::pin(async move {
+                let (published, unit) = db
+                    .lock_for_transaction_operation(open_tx_id)
+                    .await?
+                    .commit_exclusive_bound_at(open_tx_id, tx_id)
+                    .await?;
+                debug_assert_eq!(published.tx_id, tx_id);
+                let committed = db.finish_exclusive_publication(published, unit).await?;
+                debug_assert_eq!(committed, tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status, None))
     }
 
     /// Commit an owned exclusive transaction as an explicit policy identity.
@@ -959,10 +1458,8 @@ where
         author: AuthorSubject,
     ) -> Result<TxId, Error> {
         let (published, unit) = self
-            .node
-            .node
-            .lock()
-            .await
+            .lock_for_transaction_operation(open_tx_id)
+            .await?
             .commit_exclusive(open_tx_id, author, self.next_now_ms())
             .await?;
         self.finish_exclusive_publication(published, unit).await
@@ -975,8 +1472,8 @@ where
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
-            self.refresh_subscriptions().await?;
-            self.node.queue_local_publication(published, Some(unit));
+            self.finish_deferred_local_publication(published, Some(unit))
+                .await?;
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;
@@ -1000,10 +1497,8 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.node
-            .node
-            .lock()
-            .await
+        self.lock_for_transaction_open(id)
+            .await?
             .open_exclusive_for_identity(id, author)
             .await
             .map_err(Into::into)

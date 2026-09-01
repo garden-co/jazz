@@ -14,7 +14,8 @@ use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
-use jazz::protocol::SyncMessage;
+use jazz::protocol::{SubscriptionKey, SyncMessage};
+use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::GlobalTime;
 use jazz::tools::public_schema::{
@@ -41,6 +42,7 @@ const EVENTS: &str = "events";
 struct WorkerHarness {
     _dir: TempDir,
     db: Db<RocksDbStorage>,
+    author: AuthorSubject,
     _edge_dir: TempDir,
     edge: NodeState<RocksDbStorage>,
     edge_peer: PeerState,
@@ -1033,34 +1035,53 @@ fn sync_worker_tables(
     }
 }
 
-fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> WorkerHarness {
-    let (dir, db) = open_db(
-        node_uuid,
-        schema.clone(),
-        AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]),
+fn bind_worker_current_rows(
+    peer: &mut PeerState,
+    schema: &JazzSchema,
+    table: &str,
+    author: &AuthorSubject,
+) {
+    let shape = Query::from(table)
+        .validate(schema)
+        .expect("valid whole-table shape");
+    let binding = shape.bind(BTreeMap::new()).expect("empty binding");
+    peer.set_subscription_policy_binding(
+        SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: Default::default(),
+        },
+        (author.clone(), BTreeMap::new()),
     );
+}
+
+fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> WorkerHarness {
+    let author = AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]);
+    let (dir, db) = open_db(node_uuid, schema.clone(), author.clone());
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
     let inbound = Rc::new(RefCell::new(VecDeque::new()));
     let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
         outbound: Rc::clone(&outbound),
         inbound: Rc::clone(&inbound),
     })));
-    let (edge_dir, edge) = open_node(edge_uuid, schema);
+    let (edge_dir, edge) = open_node(edge_uuid, schema.clone());
     let mut worker = WorkerHarness {
         _dir: dir,
         db,
+        author: author.clone(),
         _edge_dir: edge_dir,
         edge,
-        edge_peer: PeerState::new(),
-        client_peer: PeerState::new(),
+        edge_peer: PeerState::relay(),
+        client_peer: PeerState::client_link(author.clone()),
         outbound,
         inbound,
         _upstream: upstream,
     };
     worker.edge_peer.set_ship_complete_exclusive_payloads(true);
-    worker
-        .client_peer
-        .set_ship_complete_exclusive_payloads(true);
+    for table in [WORKFLOWS, INSTANCES, STEPS, EVENTS] {
+        bind_worker_current_rows(&mut worker.edge_peer, &schema, table, &worker.author);
+        bind_worker_current_rows(&mut worker.client_peer, &schema, table, &worker.author);
+    }
     worker
 }
 

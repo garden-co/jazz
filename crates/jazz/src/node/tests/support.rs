@@ -1372,6 +1372,7 @@ fn register_shape_binding<S>(
 },
         values,
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
 }

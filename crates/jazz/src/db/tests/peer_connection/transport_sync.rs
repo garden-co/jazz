@@ -114,6 +114,149 @@ fn db_sync_surface_round_trips_subscription_to_client() {
     assert_eq!(prepared_read(&client, &query).len(), 2);
 }
 
+/// Refresh is a post-durability publication effect for an inbound authority
+/// batch. This stays internal because the fault boundary and per-peer progress
+/// receipt are not exposed through the public client API.
+#[test]
+fn persisted_upstream_batch_survives_subscription_refresh_failure_without_redelivery() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc2, client_author, &schema);
+    seed(&server, "todos", cells("persisted upstream", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let opened = block_on(subscription.next_raw()).unwrap();
+    assert!(!event_settled(&opened));
+    assert!(opened_rows(opened).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    upstream
+        .borrow_mut()
+        .fail_next_subscription_refresh
+        .set(true);
+
+    let applied = block_on(upstream.borrow_mut().tick())
+        .expect("a post-persistence refresh failure must not fail the peer tick");
+    assert_eq!(
+        applied.remote_sync_applied, 1,
+        "the durably applied inbound batch must be acknowledged once"
+    );
+    assert_eq!(
+        applied.subscription_events, 1,
+        "the routed subscription error must remain visible in tick progress"
+    );
+    assert_eq!(
+        block_on(subscription.next_raw()).expect("refresh failure event"),
+        SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        },
+        "refresh failure belongs to the affected subscription"
+    );
+    assert_eq!(
+        prepared_read(&client, &query).len(),
+        1,
+        "refresh failure must not roll back the settled inbound batch"
+    );
+
+    let idle = block_on(upstream.borrow_mut().tick())
+        .expect("the same peer connection must remain usable");
+    assert_eq!(
+        idle.remote_sync_applied, 0,
+        "the consumed inbound batch must not be reported or applied again"
+    );
+    assert!(
+        client
+            .node
+            .connections
+            .borrow()
+            .iter()
+            .any(|connection| Rc::ptr_eq(connection, &upstream)),
+        "refresh failure must not force reconnect of the peer that applied the batch"
+    );
+}
+
+/// A globally accepted client write belongs to the authority's durable current
+/// state, not to the lifetime of the client connection that first uploaded it.
+/// A reader that connects only after the writer has gone away must therefore
+/// receive the same current rows from a fresh subscription.
+#[test]
+fn globally_accepted_client_rows_survive_writer_disconnect_for_fresh_reader() {
+    let schema = schema();
+    let writer_author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let reader_author = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let writer = open_db(0xa1, writer_author, &schema);
+
+    let (writer_transport, server_writer_transport) = duplex();
+    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let writer_subscriber = server.accept_subscriber(server_writer_transport, writer_author);
+
+    let mut expected_rows = Vec::new();
+    for index in 0..12 {
+        let write = writer
+            .insert(
+                "todos",
+                cells(&format!("durable-writer-row-{index}"), false, writer_author),
+                Default::default(),
+            )
+            .unwrap();
+        expected_rows.push(write.row_uuid());
+        writer.tick().unwrap();
+        server.tick().unwrap();
+        writer.tick().unwrap();
+        assert_eq!(
+            block_on(write.wait(DurabilityTier::Global)).unwrap(),
+            write.mergeable_tx_id(),
+            "writer row {index} must not report Global before authority acceptance"
+        );
+    }
+    expected_rows.sort();
+    assert_eq!(
+        row_ids(&server.read(&Query::from("todos")).unwrap()),
+        expected_rows,
+        "the authority must retain all globally accepted writer rows before disconnect"
+    );
+
+    assert!(server.server.detach_connection(&writer_subscriber));
+    assert!(writer.detach_connection(&upstream));
+    drop(writer);
+
+    let reader = open_db(0xb1, reader_author, &schema);
+    let (reader_transport, server_reader_transport) = duplex();
+    let _reader_upstream = crate::db::block_on(reader.connect_upstream(reader_transport));
+    let _reader_subscriber = server.accept_subscriber(server_reader_transport, reader_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&reader, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+
+    let mut received = RelationSnapshot::default();
+    for _ in 0..32 {
+        reader.tick().unwrap();
+        server.tick().unwrap();
+        reader.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut received, event);
+        }
+        if row_ids(&received.rows) == expected_rows {
+            break;
+        }
+    }
+    assert_eq!(
+        row_ids(&received.rows),
+        expected_rows,
+        "a fresh reader must receive durable authority rows after the writer disconnects"
+    );
+}
+
 #[test]
 fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
     let schema = schema();

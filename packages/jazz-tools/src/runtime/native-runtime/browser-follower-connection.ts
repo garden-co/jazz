@@ -4,9 +4,10 @@ import type {
   BrowserFollowerConnectionContext,
 } from "../runtime-source.js";
 import { BrowserWorkerTransportPump, transferableFrames } from "./browser-worker-transport.js";
-import type {
-  BrowserFollowerPortEvent,
-  BrowserFollowerPortRequest,
+import {
+  deserializeBrowserRelayError,
+  type BrowserFollowerPortEvent,
+  type BrowserFollowerPortRequest,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { IndexedDbPageStore } from "../indexeddb-page-store.js";
@@ -32,10 +33,12 @@ type BrowserFollowerPortRpcRequest =
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
   private readonly pump: BrowserWorkerTransportPump;
   private readonly readyPromise: Promise<void>;
+  private inspectorAttachmentPhysicalDbName: string | null = null;
   private readonly pending = new Map<number, PendingRequest>();
   private nextRequestId = 1;
   private closed = false;
   private failed: Error | null = null;
+  private readonly disposeQueryCoverageTrace: (() => void) | null;
 
   constructor(
     private readonly runtime: NativeRuntimeAdapter,
@@ -56,6 +59,15 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     port.addEventListener("message", this.onMessage);
     port.addEventListener("messageerror", this.onMessageError);
     port.start();
+    this.disposeQueryCoverageTrace = traceRelay
+      ? runtime.onQueryCoverageTrace((entry) => {
+          if (this.closed) return;
+          this.port.postMessage({
+            type: "diagnostic-query-coverage",
+            ...entry,
+          } satisfies BrowserFollowerPortRequest);
+        })
+      : null;
 
     // Establish the accepted peer with this tab's claims before any runtime
     // frames can be delivered. MessagePort ordering keeps the handshake ahead
@@ -74,7 +86,22 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           copies.map((frame) => frame.buffer),
         );
       },
-      (error) => this.fail(asError(error)),
+      (error) => {
+        const failure = asError(error);
+        // `pump.close()` retires its transport asynchronously. A retirement
+        // failure can re-enter this callback after the original protocol
+        // failure, but must not overwrite or duplicate the causal error that
+        // already woke remote subscribers.
+        if (this.failed || this.closed) return;
+        // This foreground peer is the tab's sole path to the durable worker.
+        // A protocol/tick failure is therefore terminal for this runtime's
+        // remote reads and waits, even though the worker's own websocket may
+        // still be healthy. Record it before port teardown so active remote
+        // subscriptions receive the exact causal error rather than waiting
+        // for their caller-owned timeout.
+        runtime.reportRemoteServerTransportError(failure);
+        this.fail(failure);
+      },
       traceRelay
         ? (entries) => {
             // Vitest forwards page-console diagnostics, unlike SharedWorker
@@ -93,6 +120,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.readyPromise;
     if (this.failed) throw this.failed;
     if (this.closed) throw new Error("Browser follower connection is closed");
+  }
+
+  /** A worker-issued receipt, not caller-supplied authority. */
+  getAuthenticatedInspectorAttachmentPhysicalDbName(): string | null {
+    return this.inspectorAttachmentPhysicalDbName;
   }
 
   async waitForServerConnection(): Promise<void> {
@@ -140,6 +172,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
     await this.ready();
     await this.request({ type: "reconnect", authJson, sessionClaims });
+    // `reconnect` acknowledges that the worker started a new upstream attempt;
+    // it does not establish that attempt. Keep the original remote failure
+    // latched until the worker confirms an actual negotiated server connection.
+    await this.request({ type: "wait-server" });
+    this.runtime.clearRemoteServerTransportError();
   }
 
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void {
@@ -212,7 +249,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       // Keep this distinct from a fate rejection. The runtime records the
       // error before any later port teardown so active Edge/Global waits and
       // remote subscriptions wake, while Local durability stays valid.
-      this.runtime.reportRemoteServerTransportError(new Error(message.message));
+      this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
       return;
     }
     if (message.type === "storage-reset") {
@@ -238,15 +275,18 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       return;
     }
     if (message.type === "error") {
-      this.fail(new Error(message.message));
+      this.fail(deserializeBrowserRelayError(message.error));
       return;
     }
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
     if (message.error) {
-      pending.reject(new Error(`Browser worker ${pending.type} failed: ${message.error}`));
-    } else pending.resolve();
+      pending.reject(deserializeBrowserRelayError(message.error));
+    } else {
+      this.inspectorAttachmentPhysicalDbName ??= message.inspectorAttachmentPhysicalDbName ?? null;
+      pending.resolve();
+    }
   };
 
   private readonly onMessageError = (): void => {
@@ -272,6 +312,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.closed = true;
     this.port.removeEventListener("message", this.onMessage);
     this.port.removeEventListener("messageerror", this.onMessageError);
+    this.disposeQueryCoverageTrace?.();
     this.pump.close();
     this.port.close();
     for (const pending of this.pending.values()) pending.reject(error);

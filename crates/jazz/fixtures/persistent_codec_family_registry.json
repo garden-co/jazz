@@ -503,6 +503,32 @@
       ]
     },
     {
+      "id": "jazz.native-root-corpus.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/4_history_merging.md",
+        "anchor": "The native whole-root compatibility receipt is"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+        "anchor": "settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+        "anchor": "committed_native_jazz_physical_corpus_rejects_corruption_before_materialization"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+          "anchor": "committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
+        },
+        {
+          "path": "crates/jazz/fixtures/native_storage_corpus.md",
+          "anchor": "# Native Jazz epoch-1 compatibility corpus"
+        }
+      ]
+    },
+    {
       "id": "jazz.wire-frame.v1",
       "boundary": "wire-binding-abi",
       "spec": {

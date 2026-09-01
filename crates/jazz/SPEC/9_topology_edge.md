@@ -106,8 +106,38 @@ benches may collapse this into in-process nodes while preserving the same role
 boundaries; browser IndexedDB and worker ownership are integrability concerns, not
 alternate semantics.
 
+For persistent browsers, the physical IndexedDB name has one durable, non-secret
+owner identity: app, environment, and authentication scope. The first worker to
+open an explicitly selected name atomically pins that identity beside the page
+store manifest. The same owner may release and reopen it across worker restarts;
+an incompatible owner fails before receiving a page-store handle or mutating a
+page. The marker is canonical JSON `{version: 1, appId, env, auth}`. `auth` is
+either `{kind: "anonymous"}`, `{kind: "system"}`, or
+`{kind: "principal", authMode, user}`, where `user` is the normal canonical
+`session.user` JSON encoding of the exact `[issuer, subject]` pair. It contains
+neither tokens, secrets, expiry nor claims, and is never hashed, truncated or
+otherwise replaced with a collision-prone surrogate. Deleting the entire browser
+namespace is the explicit ownership-transfer operation. This physical ownership
+is distinct from a foreground replica/node ID, which remains per live client,
+and from credentials, which are never persisted as the ownership marker.
+
+The owner marker alone does not establish _live_ worker ownership: rolling
+assets and generation retry can name distinct SharedWorker realms for the same
+physical root. Before a realm opens or recovers that root's foreground-lease
+pool, it MUST hold one origin-wide physical-root liveness lock and durably claim
+an opaque worker epoch beside the manifest. A live predecessor therefore makes
+a successor fail/retry operation-scoped rather than retiring its leases. Once
+the browser releases a dead predecessor's lock, a successor may replace its
+epoch; stale cleanup may delete only the epoch it claimed. A running persistent
+browser Db likewise MUST reject a principal-changing auth update before it
+reaches the worker; same-principal credential refresh remains allowed, while a
+user switch requires shutdown and reopening (or explicit storage reset).
+
 The main-thread client is deliberately non-durable: its authored transactions
-start at `Pending`/`None`. The worker relay persists the unchanged commit unit and
+start at `Pending`/`None`. Each live foreground owns an exclusive leased
+`NodeUuid` and mints its own transaction identities locally; its clean handoff
+may reuse that identity only after the worker durably records the runtime-owned
+HLC high-water, while an unclean termination retires it. The worker relay persists the unchanged commit unit and
 returns `Pending`/`Local`; that durability acknowledgement does not assign fate.
 The relay forwards later Edge/Global durability and authority fates back over the
 same client-worker link. A worker without an upstream can therefore satisfy

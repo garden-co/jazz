@@ -459,7 +459,7 @@ pub struct ReachableVia {
     pub edge_parent_column: String,
     /// Filters on recursive edges.
     pub edge_filters: Vec<Predicate>,
-    /// Recursion bound for reachable closure.
+    /// Recursion bound for reachable closure. `MaxDepth(0)` includes only the seed.
     #[serde(default = "RecursionBound::default_max_depth")]
     pub bound: RecursionBound,
     /// Optional relation that produces initial reachable team ids.
@@ -495,7 +495,7 @@ pub struct InheritsVia {
     /// Parent operation to require for the referenced row.
     #[serde(default)]
     pub operation: InheritsOperation,
-    /// Optional maximum number of recursive uses of this inheritance atom.
+    /// Optional maximum recursive uses. Zero performs no inheritance hop and denies.
     #[serde(default)]
     pub max_depth: Option<usize>,
 }
@@ -531,9 +531,10 @@ pub enum RecursionBound {
     /// Continue until the recursive frontier reaches a fixpoint. Unified
     /// lowering may still apply an independent safety cap that errors if hit.
     Fixpoint,
-    /// Stop after at most this many recursive steps. Unified lowering must carry
-    /// depth through the recursive relation and filter by it; this is not the
-    /// same as groove's internal safety cap.
+    /// Stop after at most this many recursive steps. The seed is at depth zero,
+    /// so `MaxDepth(0)` evaluates the seed without traversing an edge. Unified
+    /// lowering must carry depth through the recursive relation and filter by
+    /// it; this is not the same as groove's internal safety cap.
     MaxDepth(usize),
 }
 
@@ -547,19 +548,18 @@ impl RecursionBound {
     ///
     /// `Fixpoint` carries no user-facing depth, so it falls back to the
     /// conservative loop cap used by evaluator paths that are not true
-    /// fixpoint. Restores the behaviour of the `iteration_cap` accessor removed
-    /// in c2db5a8e4, whose last caller survived the removal and left the crate
-    /// unable to compile.
+    /// fixpoint. `MaxDepth(0)` remains zero: callers that request no recursive
+    /// steps must never be widened to one.
     pub(crate) fn depth_steps(self) -> usize {
         match self {
             Self::Fixpoint => 128,
-            Self::MaxDepth(max_depth) => max_depth.max(1),
+            Self::MaxDepth(max_depth) => max_depth,
         }
     }
 }
 
 /// Query predicate.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum Predicate {
     /// All child predicates must match.
     All(Vec<Predicate>),
@@ -595,6 +595,408 @@ pub enum Predicate {
     },
     /// Nullable value is null.
     IsNull(Operand),
+}
+
+impl<'de> serde::Deserialize<'de> for Predicate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut budget = PolicyExpressionDecodeBudget::default();
+        serde::de::DeserializeSeed::deserialize(
+            PredicateSeed {
+                budget: &mut budget,
+                depth: 1,
+            },
+            deserializer,
+        )
+    }
+}
+
+#[derive(Default)]
+struct PolicyExpressionDecodeBudget {
+    nodes: usize,
+}
+
+impl PolicyExpressionDecodeBudget {
+    fn enter<E>(&mut self, depth: usize) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
+        use crate::protocol_limits::{
+            MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError,
+        };
+
+        if depth > MAX_POLICY_EXPRESSION_DEPTH {
+            return Err(E::custom(PolicyExpressionLimitError {
+                limit: "MAX_POLICY_EXPRESSION_DEPTH",
+                max: MAX_POLICY_EXPRESSION_DEPTH,
+                actual: depth,
+            }));
+        }
+        if self.nodes >= MAX_POLICY_EXPRESSION_NODES {
+            return Err(E::custom(PolicyExpressionLimitError {
+                limit: "MAX_POLICY_EXPRESSION_NODES",
+                max: MAX_POLICY_EXPRESSION_NODES,
+                actual: self.nodes + 1,
+            }));
+        }
+        self.nodes += 1;
+        Ok(())
+    }
+
+    fn reserve_children<E>(&self, children: usize) -> Result<usize, E>
+    where
+        E: serde::de::Error,
+    {
+        use crate::protocol_limits::{
+            MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError,
+        };
+
+        let remaining = MAX_POLICY_EXPRESSION_NODES - self.nodes;
+        if children > remaining {
+            return Err(E::custom(PolicyExpressionLimitError {
+                limit: "MAX_POLICY_EXPRESSION_NODES",
+                max: MAX_POLICY_EXPRESSION_NODES,
+                actual: self.nodes.saturating_add(children),
+            }));
+        }
+        Ok(children)
+    }
+}
+
+struct PredicateSeed<'a> {
+    budget: &'a mut PolicyExpressionDecodeBudget,
+    depth: usize,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for PredicateSeed<'_> {
+    type Value = Predicate;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        self.budget.enter::<D::Error>(self.depth)?;
+        deserializer.deserialize_enum(
+            "Predicate",
+            &[
+                "All",
+                "Any",
+                "Not",
+                "Eq",
+                "Ne",
+                "In",
+                "Gt",
+                "Gte",
+                "Lt",
+                "Lte",
+                "Contains",
+                "EnumMatch",
+                "IsNull",
+            ],
+            PredicateVisitor {
+                budget: self.budget,
+                depth: self.depth,
+            },
+        )
+    }
+}
+
+struct PredicateVisitor<'a> {
+    budget: &'a mut PolicyExpressionDecodeBudget,
+    depth: usize,
+}
+
+impl<'de> serde::de::Visitor<'de> for PredicateVisitor<'_> {
+    type Value = Predicate;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded policy predicate")
+    }
+
+    fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::EnumAccess<'de>,
+    {
+        use serde::de::VariantAccess;
+
+        let (variant, access) = data.variant::<PredicateVariant>()?;
+        let child_depth = self.depth + 1;
+        match variant {
+            PredicateVariant::All => access
+                .newtype_variant_seed(PredicateVecSeed {
+                    budget: self.budget,
+                    depth: child_depth,
+                })
+                .map(Predicate::All),
+            PredicateVariant::Any => access
+                .newtype_variant_seed(PredicateVecSeed {
+                    budget: self.budget,
+                    depth: child_depth,
+                })
+                .map(Predicate::Any),
+            PredicateVariant::Not => access
+                .newtype_variant_seed(PredicateSeed {
+                    budget: self.budget,
+                    depth: child_depth,
+                })
+                .map(Box::new)
+                .map(Predicate::Not),
+            PredicateVariant::Eq => {
+                decode_binary_predicate(access, Predicate::Eq)
+            }
+            PredicateVariant::Ne => {
+                decode_binary_predicate(access, Predicate::Ne)
+            }
+            PredicateVariant::In => access.tuple_variant(
+                2,
+                InPredicateVisitor,
+            ),
+            PredicateVariant::Gt => {
+                decode_binary_predicate(access, Predicate::Gt)
+            }
+            PredicateVariant::Gte => {
+                decode_binary_predicate(access, Predicate::Gte)
+            }
+            PredicateVariant::Lt => {
+                decode_binary_predicate(access, Predicate::Lt)
+            }
+            PredicateVariant::Lte => {
+                decode_binary_predicate(access, Predicate::Lte)
+            }
+            PredicateVariant::Contains => {
+                decode_binary_predicate(access, Predicate::Contains)
+            }
+            PredicateVariant::EnumMatch => access.struct_variant(
+                &["column", "case", "payload"],
+                EnumMatchPredicateVisitor {
+                    budget: self.budget,
+                    depth: child_depth,
+                },
+            ),
+            PredicateVariant::IsNull => access
+                .newtype_variant()
+                .map(Predicate::IsNull),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(field_identifier)]
+enum PredicateVariant {
+    All,
+    Any,
+    Not,
+    Eq,
+    Ne,
+    In,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Contains,
+    EnumMatch,
+    IsNull,
+}
+
+struct PredicateVecSeed<'a> {
+    budget: &'a mut PolicyExpressionDecodeBudget,
+    depth: usize,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for PredicateVecSeed<'_> {
+    type Value = Vec<Predicate>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(PredicateVecVisitor {
+            budget: self.budget,
+            depth: self.depth,
+        })
+    }
+}
+
+struct PredicateVecVisitor<'a> {
+    budget: &'a mut PolicyExpressionDecodeBudget,
+    depth: usize,
+}
+
+impl<'de> serde::de::Visitor<'de> for PredicateVecVisitor<'_> {
+    type Value = Vec<Predicate>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded sequence of policy predicates")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let capacity = match sequence.size_hint() {
+            Some(children) => self.budget.reserve_children::<A::Error>(children)?,
+            None => 0,
+        };
+        let mut predicates = Vec::with_capacity(capacity);
+        while let Some(predicate) =
+            sequence.next_element_seed(PredicateSeed {
+                budget: self.budget,
+                depth: self.depth,
+            })?
+        {
+            predicates.push(predicate);
+        }
+        Ok(predicates)
+    }
+}
+
+fn decode_binary_predicate<'de, A>(
+    access: A,
+    constructor: fn(Operand, Operand) -> Predicate,
+) -> Result<Predicate, A::Error>
+where
+    A: serde::de::VariantAccess<'de>,
+{
+    serde::de::VariantAccess::tuple_variant(
+        access,
+        2,
+        BinaryPredicateVisitor { constructor },
+    )
+}
+
+struct BinaryPredicateVisitor {
+    constructor: fn(Operand, Operand) -> Predicate,
+}
+
+impl<'de> serde::de::Visitor<'de> for BinaryPredicateVisitor {
+    type Value = Predicate;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("two policy operands")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let left = sequence
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+        let right = sequence
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+        Ok((self.constructor)(left, right))
+    }
+}
+
+struct InPredicateVisitor;
+
+impl<'de> serde::de::Visitor<'de> for InPredicateVisitor {
+    type Value = Predicate;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a policy operand and operand list")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let operand = sequence
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+        let values = sequence
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+        Ok(Predicate::In(operand, values))
+    }
+}
+
+struct EnumMatchPredicateVisitor<'a> {
+    budget: &'a mut PolicyExpressionDecodeBudget,
+    depth: usize,
+}
+
+impl<'de> serde::de::Visitor<'de> for EnumMatchPredicateVisitor<'_> {
+    type Value = Predicate;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an enum-match policy predicate")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let column = sequence
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+        let case = sequence
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+        let payload = sequence
+            .next_element_seed(PredicateSeed {
+                budget: self.budget,
+                depth: self.depth,
+            })?
+            .ok_or_else(|| serde::de::Error::invalid_length(2, &self))?;
+        Ok(Predicate::EnumMatch {
+            column,
+            case,
+            payload: Box::new(payload),
+        })
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut column = None;
+        let mut case = None;
+        let mut payload = None;
+        while let Some(field) = map.next_key::<EnumMatchField>()? {
+            match field {
+                EnumMatchField::Column => {
+                    if column.is_some() {
+                        return Err(serde::de::Error::duplicate_field("column"));
+                    }
+                    column = Some(map.next_value()?);
+                }
+                EnumMatchField::Case => {
+                    if case.is_some() {
+                        return Err(serde::de::Error::duplicate_field("case"));
+                    }
+                    case = Some(map.next_value()?);
+                }
+                EnumMatchField::Payload => {
+                    if payload.is_some() {
+                        return Err(serde::de::Error::duplicate_field("payload"));
+                    }
+                    payload = Some(map.next_value_seed(PredicateSeed {
+                        budget: self.budget,
+                        depth: self.depth,
+                    })?);
+                }
+            }
+        }
+        Ok(Predicate::EnumMatch {
+            column: column.ok_or_else(|| serde::de::Error::missing_field("column"))?,
+            case: case.ok_or_else(|| serde::de::Error::missing_field("case"))?,
+            payload: Box::new(
+                payload.ok_or_else(|| serde::de::Error::missing_field("payload"))?,
+            ),
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(field_identifier, rename_all = "lowercase")]
+enum EnumMatchField {
+    Column,
+    Case,
+    Payload,
 }
 
 /// Predicate operand.

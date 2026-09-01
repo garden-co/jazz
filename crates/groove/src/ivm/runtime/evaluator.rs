@@ -24,7 +24,7 @@ use std::rc::Rc;
 pub(super) enum OperatorState {
     Stateless,
     Join(JoinState),
-    SemiJoin(AntiJoinState),
+    SemiJoin(SemiJoinState),
     AntiJoin(AntiJoinState),
     TopBy(AsOf<TopByIncrementalState, SubTick>),
     Recursive(AsOf<RecursiveState, Tick>),
@@ -116,7 +116,7 @@ impl TopByIncrementalState {
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
         OpType::Join(_) => OperatorState::Join(JoinState),
-        OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
+        OpType::SemiJoin(_) => OperatorState::SemiJoin(SemiJoinState::default()),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
         OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
@@ -451,19 +451,24 @@ impl TickEvaluator<'_> {
                 .node(node)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
             pending.push((node, true));
-            pending.extend(
-                graph_node
-                    .descriptor
-                    .inputs
-                    .iter()
-                    .rev()
-                    .map(|input| (*input, false)),
-            );
+            // Recursive seed and step graphs run under a frontier-scoped
+            // evaluator in `update_recursive`; evaluating them here would
+            // incorrectly populate root-scoped memo and operator state.
+            if !matches!(graph_node.descriptor.operator, OpType::Recursive(_)) {
+                pending.extend(
+                    graph_node
+                        .descriptor
+                        .inputs
+                        .iter()
+                        .rev()
+                        .map(|input| (*input, false)),
+                );
+            }
         }
 
         let mut result = None;
         for node in order {
-            let records = self.update_node(node).await?;
+            let records = self.update_one_node(node).await?;
             if node == root {
                 result = Some(records);
             }
@@ -648,6 +653,13 @@ impl TickEvaluator<'_> {
     }
 
     pub(super) fn update_node(
+        &mut self,
+        node: NodeId,
+    ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        Box::pin(self.update_subgraph(node))
+    }
+
+    fn update_one_node(
         &mut self,
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
@@ -855,14 +867,14 @@ impl TickEvaluator<'_> {
                     let input = self.update_unary_input(graph_node, node).await?;
                     let input = self.materialize_indirect_field_indices(
                         &input,
-                        &arg_max_by.primary_key_field_indices,
+                        &arg_max_by.comparison_field_indices,
                     )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
                             group_fields: &arg_max_by.group_fields,
                             group_field_indices: &arg_max_by.group_field_indices,
-                            primary_key_field_indices: &arg_max_by.primary_key_field_indices,
+                            comparison_field_indices: &arg_max_by.comparison_field_indices,
                             direction: ArgByDirection::Max,
                         },
                         output_desc,
@@ -873,14 +885,14 @@ impl TickEvaluator<'_> {
                     let input = self.update_unary_input(graph_node, node).await?;
                     let input = self.materialize_indirect_field_indices(
                         &input,
-                        &arg_min_by.primary_key_field_indices,
+                        &arg_min_by.comparison_field_indices,
                     )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
                             group_fields: &arg_min_by.group_fields,
                             group_field_indices: &arg_min_by.group_field_indices,
-                            primary_key_field_indices: &arg_min_by.primary_key_field_indices,
+                            comparison_field_indices: &arg_min_by.comparison_field_indices,
                             direction: ArgByDirection::Min,
                         },
                         output_desc,
@@ -1503,12 +1515,12 @@ impl TickEvaluator<'_> {
         let operator_key = self.operator_key(node)?;
         let operator = self
             .operator_states
-            .entry(operator_key)
+            .entry(operator_key.clone())
             .or_insert_with(|| operator_state_for(&OpType::SemiJoin(join.clone())));
         let OperatorState::SemiJoin(join_state) = operator else {
             return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
-        let join_state = join_state.clone();
+        let mut join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
             self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
@@ -1529,7 +1541,7 @@ impl TickEvaluator<'_> {
                 .remove(&right_key)
                 .unwrap_or_default()
         };
-        let deltas = join_state.apply_semi(
+        let deltas = join_state.apply(
             &mut left_arrangement,
             &mut right_arrangement,
             join.left_descriptor,
@@ -1550,6 +1562,8 @@ impl TickEvaluator<'_> {
             self.insert_arrangement(right_key, right_arrangement);
         }
         self.insert_arrangement(left_key, left_arrangement);
+        self.operator_states
+            .insert(operator_key, OperatorState::SemiJoin(join_state));
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
@@ -1641,13 +1655,13 @@ impl TickEvaluator<'_> {
             let after_records = arrangement.value().records_for_key(&group_prefix);
             let after = arg_by_winner_from_records(
                 output_desc,
-                spec.primary_key_field_indices,
+                spec.comparison_field_indices,
                 after_records.clone(),
                 spec.direction,
             )?;
             let before = arg_by_winner_before_from_deltas(
                 output_desc,
-                spec.primary_key_field_indices,
+                spec.comparison_field_indices,
                 after_records,
                 group_deltas,
                 spec.direction,
@@ -2343,7 +2357,8 @@ impl TickEvaluator<'_> {
             return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
         if self.context.eval_mode == EvalMode::Hydrate {
-            if recursive_as_of.value().step_arrangements_hydrated()
+            if !recursive_as_of.value().has_pending_hydration()
+                && recursive_as_of.value().step_arrangements_hydrated()
                 && recursive_as_of.as_of() == Some(Tick(self.current_tick))
                 && recursive_as_of.value().hydrated_input_generation() == Some(input_generation)
             {
@@ -2357,26 +2372,41 @@ impl TickEvaluator<'_> {
                 });
             }
             let scope = self.context.scope.child(node);
-            let next = recompute_recursive(
-                self.schema,
-                self.graph,
-                self.variant_projections,
-                Some(self.table_deltas),
-                self.evaluation_inputs.as_deref_mut(),
+            let progress = super::recursion::resume_inputs_hydration_recompute(
+                recursive_as_of.value_mut(),
+                super::recursion::HydrationRecomputeContext {
+                    schema: self.schema,
+                    graph: self.graph,
+                    variant_projections: self.variant_projections,
+                    inputs: self.evaluation_inputs.as_deref_mut(),
+                    table_deltas: Some(self.table_deltas),
+                    storage,
+                    binding_snapshots: self.binding_snapshots,
+                    scope,
+                    input_generation,
+                },
                 node,
                 recursive,
                 output_desc,
+                seed,
                 step,
-                storage,
-                self.binding_snapshots,
-                self.current_tick,
-                scope,
             )
-            .await?;
-            recursive_as_of.value_mut().replace_with(next);
-            let accumulated = RecordDeltas {
-                descriptor: output_desc,
-                deltas: recursive_as_of.value().accumulated_deltas(),
+            .await;
+            let accumulated = match progress {
+                Ok(super::recursion::HydrationRecomputeProgress::Yield) => {
+                    self.operator_states.insert(operator_key, operator);
+                    cooperative_operator_yield().await;
+                    unreachable!("retained recursive hydration yields through operator state")
+                }
+                Ok(super::recursion::HydrationRecomputeProgress::ReadyForArrangementHydration) => {
+                    recursive_as_of
+                        .value()
+                        .pending_hydration_accumulated_deltas(output_desc)
+                }
+                Err(error) => {
+                    self.operator_states.insert(operator_key, operator);
+                    return Err(error);
+                }
             };
             let mut runtime = graph_runtime_view(
                 self.schema,
@@ -2402,6 +2432,10 @@ impl TickEvaluator<'_> {
             );
             hydrate_recursive_arrangements(&mut runtime, recursive, step, accumulated.clone())
                 .await?;
+            if recursive_as_of.value().has_pending_hydration() {
+                let next = recursive_as_of.value_mut().finish_hydration_recompute();
+                recursive_as_of.value_mut().replace_with(next);
+            }
             recursive_as_of
                 .value_mut()
                 .mark_step_arrangements_hydrated();
@@ -2444,7 +2478,12 @@ impl TickEvaluator<'_> {
         )
         .await;
         let deltas = match deltas {
-            Ok(deltas) => deltas,
+            Ok(super::recursion::RecursiveDeltaProgress::Ready(deltas)) => deltas,
+            Ok(super::recursion::RecursiveDeltaProgress::Yield) => {
+                self.operator_states.insert(operator_key, operator);
+                cooperative_operator_yield().await;
+                unreachable!("retained recursive tick yields through operator state")
+            }
             Err(error) => {
                 self.operator_states.insert(operator_key, operator);
                 return Err(error);

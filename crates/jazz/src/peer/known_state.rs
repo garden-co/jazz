@@ -64,6 +64,11 @@ impl PeerState {
     {
         let Some(mut state) = self.publication_states.remove(&subscription) else {
             self.downstream_known_states.remove(&subscription);
+            // `ensure_query_subscription_registered` may have installed the
+            // node-side shape before this peer had enough state to create a
+            // maintained receiver. Retire that owner too; the node-side
+            // removal is idempotent for an already-forgotten publication.
+            node.release_query_subscription_for_peer(self.publication_owner, subscription);
             return false;
         };
         self.downstream_known_states.remove(&subscription);
@@ -78,6 +83,7 @@ impl PeerState {
             false
         };
         drop(state);
+        node.release_query_subscription_for_peer(self.publication_owner, subscription);
         unsubscribed
     }
 
@@ -163,7 +169,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let SyncMessage::FetchRowVersions { requests } = message else {
+        let SyncMessage::FetchRowVersions { requests, .. } = message else {
             return Err(Error::UnsupportedSyncMessage(
                 "non-row-version-fetch peer request",
             ));
@@ -171,7 +177,14 @@ impl PeerState {
         validate_fetch_row_versions(&requests).map_err(|_| {
             Error::UnsupportedSyncMessage("row-version repair request exceeds limit")
         })?;
-        self.serve_row_versions(node, &requests).await
+        if self.role() == PeerRole::Relay {
+            return Err(Error::InvalidStoredValue(
+                "relay row-version repair requires an explicit immutable policy binding",
+            ));
+        }
+        let identity = self.identity();
+        let claims = node.session_claims_for(identity);
+        self.serve_row_versions(node, &requests, (identity, claims)).await
     }
 
     /// Build repair-lane responses for visible requested row-version payloads.
@@ -179,12 +192,15 @@ impl PeerState {
         &mut self,
         node: &mut NodeState<S>,
         requests: &[RowVersionRef],
+        policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
     {
+        let (identity, claims) = policy_binding;
         let versions = node
-            .row_version_payloads_for_refs(requests, self.identity())
+            .scoped_active_session_claims(identity, claims)
+            .row_version_payloads_for_refs(requests, identity)
             .await?;
         Ok(vec![SyncMessage::RowVersionPayloads {
             version_bundles: versions,

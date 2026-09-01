@@ -26,7 +26,6 @@ pub(crate) fn seeded_recursive_access_policy(
     access_team_column: &str,
     access_filters: &[(&str, Value)],
     access_in_filters: &[(&str, Vec<Value>)],
-    team_table: &str,
     edge_table: &str,
     edge_member_column: &str,
     edge_parent_column: &str,
@@ -36,18 +35,15 @@ pub(crate) fn seeded_recursive_access_policy(
     seed_claim_path: &[&str],
     seed_team_column: &str,
 ) -> PolicyExpr {
-    let seed_alias = "seed";
-    let edge_alias = "recursive_edge";
-    let target_alias = "recursive_target";
     let access_alias = "access";
     let seed = RelExpr::Project {
         input: Box::new(RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
                 table: seed_table.into(),
-                alias: Some(seed_alias.to_owned()),
+                alias: None,
             }),
             predicate: equals(
-                seed_alias,
+                seed_table,
                 seed_user_column,
                 RelValueRef::SessionRef(
                     seed_claim_path
@@ -59,39 +55,28 @@ pub(crate) fn seeded_recursive_access_policy(
         }),
         columns: vec![RelProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(column(seed_alias, seed_team_column)),
+            expr: RelProjectExpr::Column(column(seed_table, seed_team_column)),
         }],
     };
     let mut edge_predicates = vec![equals(
-        edge_alias,
+        edge_table,
         edge_member_column,
         RelValueRef::RowId(RowIdRef::Frontier),
     )];
     edge_predicates.extend(edge_filters.iter().map(|(column_name, value)| {
-        equals(edge_alias, column_name, RelValueRef::Literal(value.clone()))
+        equals(edge_table, column_name, RelValueRef::Literal(value.clone()))
     }));
     let step = RelExpr::Project {
-        input: Box::new(RelExpr::Join {
-            left: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
-                    table: edge_table.into(),
-                    alias: Some(edge_alias.to_owned()),
-                }),
-                predicate: RelPredicateExpr::And(edge_predicates),
+        input: Box::new(RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: edge_table.into(),
+                alias: None,
             }),
-            right: Box::new(RelExpr::TableScan {
-                table: team_table.into(),
-                alias: Some(target_alias.to_owned()),
-            }),
-            on: vec![RelJoinCondition {
-                left: column(edge_alias, edge_parent_column),
-                right: column(target_alias, "id"),
-            }],
-            join_kind: RelJoinKind::Inner,
+            predicate: RelPredicateExpr::And(edge_predicates),
         }),
         columns: vec![RelProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(column(target_alias, "id")),
+            expr: RelProjectExpr::Column(column(edge_table, edge_parent_column)),
         }],
     };
     let reachable = RelExpr::Gather {

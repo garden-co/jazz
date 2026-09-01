@@ -787,11 +787,13 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 step,
                 frontier,
                 max_iters,
+                truncate_at_max_iters,
             } => {
                 child!(seed).hash(&mut hasher);
                 child!(step).hash(&mut hasher);
                 frontier.hash(&mut hasher);
                 max_iters.hash(&mut hasher);
+                truncate_at_max_iters.hash(&mut hasher);
             }
             GraphBuilder::Filter {
                 input,
@@ -988,14 +990,16 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                     step: b,
                     frontier: c,
                     max_iters: d,
+                    truncate_at_max_iters: e,
                 },
                 GraphBuilder::Recursive {
                     seed: x,
                     step: y,
                     frontier: z,
                     max_iters: w,
+                    truncate_at_max_iters: v,
                 },
-            ) if c == z && d == w => {
+            ) if c == z && d == w && e == v => {
                 pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())])
             }
             (
@@ -2306,11 +2310,13 @@ fn replace_binding_shape(graph: &GraphBuilder, shape: &str) -> GraphBuilder {
                 step,
                 frontier,
                 max_iters,
+                truncate_at_max_iters,
             } => GraphBuilder::Recursive {
                 seed: child!(seed),
                 step: child!(step),
                 frontier: frontier.clone(),
                 max_iters: *max_iters,
+                truncate_at_max_iters: *truncate_at_max_iters,
             },
             GraphBuilder::Filter {
                 input,
@@ -2447,6 +2453,23 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
+        self.subscribe_one_sink_with_waker(graph, storage, None)
+            .await
+    }
+
+    /// Internal direct-subscription opening with an optional continuation
+    /// waker. Runtime owners use the multi-sink entrypoint; this exists for
+    /// the database convenience API to drain only its resident continuation
+    /// chain without losing a cold-storage wake.
+    pub(crate) async fn subscribe_one_sink_with_waker<S>(
+        &mut self,
+        graph: GraphBuilder,
+        storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
+    ) -> Result<Subscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
@@ -2476,11 +2499,16 @@ impl IvmRuntime {
                     .insert(plan.key.clone(), shape.id());
                 shape.id()
             };
-            return self.bind_shape_one_sink(shape_id, &[plan.binding_value], storage);
+            return self.bind_shape_one_sink_with_waker(
+                shape_id,
+                &[plan.binding_value],
+                storage,
+                progress_waker,
+            );
         }
         let multisink = self.subscribe_staged(vec![(DEFAULT_SINK.to_owned(), graph)], storage)?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 
@@ -2494,23 +2522,55 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage + 'static,
     {
+        self.subscribe_with_waker(sinks, storage, None)
+    }
+
+    /// Internal owner-loop counterpart to [`Self::subscribe`].
+    pub(crate) fn subscribe_with_waker<I, K, S>(
+        &mut self,
+        sinks: I,
+        storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+        S: OrderedKvStorage + 'static,
+    {
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
         let subscription = self.subscribe_staged(sinks, storage)?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 
     /// Publish all subscription work that can complete from resident inputs
     /// before returning control to the caller. Cold inputs remain queued for
     /// the runtime owner to resume when storage wakes them.
-    fn poll_ready_subscription_work_now(&mut self) -> Result<(), IvmRuntimeError> {
-        let mut cx = Context::from_waker(Waker::noop());
+    fn poll_ready_subscription_work_now_with_waker(
+        &mut self,
+        progress_waker: Option<&Waker>,
+    ) -> Result<(), IvmRuntimeError> {
+        let mut cx = Context::from_waker(progress_waker.unwrap_or(Waker::noop()));
         match self.poll_pending_incremental(&mut cx) {
             Poll::Ready(result) => result,
-            Poll::Pending => Ok(()),
+            Poll::Pending if progress_waker.is_some() => Ok(()),
+            Poll::Pending => {
+                // A direct opening owns every explicitly retained CPU slice,
+                // including one queued behind an older cold hydration. Do not
+                // infer that ownership from a wake: scan the runtime's
+                // per-evaluation continuation state and leave all storage
+                // requests untouched for a later owner.
+                while self.has_resident_continuation() {
+                    match self.poll_resident_incremental(&mut cx) {
+                        Poll::Ready(result) => return result,
+                        Poll::Pending => {}
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2702,7 +2762,27 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
-        self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
+        self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage, None)
+    }
+
+    /// Internal owner-loop counterpart to [`Self::bind_shape`].
+    pub(crate) fn bind_shape_with_waker<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        self.bind_shape_with_public_fields(
+            shape_id,
+            binding_values,
+            BTreeMap::new(),
+            storage,
+            progress_waker,
+        )
     }
 
     fn bind_shape_with_public_fields<S>(
@@ -2711,6 +2791,7 @@ impl IvmRuntime {
         binding_values: &[Value],
         public_fields: BTreeMap<String, Vec<String>>,
         storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -2721,7 +2802,7 @@ impl IvmRuntime {
             public_fields,
             storage,
         )?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 
@@ -2916,6 +2997,19 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
+        self.bind_shape_one_sink_with_waker(shape_id, binding_values, storage, None)
+    }
+
+    pub(crate) fn bind_shape_one_sink_with_waker<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
+    ) -> Result<Subscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
         let multisink = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
@@ -2923,16 +3017,17 @@ impl IvmRuntime {
             storage,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 
-    pub(crate) fn bind_shape_one_sink_with_output<S>(
+    pub(crate) fn bind_shape_one_sink_with_output_and_waker<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
         public_output: RecordDescriptor,
         storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
     ) -> Result<Subscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -2952,7 +3047,7 @@ impl IvmRuntime {
             storage,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 

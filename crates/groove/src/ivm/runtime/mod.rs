@@ -50,11 +50,11 @@ mod state;
 mod terminal;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
-use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
+use join::{AntiJoinState, ArrangementState, JoinState, SemiJoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
-    RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
-    recursive_read_tables, require_snapshot_inputs, snapshot_requirement,
+    RecursiveState, hydrate_recursive_arrangements, recursive_delta, recursive_read_tables,
+    require_snapshot_inputs, snapshot_requirement,
 };
 use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
@@ -365,6 +365,8 @@ pub enum IvmRuntimeError {
     GraphInputMissing(NodeId),
     #[error("graph node not found: {0:?}")]
     GraphNodeNotFound(NodeId),
+    #[error("graph contains a dependency cycle at node: {0:?}")]
+    GraphCycle(NodeId),
     #[error("graph output descriptors do not match")]
     GraphOutputMismatch,
     #[error("enum tag {tag} is absent from this projection target")]
@@ -516,7 +518,7 @@ pub enum IvmRuntimeError {
     UnsupportedNonMonotoneRecursion,
     #[error("nested recursive graphs are not supported in v0")]
     UnsupportedNestedRecursion,
-    #[error("unsupported arg_max_by graph: {0}")]
+    #[error("unsupported arg_by graph: {0}")]
     UnsupportedArgMaxBy(String),
     #[error("collect_by is terminal-only and cannot feed another graph node")]
     CollectByMustBeTerminal,

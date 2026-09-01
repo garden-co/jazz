@@ -4,7 +4,9 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,6 +69,31 @@ const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
 const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
+
+struct StackSafeFuture<F> {
+    inner: Pin<Box<F>>,
+}
+
+impl<F> StackSafeFuture<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner: Box::pin(inner),
+        }
+    }
+}
+
+impl<F: Future> Future for StackSafeFuture<F> {
+    type Output = F::Output;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        stacker::maybe_grow(4 * 1024 * 1024, 8 * 1024 * 1024, || {
+            self.inner.as_mut().poll(context)
+        })
+    }
+}
 
 fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
     let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
@@ -359,7 +386,7 @@ impl Backend {
         identity: CoreDbIdentity,
     ) -> Result<Self> {
         Ok(Self(Rc::new(
-            CoreDb::open(CoreDbConfig::new(schema, storage, identity))
+            StackSafeFuture::new(CoreDb::open(CoreDbConfig::new(schema, storage, identity)))
                 .await
                 .map_err(|error| JazzError::Connection(error.to_string()))?,
         )))
@@ -370,8 +397,7 @@ impl Backend {
     }
 
     async fn close(&self) -> Result<()> {
-        self.0
-            .close()
+        StackSafeFuture::new(self.0.close())
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
         #[cfg(test)]
@@ -380,7 +406,7 @@ impl Backend {
     }
 
     async fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
-        self.0.connect_upstream(transport).await
+        StackSafeFuture::new(self.0.connect_upstream(transport)).await
     }
 
     fn detach_connection(&self, connection: &BackendConnection) -> bool {
@@ -392,8 +418,8 @@ impl Backend {
             .set_identity_claims(identity, claims.into_iter().collect());
     }
 
-    fn tick(&self) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.tick())
+    async fn tick(&self) -> std::result::Result<(), CoreDbError> {
+        StackSafeFuture::new(self.0.tick()).await
     }
 
     fn insert(
@@ -575,25 +601,33 @@ impl Backend {
         self.0.row_provenance(row)
     }
 
+    async fn row_provenance_for_subscription(
+        &self,
+        row: &crate::node::CurrentRow,
+    ) -> std::result::Result<Option<crate::node::RowProvenance>, CoreDbError> {
+        StackSafeFuture::new(self.0.row_provenance_async(row)).await
+    }
+
     async fn all(
         &self,
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        self.0.all(prepared, opts).await
+        StackSafeFuture::new(self.0.all(prepared, opts)).await
     }
 
-    fn transaction_all_for_identity(
+    async fn transaction_all_for_identity(
         &self,
         tx_id: OpenTransactionId,
         prepared: &crate::db::PreparedQuery,
         author: CoreAuthorSubject,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        crate::db::block_on(
+        StackSafeFuture::new(
             self.0
                 .transaction_all_for_identity(tx_id, prepared, author, opts),
         )
+        .await
     }
 
     async fn subscribe(
@@ -601,7 +635,7 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<crate::db::SubscriptionStream, CoreDbError> {
-        self.0.subscribe(prepared, opts).await
+        StackSafeFuture::new(self.0.subscribe(prepared, opts)).await
     }
 
     fn write_state(
@@ -612,7 +646,7 @@ impl Backend {
     }
 
     async fn next_write_state_change(&self, tx_id: CoreTxId) {
-        self.0.next_write_state_change(tx_id).await;
+        StackSafeFuture::new(self.0.next_write_state_change(tx_id)).await;
     }
 
     fn begin_exclusive(&self, id: OpenTransactionId) -> std::result::Result<(), CoreDbError> {
@@ -708,6 +742,7 @@ struct TickSchedulerImpl {
 struct TickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
+    after_current_turn: AtomicBool,
     delayed: AtomicBool,
     notify: tokio::sync::Notify,
 }
@@ -731,7 +766,12 @@ impl TickSchedulerImpl {
     fn take(&self) -> Option<TickUrgency> {
         if self.state.immediate.swap(false, Ordering::AcqRel) {
             self.state.deferred.store(false, Ordering::Release);
+            self.state
+                .after_current_turn
+                .store(false, Ordering::Release);
             Some(TickUrgency::Immediate)
+        } else if self.state.after_current_turn.swap(false, Ordering::AcqRel) {
+            Some(TickUrgency::AfterCurrentTurn)
         } else if self.state.deferred.swap(false, Ordering::AcqRel) {
             Some(TickUrgency::Deferred)
         } else {
@@ -743,6 +783,9 @@ impl TickSchedulerImpl {
         match urgency {
             TickUrgency::Immediate => self.state.immediate.store(true, Ordering::Release),
             TickUrgency::Deferred => self.state.deferred.store(true, Ordering::Release),
+            TickUrgency::AfterCurrentTurn => {
+                self.state.after_current_turn.store(true, Ordering::Release)
+            }
         }
         self.state.notify.notify_one();
     }
@@ -901,7 +944,7 @@ impl ClientDb {
         ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
     }
 
-    fn query_transaction_rows(
+    async fn query_transaction_rows(
         &self,
         query: crate::query::Query,
         opts: CoreReadOpts,
@@ -916,14 +959,15 @@ impl ClientDb {
                 .prepare_query(&query)
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
-        let rows = {
+        let backend = {
             let inner = self.inner.borrow();
             inner.ensure_transaction_open(transaction_id)?;
-            inner
-                .backend()?
-                .transaction_all_for_identity(transaction_id, &prepared, author, opts)
-                .map_err(|error| JazzError::Query(error.to_string()))?
+            inner.backend_clone()?
         };
+        let rows = backend
+            .transaction_all_for_identity(transaction_id, &prepared, author, opts)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         self.inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
@@ -1285,11 +1329,14 @@ impl ClientDb {
                     };
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
+                    } else if urgency == TickUrgency::AfterCurrentTurn {
+                        tokio::task::yield_now().await;
                     }
-                    let tick_result = match inner.borrow().backend() {
-                        Ok(db) => db.tick(),
+                    let backend = match inner.borrow().backend_clone() {
+                        Ok(db) => db,
                         Err(_) => return,
                     };
+                    let tick_result = backend.tick().await;
                     match tick_result {
                         Ok(()) => recovery_attempts = 0,
                         Err(error) => {
@@ -1650,11 +1697,6 @@ impl ClientDbInner {
             let _completion = completion;
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
-            // A fresh subscription may be hydrated by consecutive reset
-            // frames. They replace the still-initial result set until core
-            // sends a delta-shaped update for a tracked occurrence. That is
-            // attach framing, not a replacement snapshot.
-            let mut initial_hydration = true;
             loop {
                 let Some(event) = (tokio::select! {
                     biased;
@@ -1673,19 +1715,41 @@ impl ClientDbInner {
                         settled,
                         ..
                     } => {
-                        let previous_rows: Vec<OutputOccurrenceId> = current_rows
-                            .iter()
-                            .map(|row| row.occurrence_id.clone())
-                            .collect();
-                        let reset_updates_tracked_row = updated.iter().any(|updated| {
-                            current_rows
+                        // A reset carries the complete replacement snapshot.
+                        // Core may omit explicit removals because the reset bit
+                        // already makes absence authoritative, but the public
+                        // facade exposes semantic deltas. Recover those absent
+                        // occurrences before classifying retained snapshot rows
+                        // as updates.
+                        let mut removed = removed;
+                        if reset {
+                            let replacement_ids = added
                                 .iter()
-                                .any(|current| current.occurrence_id == updated.occurrence_id)
-                        });
-                        let reset_replaces_initial_view =
-                            initial_hydration && reset && !reset_updates_tracked_row;
-                        if reset_replaces_initial_view {
-                            current_rows.clear();
+                                .chain(&updated)
+                                .map(|row| row.occurrence_id.clone())
+                                .collect::<std::collections::BTreeSet<_>>();
+                            let explicitly_removed = removed
+                                .iter()
+                                .map(|row| row.occurrence_id.clone())
+                                .collect::<std::collections::BTreeSet<_>>();
+                            removed.extend(
+                                reset_absent_row_indices(
+                                    &current_rows,
+                                    &replacement_ids,
+                                    &explicitly_removed,
+                                    |row| &row.occurrence_id,
+                                )
+                                .into_iter()
+                                .map(|index| {
+                                    let row = &current_rows[index];
+                                    crate::db::RemovedRow {
+                                        table: table.clone(),
+                                        row_uuid: row.row.row_uuid(),
+                                        occurrence_id: row.occurrence_id.clone(),
+                                        index: row.index,
+                                    }
+                                }),
+                            );
                         }
                         // A local aggregate snapshot may retract while the
                         // relay concurrently publishes its replacement.  The
@@ -1694,21 +1758,41 @@ impl ClientDbInner {
                         // retracted snapshot. Normalize at this boundary so a
                         // public stream never emits an update for an unknown
                         // row.
-                        let surviving_rows = current_rows
+                        let removed_occurrences = removed
                             .iter()
-                            .filter(|row| {
-                                !removed
-                                    .iter()
-                                    .any(|removed| removed.occurrence_id == row.occurrence_id)
-                            })
                             .map(|row| row.occurrence_id.clone())
                             .collect::<std::collections::BTreeSet<_>>();
-                        let (effective_added, effective_updated) =
-                            normalize_subscription_updates(surviving_rows, added, updated, |row| {
-                                &row.occurrence_id
-                            });
-                        let change_delta = (!reset_replaces_initial_view).then(|| {
-                            query_decoder.core_subscription_change_delta(
+                        let surviving_rows = surviving_subscription_rows(
+                            &current_rows,
+                            &removed_occurrences,
+                            |row| &row.occurrence_id,
+                            |row| row.index,
+                        );
+                        let previous_rows_by_occurrence = current_rows
+                            .iter()
+                            .map(|row| (row.occurrence_id.clone(), row))
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        let (effective_added, mut effective_updated) =
+                            normalize_subscription_updates(
+                                surviving_rows,
+                                added,
+                                updated,
+                                |row| &row.occurrence_id,
+                                |row, previous_index| {
+                                    row.previous_index.get_or_insert(previous_index);
+                                },
+                            );
+                        retain_changed_subscription_updates(
+                            &mut effective_updated,
+                            &previous_rows_by_occurrence,
+                            |row| &row.occurrence_id,
+                            |current, row| {
+                                current.index == row.index
+                                    && current.row.subscription_equivalent(&row.row)
+                            },
+                        );
+                        let change_delta = query_decoder
+                            .core_subscription_change_delta(
                                 &db,
                                 &query,
                                 &current_rows,
@@ -1716,7 +1800,7 @@ impl ClientDbInner {
                                 &effective_updated,
                                 &removed,
                             )
-                        });
+                            .await;
                         PublicQueryDecoder::apply_core_subscription_rows(
                             &mut current_rows,
                             &effective_added,
@@ -1728,19 +1812,7 @@ impl ClientDbInner {
                             .map(|row| row.row.clone())
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
-                        let delta = if reset_replaces_initial_view {
-                            query_decoder.core_subscription_reset_delta(
-                                &db,
-                                &query,
-                                &previous_rows,
-                                &current_rows,
-                            )
-                        } else {
-                            change_delta.expect("non-reset subscription frame has a change delta")
-                        };
-                        if !reset_replaces_initial_view {
-                            initial_hydration = false;
-                        }
+                        let delta = change_delta;
                         let Ok(delta) = delta else {
                             break;
                         };
@@ -1871,20 +1943,72 @@ impl ClientDbInner {
 /// additions. A relay replacement may cross a locally retracted aggregate
 /// member, so public streams may never observe that as an update.
 fn normalize_subscription_updates<T>(
-    surviving: std::collections::BTreeSet<OutputOccurrenceId>,
-    mut added: Vec<T>,
+    surviving: std::collections::BTreeMap<OutputOccurrenceId, usize>,
+    added: Vec<T>,
     updated: Vec<T>,
     occurrence_id: impl Fn(&T) -> &OutputOccurrenceId,
+    mut retain_previous_index: impl FnMut(&mut T, usize),
 ) -> (Vec<T>, Vec<T>) {
+    let mut effective_added = Vec::new();
     let mut effective_updated = Vec::new();
-    for row in updated {
-        if surviving.contains(occurrence_id(&row)) {
+    for mut row in added {
+        if let Some(previous_index) = surviving.get(occurrence_id(&row)).copied() {
+            retain_previous_index(&mut row, previous_index);
             effective_updated.push(row);
         } else {
-            added.push(row);
+            effective_added.push(row);
         }
     }
-    (added, effective_updated)
+    for row in updated {
+        if surviving.contains_key(occurrence_id(&row)) {
+            effective_updated.push(row);
+        } else {
+            effective_added.push(row);
+        }
+    }
+    (effective_added, effective_updated)
+}
+
+fn reset_absent_row_indices<T, K: Ord>(
+    current: &[T],
+    replacement_ids: &std::collections::BTreeSet<K>,
+    explicitly_removed: &std::collections::BTreeSet<K>,
+    occurrence_id: impl Fn(&T) -> &K,
+) -> Vec<usize> {
+    current
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let id = occurrence_id(row);
+            (!replacement_ids.contains(id) && !explicitly_removed.contains(id)).then_some(index)
+        })
+        .collect()
+}
+
+fn retain_changed_subscription_updates<T, K: Ord, P>(
+    updates: &mut Vec<T>,
+    previous_by_occurrence: &std::collections::BTreeMap<K, P>,
+    occurrence_id: impl Fn(&T) -> &K,
+    unchanged: impl Fn(&P, &T) -> bool,
+) {
+    updates.retain(|row| {
+        previous_by_occurrence
+            .get(occurrence_id(row))
+            .is_none_or(|previous| !unchanged(previous, row))
+    });
+}
+
+fn surviving_subscription_rows<T, K: Ord + Clone>(
+    current: &[T],
+    removed_occurrences: &std::collections::BTreeSet<K>,
+    occurrence_id: impl Fn(&T) -> &K,
+    index: impl Fn(&T) -> usize,
+) -> std::collections::BTreeMap<K, usize> {
+    current
+        .iter()
+        .filter(|row| !removed_occurrences.contains(occurrence_id(row)))
+        .map(|row| (occurrence_id(row).clone(), index(row)))
+        .collect()
 }
 
 /// Transaction-scoped Jazz client handle.
@@ -2006,7 +2130,10 @@ fn core_author_from_session(session: &Session) -> Result<CoreAuthorSubject> {
     Ok(session.author_subject()?)
 }
 
-fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
+async fn core_storage(
+    schema: &crate::schema::JazzSchema,
+    context: &AppContext,
+) -> Result<StorageBundle> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -2022,15 +2149,15 @@ fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Res
                     "persistent client storage requires a target-shell storage factory".to_string(),
                 )
             })?;
-            crate::db::block_on(
-                factory.open(
+            factory
+                .open(
                     context.data_dir.join("jazz-core.rocksdb"),
                     column_families,
                     epoch_1_storage_codec_profile()
                         .map_err(|error| JazzError::Connection(error.to_string()))?,
-                ),
-            )
-            .map_err(|error| JazzError::Connection(error.to_string()))
+                )
+                .await
+                .map_err(|error| JazzError::Connection(error.to_string()))
         }
     }
 }
@@ -2532,7 +2659,12 @@ impl JazzClient {
     }
 
     fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
-        Self::core_read_opts(Some(tier.legacy_durability_tier()))
+        let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
+        opts.local_updates = match tier {
+            ReadTier::Remote => CoreLocalUpdates::Deferred,
+            ReadTier::LocalFirst | ReadTier::RemoteIfPossible => CoreLocalUpdates::Immediate,
+        };
+        opts
     }
 }
 
@@ -2758,7 +2890,7 @@ impl PublicQueryDecoder {
 }
 
 impl PublicQueryDecoder {
-    fn core_subscription_row_to_public(
+    async fn core_subscription_row_to_public(
         &self,
         db: &Backend,
         query: &Query,
@@ -2768,7 +2900,8 @@ impl PublicQueryDecoder {
         let _ = query;
         let encoded = public_subscription_record(&row.row)?;
         let provenance = db
-            .row_provenance(&row.row)
+            .row_provenance_for_subscription(&row.row)
+            .await
             .map_err(|error| JazzError::Query(error.to_string()))?
             .map(core_row_provenance_to_public)
             .unwrap_or_else(|| {
@@ -2791,51 +2924,6 @@ impl PublicQueryDecoder {
             public.with_fields(fields)
         };
         Ok(public)
-    }
-
-    fn core_subscription_snapshot_delta(
-        &self,
-        db: &Backend,
-        query: &Query,
-        rows: &[CoreSubscriptionOutputRow],
-    ) -> Result<OrderedRowDelta> {
-        let added = rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let public = self.core_subscription_row_to_public(db, query, row)?;
-                Ok(OrderedAdded {
-                    id: public.id.clone(),
-                    index,
-                    row: public,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(OrderedRowDelta {
-            added,
-            ..OrderedRowDelta::default()
-        })
-    }
-
-    fn core_subscription_reset_delta(
-        &self,
-        db: &Backend,
-        query: &Query,
-        previous_rows: &[OutputOccurrenceId],
-        rows: &[CoreSubscriptionOutputRow],
-    ) -> Result<OrderedRowDelta> {
-        let removed = previous_rows
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, id)| OrderedRemoved {
-                id: ResultKey::from_occurrence(id),
-                index,
-            })
-            .collect();
-        let mut delta = self.core_subscription_snapshot_delta(db, query, rows)?;
-        delta.removed = removed;
-        Ok(delta)
     }
 
     fn apply_core_subscription_rows(
@@ -2863,7 +2951,7 @@ impl PublicQueryDecoder {
         }
     }
 
-    fn core_subscription_change_delta(
+    async fn core_subscription_change_delta(
         &self,
         db: &Backend,
         query: &Query,
@@ -2872,33 +2960,29 @@ impl PublicQueryDecoder {
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
     ) -> Result<OrderedRowDelta> {
-        let added = added_rows
-            .iter()
-            .map(|row| {
-                let public = self.core_subscription_row_to_public(db, query, row)?;
-                Ok(OrderedAdded {
-                    id: public.id.clone(),
-                    index: row.index,
-                    row: public,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let updated = updated_rows
-            .iter()
-            .map(|row| {
-                let public = self.core_subscription_row_to_public(db, query, row)?;
-                let content_changed = previous_rows
-                    .iter()
-                    .find(|previous| previous.occurrence_id == row.occurrence_id)
-                    .is_none_or(|previous| !previous.row.subscription_equivalent(&row.row));
-                Ok(OrderedUpdated {
-                    id: public.id.clone(),
-                    old_index: row.previous_index.unwrap_or(row.index),
-                    new_index: row.index,
-                    row: content_changed.then_some(public),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut added = Vec::with_capacity(added_rows.len());
+        for row in added_rows {
+            let public = self.core_subscription_row_to_public(db, query, row).await?;
+            added.push(OrderedAdded {
+                id: public.id.clone(),
+                index: row.index,
+                row: public,
+            });
+        }
+        let mut updated = Vec::with_capacity(updated_rows.len());
+        for row in updated_rows {
+            let public = self.core_subscription_row_to_public(db, query, row).await?;
+            let content_changed = previous_rows
+                .iter()
+                .find(|previous| previous.occurrence_id == row.occurrence_id)
+                .is_none_or(|previous| !previous.row.subscription_equivalent(&row.row));
+            updated.push(OrderedUpdated {
+                id: public.id.clone(),
+                old_index: row.previous_index.unwrap_or(row.index),
+                new_index: row.index,
+                row: content_changed.then_some(public),
+            });
+        }
         let removed = removed_rows
             .iter()
             .map(|row| OrderedRemoved {
@@ -3027,7 +3111,7 @@ impl JazzClient {
             let public_schema_convert = crate::schema::JazzSchema::new(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
             let identity = core_identity(&context, default_session.as_ref())?;
-            let storage = core_storage(&public_schema_convert, &context)?;
+            let storage = core_storage(&public_schema_convert, &context).await?;
             let auth = has_server.then(|| WsAuthConfig {
                 jwt_token: if context.backend_secret.is_some() {
                     None
@@ -3075,9 +3159,9 @@ impl JazzClient {
 
     /// Subscribe using a product-level read tier.
     ///
-    /// `RemoteIfPossible` remains strict in the native Rust facade because it
-    /// has no public explicit-disconnect state; host bindings can lower it to
-    /// local only after their caller explicitly disconnects.
+    /// `RemoteIfPossible` keeps a strict remote initial gate in the native Rust
+    /// facade because it has no public explicit-disconnect state; host bindings
+    /// can lower it to local only after their caller explicitly disconnects.
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
@@ -3195,7 +3279,8 @@ impl JazzClient {
                 .write_identity()?
                 .unwrap_or_else(|| self.db.inner.borrow().identity.author);
             self.db
-                .query_transaction_rows(query.clone(), opts, transaction_id, table, author)?
+                .query_transaction_rows(query.clone(), opts, transaction_id, table, author)
+                .await?
         } else {
             let wait_for_coverage = matches!(opts.tier, CoreDurabilityTier::Global);
             self.db
@@ -3472,12 +3557,36 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::groove::storage::{Error as StorageError, StorageFactory, StorageFuture};
     use crate::ids::NodeUuid;
     use crate::tools::AppId;
     use crate::tools::public_schema::Schema;
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[derive(Debug)]
+    struct YieldingStorageFactory;
+
+    impl StorageFactory for YieldingStorageFactory {
+        fn open(
+            &self,
+            _path: std::path::PathBuf,
+            column_families: Vec<String>,
+            _codec_profile: crate::groove::storage::StorageCodecProfile,
+        ) -> StorageFuture<'_, std::result::Result<CoreStorage, StorageError>> {
+            Box::pin(async move {
+                // A target storage factory may need an executor turn before it
+                // can hand a boxed store back to the facade.
+                tokio::task::yield_now().await;
+                let refs = column_families
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                Ok(CoreStorage::new(CoreMemoryStorage::new(&refs)?))
+            })
+        }
+    }
 
     #[test]
     fn query_runtime_waker_enqueues_one_immediate_owner_turn() {
@@ -3491,8 +3600,30 @@ mod tests {
         assert_eq!(scheduler.take(), None, "waking does not create a hot loop");
     }
 
-    /// Product read tiers lower to the unchanged facade durability contract,
-    /// keeping write durability independent of the read API migration.
+    #[tokio::test(flavor = "current_thread")]
+    async fn persistent_storage_open_yields_without_sync_polling() {
+        let temp_dir = TempDir::new().expect("temp client dir");
+        let mut context = make_offline_context_with_storage(
+            AppId::from_name("yielding-storage-factory"),
+            temp_dir.path().to_path_buf(),
+            declared_todo_schema(),
+            ClientStorage::Persistent,
+        );
+        context.storage_factory = Some(Arc::new(YieldingStorageFactory));
+
+        let client = tokio::time::timeout(Duration::from_secs(1), JazzClient::connect(context))
+            .await
+            .expect("storage factory must resume through the async connect owner turn")
+            .expect("connect yielding persistent storage");
+        client
+            .shutdown()
+            .await
+            .expect("close yielding persistent storage");
+    }
+
+    /// This binding-boundary lowering is asserted directly because its internal
+    /// overlay bit is not independently observable without conflating it with
+    /// remote transport timing. Write durability remains independent.
     #[test]
     fn read_tier_lowers_without_changing_write_durability() {
         assert_eq!(
@@ -3507,6 +3638,18 @@ mod tests {
             ReadTier::RemoteIfPossible.legacy_durability_tier(),
             DurabilityTier::EdgeServer,
             "the native facade has no explicit offline boundary"
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
+            CoreLocalUpdates::Immediate
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::Remote).local_updates,
+            CoreLocalUpdates::Deferred
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::RemoteIfPossible).local_updates,
+            CoreLocalUpdates::Immediate
         );
         assert_eq!(
             core_legacy_read_tier(DurabilityTier::Local),
@@ -3688,23 +3831,225 @@ mod tests {
         let held = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(1)));
         let crossed = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(2)));
         let (added, updated) = normalize_subscription_updates(
-            std::collections::BTreeSet::from([held.clone()]),
-            Vec::<OutputOccurrenceId>::new(),
-            vec![crossed.clone()],
-            |id| id,
+            std::collections::BTreeMap::from([(held.clone(), 7)]),
+            Vec::<(OutputOccurrenceId, Option<usize>)>::new(),
+            vec![(crossed.clone(), None)],
+            |row| &row.0,
+            |row, previous_index| row.1 = Some(previous_index),
         );
 
-        assert_eq!(added, vec![crossed]);
+        assert_eq!(added, vec![(crossed, None)]);
         assert!(updated.is_empty());
 
         let (added, updated) = normalize_subscription_updates(
-            std::collections::BTreeSet::from([held.clone()]),
-            Vec::<OutputOccurrenceId>::new(),
-            vec![held.clone()],
-            |id| id,
+            std::collections::BTreeMap::from([(held.clone(), 7)]),
+            Vec::<(OutputOccurrenceId, Option<usize>)>::new(),
+            vec![(held.clone(), Some(7))],
+            |row| &row.0,
+            |row, previous_index| row.1 = Some(previous_index),
         );
         assert!(added.is_empty());
-        assert_eq!(updated, vec![held]);
+        assert_eq!(updated, vec![(held.clone(), Some(7))]);
+
+        let (added, updated) = normalize_subscription_updates(
+            std::collections::BTreeMap::from([(held.clone(), 7)]),
+            vec![(held.clone(), None)],
+            Vec::<(OutputOccurrenceId, Option<usize>)>::new(),
+            |row| &row.0,
+            |row, previous_index| row.1 = Some(previous_index),
+        );
+        assert!(added.is_empty());
+        assert_eq!(updated, vec![(held, Some(7))]);
+    }
+
+    #[test]
+    fn reset_snapshot_preserves_retained_updates_and_recovers_absent_removals() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct SnapshotRow {
+            id: OutputOccurrenceId,
+            payload: &'static str,
+            index: usize,
+            previous_index: Option<usize>,
+        }
+
+        let a = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(1)));
+        let b = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(2)));
+        let c = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(3)));
+        let current = vec![
+            SnapshotRow {
+                id: a.clone(),
+                payload: "old A",
+                index: 0,
+                previous_index: None,
+            },
+            SnapshotRow {
+                id: b.clone(),
+                payload: "old B",
+                index: 1,
+                previous_index: None,
+            },
+        ];
+        let replacement = vec![
+            SnapshotRow {
+                id: c.clone(),
+                payload: "new C",
+                index: 0,
+                previous_index: None,
+            },
+            SnapshotRow {
+                id: a.clone(),
+                payload: "new A",
+                index: 1,
+                previous_index: None,
+            },
+        ];
+        let replacement_ids = replacement.iter().map(|row| row.id.clone()).collect();
+        let removed_indices = reset_absent_row_indices(
+            &current,
+            &replacement_ids,
+            &std::collections::BTreeSet::new(),
+            |row| &row.id,
+        );
+        assert_eq!(removed_indices, vec![1]);
+        assert_eq!(current[removed_indices[0]].id, b);
+        assert_eq!(current[removed_indices[0]].payload, "old B");
+
+        let surviving = std::collections::BTreeMap::from([(a.clone(), 0)]);
+        let (added, updated) = normalize_subscription_updates(
+            surviving,
+            replacement,
+            Vec::new(),
+            |row| &row.id,
+            |row, previous_index| row.previous_index = Some(previous_index),
+        );
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            (&added[0].id, added[0].payload, added[0].index),
+            (&c, "new C", 0)
+        );
+        assert_eq!(updated.len(), 1);
+        assert_eq!(
+            (
+                &updated[0].id,
+                updated[0].payload,
+                updated[0].previous_index,
+                updated[0].index,
+            ),
+            (&a, "new A", Some(0), 1)
+        );
+        assert_eq!(added.len() + updated.len() + removed_indices.len(), 3);
+    }
+
+    #[test]
+    fn semantic_update_filter_is_indexed_and_preserves_real_changes() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct TestRow {
+            id: u8,
+            index: usize,
+            payload: &'static str,
+            provenance: u8,
+        }
+
+        let previous = TestRow {
+            id: b'A',
+            index: 0,
+            payload: "same",
+            provenance: 1,
+        };
+        let previous_by_occurrence = std::collections::BTreeMap::from([(b'A', &previous)]);
+        let exact = previous.clone();
+        let moved = TestRow {
+            index: 1,
+            ..previous.clone()
+        };
+        let content_changed = TestRow {
+            payload: "changed",
+            ..previous.clone()
+        };
+        let provenance_changed = TestRow {
+            provenance: 2,
+            ..previous.clone()
+        };
+        let unknown_first = TestRow {
+            id: b'B',
+            ..previous.clone()
+        };
+        let unknown_second = unknown_first.clone();
+        let mut updates = vec![
+            exact,
+            moved.clone(),
+            content_changed.clone(),
+            provenance_changed.clone(),
+            unknown_first.clone(),
+            unknown_second.clone(),
+        ];
+
+        retain_changed_subscription_updates(
+            &mut updates,
+            &previous_by_occurrence,
+            |row| &row.id,
+            |old, new| {
+                old.index == new.index
+                    && old.payload == new.payload
+                    && old.provenance == new.provenance
+            },
+        );
+
+        assert_eq!(
+            updates,
+            vec![
+                moved,
+                content_changed,
+                provenance_changed,
+                unknown_first,
+                unknown_second,
+            ]
+        );
+        assert_eq!(
+            updates.iter().filter(|row| row.id == b'B').count(),
+            2,
+            "filtering semantic no-ops must not deduplicate distinct update entries"
+        );
+    }
+
+    #[test]
+    fn reset_survivor_classification_scales_by_index_lookup() {
+        static COMPARISONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct CountingKey(u32);
+
+        impl PartialOrd for CountingKey {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for CountingKey {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                COMPARISONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.0.cmp(&other.0)
+            }
+        }
+
+        const ROWS: usize = 1_024;
+        let current = (0..ROWS)
+            .map(|index| (CountingKey(index as u32), index))
+            .collect::<Vec<_>>();
+        let removed = current
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let surviving = surviving_subscription_rows(&current, &removed, |row| &row.0, |row| row.1);
+        let comparisons = COMPARISONS.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert!(surviving.is_empty());
+        assert!(
+            comparisons < ROWS * 64,
+            "reset survivor classification regressed from indexed lookup: {comparisons} comparisons for {ROWS} rows"
+        );
     }
 
     #[test]

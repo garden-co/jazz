@@ -37,6 +37,11 @@ pub(super) enum CurrentAccessPath {
         column: String,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
+        /// A maintained source keeps every equality probe as an ordinary IVM
+        /// source and intersects them in the graph. The fused storage request
+        /// is snapshot-only and cannot observe later transitions through a
+        /// secondary equality index.
+        maintained: bool,
         /// A proved physical source cap for an ordinary one-shot read. This is
         /// never selected by policy compilation or subscriptions.
         source_limit: Option<usize>,
@@ -932,7 +937,7 @@ where
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let (graph, descriptor) = if include_deleted {
+            let (base, descriptor, metadata) = if include_deleted {
                 let rows = rows
                     .into_iter()
                     .map(|row| {
@@ -940,21 +945,112 @@ where
                         (row, deleted)
                     })
                     .collect();
-                (
-                    inline_snapshot_include_deleted_current_graph(&table, rows).map_err(|_| {
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
+                    .map_err(|_| {
                         source_resolution_error(request, SourceGap::TransactionReadOverlay)
-                    })?,
-                    include_deleted_current_row_descriptor(&table),
+                    })?;
+                inline_snapshot_include_deleted_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    "open-transaction",
+                    &request.requirements,
                 )
+                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?
             } else {
-                (
-                    inline_current_graph(&table, rows).map_err(|_| {
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
+                    .map_err(|_| {
                         source_resolution_error(request, SourceGap::TransactionReadOverlay)
-                    })?,
-                    current_row_descriptor(&table),
+                    })?;
+                inline_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    "open-transaction",
+                    &request.requirements,
                 )
+                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?
             };
-            (graph, descriptor, BTreeMap::new(), BTreeSet::new())
+            // An open transaction is a snapshot plus its staged overlay, not
+            // an authorization result. Filter the effective rows through the
+            // same identity-bound read policy as an ordinary trusted-serving
+            // source. The matching policy dependency is compiled against this
+            // overlay below, so staged rows are subject to the opening
+            // transaction identity as well.
+            let graph = match &authorization {
+                SourceAuthorizationRequest::System => base,
+                SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
+                    permission_subject,
+                    plan,
+                } => {
+                    if plan.protected_source.table != table.name
+                        || plan.role != PolicyDecisionRole::Read
+                        || plan.protected_row_field != "row_uuid"
+                    {
+                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    }
+                    let policy_request = if include_deleted {
+                        self.node
+                            .table_read_policy_authorization_request_for_include_deleted(
+                                self.read_view.policy_schema,
+                                &table.name,
+                                *permission_subject,
+                                DurabilityTier::Global,
+                                plan.binding_source_shape.clone(),
+                                plan.binding_user_params.clone(),
+                                plan.binding_claim_params.clone(),
+                            )
+                    } else {
+                        let param_binding_mode = if plan.binding_source_shape.is_some() {
+                            ParamBindingMode::RetainAllParams
+                        } else {
+                            ParamBindingMode::InlineAllReachableSeeds
+                        };
+                        self.node.table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            param_binding_mode,
+                            DurabilityTier::Global,
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
+                        )
+                    };
+                    let policy_request = policy_request.map(|mut request| {
+                        request.reads.primary = policy_read_view_projected_through(
+                            &request.reads.primary,
+                            self.read_view,
+                        );
+                        request
+                    });
+                    let mut output_fields = descriptor_field_names(&descriptor).map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?;
+                    if include_deleted {
+                        output_fields.push("__jazz_deleted".to_owned());
+                    }
+                    self.node
+                        .compose_policy_filtered_current_source_graph(
+                            policy_request,
+                            base,
+                            &output_fields,
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
+                }
+            };
+            (graph, descriptor, metadata, BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
             && self.needs_projected_current_source(&request.source.table)
         {
@@ -1645,7 +1741,8 @@ where
             ),
             SourceExpr::VisibleCurrent { .. }
             | SourceExpr::BranchView { .. }
-            | SourceExpr::SettledBindingView { .. } => {
+            | SourceExpr::SettledBindingView { .. }
+            | SourceExpr::WithOverlays { .. } => {
                 let tier = source.current_tier().unwrap_or(DurabilityTier::Global);
                 if request.visibility == RowVisibility::IncludeDeleted {
                     self.node
@@ -1676,9 +1773,6 @@ where
                     )
                 }
             }
-            // Transaction overlays already carry explicitly captured rows and
-            // do not apply a second read-policy program in source preparation.
-            SourceExpr::WithOverlays { .. } => return Ok(None),
             _ => return Ok(None),
         };
         match dependency {
@@ -1806,6 +1900,7 @@ where
                 prefix,
                 intersections,
                 source_limit,
+                ..
             } => {
                 if tier != DurabilityTier::Global {
                     return Ok(None);
@@ -1822,6 +1917,7 @@ where
                         &column,
                         &prefix,
                         &intersections,
+                        false,
                         source_limit,
                         &projection_target,
                     )
@@ -2115,6 +2211,7 @@ where
                     prefix,
                     intersections,
                     source_limit,
+                    maintained,
                 }) => {
                     let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
                     self.node.query_engine_read_metrics.source_index_probes +=
@@ -2126,6 +2223,7 @@ where
                             &column,
                             &prefix,
                             &intersections,
+                            maintained,
                             source_limit,
                             &projection_target,
                         )
@@ -2208,6 +2306,7 @@ where
                 prefix,
                 intersections,
                 source_limit,
+                maintained,
             }) => {
                 // Select settled candidates before combining them with the
                 // corresponding Local ahead candidates below.
@@ -2221,6 +2320,7 @@ where
                         column,
                         prefix,
                         intersections,
+                        *maintained,
                         source_limit,
                         &projection_target,
                         raw_global_output.clone(),
@@ -3184,6 +3284,20 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
     branch_columns_nonnullable: bool,
 ) -> RecordDescriptor {
+    current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
+        table,
+        metadata,
+        branch_columns_nonnullable,
+        false,
+    )
+}
+
+fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
+    table: &TableSchema,
+    metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    branch_columns_nonnullable: bool,
+    include_deletion_marker: bool,
+) -> RecordDescriptor {
     let mut fields = std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
@@ -3246,6 +3360,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
             ValueType::Nullable(Box::new(ValueType::U64)),
         ));
     }
+    if include_deletion_marker {
+        fields.push(("__jazz_deleted".to_owned(), ValueType::Bool));
+    }
     RecordDescriptor::new(fields)
 }
 
@@ -3265,6 +3382,7 @@ where
     pub(super) fn query_program_access_paths(
         &self,
         request: &QueryProgramRequest,
+        allow_secondary_indexes: bool,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
         // A policy proof may contain both an owner arm and a correlated
         // membership arm for the same protected source. Walking its nested
@@ -3288,6 +3406,7 @@ where
             &request.reads.primary,
             &request.policy,
             false,
+            allow_secondary_indexes,
         )
     }
 
@@ -3297,6 +3416,7 @@ where
         read_view: &ReadView<RequestedSourceStage>,
         policy: &PolicyContext,
         allow_local: bool,
+        allow_secondary_indexes: bool,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
         let mut equalities_by_source = BTreeMap::new();
         // This deliberately small access-path selector only recognizes a
@@ -3327,17 +3447,26 @@ where
             let Some(mut path) = select_current_access_path(&table, &equalities) else {
                 continue;
             };
-            // Multi-index intersection is an ephemeral one-shot source. Keep
-            // maintained programs and reusable policy graphs on their existing
-            // single-index path until the fused source has incremental-update
-            // semantics of its own.
-            if !allow_local && let CurrentAccessPath::Index { intersections, .. } = &mut path {
-                intersections.clear();
+            // Authorization dependencies are cached by policy shape and claim
+            // schema, not by a resolved claim value. A secondary-index prefix
+            // derived from this request could therefore make a later identity
+            // reuse another identity's candidate set. Keep those reusable
+            // graphs identity-neutral; maintained root views are compiled for
+            // this concrete request and may safely select their own index.
+            if !allow_secondary_indexes && matches!(path, CurrentAccessPath::Index { .. }) {
+                continue;
             }
-            // Generic maintained programs remain Global-only. A one-shot Local
-            // caller opts in only after arranging equivalent index scans over
-            // both the settled and ahead physical sources.
-            if tier == DurabilityTier::Global || (allow_local && tier == DurabilityTier::Local) {
+            if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
+                *maintained = true;
+            }
+            // Local/Edge sources still combine the selected settled candidates
+            // with the complete ahead overlay before choosing a winner, so a
+            // newer row which leaves an equality prefix cannot leave behind a
+            // stale settled match.
+            if matches!(
+                tier,
+                DurabilityTier::Global | DurabilityTier::Local | DurabilityTier::Edge
+            ) {
                 paths.insert(source, path);
             }
         }
@@ -3376,6 +3505,7 @@ where
             &input,
             &reads.primary,
             &PolicyContext::System,
+            true,
             true,
         )?;
 
@@ -3515,6 +3645,7 @@ where
         column: &str,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
+        maintained: bool,
         source_limit: Option<usize>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
@@ -3524,6 +3655,7 @@ where
             column,
             prefix,
             intersections,
+            maintained,
             source_limit,
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
@@ -3537,6 +3669,7 @@ where
         column: &str,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
+        maintained: bool,
         source_limit: Option<usize>,
         projection_target: &str,
         _output: RecordDescriptor,
@@ -3605,13 +3738,37 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(GraphBuilder::variant_index_intersection_scan(
-            storage_table,
-            physical_current_index_name(column_id),
-            scan,
-            intersections,
-            projection_target,
-        ))
+        let primary_index = physical_current_index_name(column_id);
+        if maintained {
+            // `IndexedRowsIntersection` is a hydration request, not a live
+            // source.  Model each equality as an index source and express the
+            // intersection in IVM so table deltas which enter or leave either
+            // prefix drive ordinary semi-join updates.
+            let mut graph = GraphBuilder::variant_index_scan(
+                storage_table.clone(),
+                primary_index,
+                projection_target,
+                scan,
+            );
+            for (index, scan) in intersections {
+                let right = GraphBuilder::variant_index_scan(
+                    storage_table.clone(),
+                    index,
+                    projection_target,
+                    scan,
+                );
+                graph = GraphBuilder::semi_join(graph, right, ["row_uuid"], ["row_uuid"]);
+            }
+            Ok(graph)
+        } else {
+            Ok(GraphBuilder::variant_index_intersection_scan(
+                storage_table,
+                primary_index,
+                scan,
+                intersections,
+                projection_target,
+            ))
+        }
     }
 }
 
@@ -3938,6 +4095,36 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
     ),
     Error,
 > {
+    let metadata = inline_source_metadata(requirements, branch_witness.map(|(field, _)| field));
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+        table,
+        &metadata,
+        branch_witness.is_some(),
+    );
+    let records = rows
+        .iter()
+        .map(|row| {
+            inline_current_record_with_source_metadata(
+                table,
+                &descriptor,
+                row,
+                schema_version_alias,
+                coverage,
+                branch_witness,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        GraphBuilder::inline_records(descriptor.clone(), records),
+        descriptor,
+        metadata,
+    ))
+}
+
+fn inline_source_metadata(
+    requirements: &SourceRequirements,
+    branch_witness_field: Option<&str>,
+) -> BTreeMap<SourceMetadataRequirement, SourceMetadataFields> {
     let mut metadata = BTreeMap::new();
     // Provenance is carried by the same content-version witness as ordinary
     // table sources.  Inline candidates must expose that full capability too:
@@ -3957,7 +4144,7 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
                 schema_version_field: "schema_version".to_owned(),
                 tx_time_field: "tx_time".to_owned(),
                 tx_node_field: "tx_node_id".to_owned(),
-                branch_or_prefix_field: branch_witness.map(|(field, _)| field.to_owned()),
+                branch_or_prefix_field: branch_witness_field.map(str::to_owned),
             },
         );
     }
@@ -3993,30 +4180,7 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
             );
         }
     }
-
-    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
-        table,
-        &metadata,
-        branch_witness.is_some(),
-    );
-    let records = rows
-        .iter()
-        .map(|row| {
-            inline_current_record_with_source_metadata(
-                table,
-                &descriptor,
-                row,
-                schema_version_alias,
-                coverage,
-                branch_witness,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((
-        GraphBuilder::inline_records(descriptor.clone(), records),
-        descriptor,
-        metadata,
-    ))
+    metadata
 }
 
 fn inline_current_record_with_source_metadata(
@@ -4026,6 +4190,26 @@ fn inline_current_record_with_source_metadata(
     schema_version_alias: SchemaVersionAlias,
     coverage: &str,
     branch_witness: Option<(&str, &BranchKey)>,
+) -> Result<Vec<u8>, Error> {
+    inline_current_record_with_source_metadata_and_deletion(
+        table,
+        descriptor,
+        row,
+        schema_version_alias,
+        coverage,
+        branch_witness,
+        None,
+    )
+}
+
+fn inline_current_record_with_source_metadata_and_deletion(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    branch_witness: Option<(&str, &BranchKey)>,
+    deletion_marker: Option<bool>,
 ) -> Result<Vec<u8>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
@@ -4077,41 +4261,49 @@ fn inline_current_record_with_source_metadata(
     if descriptor.field_index("settle_position").is_some() {
         values.push(Value::Nullable(None));
     }
+    if let Some(deleted) = deletion_marker {
+        values.push(Value::Bool(deleted));
+    }
     Ok(descriptor.create(&values)?)
 }
 
-fn inline_snapshot_include_deleted_current_graph(
+fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
     table: &TableSchema,
     rows: Vec<(CurrentRow, bool)>,
-) -> Result<GraphBuilder, Error> {
-    let descriptor = include_deleted_current_row_descriptor(table);
-    let mut records = Vec::with_capacity(rows.len());
-    for (row, deleted) in rows {
-        let mut values = Vec::with_capacity(table.columns.len() + 8);
-        values.push(Value::Uuid(row.row_uuid().0));
-        for column in &table.columns {
-            values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
-        }
-        if let Some(provenance) = row.provenance()? {
-            values.push(Value::String(provenance.created_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.created_at));
-            values.push(Value::String(provenance.updated_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.updated_at));
-        } else {
-            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
-            values.push(Value::U64(0));
-            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
-            values.push(Value::U64(0));
-        }
-        let (tx_time, tx_node_alias) = row
-            .projected_tx_alias()
-            .unwrap_or((TxTime(0), NodeAlias(0)));
-        values.push(Value::U64(tx_time.0));
-        values.push(Value::U64(tx_node_alias.0));
-        values.push(Value::Bool(deleted));
-        records.push(descriptor.create(&values)?);
-    }
-    Ok(GraphBuilder::inline_records(descriptor, records))
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
+    let metadata = inline_source_metadata(requirements, None);
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
+        table, &metadata, false, true,
+    );
+    let records = rows
+        .iter()
+        .map(|(row, deleted)| {
+            inline_current_record_with_source_metadata_and_deletion(
+                table,
+                &descriptor,
+                row,
+                schema_version_alias,
+                coverage,
+                None,
+                Some(*deleted),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        GraphBuilder::inline_records(descriptor.clone(), records),
+        descriptor,
+        metadata,
+    ))
 }
 
 #[cfg(test)]

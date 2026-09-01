@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use jazz::db::ReadOpts;
-use jazz::query::{Query, col, contains, eq, gt, gte, is_null, lit, lt, lte, ne};
-use jazz::tools::{JazzClient, Value};
+use jazz::query::{OrderDirection, Query, col, contains, eq, gt, gte, is_null, lit, lt, lte, ne};
+use jazz::tools::test_support::{disconnect_client, reconnect_client};
+use jazz::tools::{DurabilityTier, JazzClient, OrderedRowDelta, ResultKey, Value};
 use jazz_server::JazzServer;
 
 use crate::common::{
@@ -24,6 +25,33 @@ macro_rules! local_tokio_test {
                 .await;
         }
     };
+}
+
+/// Reduces the ordered public stream protocol exactly as a consumer does: a
+/// frame first removes every changed occurrence, then inserts additions and
+/// updates at their new positions. Update indexes are relative to the state
+/// before the whole frame, so callers inspect that state before applying it.
+fn apply_ordered_delta(order: &mut Vec<ResultKey>, delta: &OrderedRowDelta) {
+    order.retain(|current| {
+        !delta.added.iter().any(|change| change.id == *current)
+            && !delta.updated.iter().any(|change| change.id == *current)
+            && !delta.removed.iter().any(|change| change.id == *current)
+    });
+    let mut placements = delta
+        .added
+        .iter()
+        .map(|change| (&change.id, change.index))
+        .chain(
+            delta
+                .updated
+                .iter()
+                .map(|change| (&change.id, change.new_index)),
+        )
+        .collect::<Vec<_>>();
+    placements.sort_by_key(|(_, index)| *index);
+    for (id, index) in placements {
+        order.insert(index.min(order.len()), id.clone());
+    }
 }
 
 local_tokio_test! {
@@ -321,6 +349,243 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
         Some(final_title.as_str()),
         "last row-bearing update delta should decode to the final rapid-update title"
     );
+
+    pair.shutdown().await;
+}
+}
+
+local_tokio_test! {
+async fn reset_replacement_preserves_update_category_and_prior_order() {
+    const RAPID_UPDATES: usize = 500;
+
+    let pair = ClientPair::start().await;
+    let query = Query::from("todos").order_by("title", OrderDirection::Asc);
+    let moving_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "a-moving",
+            done: false,
+            priority: Some(1),
+            tags: &["burst"],
+            payload: None,
+        },
+    )
+    .await;
+    let anchor_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "m-anchor",
+            done: false,
+            priority: Some(1),
+            tags: &["burst"],
+            payload: None,
+        },
+    )
+    .await;
+
+    let mut stream = pair
+        .subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to ordered todos");
+    let mut log = Vec::new();
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "both initial ordered rows",
+        |log| has_added_id(log, moving_id) && has_added_id(log, anchor_id),
+    )
+    .await;
+    let mut facade_order = Vec::new();
+    for delta in &log {
+        apply_ordered_delta(&mut facade_order, delta);
+    }
+    assert_eq!(
+        facade_order,
+        vec![ResultKey::from(moving_id), ResultKey::from(anchor_id)],
+        "initial public stream order"
+    );
+    log.clear();
+
+    for revision in 1..=RAPID_UPDATES {
+        let prefix = if revision % 2 == 0 { 'z' } else { 'a' };
+        pair.writer
+            .update(
+                moving_id,
+                vec![(
+                    "title".to_owned(),
+                    Value::Text(format!("{prefix}-{revision:03}")),
+                )],
+            )
+            .expect("apply rapid ordered update");
+    }
+    let final_title = format!("z-{RAPID_UPDATES:03}");
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query.clone(),
+        "final ordered rows before stream drain",
+        |rows| {
+            (rows.len() == 2 && rows[0].0 == anchor_id && rows[1].0 == moving_id).then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].1.first(), Some(&Value::Text(final_title.clone())));
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "final ordered reset replacement",
+        |log| last_updated_todo_title(log, moving_id).as_deref() == Some(final_title.as_str()),
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+
+    assert!(
+        log.iter().all(|delta| delta.added.is_empty() && delta.removed.is_empty()),
+        "a reset replacement of existing occurrences remains an update: {log:#?}"
+    );
+    let final_update = log
+        .iter()
+        .rev()
+        .flat_map(|delta| delta.updated.iter().rev())
+        .find(|update| {
+            update.id == moving_id
+                && update
+                    .row
+                    .as_ref()
+                    .and_then(|row| row.get("title"))
+                    == Some(&Value::Text(final_title.clone()))
+        })
+        .expect("final moving-row update");
+    let mut final_update_prior_index = None;
+    for delta in &log {
+        if delta.updated.iter().any(|update| {
+            update.id == moving_id
+                && update
+                    .row
+                    .as_ref()
+                    .and_then(|row| row.get("title"))
+                    == Some(&Value::Text(final_title.clone()))
+        }) {
+            assert!(
+                final_update_prior_index.is_none(),
+                "final title must have one normalized update frame: {log:#?}"
+            );
+            final_update_prior_index = facade_order
+                .iter()
+                .position(|id| *id == moving_id);
+        }
+        apply_ordered_delta(&mut facade_order, delta);
+    }
+    assert_eq!(
+        final_update.old_index,
+        final_update_prior_index.expect("final moving row exists before its update"),
+        "normalized update must preserve the public stream's immediately prior position"
+    );
+    assert_eq!(final_update.new_index, 1);
+    assert_eq!(
+        facade_order,
+        vec![ResultKey::from(anchor_id), ResultKey::from(moving_id)],
+        "final normalized stream order"
+    );
+
+    pair.shutdown().await;
+}
+}
+
+local_tokio_test! {
+/// A reconnect replaces an already-observed remote result with the authority's
+/// full current snapshot. The public stream has no reset bit, so an omitted
+/// member must become an ordinary removal rather than remaining stale in the
+/// facade's reduction.
+///
+/// subscriber(initial: keep + removed) ──disconnect──► local stale view
+/// writer(delete removed) ──► authority
+/// subscriber ──reconnect/reset(keep)──► public `removed`
+async fn authoritative_reconnect_reset_omits_prior_facade_member() {
+    let pair = ClientPair::start().await;
+    let query = Query::from("todos");
+    let keep_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "survives-authoritative-reset",
+            done: false,
+            priority: Some(1),
+            tags: &["reset"],
+            payload: None,
+        },
+    )
+    .await;
+    let removed_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "omitted-by-authoritative-reset",
+            done: false,
+            priority: Some(1),
+            tags: &["reset"],
+            payload: None,
+        },
+    )
+    .await;
+
+    let mut stream = pair
+        .subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe before authoritative reset");
+    let mut log = Vec::new();
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "initial public reduction has both rows",
+        |log| has_added_id(log, keep_id) && has_added_id(log, removed_id),
+    )
+    .await;
+    log.clear();
+
+    assert!(
+        disconnect_client(&pair.subscriber),
+        "detach subscriber before authority changes its result"
+    );
+    let deleted_tx = pair
+        .writer
+        .delete(removed_id)
+        .expect("delete row at authority")
+        .expect("ordinary delete commits immediately");
+    pair.writer
+        .wait_for_transaction(deleted_tx, DurabilityTier::GlobalServer)
+        .await
+        .expect("authority accepts deletion before subscriber reconnects");
+
+    assert!(
+        reconnect_client(&pair.subscriber)
+            .await
+            .expect("reconnect preserved subscriber"),
+        "subscriber transport reconnects"
+    );
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "public reduction removes the member absent from authoritative reset",
+        |log| has_removed(log, removed_id),
+    )
+    .await;
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query,
+        "reconnected query replaces stale local membership",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == keep_id && rows.iter().all(|(id, _)| *id != removed_id))
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, keep_id);
 
     pair.shutdown().await;
 }

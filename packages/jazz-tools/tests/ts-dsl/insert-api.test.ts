@@ -125,12 +125,18 @@ describe("TS Insert API", () => {
     });
   });
 
-  it("cannot insert two rows with the same id", async () => {
+  it("reports duplicate caller-supplied ids through the write handle", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
     const { value: project } = db.insert(app.projects, { name: "Test Project 1" }, { id });
-    expect(() => db.insert(app.projects, { name: "Test Project 2" }, { id: project.id })).toThrow(
-      `Insert failed: WriteError("encoding error: object already exists: ${project.id}")`,
-    );
+    await expect(
+      db
+        .insert(app.projects, { name: "Test Project 2" }, { id: project.id })
+        .wait({ tier: "local" }),
+    ).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      code: "write_rejected",
+      reason: `encoding error: object already exists: ${project.id}`,
+    });
   });
 
   it("keeps caller-supplied ids reserved after the row is deleted", async () => {
@@ -138,9 +144,15 @@ describe("TS Insert API", () => {
     const { value: project } = db.insert(app.projects, { name: "Test Project 1" }, { id });
     db.delete(app.projects, project.id);
 
-    expect(() => db.insert(app.projects, { name: "Test Project 2" }, { id: project.id })).toThrow(
-      `Insert failed: WriteError("row already deleted: ${project.id}")`,
-    );
+    await expect(
+      db
+        .insert(app.projects, { name: "Test Project 2" }, { id: project.id })
+        .wait({ tier: "local" }),
+    ).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      code: "write_rejected",
+      reason: `row already deleted: ${project.id}`,
+    });
   });
 
   it("uses default values missing from the insert data", async () => {

@@ -321,6 +321,15 @@ pub type ScanVisitor<'visitor> =
 /// reflected by those resident reads. A backend may evict retained data; after
 /// eviction, a later read may become pending again.
 pub trait OrderedKvStorage {
+    /// Whether a read that yields once may be immediately re-polled by the
+    /// caller without turning an external storage wait into a synchronous
+    /// drain. Backends return `true` only for executor-local storage whose
+    /// reads cannot require an external readiness event; the conservative
+    /// default keeps self-woken cold backends pending for their runtime owner.
+    fn permits_eager_read_retry(&self) -> bool {
+        false
+    }
+
     /// Begin an encoded storage transaction over this backend.
     ///
     /// The transaction buffers already-encoded key/value writes and presents
@@ -484,6 +493,10 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.as_ref().permits_eager_read_retry()
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.as_ref().scan(request)
     }
@@ -574,6 +587,10 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        S::permits_eager_read_retry(*self)
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         S::scan(*self, request)
     }
@@ -1477,6 +1494,12 @@ pub struct StagedWriteOverlay<'a, S> {
     staged_writes: OverlayHandle<'a, RefCell<StagedWriteState>>,
 }
 
+pub(crate) enum StagedPointValue {
+    Miss,
+    Set(Value),
+    Delete,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StagedWriteState {
     operations: Vec<OwnedWriteOperation>,
@@ -1616,6 +1639,20 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
         StagedWriteOverlay {
             base: OverlayHandle::Owned(base),
             staged_writes: OverlayHandle::Owned(staged_writes),
+        }
+    }
+
+    pub(crate) fn staged_point_value(&self, cf: &ColumnFamilyName, key: &Key) -> StagedPointValue {
+        let mut staged_writes = self.staged_writes.borrow_mut();
+        if staged_writes.is_empty() {
+            return StagedPointValue::Miss;
+        }
+        let Some(index) = staged_writes.latest_index(cf, key) else {
+            return StagedPointValue::Miss;
+        };
+        match &staged_writes.operations[index] {
+            OwnedWriteOperation::Set { value, .. } => StagedPointValue::Set(value.clone()),
+            OwnedWriteOperation::Delete { .. } => StagedPointValue::Delete,
         }
     }
 
@@ -1815,6 +1852,10 @@ impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.base.permits_eager_read_retry()
+    }
+
     fn put_if_absent(
         &self,
         _cf: String,
@@ -1837,22 +1878,10 @@ where
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-        let mut staged_writes = self.staged_writes.borrow_mut();
-        if staged_writes.is_empty() {
-            drop(staged_writes);
-            return self.base.get(cf, key);
-        }
-
-        let Some(index) = staged_writes.latest_index(&cf, &key) else {
-            drop(staged_writes);
-            return self.base.get(cf, key);
-        };
-        match &staged_writes.operations[index] {
-            OwnedWriteOperation::Set { value, .. } => {
-                let value = value.clone();
-                Box::pin(async move { Ok(Some(value)) })
-            }
-            OwnedWriteOperation::Delete { .. } => Box::pin(async { Ok(None) }),
+        match self.staged_point_value(&cf, &key) {
+            StagedPointValue::Miss => self.base.get(cf, key),
+            StagedPointValue::Set(value) => Box::pin(async move { Ok(Some(value)) }),
+            StagedPointValue::Delete => Box::pin(async { Ok(None) }),
         }
     }
 

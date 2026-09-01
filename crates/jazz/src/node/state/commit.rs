@@ -212,6 +212,54 @@ where
         .await
     }
 
+    /// Commit prepared local writes under a transaction identity reserved by
+    /// the host before asynchronous preparation began.
+    pub(crate) async fn commit_mergeable_many_in_schema_at(
+        &mut self,
+        schema_version: SchemaVersionId,
+        commits: Vec<MergeableCommit>,
+        reserved: TxId,
+    ) -> Result<PublishedTransaction, Error> {
+        if reserved.node != self.node_uuid {
+            return Err(Error::InvalidMergeableCommit(
+                "reserved transaction belongs to another node",
+            ));
+        }
+        self.require_catalogue_ready()?;
+        if !self.catalogue.catalogue_schemas.contains_key(&schema_version) {
+            return Err(Error::InvalidMergeableCommit(
+                "authored schema version is not admitted",
+            ));
+        }
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "mergeable transaction requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "mergeable transaction permission subjects must match",
+                ));
+            }
+            if commit.parents.iter().any(|parent| parent.time >= reserved.time) {
+                return Err(Error::InvalidMergeableCommit(
+                    "reserved transaction does not dominate its prepared parents",
+                ));
+            }
+        }
+        self.merge_tx_time(reserved.time);
+        self.commit_mergeable_many_at_with_schema_versions(
+            commits
+                .into_iter()
+                .map(|commit| (schema_version, commit))
+                .collect(),
+            reserved.time,
+        )
+        .await
+    }
+
     fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {
         for commit in commits {
             if !commit.parents.is_empty() {
@@ -1341,7 +1389,15 @@ where
             .unwrap_or_default();
         for (column, value) in &commit.cells {
             if value_contains_indirect_descriptor(value) {
-                if inherited.get(column) != Some(value) {
+                // A branch-view write can carry an unchanged descriptor from
+                // a locally read base snapshot while the target branch has no
+                // physical row yet. That exact cell is marked privately by
+                // `verified_inherited_large_cells`; public mutation input can
+                // never create this marker. Every other descriptor still has
+                // to equal the target branch's observed physical cell.
+                if inherited.get(column) != Some(value)
+                    && !commit.prepared_large_columns.contains(column)
+                {
                     return Err(Error::InvalidMergeableCommit(
                         "row update contains an unverified large-value descriptor",
                     ));

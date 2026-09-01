@@ -207,6 +207,7 @@ where
                 binding: binding.clone(),
                 opts: upstream_opts.clone(),
                 identity,
+                policy_binding: None,
             };
             self.register_query_coverage(coverage.clone(), pending_subscription.clone(), false);
             let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
@@ -246,6 +247,7 @@ where
                 binding: binding.clone(),
                 opts: upstream_opts,
                 identity,
+                policy_binding: None,
             },
             true,
         );
@@ -294,6 +296,7 @@ where
                     binding: binding.clone(),
                     opts: opts.clone(),
                     identity,
+                    policy_binding: None,
                 },
             ));
         self.node
@@ -362,6 +365,16 @@ where
             .node
             .borrow()
             .settled_authoritative_receipt_counts_for_test()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Hold the async node owner until this future is cancelled.
+    ///
+    /// This is a test-only suspension point for cancellation and contention
+    /// contracts that cannot be reproduced by borrowing the private node.
+    pub async fn hold_node_owner_for_test(&self) {
+        let _node = self.node.node.lock().await;
+        std::future::pending::<()>().await;
     }
 
     /// Detach a one-shot query coverage request.
@@ -488,12 +501,16 @@ where
                 authorization_mode,
             )
             .await?;
+        // The subscription opener performs one bounded IVM poll. Keep the
+        // current host scheduler as the cold-storage continuation owner,
+        // rather than the short-lived foreground future opening this stream.
+        let progress_waker = self.node.query_runtime_waker();
         let (subscription, snapshot) = self
             .node
             .node
             .lock()
             .await
-            .open_maintained_view_subscription_in_authorization_mode(
+            .open_maintained_view_subscription_in_authorization_mode_with_waker(
                 &local_shape,
                 &local_binding,
                 author,
@@ -501,6 +518,7 @@ where
                 &opts.read_view,
                 Some(_local_plan),
                 authorization_mode,
+                progress_waker.as_ref(),
             )
             .await?;
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
@@ -522,6 +540,11 @@ where
                 acknowledgement: None,
             });
         }));
+        // This opener may have been waiting for the node mutex while a close
+        // attempt closed finalization admission. Its local maintained view
+        // was absent from that close's snapshot, so reject it and let this
+        // guard transfer cleanup to the still-live node owner.
+        self.node.ensure_subscription_finalization_open()?;
         // A projected ordered root needs terminal patches even without nested
         // arrays: an unprojected sort-key mutation can move a visible row
         // without changing the projected payload. Unprojected roots retain
@@ -694,7 +717,7 @@ where
         // exists. On success, replace it with one command carrying local and
         // upstream cleanup so Drop never touches the async node mutex.
         drop(local_cleanup.take());
-        let cleanup: Box<dyn FnOnce(Option<oneshot::Sender<()>>)> = {
+        let cleanup: SubscriptionCleanup = {
             register_upstream_subscription_owner(
                 &self.node.upstream_subscription_owners,
                 &state.borrow().upstream_subscription_handles,
@@ -704,17 +727,25 @@ where
             let state = Rc::clone(&state);
             Box::new(move |acknowledgement| {
                 closed.set(true);
+                let finalization_node = acknowledgement.as_ref().map(|_| Rc::clone(&node));
                 node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
                     state: Some(state),
                     opening_local: None,
                     acknowledgement,
                 });
+                finalization_node.map(|node| {
+                    Box::pin(async move {
+                        node.drain_subscription_finalizations().await?;
+                        Ok(())
+                    }) as SubscriptionFinalizationFuture
+                })
             })
         };
         Ok(SubscriptionStream {
             receiver,
             _state: state,
             cleanup: Some(cleanup),
+            finalization: None,
             terminated: false,
         })
     }

@@ -11,6 +11,7 @@ use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
+use crate::node::query_engine::left_field;
 use crate::protocol::{
     ContributingMembersEntry, KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry,
     RealRowMemberEntry, ResultMemberEntry, RowVersionRef, VersionBundle, VersionBundleRef,
@@ -215,6 +216,35 @@ fn relation_edge_version_rows_for_bundle(
         .collect()
 }
 
+/// Source vocabulary required to turn maintained flat-tuple membership into
+/// canonical contributor facts. Construct this from the validated query rather
+/// than independently from its result rows: an empty vocabulary on a flat join
+/// produces a payload that renders once but cannot be reconstructed afterward.
+pub(crate) struct FlatTupleSourceTables(Vec<String>);
+
+impl FlatTupleSourceTables {
+    pub(crate) fn for_query(shape: &ValidatedQuery) -> Self {
+        Self(
+            shape
+                .query()
+                .flat_join
+                .as_ref()
+                .map(|flat_join| {
+                    flat_join
+                        .sources
+                        .iter()
+                        .map(|source| source.table.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
 pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) subscription: SubscriptionKey,
     /// Peer inventory of transactions whose full row-version payload has
@@ -232,7 +262,7 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     /// a durable general-history grant.
     pub(crate) previous_program_facts: BTreeSet<ProgramFactEntry>,
     /// Declared flat-join source table for each contributor position.
-    pub(crate) flat_tuple_source_tables: Vec<String>,
+    pub(crate) flat_tuple_source_tables: FlatTupleSourceTables,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
@@ -251,10 +281,143 @@ struct ViewBundlePreflight {
     persisted_tx_ids: BTreeSet<TxId>,
 }
 
+/// Provenance of version rows selected for a maintained-view wire bundle.
+/// Only exact immutable-store reads may skip witness canonicalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaintainedBundleVersionSource {
+    IvmWitness,
+    ExactStorage,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Recover the deletion-register winner currently visible at the
+    /// subscription tier for an optimized scalar root. Result membership tells
+    /// us that the row is visible, but not whether that visibility is due to a
+    /// later `Restored` register event; the receiver must learn that event to
+    /// keep its own register current for later ordinary reads.
+    async fn storage_backed_maintained_deletion_winner(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        tier: DurabilityTier,
+        context: &mut ViewEvaluationContext,
+    ) -> Result<Option<VersionRow>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
+        let global = self
+            .visible_global_layer_tx_id_for_physical_table_now(
+                table_id,
+                row_uuid,
+                VersionLayer::Deletion,
+            )
+            .await;
+        let tx_id = match tier {
+            // Global current storage already represents the settled winner.
+            DurabilityTier::Global => global,
+            // Local reads select the greatest global/ahead register winner.
+            DurabilityTier::Local => self.local_deletion_winner_tx_id(table, row_uuid).await?,
+            // Edge filters ahead candidates before selecting a winner. A
+            // later Local register event must not shadow an earlier
+            // Edge-accepted event in that filter/argmax ordering.
+            DurabilityTier::Edge => {
+                self.edge_visible_deletion_winner_tx_id(table_id, table, row_uuid)
+                    .await?
+            }
+            // No-tier reads do not have a settled maintained source.
+            DurabilityTier::None => None,
+        };
+        let Some(tx_id) = tx_id else {
+            return Ok(None);
+        };
+        let stored_tx = self
+            .query_transaction_memo(tx_id, context)
+            .await?
+            .ok_or(Error::MissingTransaction(tx_id))?;
+        let wanted_row = BTreeSet::from([(table.to_owned(), row_uuid)]);
+        Ok(self
+            .query_versions_for_tx_rows_by_alias(tx_id, stored_tx.node_alias, &wanted_row)
+            .await?
+            .into_iter()
+            .find(|version| version.deletion().is_some()))
+    }
+
+    /// Mirror the Edge deletion source exactly: filter accepted
+    /// Edge-or-Global ahead entries first, then select the winner with the
+    /// settled global register.  This cannot be implemented by validating the
+    /// raw Local argmax afterwards because that loses an older visible ahead
+    /// row when a newer Local-only row shares the current key.
+    async fn edge_visible_deletion_winner_tx_id(
+        &mut self,
+        table_id: PhysicalTableId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        use groove::ivm::{LiteralValue, StaticScanSpec};
+
+        let scan = StaticScanSpec::Point(vec![
+            LiteralValue::from(Value::Bytes(BranchKey::default().canonical_bytes())),
+            LiteralValue::from(Value::Uuid(row_uuid.0)),
+        ]);
+        let fields = ["row_uuid", "tx_time", "tx_node_id"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let global = GraphBuilder::table_scan(
+            physical_register_global_current_table_name(table_id),
+            scan.clone(),
+        )
+        .project(fields.clone());
+        let ahead =
+            GraphBuilder::table_scan(physical_register_ahead_current_table_name(table_id), scan);
+        let edge_ahead = GraphBuilder::join(
+            ahead.project(fields.clone()),
+            GraphBuilder::table("jazz_transactions")
+                .filter(
+                    PredicateExpr::And(vec![
+                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+                        PredicateExpr::Or(vec![
+                            PredicateExpr::eq("durability", Value::EnumTag(2)),
+                            PredicateExpr::eq("durability", Value::EnumTag(3)),
+                        ])
+                        .canonicalize(),
+                    ])
+                    .canonicalize(),
+                )
+                .project(["time", "node_id"]),
+            ["tx_time", "tx_node_id"],
+            ["time", "node_id"],
+        )
+        .project_fields(
+            fields
+                .into_iter()
+                .map(|field| ProjectField::renamed(left_field(&field), field)),
+        );
+        let result = self
+            .database
+            .query_graph(GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, edge_ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            ))
+            .await
+            .map_err(|error| Self::malformed_current_query_error(table, row_uuid, error))?;
+        let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
+            return Ok(None);
+        };
+        let record = BorrowedRecord::new(&delta.record, &result.descriptor);
+        let time = TxTime(record.get_u64(1)?);
+        let node_alias = NodeAlias(record.get_u64(2)?);
+        let node = self
+            .node_for_alias(node_alias)
+            .ok_or(Error::InvalidStoredValue(
+                "Edge deletion winner references an unknown node alias",
+            ))?;
+        Ok(Some(TxId::new(time, node)))
+    }
+
     async fn preflight_view_bundle_conflicts(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
@@ -508,7 +671,7 @@ where
                 complete_exclusive_payloads: false,
                 previous_result_set,
                 previous_program_facts: BTreeSet::new(),
-                flat_tuple_source_tables: Vec::new(),
+                flat_tuple_source_tables: FlatTupleSourceTables::for_query(shape),
                 identity,
                 tier,
                 maintained_facts: &maintained,
@@ -536,14 +699,22 @@ where
             previous_program_facts,
             flat_tuple_source_tables,
             identity: _identity,
-            tier: _tier,
+            tier,
             maintained_facts,
             allow_storage_witness_fallback,
         } = inputs;
+        // The storage-backed maintained subset deliberately omits the
+        // source-wide terminal witnesses. Its result-member identity is still
+        // exact, so Stream B must retrieve that immutable payload from the
+        // authoritative node store when shipping a newly admitted member.
+        // Keep callers' explicit fallback flag for the legacy cases that
+        // already use it.
+        let allow_storage_witness_fallback = allow_storage_witness_fallback
+            || maintained_facts.uses_storage_backed_result_materialization();
         program_fact_adds.extend(maintained_facts.payload_facts_for_members(&result_member_adds));
         let tuple_source_versions = maintained_facts.tuple_source_versions_for_members(
             &maintained_facts.active_result_members(),
-            &flat_tuple_source_tables,
+            flat_tuple_source_tables.as_slice(),
         );
         let mut desired_tuple_source_facts = BTreeMap::new();
         for (result, source_index, maintained_version) in &tuple_source_versions {
@@ -706,6 +877,15 @@ where
         let mut version_bundles = Vec::with_capacity(row_result_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
         let mut emitted_versions = BTreeSet::new();
+        // A current result member names its content version, but its visible
+        // existence can also depend on a deletion-register `Restored` event.
+        // Remember the winner while assembling its content bundle so that a
+        // content and restore event committed in the *same* transaction are
+        // shipped together.  The later replacement pass only emits a
+        // different transaction; once this transaction is marked emitted it
+        // cannot repair a missing same-transaction register witness.
+        let mut result_add_deletion_winners =
+            BTreeMap::<(String, RowUuid), Option<VersionRow>>::new();
         for (tx_id, wanted_rows) in &wanted_add_rows_by_tx {
             if peer_complete_tx_payloads.contains(tx_id) {
                 peer_payload_inventory_refs.push(*tx_id);
@@ -754,9 +934,55 @@ where
                     };
                 tx_versions_cache.insert(*tx_id, fallback_versions);
             }
+            let mut same_transaction_deletion_winners = Vec::new();
+            for (entry_table, row_uuid) in wanted_rows {
+                if !row_result_adds
+                    .iter()
+                    .any(|(table, result_row_uuid, content_tx_id)| {
+                        table.as_str() == entry_table
+                            && result_row_uuid == row_uuid
+                            && content_tx_id == tx_id
+                    })
+                {
+                    continue;
+                }
+                let winner_key = (entry_table.clone(), *row_uuid);
+                let deletion_winner =
+                    if let Some(winner) = result_add_deletion_winners.get(&winner_key) {
+                        winner.clone()
+                    } else {
+                        let (_, retained_deletion_winner) =
+                            maintained_facts.replacement_for(entry_table, *row_uuid);
+                        let winner = match retained_deletion_winner {
+                            Some(winner) => Some(winner),
+                            None if allow_storage_witness_fallback => {
+                                self.storage_backed_maintained_deletion_winner(
+                                    entry_table,
+                                    *row_uuid,
+                                    tier,
+                                    &mut context,
+                                )
+                                .await?
+                            }
+                            None => None,
+                        };
+                        result_add_deletion_winners.insert(winner_key, winner.clone());
+                        winner
+                    };
+                if let Some(winner) = deletion_winner
+                    && self.version_tx_id(&winner)? == *tx_id
+                {
+                    same_transaction_deletion_winners.push(winner);
+                }
+            }
             let tx_versions = tx_versions_cache
                 .get_mut(tx_id)
                 .expect("tx versions cache entry must exist after fallback");
+            for winner in same_transaction_deletion_winners {
+                if !maintained_view_tx_versions_contain_winner(tx_versions, &winner) {
+                    tx_versions.push(winner);
+                }
+            }
             if tx_versions.iter().any(|version| {
                 version.deletion().is_none()
                     && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
@@ -793,12 +1019,29 @@ where
                 if filtered_tx_versions.is_empty() {
                     continue;
                 }
-                let bundle = self
-                    .version_bundle_for_maintained_view_versions_with_tx(
+                // Storage-backed result membership loaded these exact
+                // immutable history records by `(table, row, tx)` above. Do
+                // not immediately reload them merely to canonicalize an IVM
+                // witness: unlike a graph-projected witness, these are
+                // already authored history rows. Keeping that distinction
+                // here preserves the cold current-row O(1) read receipt.
+                let bundle = if maintained_facts.uses_storage_backed_result_materialization()
+                    && needs_storage_fallback
+                    && self
+                        .exact_storage_maintained_versions_are_unambiguous(&filtered_tx_versions)?
+                {
+                    self.version_bundle_for_exact_storage_maintained_view_versions_with_tx(
                         &stored_tx,
                         &filtered_tx_versions,
                     )
-                    .await?;
+                    .await?
+                } else {
+                    self.version_bundle_for_maintained_view_versions_with_tx(
+                        &stored_tx,
+                        &filtered_tx_versions,
+                    )
+                    .await?
+                };
                 version_bundles.push(bundle);
                 record_maintained_view_stream_b_add_bundle();
                 continue;
@@ -808,45 +1051,60 @@ where
                 "add result row missing Stream B content witness",
             ));
         }
+        let mut replacement_winners_by_tx =
+            BTreeMap::<TxId, Vec<(String, RowUuid, VersionRow, &'static str)>>::new();
         for (entry_table, row_uuid, content_tx_id) in &row_result_adds {
-            let (_, deletion_winner) = maintained_facts.replacement_for(entry_table, *row_uuid);
+            let deletion_winner = if let Some(winner) =
+                result_add_deletion_winners.get(&(entry_table.as_str().to_owned(), *row_uuid))
+            {
+                winner.clone()
+            } else {
+                let (_, retained_deletion_winner) =
+                    maintained_facts.replacement_for(entry_table, *row_uuid);
+                match retained_deletion_winner {
+                    Some(winner) => Some(winner),
+                    None if allow_storage_witness_fallback => {
+                        self.storage_backed_maintained_deletion_winner(
+                            entry_table,
+                            *row_uuid,
+                            tier,
+                            &mut context,
+                        )
+                        .await?
+                    }
+                    None => None,
+                }
+            };
             let Some(version) = deletion_winner.as_ref() else {
                 continue;
             };
             let tx_id = self.version_tx_id(version)?;
-            if tx_id == *content_tx_id || !emitted_versions.insert(tx_id) {
+            if tx_id == *content_tx_id || emitted_versions.contains(&tx_id) {
                 continue;
             }
-            if peer_complete_tx_payloads.contains(&tx_id) {
-                peer_payload_inventory_refs.push(tx_id);
-                record_maintained_view_removal_stream_bundle();
-            } else {
-                let tx_versions = tx_versions_cache
-                    .entry(tx_id)
-                    .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
-                if maintained_view_tx_versions_contain_winner(tx_versions, version) {
-                    let stored_tx = self
-                        .query_transaction_memo(tx_id, &mut context)
-                        .await?
-                        .ok_or(Error::MissingTransaction(tx_id))?;
-                    version_bundles.push(
-                        self.version_bundle_for_maintained_view_versions_with_tx(
-                            &stored_tx,
-                            tx_versions,
-                        )
-                        .await?,
-                    );
-                    record_maintained_view_removal_stream_bundle();
-                } else {
-                    return Err(Error::MaintainedViewMissingBundleWitness(
-                        "add result row missing deletion replacement witness",
-                    ));
-                }
-            }
+            replacement_winners_by_tx.entry(tx_id).or_default().push((
+                entry_table.to_string(),
+                *row_uuid,
+                version.clone(),
+                "add result row missing deletion replacement witness",
+            ));
         }
         for (entry_table, row_uuid, old_tx_id) in &row_result_removes {
-            let (content_winner, deletion_winner) =
+            let (content_winner, retained_deletion_winner) =
                 maintained_facts.replacement_for(entry_table, *row_uuid);
+            let deletion_winner = match retained_deletion_winner {
+                Some(winner) => Some(winner),
+                None if allow_storage_witness_fallback => {
+                    self.storage_backed_maintained_deletion_winner(
+                        entry_table,
+                        *row_uuid,
+                        tier,
+                        &mut context,
+                    )
+                    .await?
+                }
+                None => None,
+            };
             for (version, missing_witness) in [
                 (
                     content_winner.as_ref(),
@@ -864,31 +1122,100 @@ where
                 if tx_id == *old_tx_id || emitted_versions.contains(&tx_id) {
                     continue;
                 }
-                if peer_complete_tx_payloads.contains(&tx_id) {
-                    peer_payload_inventory_refs.push(tx_id);
-                    record_maintained_view_removal_stream_bundle();
-                    continue;
-                }
-                let tx_versions = tx_versions_cache
-                    .entry(tx_id)
-                    .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
-                if !maintained_view_tx_versions_contain_winner(tx_versions, version) {
+                replacement_winners_by_tx.entry(tx_id).or_default().push((
+                    entry_table.to_string(),
+                    *row_uuid,
+                    version.clone(),
+                    missing_witness,
+                ));
+            }
+        }
+        for (tx_id, winners) in replacement_winners_by_tx {
+            if emitted_versions.contains(&tx_id) {
+                continue;
+            }
+            if peer_complete_tx_payloads.contains(&tx_id) {
+                emitted_versions.insert(tx_id);
+                peer_payload_inventory_refs.push(tx_id);
+                record_maintained_view_removal_stream_bundle();
+                continue;
+            }
+            let wanted_rows = winners
+                .iter()
+                .map(|(table, row_uuid, _, _)| (table.clone(), *row_uuid))
+                .collect::<BTreeSet<_>>();
+            let tx_versions = tx_versions_cache
+                .entry(tx_id)
+                .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
+            if winners.iter().any(|(_, _, winner, _)| {
+                !maintained_view_tx_versions_contain_winner(tx_versions, winner)
+            }) {
+                if !allow_storage_witness_fallback {
+                    let (_, _, _, missing_witness) = winners
+                        .iter()
+                        .find(|(_, _, winner, _)| {
+                            !maintained_view_tx_versions_contain_winner(tx_versions, winner)
+                        })
+                        .expect("missing maintained witness must be present");
                     return Err(Error::MaintainedViewMissingBundleWitness(missing_witness));
                 }
-                emitted_versions.insert(tx_id);
                 let stored_tx = self
                     .query_transaction_memo(tx_id, &mut context)
                     .await?
                     .ok_or(Error::MissingTransaction(tx_id))?;
-                version_bundles.push(
-                    self.version_bundle_for_maintained_view_versions_with_tx(
-                        &stored_tx,
-                        tx_versions,
-                    )
-                    .await?,
-                );
-                record_maintained_view_removal_stream_bundle();
+                let fallback_versions =
+                    if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
+                        self.query_versions_for_tx(tx_id).await?
+                    } else {
+                        self.query_versions_for_tx_rows_by_alias(
+                            tx_id,
+                            stored_tx.node_alias,
+                            &wanted_rows,
+                        )
+                        .await?
+                    };
+                tx_versions_cache.insert(tx_id, fallback_versions);
             }
+            let stored_tx = self
+                .query_transaction_memo(tx_id, &mut context)
+                .await?
+                .ok_or(Error::MissingTransaction(tx_id))?;
+            if complete_exclusive_payloads
+                && stored_tx.tx.kind == TxKind::Exclusive
+                && usize::try_from(stored_tx.tx.n_total_writes).ok()
+                    != tx_versions_cache.get(&tx_id).map(Vec::len)
+            {
+                tx_versions_cache.insert(tx_id, self.query_versions_for_tx(tx_id).await?);
+            }
+            let tx_versions = tx_versions_cache
+                .get(&tx_id)
+                .expect("tx versions cache entry must exist after fallback");
+            if let Some((_, _, _, missing_witness)) = winners.iter().find(|(_, _, winner, _)| {
+                !maintained_view_tx_versions_contain_winner(tx_versions, winner)
+            }) {
+                return Err(Error::MaintainedViewMissingBundleWitness(missing_witness));
+            }
+            emitted_versions.insert(tx_id);
+            let bundled_versions =
+                if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
+                    tx_versions.clone()
+                } else {
+                    tx_versions
+                        .iter()
+                        .filter(|version| {
+                            wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
+                        })
+                        .cloned()
+                        .collect()
+                };
+            version_bundles.push(
+                self.version_bundle_for_maintained_view_versions_with_tx(
+                    &stored_tx,
+                    &bundled_versions,
+                )
+                .await?,
+            );
+            record_maintained_view_removal_stream_bundle();
         }
         for bundle in &mut version_bundles {
             if bundle.tx.kind != TxKind::Exclusive {
@@ -1746,6 +2073,64 @@ where
         stored_tx: &StoredTransaction,
         tx_versions: &[VersionRow],
     ) -> Result<VersionBundle, Error> {
+        self.version_bundle_for_maintained_view_versions_with_tx_and_source(
+            stored_tx,
+            tx_versions,
+            MaintainedBundleVersionSource::IvmWitness,
+        )
+        .await
+    }
+
+    /// Build a maintained-view bundle from rows that were loaded directly
+    /// from the immutable history store by their exact storage identities.
+    ///
+    /// This is intentionally narrower than the ordinary maintained-witness
+    /// path: graph-projected versions still need canonicalization before
+    /// serialization. Callers may use this only for the result of an exact
+    /// `query_versions_for_tx_rows_by_alias` lookup, never for an IVM
+    /// witness.
+    async fn version_bundle_for_exact_storage_maintained_view_versions_with_tx(
+        &mut self,
+        stored_tx: &StoredTransaction,
+        tx_versions: &[VersionRow],
+    ) -> Result<VersionBundle, Error> {
+        self.version_bundle_for_maintained_view_versions_with_tx_and_source(
+            stored_tx,
+            tx_versions,
+            MaintainedBundleVersionSource::ExactStorage,
+        )
+        .await
+    }
+
+    /// Whether these direct immutable-store reads can be serialized without
+    /// the normal maintained-witness canonicalization. Logical names can be
+    /// reused by different physical tables across schema history, so an exact
+    /// `(table, row, tx)` lookup alone is not enough: every row must resolve
+    /// to the sole physical table ever named by that logical label. Otherwise
+    /// use the ordinary fail-closed canonicalization path.
+    fn exact_storage_maintained_versions_are_unambiguous(
+        &self,
+        versions: &[VersionRow],
+    ) -> Result<bool, Error> {
+        versions.iter().try_fold(true, |all_unambiguous, version| {
+            let version_table_id = self.physical_table_id_for_version(version)?;
+            let table_ids = self
+                .catalogue
+                .physical_mappings
+                .values()
+                .filter_map(|mapping| mapping.tables.get(version.table()))
+                .map(|mapping| mapping.table_id)
+                .collect::<BTreeSet<_>>();
+            Ok(all_unambiguous && table_ids.len() == 1 && table_ids.contains(&version_table_id))
+        })
+    }
+
+    async fn version_bundle_for_maintained_view_versions_with_tx_and_source(
+        &mut self,
+        stored_tx: &StoredTransaction,
+        tx_versions: &[VersionRow],
+        source: MaintainedBundleVersionSource,
+    ) -> Result<VersionBundle, Error> {
         let Transaction {
             tx_id,
             kind,
@@ -1788,9 +2173,12 @@ where
             // query output. Resolve its identity back to the stored authored
             // row before crossing the wire boundary (INV-DATA-16/18,
             // INV-SYNC-16, and C.3's byte-fidelity rule).
-            let canonical = self
-                .canonical_history_version_for_maintained_witness(version)
-                .await?;
+            let canonical = if source == MaintainedBundleVersionSource::ExactStorage {
+                version.clone()
+            } else {
+                self.canonical_history_version_for_maintained_witness(version)
+                    .await?
+            };
             versions.push(self.version_record_from_row(&canonical)?);
         }
         Ok(VersionBundle {
@@ -1902,9 +2290,11 @@ where
             self.version_storage_sources_for_layer(version.table(), version.layer())?
         {
             let Some(canonical) = self
-                .query_version_by_alias_with_storage(
+                .query_version_by_alias_with_storage_in_schema(
+                    authored_schema,
                     version.table(),
                     &storage_table,
+                    version.branch_key(),
                     version.row_uuid(),
                     version.tx_time(),
                     version.tx_node_alias(),

@@ -5,7 +5,7 @@
  * subscriptions, and sync.
  */
 
-import type { AppContext, Session } from "./context.js";
+import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type {
   InsertValues,
   RuntimeSubscriptionDelta,
@@ -21,7 +21,12 @@ import {
 } from "./client-session.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
+import {
+  resolveRuntimeConfigSyncInitInput,
+  resolveRuntimeConfigWasmUrl,
+} from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
+import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
 
 type RuntimeSerializedSession = Pick<Session, "issuer" | "user_id" | "claims" | "authMode"> & {
   [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
@@ -346,14 +351,17 @@ export interface AuthConfig {
  */
 export type DurabilityTier = "local" | "edge" | "global";
 /** Product-facing policy for reads. It deliberately does not change write durability. */
-export enum ReadTier {
-  LocalFirst = "local-first",
-  Remote = "remote",
-  RemoteIfPossible = "remote-if-possible",
-}
+export const ReadTier = {
+  LocalFirst: "local-first",
+  Remote: "remote",
+  RemoteIfPossible: "remote-if-possible",
+} as const;
+export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
 /** @deprecated Read APIs also accept these legacy durability names unchanged. */
 export type LegacyReadDurabilityTier = DurabilityTier;
 export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
+/** @internal Inspector-only tier that never subscribes upstream. */
+type InternalQueryReadTier = QueryReadTier | "local-only";
 /**
  * Controls when a write is visible to subscriptions.
  *
@@ -397,14 +405,48 @@ export interface BranchView {
 export interface QueryExecutionOptions {
   /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
   tier?: QueryReadTier;
-  localUpdates?: LocalUpdatesMode;
-  propagation?: QueryPropagation;
-  visibility?: QueryVisibility;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
 }
 
-type InternalQueryExecutionOptions = QueryExecutionOptions & {
+/**
+ * Copy the product-facing subset of query options before crossing a public
+ * JavaScript boundary.  TypeScript declarations are useful guidance, but a
+ * caller can always supply an object through `as any` (or plain JavaScript).
+ * In particular, transport propagation and own-write delivery are runtime
+ * controls, not product API switches.
+ *
+ * @internal Db uses the analogous conversion when it lowers typed builders.
+ */
+export function publicQueryExecutionOptions(
+  options?: QueryExecutionOptions,
+): QueryExecutionOptions | undefined {
+  if (!options) return undefined;
+  const candidate = options as { tier?: unknown; branch?: unknown };
+  const result: QueryExecutionOptions = {};
+  if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
+  if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
+  return result;
+}
+
+/** @internal `local-only` is deliberately excluded from the product surface. */
+export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
+  return (
+    value === ReadTier.LocalFirst ||
+    value === ReadTier.Remote ||
+    value === ReadTier.RemoteIfPossible ||
+    value === "local" ||
+    value === "edge" ||
+    value === "global"
+  );
+}
+
+/** @internal Low-level read controls that are not part of the product-facing query API. */
+export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
+  tier?: InternalQueryReadTier;
+  localUpdates?: LocalUpdatesMode;
+  propagation?: QueryPropagation;
+  visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
   runtimeSettledTier?: DurabilityTier | null;
 };
@@ -519,8 +561,18 @@ interface WriteContextPayload {
 
 /**
  * Subscription callback type.
+ *
+ * The function form is retained for compatibility. Prefer
+ * {@link SubscriptionCallbacks} so terminal failures are handled explicitly;
+ * otherwise they are reported to `console.error`.
  */
 export type SubscriptionCallback = (delta: RuntimeSubscriptionDelta) => void;
+export interface SubscriptionCallbacks {
+  /** Called for each native subscription delta. */
+  onUpdate: SubscriptionCallback;
+  /** Called once when the native subscription or update callback fails. */
+  onError?: (error: Error) => void;
+}
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
@@ -549,19 +601,22 @@ export function resolveDefaultDurabilityTier(
 
 export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
-  options?: QueryExecutionOptions,
+  options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
+  const selectedTier = options?.tier ?? resolveDefaultDurabilityTier(context);
   return {
-    tier: resolveReadTier(options?.tier ?? resolveDefaultDurabilityTier(context)),
-    localUpdates: options?.localUpdates ?? "immediate",
-    propagation: options?.propagation ?? "full",
+    tier: resolveReadTier(selectedTier),
+    localUpdates:
+      options?.localUpdates ?? (selectedTier === ReadTier.Remote ? "deferred" : "immediate"),
+    propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
 }
 
 /** @internal Low-level runtimes retain the legacy three-tier wire contract. */
-export function resolveReadTier(tier: QueryReadTier): DurabilityTier {
+export function resolveReadTier(tier: InternalQueryReadTier): DurabilityTier {
+  if (tier === "local-only") return "local";
   return tier === ReadTier.LocalFirst
     ? "local"
     : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
@@ -811,6 +866,20 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
+  /** Facade-owned subscription releases, fenced against terminal reentrancy. */
+  private activeSubscriptionReleases = new Map<number, () => void>();
+
+  private registerSubscriptionRelease(handle: number, release: () => void): void {
+    this.activeSubscriptionReleases.set(handle, release);
+  }
+
+  private releaseSubscription(handle: number): void {
+    const release = this.activeSubscriptionReleases.get(handle);
+    // Subscription ids are opaque facade results. Once their owner is gone,
+    // duplicate public calls are intentionally no-ops rather than raw native
+    // unsubscriptions (which could double-release a terminal handle).
+    release?.();
+  }
 
   private resolveSessionFromContext(): Session | null {
     return resolveClientSessionStateSync({
@@ -949,20 +1018,9 @@ export class JazzClient {
   }
 
   updateCookieSession(cookieSession?: Session): void {
-    const previousCookieSession = this.context.cookieSession;
-    const previousResolvedSession = this.resolvedSession;
     this.context.cookieSession = cookieSession;
     this.resolvedSession = this.resolveSessionFromContext();
-    try {
-      this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
-    } catch (error) {
-      // A native foreground capability is authenticated at admission time and
-      // cannot safely be reused under a refreshed session. Keep the public
-      // auth view truthful when that runtime fails closed.
-      this.context.cookieSession = previousCookieSession;
-      this.resolvedSession = previousResolvedSession;
-      throw error;
-    }
+    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
   private normalizeQueryExecutionOptions(
@@ -1241,7 +1299,7 @@ export class JazzClient {
     table: string,
     objectId: string,
     values: InsertValues,
-    options?: TimestampOverrideOptions,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
   ): WriteHandle {
@@ -1256,7 +1314,7 @@ export class JazzClient {
     table: string,
     objectId: string,
     values: InsertValues,
-    options?: TimestampOverrideOptions,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
     openTransactionId?: OpenTransactionId,
@@ -1267,6 +1325,7 @@ export class JazzClient {
       attribution,
       openTransactionId,
       options?.updatedAt,
+      options?.branch,
     );
     return this.runtime.upsert(table, objectId, values, writeContext);
   }
@@ -1278,7 +1337,12 @@ export class JazzClient {
    * @param options Optional read durability options
    * @returns Array of matching rows
    */
-  async query(
+  async query(query: string, options?: QueryExecutionOptions, session?: Session): Promise<Row[]> {
+    return this.queryInternal(query, publicQueryExecutionOptions(options), session);
+  }
+
+  /** @internal */
+  async queryInternal(
     query: string,
     options?: InternalQueryExecutionOptions,
     session?: Session,
@@ -1558,17 +1622,29 @@ export class JazzClient {
   /**
    * Subscribe to a query and receive updates when results change.
    *
-   * @param query JSON-encoded runtime query specification
-   * @param callback Called with delta whenever results change
+   * @param callbacks Delta callback, or callbacks object with terminal error handling.
+   * Legacy function-form subscriptions report terminal failures to `console.error`.
    * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
     query: string,
-    callback: SubscriptionCallback,
+    callbacks: SubscriptionCallback | SubscriptionCallbacks,
     options?: QueryExecutionOptions,
     session?: Session,
   ): number {
+    return this.subscribeInternal(query, callbacks, publicQueryExecutionOptions(options), session);
+  }
+
+  /** @internal */
+  subscribeInternal(
+    query: string,
+    callbacks: SubscriptionCallback | SubscriptionCallbacks,
+    options?: InternalQueryExecutionOptions,
+    session?: Session,
+  ): number {
+    const { onUpdate, onError } =
+      typeof callbacks === "function" ? { onUpdate: callbacks, onError: undefined } : callbacks;
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession
@@ -1583,16 +1659,60 @@ export class JazzClient {
       optionsJson,
     );
 
+    let terminal = false;
+    let nativeHandleReleased = false;
+    const releaseNativeHandle = () => {
+      if (nativeHandleReleased) return;
+      nativeHandleReleased = true;
+      if (this.activeSubscriptionReleases.get(handle) === releaseSubscription) {
+        this.activeSubscriptionReleases.delete(handle);
+      }
+      this.runtime.unsubscribe(handle);
+    };
+    const releaseSubscription = () => {
+      // A public unsubscribe is terminal too: a queued native frame must not
+      // re-enter application callbacks after its owner has been released.
+      terminal = true;
+      releaseNativeHandle();
+    };
+    this.registerSubscriptionRelease(handle, releaseSubscription);
+    const terminate = (error: Error, unsubscribe: boolean) => {
+      if (terminal) return;
+      terminal = true;
+      if (unsubscribe) this.releaseSubscription(handle);
+      if (!onError) {
+        console.error("Unhandled Jazz subscription error", error);
+        return;
+      }
+      try {
+        onError(error);
+      } catch (callbackError) {
+        console.error("Jazz subscription error callback failed", callbackError);
+      }
+    };
+
     try {
       this.runtime.executeSubscription(handle, (result) => {
-        if (result instanceof Error) throw result;
-        callback(result);
+        if (terminal) return;
+        if (result instanceof Error) {
+          // A terminal callback means this facade owns the now-dead native
+          // handle. Release it even if the core stream has stopped producing.
+          terminate(result, true);
+          return;
+        }
+        try {
+          onUpdate(result);
+        } catch (error) {
+          // User callback failures must not escape through the native tick or
+          // leave a live source publishing behind the terminal notification.
+          terminate(error instanceof Error ? error : new Error(String(error)), true);
+        }
       });
     } catch (error) {
       // createSubscription already transferred ownership to this facade. If
       // callback installation fails synchronously, no caller can own the
       // handle because subscribe() has not returned it yet.
-      this.runtime.unsubscribe(handle);
+      this.releaseSubscription(handle);
       throw error;
     }
 
@@ -1605,7 +1725,7 @@ export class JazzClient {
    * @param subscriptionId ID returned from subscribe()
    */
   unsubscribe(subscriptionId: number): void {
-    this.runtime.unsubscribe(subscriptionId);
+    this.releaseSubscription(subscriptionId);
   }
 
   /**
@@ -1694,4 +1814,125 @@ export class JazzClient {
 
     await this.runtime.clearClientStorage();
   }
+}
+
+/**
+ * WASM module type for sync client creation.
+ * This is the type of the jazz-wasm module after dynamic import.
+ */
+export type WasmModule = typeof import("jazz-wasm");
+
+async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
+  const moduleBuiltin = process.getBuiltinModule?.("module");
+  const fsBuiltin = process.getBuiltinModule?.("fs");
+  const pathBuiltin = process.getBuiltinModule?.("path");
+
+  if (!moduleBuiltin || !fsBuiltin || !pathBuiltin) {
+    return null;
+  }
+
+  const { createRequire } = moduleBuiltin;
+  const { existsSync, readFileSync } = fsBuiltin;
+  const { dirname, resolve } = pathBuiltin;
+
+  const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+  if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+    throw new Error("sealed correctness consumer is missing its admitted WASM package");
+  if (sealedWasmPackage) {
+    const wasmPath = pathBuiltin.resolve(sealedWasmPackage, "jazz_wasm_bg.wasm");
+    return existsSync(wasmPath) ? readFileSync(wasmPath) : null;
+  }
+
+  const require = createRequire(import.meta.url);
+  const packageJsonPath = require.resolve("jazz-wasm/package.json");
+  const packageDir = dirname(packageJsonPath);
+  const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
+
+  if (!existsSync(wasmPath)) {
+    return null;
+  }
+
+  return readFileSync(wasmPath);
+}
+
+/**
+ * Load and initialize the WASM module.
+ *
+ * Exported so that `createDb()` can pre-load the module for sync mutations.
+ */
+let wasmInitializationTail: Promise<void> = Promise.resolve();
+
+export function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
+  const initialization = wasmInitializationTail.then(() => initializeWasmModule(runtime));
+  wasmInitializationTail = initialization.then(
+    () => undefined,
+    () => undefined,
+  );
+  return initialization;
+}
+
+async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
+  // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
+  const wasmModule: any = await import("jazz-wasm");
+  const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
+
+  if (syncInitInput) {
+    wasmModule.initSync(syncInitInput);
+    assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
+    return wasmModule;
+  }
+
+  // In Node.js, we need to read the .wasm file and use initSync.
+  // In browsers/React Native, the default fetch-based init works (or default()).
+  // Use try/catch so we skip the Node path when node:* modules are unavailable (e.g. RN).
+  let nodeInitDone = false;
+  if (typeof process !== "undefined" && process.versions?.node) {
+    try {
+      const wasmBinary = await tryLoadNodePackagedWasmBinary();
+      if (wasmBinary) {
+        wasmModule.initSync({ module: wasmBinary });
+        nodeInitDone = true;
+      }
+    } catch {
+      // Node modules unavailable (e.g. React Native with process polyfill)
+    }
+  }
+  if (!nodeInitDone && typeof wasmModule.default === "function") {
+    const wasmUrl =
+      typeof location !== "undefined"
+        ? resolveRuntimeConfigWasmUrl(import.meta.url, location.href, runtime)
+        : null;
+
+    if (wasmUrl) {
+      await initializeWasmFromUrl(wasmModule, wasmUrl);
+    } else {
+      await wasmModule.default();
+    }
+  }
+
+  assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
+  return wasmModule;
+}
+
+async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<void> {
+  const response = await fetch(wasmUrl);
+  if (!response.ok) {
+    throw new Error(
+      `WASM asset request failed (${response.status} ${response.statusText}) for ${wasmUrl}`,
+    );
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (
+    bytes.length < 4 ||
+    bytes[0] !== 0x00 ||
+    bytes[1] !== 0x61 ||
+    bytes[2] !== 0x73 ||
+    bytes[3] !== 0x6d
+  ) {
+    const contentType = response.headers.get("content-type") ?? "unknown content type";
+    throw new Error(
+      `WASM asset response is not a WebAssembly binary for ${wasmUrl} (${contentType})`,
+    );
+  }
+  await wasmModule.default({ module_or_path: bytes });
 }

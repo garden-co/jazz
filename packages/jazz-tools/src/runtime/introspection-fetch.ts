@@ -1,4 +1,3 @@
-import type { QueryPropagation } from "./client.js";
 import { appScopedUrl } from "./url.js";
 
 export interface IntrospectionSubscriptionGroup {
@@ -7,7 +6,7 @@ export interface IntrospectionSubscriptionGroup {
   table: string;
   query: string;
   branches: string[];
-  propagation: QueryPropagation;
+  propagation: "full" | "local-only";
 }
 
 export interface IntrospectionSubscriptionResponse {

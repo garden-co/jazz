@@ -6,7 +6,7 @@
 //! [`views`] for sync view payloads. In the layer map it is the core between the
 //! `Db` facade and groove storage/IVM.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -66,12 +66,43 @@ fn install_enum_case_ids(
         .iter()
         .copied()
         .enumerate()
-        .map(|(ordinal, id)| GlobalScalarEnumCaseId {
-            id,
-            introducing_schema,
-            introducing_ordinal: ordinal as u8,
+        .map(|(ordinal, id)| {
+            Ok(GlobalScalarEnumCaseId {
+                id,
+                introducing_schema,
+                introducing_ordinal: u8::try_from(ordinal)
+                    .map_err(|_| Error::InvalidStoredValue("scalar enum tag exhausted"))?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, Error>>()?;
+    let shared = slot.len().min(expected.len());
+    if slot[..shared] != expected[..shared] || slot.len() > expected.len() {
+        return Err(Error::InvalidStoredValue(
+            "enum registry conflicts with authority identities",
+        ));
+    }
+    slot.extend(expected.into_iter().skip(slot.len()));
+    Ok(())
+}
+
+fn install_payload_enum_case_ids(
+    slot: &mut Vec<GlobalEnumCaseId>,
+    ids: &[crate::ids::GlobalPhysicalEnumVariantId],
+    introducing_schema: SchemaVersionId,
+) -> Result<(), Error> {
+    let expected = ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(ordinal, id)| {
+            Ok(GlobalEnumCaseId {
+                id,
+                introducing_schema,
+                introducing_ordinal: u32::try_from(ordinal)
+                    .map_err(|_| Error::InvalidStoredValue("payload enum tag exhausted"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     let shared = slot.len().min(expected.len());
     if slot[..shared] != expected[..shared] || slot.len() > expected.len() {
         return Err(Error::InvalidStoredValue(
@@ -154,7 +185,7 @@ fn hydrate_nested_scalar_enum_cases(
         }
         ValueType::Enum(schema) => {
             for (ordinal, case) in schema.cases.iter().enumerate() {
-                let identity = GlobalScalarEnumCaseId {
+                let identity = GlobalEnumCaseId {
                     id: *identities
                         .get(authored_path)
                         .and_then(|ids| ids.get(ordinal))
@@ -162,7 +193,9 @@ fn hydrate_nested_scalar_enum_cases(
                             "nested payload enum authority identity missing",
                         ))?,
                     introducing_schema,
-                    introducing_ordinal: ordinal as u8,
+                    introducing_ordinal: u32::try_from(ordinal).map_err(|_| {
+                        Error::InvalidStoredValue("nested payload enum tag exhausted")
+                    })?,
                 };
                 hydrate_nested_scalar_enum_cases(
                     &records::ValueType::Record(Box::new(case.payload.clone())),
@@ -179,7 +212,7 @@ fn hydrate_nested_scalar_enum_cases(
     Ok(())
 }
 
-fn global_case_path(path: &str, case: &GlobalScalarEnumCaseId) -> String {
+fn global_case_path(path: &str, case: &GlobalEnumCaseId) -> String {
     format!("{path}/case/{}", case.id.0.simple())
 }
 
@@ -192,7 +225,7 @@ fn hydrate_nested_payload_enum_cases(
     introducing_schema: SchemaVersionId,
     authored_path: &str,
     path: &str,
-    output: &mut BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+    output: &mut BTreeMap<String, Vec<GlobalEnumCaseId>>,
 ) -> Result<(), Error> {
     use records::ValueType;
     match value_type {
@@ -250,7 +283,7 @@ fn hydrate_nested_payload_enum_cases(
                     "nested payload enum authority identity width mismatch",
                 ));
             }
-            install_enum_case_ids(
+            install_payload_enum_case_ids(
                 output.entry(path.to_owned()).or_default(),
                 ids,
                 introducing_schema,
@@ -288,6 +321,7 @@ mod query_eval;
 mod recovery;
 mod source_resolution;
 mod views;
+pub(crate) use open_tx::TransactionBranchRowState;
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(test)]
@@ -295,7 +329,7 @@ pub(crate) use query_eval::take_client_physical_row_query_calls_for_test;
 pub(crate) use query_eval::{
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
 };
-pub(crate) use views::MaintainedViewBundleInputs;
+pub(crate) use views::{FlatTupleSourceTables, MaintainedViewBundleInputs};
 
 type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 
@@ -509,6 +543,10 @@ pub struct NodeState<S> {
     session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
     session_claim_revisions: BTreeMap<AuthorSubject, u64>,
+    /// Claims scoped to the subscriber whose query is currently compiling.
+    /// This never escapes the node lock, so equal authenticated identities on
+    /// concurrent transports cannot change each other's policy inputs.
+    active_session_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     /// Whether this authority has installed the permissions head that governs
     /// session-scoped reads and writes.
     permissions_ready: bool,
@@ -633,6 +671,9 @@ pub(crate) enum CatalogueBootstrapState {
 struct Clock {
     /// Highest local transaction timestamp observed or minted by this node.
     tx_time: TxTime,
+    /// Synchronously reservable high-water mirror shared with the host-facing
+    /// node wrapper. Every mint/merge path advances both clocks.
+    reservation_high_water: Rc<Cell<TxTime>>,
     /// Highest authority settlement timestamp observed or minted by this node.
     global_time_register: GlobalTime,
     /// Authority timestamps allocated here and awaiting accepted application.
@@ -681,7 +722,7 @@ where
 
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {
         self.clock
-            .allocate_global_time(self.clock.tx_time.physical_ms())
+            .allocate_global_time(self.tx_time_high_water().physical_ms())
             .expect("test global HLC must have capacity")
     }
 
@@ -788,6 +829,27 @@ struct QueryServing {
     version_storage_sources_cache: BTreeMap<(String, VersionLayer), Vec<String>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
+    /// Connection epochs retaining each peer-installed or peer-parked shape.
+    ///
+    /// One owner is recorded per peer regardless of repeated registration or
+    /// the number of read-view registrations sharing the shape.
+    peer_shape_owners: BTreeMap<ShapeId, BTreeSet<u64>>,
+    /// Shapes registered by the local runtime rather than a served peer.
+    ///
+    /// Local ownership pins a shared shape after the last remote owner leaves.
+    locally_registered_shapes: BTreeSet<ShapeId>,
+    /// Served publications retaining each shape, keyed by the peer-state
+    /// instance and concrete usage subscription that opened the publication.
+    ///
+    /// These are deliberately distinct from `peer_shape_owners`: the latter
+    /// tracks an inbound peer's `RegisterShape` lifetime, while this records
+    /// this node serving a downstream peer. Both kinds of owner may retain the
+    /// same shape concurrently.
+    outbound_shape_owners: BTreeMap<ShapeId, BTreeSet<(u64, SubscriptionKey)>>,
+    /// Served publications retaining each concrete binding view.  This keeps
+    /// one peer's retirement from leaving its binding receipts resident, while
+    /// still permitting multiple peer states to share an identical binding.
+    outbound_binding_owners: BTreeMap<SubscriptionKey, BTreeSet<u64>>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
     // A wire subscription is identified by its usage binding handle *and* read
     // view. The same canonical binding id may legitimately be registered at
@@ -856,6 +918,7 @@ struct ReadPolicyAuthorizationRequestCacheKey {
     binding_source_shape: Option<String>,
     binding_user_params: String,
     binding_claim_params: String,
+    active_session_claims: String,
     include_deleted_root: bool,
 }
 
@@ -1716,6 +1779,25 @@ impl MergeableCommit {
         self
     }
 
+    /// Carry an engine-proven physical preimage into a branch-view write.
+    ///
+    /// A branch overlay starts with cells read from its base. An unchanged
+    /// indirect descriptor in that snapshot is not caller-authored: it was
+    /// already admitted by the local physical read that produced `inherited`.
+    /// Mark only an exact still-present cell, so a later patch cannot use this
+    /// provenance to smuggle in a different descriptor.
+    pub(crate) fn verified_inherited_large_cells(
+        mut self,
+        inherited: &BTreeMap<String, Value>,
+    ) -> Self {
+        for (column, value) in inherited {
+            if value_contains_indirect_descriptor(value) && self.cells.get(column) == Some(value) {
+                self.prepared_large_columns.insert(column.clone());
+            }
+        }
+        self
+    }
+
     /// Preserve which cells were explicitly authored when `cells` is a
     /// materialized snapshot assembled for a partial update.
     pub fn authored_columns(mut self, columns: BTreeSet<String>) -> Self {
@@ -2056,9 +2138,38 @@ fn settled_result_member_key(
     binding_view_key: BindingViewKey,
     member: &ResultMemberEntry,
 ) -> Result<Vec<Value>, Error> {
+    let member_bytes = codec::result_member_storage_bytes(member)?;
     let mut key = binding_view_store_prefix(binding_view_key);
-    key.push(Value::Bytes(codec::result_member_storage_bytes(member)?));
+    key.push(Value::Bytes(
+        settled_result_member_digest(&member_bytes).to_vec(),
+    ));
     Ok(key)
+}
+
+/// Domain-separated identity for one settled result member.  A member may
+/// contain an application-controlled synthetic payload, so its canonical bytes
+/// belong in the direct-store value rather than an ordered storage key.  The
+/// fixed-size digest retains idempotent add/remove semantics without allowing
+/// a large member to make an IDB/B-tree key exceed its page bound.
+const SETTLED_RESULT_MEMBER_DIGEST_DOMAIN: &str = "jazz.settled-result-member-key.v1";
+
+fn settled_result_member_digest(member_bytes: &[u8]) -> [u8; 32] {
+    blake3::derive_key(SETTLED_RESULT_MEMBER_DIGEST_DOMAIN, member_bytes)
+}
+
+fn settled_result_member_storage_write(
+    binding_view_key: BindingViewKey,
+    member: &ResultMemberEntry,
+) -> Result<groove::db::DirectRecordStoreWrite, Error> {
+    let member_bytes = codec::result_member_storage_bytes(member)?;
+    let mut key = binding_view_store_prefix(binding_view_key);
+    key.push(Value::Bytes(
+        settled_result_member_digest(&member_bytes).to_vec(),
+    ));
+    Ok(groove::db::DirectRecordStoreWrite::Set {
+        key,
+        value: vec![Value::Bytes(member_bytes)],
+    })
 }
 
 fn settled_program_fact_key(
@@ -2066,8 +2177,35 @@ fn settled_program_fact_key(
     fact: &ViewFactEntry,
 ) -> Result<Vec<Value>, Error> {
     let mut key = binding_view_store_prefix(binding_view_key);
-    key.push(Value::Bytes(codec::program_fact_storage_bytes(fact)?));
+    key.push(Value::Bytes(
+        settled_program_fact_digest(&codec::program_fact_storage_bytes(fact)?).to_vec(),
+    ));
     Ok(key)
+}
+
+/// Domain-separated identity for a settled program fact. Facts can include a
+/// hydrated application payload, so the full canonical encoding belongs in a
+/// value cell. The key keeps only this fixed-size identity, preserving ordered
+/// B-tree page bounds while retaining exact payload validation on recovery.
+const SETTLED_PROGRAM_FACT_DIGEST_DOMAIN: &str = "jazz.settled-program-fact-key.v1";
+
+fn settled_program_fact_digest(fact_bytes: &[u8]) -> [u8; 32] {
+    blake3::derive_key(SETTLED_PROGRAM_FACT_DIGEST_DOMAIN, fact_bytes)
+}
+
+fn settled_program_fact_storage_write(
+    binding_view_key: BindingViewKey,
+    fact: &ViewFactEntry,
+) -> Result<groove::db::DirectRecordStoreWrite, Error> {
+    let fact_bytes = codec::program_fact_storage_bytes(fact)?;
+    let mut key = binding_view_store_prefix(binding_view_key);
+    key.push(Value::Bytes(
+        settled_program_fact_digest(&fact_bytes).to_vec(),
+    ));
+    Ok(groove::db::DirectRecordStoreWrite::Set {
+        key,
+        value: vec![Value::Bytes(fact_bytes)],
+    })
 }
 
 fn binding_view_key_from_store_key(

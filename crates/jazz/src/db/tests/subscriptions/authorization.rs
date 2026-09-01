@@ -1991,21 +1991,42 @@ fn served_many_subscription_rows_for_author(
         .collect()
 }
 
-fn served_group_entry_rows_via_relay(
+fn served_table_rows_via_relay(
     schema: &JazzSchema,
     server: &CoreDb,
     author: AuthorSubject,
+    table: &str,
 ) -> (Vec<RowUuid>, usize, usize) {
     let relay = open_db(0x71, AuthorSubject::SYSTEM, schema);
     let client = open_db(0x72, author, schema);
+    let mut downstream_claims = test_provider_claims(author);
+    // This extra admitted claim is irrelevant to the policy itself. It proves
+    // the relay forwards this connection's immutable snapshot rather than
+    // reconstructing claims from the client node's author-keyed cache.
+    downstream_claims.insert(
+        crate::query::provider_claim_key("relay_fixture"),
+        Value::String("delegated".to_owned()),
+    );
     let (relay_transport, core_transport) = duplex();
     let _relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
-    let _core_subscriber = server.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
+    // A relay sends its downstream session's immutable policy binding to its
+    // upstream. Only the dedicated trusted-backend link may carry that
+    // delegated binding; an ordinary SYSTEM session must not be able to
+    // self-assert another subject's claims.
+    let core_subscriber = server.accept_subscriber_with_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
     let (client_transport, relay_sub_transport) = duplex();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _relay_subscriber = relay.accept_subscriber(relay_sub_transport, author);
+    // The relay is the downstream client's authentication boundary.  Its
+    // receiving connection therefore gets the actual session claims instead
+    // of the empty claims used by the generic test transport helper.
+    let _relay_subscriber =
+        relay.accept_subscriber_with_claims(relay_sub_transport, author, downstream_claims.clone());
 
-    let query = Query::from("group_entry");
+    let query = Query::from(table);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     let mut rows = BTreeSet::new();
@@ -2034,14 +2055,26 @@ fn served_group_entry_rows_via_relay(
             }
         }
     }
-    let client_query = client.prepare_query(&Query::from("group_entry")).unwrap();
+    let client_query = client.prepare_query(&Query::from(table)).unwrap();
     let client_one_shot = block_on(client.all(&client_query, ReadOpts::default()))
         .unwrap()
         .len();
-    let relay_query = relay.prepare_query(&Query::from("group_entry")).unwrap();
+    let relay_query = relay.prepare_query(&Query::from(table)).unwrap();
     let relay_one_shot = block_on(relay.all(&relay_query, ReadOpts::default()))
         .unwrap()
         .len();
+    let expected_delegated_binding = (author, downstream_claims);
+    let connection = core_subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        panic!("relay's core-facing connection must be a subscriber link");
+    };
+    assert!(
+        state
+            .coverage_groups
+            .values()
+            .any(|group| group.policy_binding == expected_delegated_binding),
+        "the core must retain the downstream session's delegated policy binding"
+    );
     (rows.into_iter().collect(), client_one_shot, relay_one_shot)
 }
 
@@ -2078,11 +2111,16 @@ fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity(
         (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>()
     );
     let (relay_rows, client_one_shot, relay_one_shot) =
-        served_group_entry_rows_via_relay(&schema, &server, member);
+        served_table_rows_via_relay(&schema, &server, member, "group_entry");
     assert_eq!(relay_one_shot, 42);
     assert_eq!(client_one_shot, 42);
     assert_eq!(
         relay_rows,
         (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>()
     );
+    let (spy_relay_rows, spy_client_one_shot, spy_relay_one_shot) =
+        served_table_rows_via_relay(&schema, &server, spy, "res_a");
+    assert_eq!(spy_relay_one_shot, 0);
+    assert_eq!(spy_client_one_shot, 0);
+    assert!(spy_relay_rows.is_empty());
 }
