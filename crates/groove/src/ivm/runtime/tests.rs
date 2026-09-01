@@ -2,7 +2,7 @@ use super::*;
 use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
 };
-use crate::storage::{MemoryStorage, RecordStore};
+use crate::storage::{MemoryStorage, OwnedStorage, RecordStore};
 use std::rc::Rc;
 
 #[futures_test::test]
@@ -2252,6 +2252,59 @@ async fn recursive_iteration_limit_rolls_back_partial_positive_tick() {
     assert!(
         subscription.try_recv().is_err(),
         "a failed recursive tick must not expose staged facts"
+    );
+}
+
+/// Resident Database writes use the same staged evaluator as direct ticks, but
+/// scoped failures must discard it rather than install its partial closure.
+#[futures_test::test]
+async fn resident_recursive_iteration_limit_discards_staged_state() {
+    let schema = edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+    let edges = schema.table("edges").unwrap().record_schema();
+    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+
+    let subscription = runtime
+        .subscribe_one_sink(recursive_reach_graph_with_limit(1), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+    let output = runtime.subscription_output_node(subscription.id()).unwrap();
+    let before_state = recursive_state_snapshot(&runtime, output);
+    let before_stats = runtime.stats();
+    let before_tick = runtime.current_tick;
+    let before_frontiers = runtime.table_frontiers.clone();
+    runtime
+        .tick_resident_staged(
+            vec![edge_table_delta(edges, &[(2, 2, 3), (3, 3, 4)])],
+            OwnedStorage::new(Rc::clone(&storage)),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recursive_state_snapshot(&runtime, output),
+        before_state,
+        "a scoped resident failure must discard partial recursive state"
+    );
+    assert_eq!(
+        runtime.stats(),
+        before_stats,
+        "a scoped resident failure must not install staged state"
+    );
+    assert_eq!(
+        runtime.current_tick, before_tick,
+        "a scoped resident failure must not advance logical time"
+    );
+    assert_eq!(
+        runtime.table_frontiers, before_frontiers,
+        "a scoped resident failure must not advance input frontiers"
     );
 }
 
