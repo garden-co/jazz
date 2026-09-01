@@ -1115,6 +1115,42 @@ mod contribution_tests {
         .unwrap()
     }
 
+    fn branch_intent(row: u8) -> BranchWriteIntent {
+        BranchWriteIntent {
+            version: 1,
+            physical_table_id: PhysicalTableId(1),
+            authored_schema: SchemaVersionId(uuid::Uuid::from_bytes([1; 16])),
+            row_uuid: RowUuid::from_bytes([row; 16]),
+            head: BranchKey {
+                values: vec![(
+                    "branch".to_owned(),
+                    crate::protocol::BranchColumnValue::from(Value::Uuid(uuid::Uuid::from_bytes(
+                        [2; 16],
+                    ))),
+                )],
+            },
+            operation: BranchWriteOperation::ExactHeadInsert,
+        }
+    }
+
+    #[test]
+    fn branch_write_intents_reject_noncanonical_order_and_duplicates() {
+        let mut provenance = ContributionMergeProvenance {
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: Vec::new(),
+            branch_write_intents: vec![branch_intent(2), branch_intent(1)],
+        };
+        assert!(provenance.validate().is_err());
+        provenance
+            .branch_write_intents
+            .sort_by_key(|intent| intent.row_uuid);
+        assert!(provenance.validate().is_ok());
+        provenance.branch_write_intents.push(branch_intent(1));
+        assert!(provenance.validate().is_err());
+    }
+
     #[test]
     fn contribution_dot_closure_prevents_a_b_c_a_echo() {
         let root = ContributionDot {
