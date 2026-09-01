@@ -2424,9 +2424,15 @@ where
                                     let mut node = self.node.lock().await;
                                     node.apply_row_version_payloads_for_requests(
                                         &repair.requests,
-                                        version_bundles,
+                                        version_bundles.clone(),
                                     )
                                     .await?;
+                                    // A successful authority repair can later be served to the
+                                    // same durable foreground scope without consulting current
+                                    // policy. Keep the immutable carrier identities, rather than
+                                    // inferring them from the current view result.
+                                    node.record_scope_relay_authoritative_bundles(&version_bundles)
+                                        .await?;
                                 }
                                 let (subscription, settled_through) = match &repair.update {
                                     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {

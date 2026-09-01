@@ -269,6 +269,7 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
                 Value::Uuid(tx_id.node.0),
             ],
             &[
+                Value::U64(1),
                 Value::String("wrong scope".to_owned()),
                 Value::Nullable(None),
             ],
@@ -285,6 +286,38 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
             .resolve(),
         Err(Error::InvalidStoredValue("scope relay ledger value does not match admitted scope"))
     ));
+}
+
+/// The durable ledger is not a general replacement for authority policy.
+/// A relay without a live host-attached scope must fail closed even if it has
+/// the row locally; a generic relay must forward the repair to its authority.
+#[test]
+fn scope_relay_repair_requires_a_live_scope_capability() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    let row_uuid = row(0x2b);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", row_uuid, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "locally cached but no capability")),
+    );
+    let response = PeerState::relay()
+        .serve_row_versions(
+            &mut relay_node,
+            &[crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)],
+            crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+        )
+        .resolve()
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = response.as_slice() else {
+        panic!("expected one row-version payload response");
+    };
+    assert!(version_bundles.is_empty());
 }
 
 #[test]

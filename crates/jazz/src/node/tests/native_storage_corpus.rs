@@ -897,7 +897,13 @@ where
                     .expect("corpus direct-store value has a canonical semantic fixture");
                 (key, value)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // The baseline corpus intentionally has no scope-isolated relay
+        // attachment. Keep its historical receipt focused on settled state;
+        // a populated repair ledger is separately exercised by relay tests.
+        if store_name == crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE && rows.is_empty() {
+            continue;
+        }
         stores.insert(store_name, rows);
     }
 

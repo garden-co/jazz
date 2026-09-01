@@ -2,6 +2,8 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    const SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1: u64 = 1;
+
     /// Record exact row versions successfully applied from this durable
     /// relay's selected authority. Deliberately append-only: later authority
     /// removal controls future delivery but cannot erase retained knowledge.
@@ -26,6 +28,7 @@ where
                         Value::Uuid(bundle.tx.tx_id.node.0),
                     ],
                     value: vec![
+                        Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1),
                         Value::String(owner.to_owned()),
                         Value::Nullable(subject.as_ref().map(|value| Box::new(Value::String(value.clone())))),
                     ],
@@ -64,6 +67,7 @@ where
                     Value::Uuid(tx.tx_id.node.0),
                 ],
                 value: vec![
+                    Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1),
                     Value::String(owner.to_owned()),
                     Value::Nullable(
                         subject
@@ -93,11 +97,15 @@ where
             Value::Uuid(request.tx_node_id.0),
         ]).await?;
         let Some(record) = record else { return Ok(false) };
-        let owner = match record.get_idx(0)? {
+        match record.get_idx(0)? {
+            Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1) => {}
+            _ => return Err(Error::InvalidStoredValue("unknown scope relay ledger format")),
+        }
+        let owner = match record.get_idx(1)? {
             Value::String(value) => value,
             _ => return Err(Error::InvalidStoredValue("scope relay ledger owner must be string")),
         };
-        let subject = match record.get_idx(1)? {
+        let subject = match record.get_idx(2)? {
             Value::Nullable(None) => None,
             Value::Nullable(Some(value)) => match value.as_ref() {
                 Value::String(value) => Some(value.to_owned()),

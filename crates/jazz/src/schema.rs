@@ -667,6 +667,7 @@ impl RuntimeSchema {
                 // Full scope components are values so host supplied strings
                 // never enter a backend's bounded ordered-key space.
                 RecordDescriptor::new([
+                    ("format_version", ValueType::U64),
                     ("storage_owner", ValueType::String),
                     (
                         "admitted_subject",
