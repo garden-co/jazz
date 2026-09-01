@@ -91,30 +91,6 @@ fn scripted_authority(
     )
 }
 
-/// Marks the worker's core-facing transport as the authenticated backend
-/// relay boundary that is allowed to forward the downstream session scope.
-struct TrustedBackendRelayTransport {
-    inner: Box<dyn Transport>,
-}
-
-impl Transport for TrustedBackendRelayTransport {
-    fn send(&mut self, message: SyncMessage) -> Result<(), jazz::wire::TransportError> {
-        self.inner.send(message)
-    }
-
-    fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.inner.try_recv()
-    }
-
-    fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
-        self.inner.connection_session_context()
-    }
-
-    fn permits_delegated_sessions(&self) -> bool {
-        true
-    }
-}
-
 use common::{compile_schema, exists, outer_eq, session_eq};
 
 /// Advance the production-shaped two-browser topology by one owner turn at
@@ -3754,10 +3730,11 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     );
 }
 
-/// A relay can carry two policy-scoped authority streams for the same
+/// Two independently scoped relays can carry authority streams for the same
 /// canonical empty query. Each downstream browser must receive its own
-/// settled handoff; one receipt cannot make the sibling's group ambiguous or
-/// leave it waiting forever.
+/// settled handoff; one receipt cannot make the sibling scope ambiguous or
+/// leave it waiting forever. A persistent browser worker owns exactly one
+/// immutable auth scope, so this deliberately uses one worker per identity.
 #[test]
 fn browser_relay_hands_off_each_policy_scoped_empty_result_independently() {
     let schema = schema();
@@ -3765,29 +3742,23 @@ fn browser_relay_hands_off_each_policy_scoped_empty_result_independently() {
     let bob = AuthorSubject::for_test_bytes([0xb8; 16]);
     let alice_main = open_db(0x1a, alice, &schema);
     let bob_main = open_db(0x1b, bob, &schema);
-    let worker = open_db(0x29, AuthorSubject::SYSTEM, &schema);
+    let alice_worker = open_db(0x29, alice, &schema);
+    let bob_worker = open_db(0x2a, bob, &schema);
     let core = open_core(0x39, &schema);
     alice_main.set_non_durable_client();
     bob_main.set_non_durable_client();
+    alice_worker.set_relay_authority_session_owner_for_test();
+    bob_worker.set_relay_authority_session_owner_for_test();
 
     let (alice_transport, worker_alice_transport) = duplex();
     let _alice_connection = block_on(alice_main.connect_upstream(alice_transport));
-    let _worker_alice = worker.accept_subscriber(worker_alice_transport, alice);
+    let _worker_alice = alice_worker.accept_subscriber(worker_alice_transport, alice);
     let (bob_transport, worker_bob_transport) = duplex();
     let _bob_connection = block_on(bob_main.connect_upstream(bob_transport));
-    let _worker_bob = worker.accept_subscriber(worker_bob_transport, bob);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(Box::new(
-        TrustedBackendRelayTransport {
-            inner: worker_upstream_transport,
-        },
-    )));
-    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
-        core_transport,
-        AuthorSubject::SYSTEM,
-        BTreeMap::new(),
-        CommitUnitTrust::TrustedBackend,
-    );
+    let _worker_bob = bob_worker.accept_subscriber(worker_bob_transport, bob);
+    let (_alice_upstream, _core_alice) =
+        connect_scope_isolated_worker_to_core!(alice_worker, core, alice);
+    let (_bob_upstream, _core_bob) = connect_scope_isolated_worker_to_core!(bob_worker, core, bob);
 
     let alice_todos = alice_main
         .prepare_query(&alice_main.table("todos"))
@@ -3809,11 +3780,19 @@ fn browser_relay_hands_off_each_policy_scoped_empty_result_independently() {
     for _ in 0..8 {
         alice_main.tick().expect("register Alice worker view");
         bob_main.tick().expect("register Bob worker view");
-        worker.tick().expect("forward both policy groups upstream");
-        core.tick().expect("serve authority snapshots");
-        worker
+        alice_worker
             .tick()
-            .expect("apply and hand off both authority snapshots");
+            .expect("forward Alice's policy group upstream");
+        bob_worker
+            .tick()
+            .expect("forward Bob's policy group upstream");
+        core.tick().expect("serve authority snapshots");
+        alice_worker
+            .tick()
+            .expect("apply and hand off Alice's authority snapshot");
+        bob_worker
+            .tick()
+            .expect("apply and hand off Bob's authority snapshot");
         alice_main.tick().expect("apply Alice handoff");
         bob_main.tick().expect("apply Bob handoff");
     }
@@ -3840,9 +3819,14 @@ fn browser_relay_hands_off_each_policy_scoped_empty_result_independently() {
         "Bob needs her own settled-empty handoff: {bob_events:?}"
     );
     assert_eq!(
-        worker.relay_upstream_subscription_owner_count_for_test(),
-        2,
-        "distinct downstream policy scopes retain distinct relay upstream usage sites"
+        alice_worker.relay_upstream_subscription_owner_count_for_test(),
+        1,
+        "Alice's scope retains its own relay upstream usage site"
+    );
+    assert_eq!(
+        bob_worker.relay_upstream_subscription_owner_count_for_test(),
+        1,
+        "Bob's scope retains its own relay upstream usage site"
     );
 }
 
