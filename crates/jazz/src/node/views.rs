@@ -1533,17 +1533,13 @@ where
                 .authority_results
                 .entry(authority_result_key.clone())
                 .or_default();
-            state.pending_terminal_operations.clear();
             state.initial_hydration = true;
         }
-        if !terminal_operations.is_empty() {
-            self.query
-                .authority_results
-                .entry(authority_result_key.clone())
-                .or_default()
-                .pending_terminal_operations
-                .extend(terminal_operations);
-        }
+        // Terminal edits are a publication optimization. The complete
+        // carriers in the same authority update drive the maintained query;
+        // retaining a second pending operation stream here would create a
+        // competing receiver path and can short-circuit that evaluation.
+        let _ = terminal_operations;
         self.query
             .authority_results
             .entry(authority_result_key.clone())
