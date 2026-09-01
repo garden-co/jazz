@@ -1079,6 +1079,84 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
     ));
 }
 
+#[test]
+fn two_table_edge_budget_counts_shared_physical_history_once_without_eviction() {
+    // This is intentionally an internal storage-boundary receipt: the edge
+    // budget is the observable policy seam, but only the backing storage can
+    // provide an independent byte count for its shared physical history class.
+    let test_schema = todos_notes_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), test_schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), test_schema.clone());
+    let column_families = test_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailWriteManyMemoryStorage::new(&refs);
+    let mut reader = NodeState::new(node(3), test_schema, storage).unwrap();
+    let mut peer = PeerState::relay();
+    let rows = [
+        (
+            "todos",
+            row(0x76),
+            BTreeMap::from([("title".to_owned(), v("cached todo"))]),
+        ),
+        (
+            "notes",
+            row(0x77),
+            BTreeMap::from([("body".to_owned(), v("cached note"))]),
+        ),
+    ];
+
+    for (table, row_uuid, cells) in &rows {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new(*table, *row_uuid, 18).cells(cells.clone()),
+        );
+        let (shape, binding) = core.whole_table_shape_binding(table).unwrap();
+        let subscription = core.whole_table_subscription_key(table).unwrap();
+        let update = peer
+            .rehydrate_query_for_subscription_with_opts(
+                &mut core,
+                subscription,
+                &shape,
+                &binding,
+                RegisterShapeOptions::default(),
+            )
+            .unwrap()
+            .expect("expected view update");
+        reader.apply_sync_message_settled(update).unwrap();
+    }
+
+    let physical_history_bytes = reader
+        .database
+        .approximate_class_bytes("__groove_class_history")
+        .resolve()
+        .unwrap()
+        .expect("memory storage meters its physical history class");
+    assert!(physical_history_bytes > 0);
+    let report = reader
+        .enforce_edge_cache_budget(
+            &PeerEvictionPins::default(),
+            EdgeCacheBudget::new(physical_history_bytes),
+        )
+        .resolve()
+        .unwrap();
+
+    assert!(
+        report.is_none(),
+        "two logical history families share one {physical_history_bytes}-byte physical class, so the exact physical budget must not trigger eviction: {report:?}"
+    );
+    for (table, row_uuid, _) in rows {
+        assert_eq!(
+            reader.row_history(table, row_uuid).unwrap().len(),
+            1,
+            "a non-triggering physical budget must retain the cached {table} row"
+        );
+    }
+}
+
 #[derive(Clone, Copy)]
 enum EvictionFailurePath {
     ManualBatch,
