@@ -1643,6 +1643,7 @@ impl ClientDbInner {
         };
         let connected = match cancellation {
             Some(cancellation) => tokio::select! {
+                biased;
                 _ = cancellation.cancelled() => return Err(ClientDbInner::shutdown_error()),
                 connected = config.connector.connect(request) => connected,
             },
@@ -1658,6 +1659,7 @@ impl ClientDbInner {
         ));
         match cancellation {
             Some(cancellation) => tokio::select! {
+                biased;
                 _ = cancellation.cancelled() => Err(ClientDbInner::shutdown_error()),
                 connection = db.connect_upstream(transport) => Ok(connection),
             },
