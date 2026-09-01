@@ -2552,10 +2552,13 @@ fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() 
         "authority sent no covered input closure"
     );
     assert!(
-        authority_updates
-            .iter()
-            .all(|update| update.terminal_operations.is_empty()),
-        "INV-SYNC-36 forbids authority-produced terminal operations: {authority_updates:?}",
+        authority_updates.iter().any(|update| {
+            update
+                .program_fact_adds
+                .iter()
+                .any(|fact| matches!(fact, jazz::protocol::ProgramFactEntry::CoveredInput(_)))
+        }),
+        "authority sent no typed covered input: {authority_updates:?}",
     );
 
     let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
@@ -3394,14 +3397,11 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         reopened_authority_messages
             .borrow()
             .iter()
-            .all(|message| match message {
-                SyncMessage::ViewUpdate(update) => update.terminal_operations.is_empty(),
-                SyncMessage::AuthorizationScopeView { view, .. } => {
-                    view.terminal_operations.is_empty()
-                }
-                _ => true,
-            }),
-        "reconnect must derive its empty reset locally from a terminal-free authority closure",
+            .any(|message| matches!(
+                message,
+                SyncMessage::ViewUpdate(_) | SyncMessage::AuthorizationScopeView { .. }
+            )),
+        "reconnect must receive a covered-input update; peer ViewUpdate has no terminal carrier",
     );
 
     let regranted = seeder
