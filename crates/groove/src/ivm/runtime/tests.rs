@@ -5,6 +5,16 @@ use crate::schema::{
 use crate::storage::{MemoryStorage, OwnedStorage, RecordStore};
 use std::rc::Rc;
 
+impl IvmRuntime {
+    pub(crate) fn deferred_publication_bookkeeping_counts(&self) -> (usize, usize, usize) {
+        (
+            self.durable_notification_publications.len(),
+            self.completed_deferred_publications.len(),
+            self.deferred_notifications.len(),
+        )
+    }
+}
+
 #[futures_test::test]
 async fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
     let record = |label: u8| Bytes::from(vec![label]);

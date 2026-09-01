@@ -3020,6 +3020,13 @@ async fn external_chunk_backend_error_cannot_forge_publication_durability_failur
 
     provider_ready.set(true);
     database.flush().await.unwrap();
+    assert_eq!(
+        database
+            .ivm_runtime
+            .deferred_publication_bookkeeping_counts(),
+        (0, 0, 0),
+        "an aborted assigned resident publication must leave no durable, completed, or deferred bookkeeping"
+    );
     assert!(!database.poisoned);
     let waker = futures::task::noop_waker();
     let mut context = std::task::Context::from_waker(&waker);
