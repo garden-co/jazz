@@ -356,6 +356,11 @@ export function workspaceDependencyInputs(root, rootManifest) {
   return [...visited]
     .map((directory) => {
       const repositoryPath = relative(canonicalRoot, directory);
+      if (!repositoryPath) {
+        throw new Error(
+          `artifact provenance: workspace dependency has no repository-relative path: ${directory}`,
+        );
+      }
       if (
         repositoryPath === ".." ||
         repositoryPath.startsWith(`..${sep}`) ||
