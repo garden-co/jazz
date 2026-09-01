@@ -286,6 +286,33 @@ fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
 }
 
 #[test]
+fn branch_view_evidence_rejects_noncanonical_branch_keys_without_codec_panic() {
+    let schema = schema();
+    let (_dir, core) = open_node_with_schema(node(0x31), schema);
+    let malformed = BranchViewCopyEvidence {
+        version: 1,
+        // A raw client can supply an unknown/reordered component. The durable
+        // boundary must surface malformed input through `Result`, rather than
+        // calling `BranchKey::canonical_bytes` and panicking.
+        head: BranchKey {
+            values: vec![
+                ("z".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+                ("a".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+            ],
+        },
+        base: BranchViewCopyBase::Current(BranchKey::default()),
+        table: "todos".to_owned(),
+        row_uuid: row(0x33),
+        source_version: TxId::new(TxTime::from(31), node(0x32)),
+    };
+    assert!(core
+        .contribution_merge_storage_value(Some(
+            &ContributionMergeProvenance::branch_view_copy(malformed),
+        ))
+        .is_err());
+}
+
+#[test]
 fn contribution_provenance_persists_column_components_as_physical_ids() {
     // The public transaction still carries a logical column name.  Only the
     // durable system-table record crosses the physical-storage boundary.
