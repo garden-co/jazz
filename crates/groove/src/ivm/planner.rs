@@ -1665,11 +1665,7 @@ mod tests {
         let query = inner_join_query(
             TableRef::named("albums"),
             TableRef::named("artists"),
-            Expr::binary(
-                Expr::column("title"),
-                BinaryOp::Eq,
-                Expr::column("name"),
-            ),
+            Expr::binary(Expr::column("title"), BinaryOp::Eq, Expr::column("name")),
         );
 
         let planned = plan_query(&query, &schema()).unwrap();
@@ -1989,6 +1985,66 @@ mod tests {
             planner.plan_query(&outside_cte),
             Err(PlannerError::TableNotFound(table)) if table == "album_ids"
         ));
+    }
+
+    #[test]
+    fn lowers_qualified_named_cte_join_operands() {
+        let cte = Cte::new(
+            "album_ids",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("artist_id"))])
+                    .from([TableRef::named("albums")]),
+            )),
+        );
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            inner_join_query(
+                TableRef::named("album_ids"),
+                TableRef::named("artists"),
+                Expr::binary(
+                    Expr::Column(ColumnRef::qualified(["album_ids"], "artist_id")),
+                    BinaryOp::Eq,
+                    Expr::Column(ColumnRef::qualified(["artists"], "id")),
+                ),
+            ),
+        )));
+
+        let planned = plan_query(&query, &schema()).unwrap();
+
+        assert_eq!(
+            join_keys(&planned),
+            (&["artist_id".to_owned()][..], &["id".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn lowers_qualified_aliased_cte_join_operands() {
+        let cte = Cte::new(
+            "album_ids",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("artist_id"))])
+                    .from([TableRef::named("albums")]),
+            )),
+        );
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            inner_join_query(
+                TableRef::named("album_ids").aliased("a"),
+                TableRef::named("artists").aliased("r"),
+                Expr::binary(
+                    Expr::Column(ColumnRef::qualified(["a"], "artist_id")),
+                    BinaryOp::Eq,
+                    Expr::Column(ColumnRef::qualified(["r"], "id")),
+                ),
+            ),
+        )));
+
+        let planned = plan_query(&query, &schema()).unwrap();
+
+        assert_eq!(
+            join_keys(&planned),
+            (&["artist_id".to_owned()][..], &["id".to_owned()][..])
+        );
     }
 
     #[test]
