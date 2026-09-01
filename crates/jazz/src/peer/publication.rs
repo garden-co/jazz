@@ -1076,11 +1076,11 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .map(|maintained| maintained.tables.clone())
             .unwrap_or_default();
-        let source_binding_view = self
+        let source_authority_result = self
             .publication_states
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
-            .and_then(|maintained| maintained.source_binding_view);
+            .and_then(|maintained| maintained.source_authority_result.clone());
         let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
             && node
                 .table(shape.query().table.as_str())?
@@ -1192,7 +1192,7 @@ impl PeerState {
             && result_table_filter.is_none()
             && let Some(settled) = node.settled_result_transitions_for_subscription(
                 subscription,
-                source_binding_view,
+                source_authority_result,
                 &previous_member_result_set,
                 &previous_program_fact_set,
                 result_table_filter,
@@ -1285,6 +1285,12 @@ impl PeerState {
             && self.role == PeerRole::Relay
             && tier == DurabilityTier::Edge
             && node.relay_edge_query_requires_authority_source(shape, binding);
+        // The downstream usage registration chose this policy scope.  Carry
+        // that exact receipt into source resolution; the shared binding-view
+        // key alone is not an authority identity in a multiplexed relay.
+        let source_authority_result_key = relay_edge_requires_authority_source
+            .then(|| node.authority_result_key_for_subscription(subscription))
+            .transpose()?;
         let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
         let opened = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
@@ -1299,6 +1305,9 @@ impl PeerState {
                     binding,
                     policy_identity,
                     read_view,
+                    source_authority_result_key
+                        .clone()
+                        .expect("strict relay source resolved above"),
                     progress_waker,
                 )
                     .await
@@ -1326,9 +1335,6 @@ impl PeerState {
                 .await,
             }
         };
-        let source_binding_view = relay_edge_requires_authority_source
-            .then(|| node.relay_edge_subscription_source_binding_view_key(shape, binding, read_view))
-            .flatten();
         let (receiver, mut maintained, terminal_schemas, transitions, tables, initial_received) =
             match opened {
             Ok(opened) => opened,
@@ -1367,7 +1373,7 @@ impl PeerState {
                 maintained,
                 terminal_schemas,
                 tables,
-                source_binding_view,
+                source_authority_result: source_authority_result_key.clone(),
                 initial_received: false,
             };
             self.replace_maintained_subscription_view(
@@ -1577,7 +1583,7 @@ impl PeerState {
             maintained,
             terminal_schemas,
             tables,
-            source_binding_view,
+            source_authority_result: source_authority_result_key,
             initial_received: true,
         };
         self.replace_maintained_subscription_view(node, subscription, maintained_subscription);

@@ -593,6 +593,7 @@ where
                 outbound_shape_owners: BTreeMap::new(),
                 outbound_binding_owners: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
+                authority_results: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
                 local_materialized_window_binding_views: BTreeSet::new(),
@@ -1583,75 +1584,69 @@ where
 
     fn insert_settled_result_member_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         member: ResultMemberEntry,
     ) {
+        let state = self
+            .query
+            .authority_results
+            .entry(authority_result_key)
+            .or_default();
         if let Some(row_key) = Self::result_member_row_key(&member) {
-            self.query
-                .settled_result_row_index
-                .entry(binding_view_key)
-                .or_default()
-                .insert(row_key, member.clone());
+            state.settled_result_row_index.insert(row_key, member.clone());
         }
-        self.query
-            .settled_result_sets
-            .entry(binding_view_key)
-            .or_default()
-            .insert(member);
+        state.settled_result_set.insert(member);
     }
 
     fn remove_settled_result_member_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         member: &ResultMemberEntry,
     ) -> bool {
         let removed = self
             .query
-            .settled_result_sets
-            .get_mut(&binding_view_key)
-            .is_some_and(|members| members.remove(member));
+            .authority_results
+            .get_mut(&authority_result_key)
+            .is_some_and(|state| state.settled_result_set.remove(member));
         if removed
             && let Some(row_key) = Self::result_member_row_key(member)
             && self
                 .query
-                .settled_result_row_index
-                .get(&binding_view_key)
-                .and_then(|index| index.get(&row_key))
+                .authority_results
+                .get(&authority_result_key)
+                .and_then(|state| state.settled_result_row_index.get(&row_key))
                 == Some(member)
-            && let Some(index) = self
+            && let Some(state) = self
                 .query
-                .settled_result_row_index
-                .get_mut(&binding_view_key)
+                .authority_results
+                .get_mut(&authority_result_key)
         {
-            index.remove(&row_key);
+            state.settled_result_row_index.remove(&row_key);
         }
         removed
     }
 
     fn remove_settled_result_member_for_occurrence_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         occurrence_id: ResultRowMembershipKey,
     ) -> Option<ResultMemberEntry> {
         let previous = self
             .query
-            .settled_result_row_index
-            .get_mut(&binding_view_key)
-            .and_then(|index| index.remove(&occurrence_id))?;
-        if let Some(members) = self.query.settled_result_sets.get_mut(&binding_view_key) {
-            members.remove(&previous);
+            .authority_results
+            .get_mut(&authority_result_key)
+            .and_then(|state| state.settled_result_row_index.remove(&occurrence_id))?;
+        if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+            state.settled_result_set.remove(&previous);
         }
         Some(previous)
     }
 
-    fn clear_settled_result_view(&mut self, binding_view_key: BindingViewKey) {
-        self.query.settled_result_sets.remove(&binding_view_key);
+    fn clear_settled_result_view(&mut self, authority_result_key: AuthorityResultKey) {
+        self.query.authority_results.remove(&authority_result_key);
         self.query
             .local_materialized_window_binding_views
-            .remove(&binding_view_key);
-        self.query
-            .settled_result_row_index
-            .remove(&binding_view_key);
+            .remove(&authority_result_key.binding_view);
     }
 
     async fn open_catalogue_stage<T>(

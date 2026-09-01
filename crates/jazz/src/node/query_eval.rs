@@ -49,11 +49,10 @@ use super::query_engine::{
 };
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
-    BindingSource, BindingViewKey, KnownStateCompleteness, KnownStateDeclaration,
-    PermissionAdviceAction, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec,
-    RegisterShapeOptions, RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry,
-    ResultRowLayer, RowVersionRef, RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe,
-    SubscriptionKey, SyntheticReplacementToken,
+    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
+    ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef,
+    RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -602,6 +601,7 @@ where
                 tier,
                 read_view,
                 None,
+                None,
                 shape.query().aggregate.is_some(),
                 &self.catalogue.schema,
             )?,
@@ -967,6 +967,7 @@ where
                 tier,
                 read_view,
                 settled_binding_view,
+                None,
                 shape.query().aggregate.is_some(),
                 &query_schema.schema,
             )?,
@@ -1807,11 +1808,28 @@ where
         table: &str,
         read_schema: SchemaVersionId,
         binding_view: BindingViewKey,
+        authority_result_key: Option<AuthorityResultKey>,
         rows: SettledBindingRows,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view) else {
+        let authority_result_key = authority_result_key.or_else(|| {
+            // Legacy source construction does not yet carry a subscription
+            // handle. It may consume a receipt only when the binding view is
+            // provably unambiguous; scoped relay paths always supply the
+            // exact registered authority key above.
+            self.unique_authority_result_key_for_binding_view(binding_view)
+        });
+        let Some(authority_result_key) = authority_result_key else {
             return Ok(Vec::new());
         };
+        if authority_result_key.binding_view != binding_view {
+            return Err(Error::InvalidStoredValue(
+                "settled source authority result does not match binding view",
+            ));
+        }
+        let Some(authority_result) = self.query.authority_results.get(&authority_result_key) else {
+            return Ok(Vec::new());
+        };
+        let row_result_set = &authority_result.settled_result_set;
         let mut row_entries = matches!(rows, SettledBindingRows::ResultMembers)
             .then(|| {
                 row_result_set
@@ -1823,9 +1841,8 @@ where
                     .collect::<BTreeMap<_, Option<RowVersionRefEntry>>>()
             })
             .unwrap_or_default();
-        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view)
-            && matches!(rows, SettledBindingRows::ResultMembers)
-        {
+        if matches!(rows, SettledBindingRows::ResultMembers) {
+            let program_facts = &authority_result.settled_program_facts;
             row_entries.extend(program_facts.iter().filter_map(|fact| {
                 let ProgramFactEntry::RelationEdge(edge) = fact else {
                     return None;
@@ -1838,9 +1855,8 @@ where
                 })
             }));
         }
-        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view)
-            && matches!(rows, SettledBindingRows::FlatTupleContributor { .. })
-        {
+        if matches!(rows, SettledBindingRows::FlatTupleContributor { .. }) {
+            let program_facts = &authority_result.settled_program_facts;
             row_entries.extend(program_facts.iter().filter_map(|fact| {
                 let ProgramFactEntry::RelationEdge(edge) = fact else {
                     return None;
@@ -1888,10 +1904,10 @@ where
         let result_payloads = matches!(rows, SettledBindingRows::ResultMembers)
             .then(|| {
                 self.query
-                    .settled_program_facts
-                    .get(&binding_view)
+                    .authority_results
+                    .get(&authority_result_key)
                     .into_iter()
-                    .flatten()
+                    .flat_map(|state| state.settled_program_facts.iter())
                     .filter_map(|fact| {
                         let ProgramFactEntry::ResultPayload(payload) = fact else {
                             return None;
@@ -3191,6 +3207,7 @@ where
             read_view,
             QueryAuthorizationMode::TrustedServing,
             None,
+            None,
             PreparedClaimBindingMode::Strict,
             progress_waker,
         )
@@ -3208,6 +3225,7 @@ where
         binding: &Binding,
         identity: AuthorSubject,
         read_view: &ReadViewSpec,
+        authority_result_key: AuthorityResultKey,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -3220,7 +3238,12 @@ where
         Error,
     > {
         self.open_seeded_relay_edge_subscription_view_with_waker(
-            shape, binding, identity, read_view, None,
+            shape,
+            binding,
+            identity,
+            read_view,
+            authority_result_key,
+            None,
         )
         .await
     }
@@ -3231,6 +3254,7 @@ where
         binding: &Binding,
         identity: AuthorSubject,
         read_view: &ReadViewSpec,
+        authority_result_key: AuthorityResultKey,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
@@ -3243,8 +3267,7 @@ where
         ),
         Error,
     > {
-        let settled_binding_view =
-            self.relay_edge_subscription_source_binding_view_key(shape, binding, read_view);
+        let settled_binding_view = Some(authority_result_key.binding_view);
         self.open_seeded_maintained_subscription_view_in_authorization_mode(
             shape,
             binding,
@@ -3253,54 +3276,11 @@ where
             read_view,
             QueryAuthorizationMode::ClientLocal,
             settled_binding_view,
+            Some(authority_result_key),
             PreparedClaimBindingMode::Strict,
             progress_waker,
         )
         .await
-    }
-
-    /// The non-public source identity owned by a durable browser relay for a
-    /// downstream Edge handoff.  Only the relay publication path asks for
-    /// this key; ordinary client reads continue using their normal upstream
-    /// Global/Edge coverage identity.
-    pub(crate) fn relay_authority_session_binding_view_key(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        read_view: &ReadViewSpec,
-    ) -> BindingViewKey {
-        BindingViewKey::new(
-            shape.shape_id(),
-            binding.binding_id(),
-            RegisterShapeOptions {
-                tier: DurabilityTier::Global,
-                read_view: read_view.clone(),
-                binding_source: BindingSource::RelayAuthoritySession,
-                ..RegisterShapeOptions::default()
-            }
-            .read_view_key(),
-        )
-    }
-
-    /// Select the source receipt used while relaying an Edge view. The
-    /// browser-worker topology gives its upstream coverage a dedicated source
-    /// identity; older/general relay paths retain their existing Global view.
-    pub(crate) fn relay_edge_subscription_source_binding_view_key(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        read_view: &ReadViewSpec,
-    ) -> Option<BindingViewKey> {
-        if self.is_relay_authority_session_owner() {
-            Some(self.relay_authority_session_binding_view_key(shape, binding, read_view))
-        } else {
-            self.client_settled_binding_view_key_for_query(
-                shape,
-                binding,
-                DurabilityTier::Edge,
-                read_view,
-            )
-        }
     }
 
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an
@@ -3358,6 +3338,7 @@ where
             read_view,
             QueryAuthorizationMode::TrustedServing,
             None,
+            None,
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
             progress_waker,
         )
@@ -3373,6 +3354,7 @@ where
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
         settled_binding_view: Option<BindingViewKey>,
+        settled_authority_result_key: Option<AuthorityResultKey>,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
@@ -3398,7 +3380,7 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let program = self
+        let mut program = self
             .compile_current_query_program_with_settled_view_and_prepared_claim_mode(
                 &shape,
                 &binding,
@@ -3411,6 +3393,17 @@ where
                 prepared_claim_binding_mode,
             )
             .await?;
+        if let Some(authority_result_key) = settled_authority_result_key {
+            for source in program.request.reads.primary.sources.values_mut() {
+                if let crate::node::query_engine::SourceExpr::SettledBindingView {
+                    authority_result_key: selected,
+                    ..
+                } = source
+                {
+                    *selected = Some(authority_result_key.clone());
+                }
+            }
+        }
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         let binding_source_shape = program

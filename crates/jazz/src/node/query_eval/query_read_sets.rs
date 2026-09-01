@@ -10,6 +10,7 @@ pub(super) fn current_query_read_set(
     policy_schema: SchemaVersionId,
     tier: DurabilityTier,
     settled_binding_view: Option<BindingViewKey>,
+    settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
     settled_requires_result_payload: bool,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
@@ -27,6 +28,7 @@ pub(super) fn current_query_read_set(
                     SourceExpr::SettledBindingView {
                         projection: projection.clone(),
                         binding_view,
+                        authority_result_key: settled_authority_result_key.clone(),
                         rows: SettledBindingRows::ResultMembers,
                         requires_result_payload: settled_requires_result_payload,
                     }
@@ -50,6 +52,7 @@ pub(super) fn current_query_read_set(
                 SourceExpr::SettledBindingView {
                     projection: projection.clone(),
                     binding_view,
+                    authority_result_key: settled_authority_result_key.clone(),
                     rows: SettledBindingRows::FlatTupleContributor { source_index },
                     requires_result_payload: settled_requires_result_payload,
                 },
@@ -195,6 +198,7 @@ pub(super) fn query_read_set_for_read_view(
     tier: DurabilityTier,
     read_view: &ReadViewSpec,
     settled_binding_view: Option<BindingViewKey>,
+    settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
     aggregate_query: bool,
     schema: &JazzSchema,
 ) -> Result<RequestedReadSet, Error> {
@@ -215,6 +219,7 @@ pub(super) fn query_read_set_for_read_view(
             policy_schema,
             tier,
             settled_binding_view,
+            settled_authority_result_key,
             matches!(read_view.source, ReadViewSourceSpec::BranchView { .. }),
         ));
     }
@@ -224,6 +229,7 @@ pub(super) fn query_read_set_for_read_view(
             read_schema,
             policy_schema,
             tier,
+            None,
             None,
             false,
         )),

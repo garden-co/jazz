@@ -452,9 +452,9 @@ where
                     Value::U64(settled_through.0),
                     Value::U64(
                         self.query
-                            .authorization_progress_by_binding_view
-                            .get(&authority_result_key.binding_view)
-                            .copied()
+                            .authority_results
+                            .get(&authority_result_key)
+                            .and_then(|state| state.authorization_progress)
                             .unwrap_or(u64::MAX),
                     ),
                 ],
@@ -481,14 +481,18 @@ where
             }
         };
         self.query
-            .settled_through_by_binding_view
-            .insert(binding_view_key, settled_through);
+            .authority_results
+            .entry(authority_result_key)
+            .or_default()
+            .settled_through = Some(settled_through);
         if let Value::U64(progress) = record.get_idx(1)?
             && progress != u64::MAX
         {
             self.query
-                .authorization_progress_by_binding_view
-                .insert(binding_view_key, progress);
+                .authority_results
+                .entry(AuthorityResultKey::unscoped(binding_view_key))
+                .or_default()
+                .authorization_progress = Some(progress);
         }
         Ok(Some(settled_through))
     }
@@ -504,8 +508,7 @@ where
         for key in keys {
             store.delete(&key).await?;
         }
-        self.query.settled_through_by_binding_view.clear();
-        self.query.authorization_progress_by_binding_view.clear();
+        self.query.authority_results.clear();
         self.clear_all_settled_result_state().await?;
         Ok(())
     }
@@ -521,6 +524,8 @@ where
         fact_removes: &[ViewFactEntry],
         fact_rewrite: Option<&BTreeSet<ViewFactEntry>>,
     ) -> Result<(), Error> {
+        self.persist_authority_policy_binding_directory(&authority_result_key)
+            .await?;
         self.persist_settled_result_members_delta(
             authority_result_key.clone(),
             cleared,
@@ -537,6 +542,58 @@ where
             fact_rewrite,
         )
         .await?;
+        Ok(())
+    }
+
+    /// Install the exact policy identity behind the bounded result-store key.
+    /// A digest is an address only: a pre-existing unequal value is a
+    /// cryptographic collision (or corruption) and must fail closed.
+    async fn persist_authority_policy_binding_directory(
+        &self,
+        authority_result_key: &AuthorityResultKey,
+    ) -> Result<(), Error> {
+        let Some(policy) = &authority_result_key.policy_binding else {
+            return Ok(());
+        };
+        let digest = policy.directory_digest();
+        let claims = crate::protocol::policy_binding_directory_claims_value(policy.claims())
+            .map_err(|_| Error::InvalidStoredValue("policy binding claims must encode"))?;
+        let store = self
+            .database
+            .direct_record_store(AUTHORITY_POLICY_BINDINGS_STORE)?;
+        let key = [Value::Bytes(digest.to_vec())];
+        if let Some(existing) = store.get(&key).await? {
+            let Value::String(subject) = existing.get_idx(0)? else {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding directory subject must be string",
+                ));
+            };
+            let existing_claims = existing.get_idx(1)?;
+            let existing_claims = crate::protocol::policy_binding_directory_claims_from_value(
+                existing_claims,
+            )
+            .map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
+            let existing = crate::protocol::PolicyBindingKey::from_canonical_parts(
+                AuthorSubject::from_canonical(&subject)
+                    .map_err(|_| Error::InvalidStoredValue("policy binding directory subject is invalid"))?,
+                existing_claims,
+            );
+            if existing != *policy {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding digest aliases a distinct exact policy identity",
+                ));
+            }
+            return Ok(());
+        }
+        store
+            .set(
+                &key,
+                &[
+                    Value::String(policy.identity.canonical().to_owned()),
+                    claims,
+                ],
+            )
+            .await?;
         Ok(())
     }
 
@@ -655,10 +712,7 @@ where
                 store.delete(&key).await?;
             }
         }
-        self.query.settled_result_sets.clear();
         self.query.local_materialized_window_binding_views.clear();
-        self.query.settled_result_row_index.clear();
-        self.query.settled_program_facts.clear();
         Ok(())
     }
 
@@ -670,30 +724,54 @@ where
     }
 
     async fn recover_known_state_facts(&mut self) -> Result<(), Error> {
-        self.query.settled_through_by_binding_view.clear();
-        self.query.authorization_progress_by_binding_view.clear();
-        self.query.settled_result_sets.clear();
+        self.query.authority_results.clear();
         self.query.local_materialized_window_binding_views.clear();
-        self.query.settled_result_row_index.clear();
-        self.query.settled_program_facts.clear();
         // Validate the complete durable closure off to the side.  Open/recovery
         // must not leave even a prefix of the recovered state resident when a
         // later store entry is malformed.
-        let mut settled_through_by_binding_view = BTreeMap::new();
-        let mut authorization_progress_by_binding_view = BTreeMap::new();
-        // The current in-memory receiver partition is still keyed by its
-        // canonical binding view. Until the following lifecycle slice moves
-        // that partition to `AuthorityResultKey`, reject a reopened store that
-        // contains two policy snapshots for one binding rather than silently
-        // merging their memberships. The durable layout already retains the
-        // full identity needed by that follow-up conversion.
-        let mut recovered_authority_keys_by_binding_view = BTreeMap::new();
+        let mut authority_results = BTreeMap::<AuthorityResultKey, AuthorityResultState>::new();
+        let mut policies = BTreeMap::<[u8; 32], crate::protocol::PolicyBindingKey>::new();
+        let policy_store = self
+            .database
+            .direct_record_store(AUTHORITY_POLICY_BINDINGS_STORE)?;
+        for entry in policy_store.prefix_entries(&[]).await? {
+            let [Value::Bytes(digest)] = entry.key.as_slice() else {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding directory key must be one digest",
+                ));
+            };
+            let digest: [u8; 32] = digest
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidStoredValue("policy binding digest must be 32 bytes"))?;
+            let Value::String(subject) = entry.value.get_idx(0)? else {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding directory subject must be string",
+                ));
+            };
+            let claims = crate::protocol::policy_binding_directory_claims_from_value(
+                entry.value.get_idx(1)?,
+            )
+            .map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
+            let policy = crate::protocol::PolicyBindingKey::from_canonical_parts(
+                AuthorSubject::from_canonical(&subject)
+                    .map_err(|_| Error::InvalidStoredValue("policy binding directory subject is invalid"))?,
+                claims,
+            );
+            if policy.directory_digest() != digest
+                || policies.insert(digest, policy.clone()).is_some_and(|previous| previous != policy)
+            {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding directory digest does not name its exact policy identity",
+                ));
+            }
+        }
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         for entry in store.prefix_entries(&[]).await? {
-            let authority_result_key = authority_result_key_from_store_prefix(
+            let authority_result_key = resolve_stored_authority_result_key(authority_result_key_from_store_prefix(
                 &entry.key,
                 "known-state authority result key must be valid",
-            )?;
+            )?, &policies, "known-state policy directory entry is missing")?;
             let settled_through = match entry.value.get_idx(0)? {
                 Value::U64(value) => GlobalTime(value),
                 _ => {
@@ -702,19 +780,11 @@ where
                     ));
                 }
             };
-            let binding_view_key = authority_result_key.binding_view;
-            if let Some(previous) = recovered_authority_keys_by_binding_view
-                .insert(binding_view_key, authority_result_key.clone())
-                && previous != authority_result_key
-            {
-                return Err(Error::InvalidStoredValue(
-                    "multiple policy-scoped authority results share one in-memory binding view",
-                ));
-            }
-            settled_through_by_binding_view.insert(binding_view_key, settled_through);
+            let state = authority_results.entry(authority_result_key).or_default();
+            state.settled_through = Some(settled_through);
             match entry.value.get_idx(1)? {
                 Value::U64(progress) if progress != u64::MAX => {
-                    authorization_progress_by_binding_view.insert(binding_view_key, progress);
+                    state.authorization_progress = Some(progress);
                 }
                 Value::U64(_) => {}
                 _ => {
@@ -727,26 +797,14 @@ where
         let store = self
             .database
             .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
-        let mut recovered_members = Vec::new();
         for entry in store.prefix_entries(&[]).await? {
             let Some((member_digest, prefix)) = entry.key.split_last() else {
                 return Err(Error::InvalidStoredValue("settled result member key is empty"));
             };
-            let authority_result_key = authority_result_key_from_store_prefix(
+            let authority_result_key = resolve_stored_authority_result_key(authority_result_key_from_store_prefix(
                 prefix,
                 "settled result member binding key must be valid",
-            )?;
-            if let Some(previous) = recovered_authority_keys_by_binding_view
-                .insert(
-                    authority_result_key.binding_view,
-                    authority_result_key.clone(),
-                )
-                && previous != authority_result_key
-            {
-                return Err(Error::InvalidStoredValue(
-                    "multiple policy-scoped authority results share one in-memory binding view",
-                ));
-            }
+            )?, &policies, "settled result member policy directory entry is missing")?;
             let member_digest = match member_digest {
                 Value::Bytes(bytes) => bytes,
                 _ => {
@@ -774,48 +832,24 @@ where
                 ));
             }
             let member = result_member_from_storage_bytes(&member_bytes)?;
-            recovered_members.push((authority_result_key.binding_view, member));
-        }
-        let mut settled_result_sets =
-            BTreeMap::<BindingViewKey, BTreeSet<ResultMemberEntry>>::new();
-        let mut settled_result_row_index =
-            BTreeMap::<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>::new();
-        for (binding_view_key, member) in recovered_members {
+            let state = authority_results.entry(authority_result_key).or_default();
             if let Some(row_key) = Self::result_member_row_key(&member) {
-                settled_result_row_index
-                    .entry(binding_view_key)
-                    .or_default()
-                    .insert(row_key, member.clone());
+                state.settled_result_row_index.insert(row_key, member.clone());
             }
-            settled_result_sets
-                .entry(binding_view_key)
-                .or_default()
-                .insert(member);
+            state.settled_result_set.insert(member);
         }
 
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        let mut settled_program_facts = BTreeMap::<BindingViewKey, BTreeSet<ViewFactEntry>>::new();
         for entry in store.prefix_entries(&[]).await? {
             let Some((fact_digest, prefix)) = entry.key.split_last() else {
                 return Err(Error::InvalidStoredValue("settled program fact key is empty"));
             };
-            let authority_result_key = authority_result_key_from_store_prefix(
+            let authority_result_key = resolve_stored_authority_result_key(authority_result_key_from_store_prefix(
                 prefix,
                 "settled program fact binding key must be valid",
-            )?;
-            if let Some(previous) = recovered_authority_keys_by_binding_view
-                .insert(
-                    authority_result_key.binding_view,
-                    authority_result_key.clone(),
-                )
-                && previous != authority_result_key
-            {
-                return Err(Error::InvalidStoredValue(
-                    "multiple policy-scoped authority results share one in-memory binding view",
-                ));
-            }
+            )?, &policies, "settled program fact policy directory entry is missing")?;
             let fact_digest = match fact_digest {
                 Value::Bytes(bytes) => bytes,
                 _ => {
@@ -843,16 +877,13 @@ where
                 ));
             }
             let fact = codec::program_fact_from_storage_bytes(&fact_bytes)?;
-            settled_program_facts
-                .entry(authority_result_key.binding_view)
+            authority_results
+                .entry(authority_result_key)
                 .or_default()
+                .settled_program_facts
                 .insert(fact);
         }
-        self.query.settled_through_by_binding_view = settled_through_by_binding_view;
-        self.query.authorization_progress_by_binding_view = authorization_progress_by_binding_view;
-        self.query.settled_result_sets = settled_result_sets;
-        self.query.settled_result_row_index = settled_result_row_index;
-        self.query.settled_program_facts = settled_program_facts;
+        self.query.authority_results = authority_results;
         Ok(())
     }
 

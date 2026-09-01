@@ -17,8 +17,8 @@ use super::super::node::maintained_subscription_view::{
     MaintainedSubscriptionView, MaintainedTerminalSchemas,
 };
 use super::super::protocol::{
-    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
+    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
@@ -163,8 +163,9 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
-    /// Authoritative source membership for an Edge child of a durable relay.
-    pub(super) source_binding_view: Option<BindingViewKey>,
+    /// Exact authoritative source membership for an Edge child of a durable
+    /// relay. A canonical binding view alone is not a permission boundary.
+    pub(super) source_authority_result: Option<AuthorityResultKey>,
     pub(super) initial_received: bool,
 }
 

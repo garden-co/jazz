@@ -497,6 +497,7 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
             "members",
             v3.id,
             binding_view,
+            None,
             SettledBindingRows::ResultMembers,
         )
         .expect("project canonical settled relation source through both lenses");
