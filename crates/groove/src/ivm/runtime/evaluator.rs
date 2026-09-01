@@ -17,7 +17,6 @@ fn plan_expr_fields(expressions: &[PlanExpr]) -> BTreeSet<String> {
         .collect()
 }
 use crate::storage::StorageFuture;
-use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -45,58 +44,190 @@ struct PendingStreamingChecksum {
     output: Vec<RecordDelta>,
 }
 
+pub(super) type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
+pub(super) type CollectByGroup = BTreeMap<CollectByOrderKey, i64>;
+
+#[derive(Clone, Debug)]
+pub(super) struct CollectByGroups {
+    base: Rc<BTreeMap<Vec<u8>, CollectByGroup>>,
+    overlay: Rc<BTreeMap<Vec<u8>, Option<CollectByGroup>>>,
+    cleared: bool,
+}
+
+impl Default for CollectByGroups {
+    fn default() -> Self {
+        Self {
+            base: Rc::default(),
+            overlay: Rc::default(),
+            cleared: false,
+        }
+    }
+}
+
+impl CollectByGroups {
+    pub(super) fn get(&self, key: &[u8]) -> Option<&CollectByGroup> {
+        if let Some(group) = self.overlay.get(key) {
+            return group.as_ref();
+        }
+        (!self.cleared).then(|| self.base.get(key)).flatten()
+    }
+
+    pub(super) fn update(&mut self, key: Vec<u8>, update: impl FnOnce(&mut CollectByGroup)) {
+        let current = self.get(&key).cloned().unwrap_or_default();
+        let group = Rc::make_mut(&mut self.overlay)
+            .entry(key)
+            .or_insert(Some(current))
+            .as_mut()
+            .expect("group updates always install a present overlay");
+        update(group);
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.cleared = true;
+        Rc::make_mut(&mut self.overlay).clear();
+    }
+
+    pub(super) fn remove_empty_touched<I>(&mut self, groups: I)
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        let empty = groups
+            .into_iter()
+            .filter(|group| self.get(group).is_some_and(BTreeMap::is_empty))
+            .collect::<Vec<_>>();
+        let overlay = Rc::make_mut(&mut self.overlay);
+        for group in empty {
+            overlay.insert(group, None);
+        }
+    }
+
+    pub(super) fn keys_set(&self) -> BTreeSet<Vec<u8>> {
+        let mut keys = if self.cleared {
+            BTreeSet::new()
+        } else {
+            self.base.keys().cloned().collect()
+        };
+        for (key, group) in self.overlay.iter() {
+            if group.is_some() {
+                keys.insert(key.clone());
+            } else {
+                keys.remove(key);
+            }
+        }
+        keys
+    }
+
+    fn commit_overlay(&mut self) {
+        if self.overlay.is_empty() && !self.cleared {
+            return;
+        }
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
+        let base = Rc::make_mut(&mut self.base);
+        if self.cleared {
+            base.clear();
+            self.cleared = false;
+        }
+        for (key, group) in overlay {
+            match group {
+                Some(group) => {
+                    base.insert(key, group);
+                }
+                None => {
+                    base.remove(&key);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CollectByRoots {
+    base: Rc<BTreeMap<CollectByOrderKey, i64>>,
+    overlay: Rc<BTreeMap<CollectByOrderKey, Option<i64>>>,
+    cleared: bool,
+}
+
+impl Default for CollectByRoots {
+    fn default() -> Self {
+        Self {
+            base: Rc::default(),
+            overlay: Rc::default(),
+            cleared: false,
+        }
+    }
+}
+
+impl CollectByRoots {
+    pub(super) fn get(&self, key: &CollectByOrderKey) -> Option<&i64> {
+        if let Some(weight) = self.overlay.get(key) {
+            return weight.as_ref();
+        }
+        (!self.cleared).then(|| self.base.get(key)).flatten()
+    }
+
+    pub(super) fn insert(&mut self, key: CollectByOrderKey, weight: i64) {
+        Rc::make_mut(&mut self.overlay).insert(key, Some(weight));
+    }
+
+    pub(super) fn remove(&mut self, key: &CollectByOrderKey) {
+        Rc::make_mut(&mut self.overlay).insert(key.clone(), None);
+    }
+
+    pub(super) fn count_positive_before(&self, key: &CollectByOrderKey) -> usize {
+        let mut keys = if self.cleared {
+            BTreeSet::new()
+        } else {
+            self.base.keys().cloned().collect()
+        };
+        keys.extend(self.overlay.keys().cloned());
+        keys.into_iter()
+            .filter(|candidate| candidate < key)
+            .filter(|candidate| self.get(candidate).is_some_and(|weight| *weight > 0))
+            .count()
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.cleared = true;
+        Rc::make_mut(&mut self.overlay).clear();
+    }
+
+    fn commit_overlay(&mut self) {
+        if self.overlay.is_empty() && !self.cleared {
+            return;
+        }
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
+        let base = Rc::make_mut(&mut self.base);
+        if self.cleared {
+            base.clear();
+            self.cleared = false;
+        }
+        for (key, weight) in overlay {
+            match weight {
+                Some(weight) => {
+                    base.insert(key, weight);
+                }
+                None => {
+                    base.remove(&key);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct CollectByIncrementalState {
-    payload: Rc<CollectByIncrementalPayload>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct CollectByIncrementalPayload {
     pub(super) groups: CollectByGroups,
-    pub(super) roots: BTreeMap<CollectByOrderKey, i64>,
+    pub(super) roots: CollectByRoots,
 }
 
-impl Deref for CollectByIncrementalState {
-    type Target = CollectByIncrementalPayload;
-
-    fn deref(&self) -> &Self::Target {
-        &self.payload
+impl CollectByIncrementalState {
+    pub(super) fn commit_overlay(&mut self) {
+        self.groups.commit_overlay();
+        self.roots.commit_overlay();
     }
 }
-
-impl DerefMut for CollectByIncrementalState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        Rc::make_mut(&mut self.payload)
-    }
-}
-
-#[cfg(test)]
-mod collect_by_state_tests {
-    use super::*;
-
-    #[test]
-    fn collect_by_snapshot_clone_shares_group_base_until_touched_group_write() {
-        let mut original = CollectByIncrementalState::default();
-        original.groups.update(vec![1], |group| {
-            group.insert((Vec::new(), Bytes::from_static(b"one")), 1);
-        });
-        original.groups.update(vec![2], |group| {
-            group.insert((Vec::new(), Bytes::from_static(b"two")), 1);
-        });
-        let mut prepared = original.clone();
-        assert!(Rc::ptr_eq(&original.groups.base, &prepared.groups.base));
-
-        prepared.groups.update(vec![1], |group| {
-            group.insert((Vec::new(), Bytes::from_static(b"updated")), 1);
-        });
-        assert!(Rc::ptr_eq(&original.groups.base, &prepared.groups.base));
-        assert_eq!(original.groups.get(&[1]), prepared.groups.base.get(&[1]));
-        assert_ne!(original.groups.get(&[1]), prepared.groups.get(&[1]));
-    }
-}
-
-pub(super) type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
-type CollectByGroups = BTreeMap<Vec<u8>, BTreeMap<CollectByOrderKey, i64>>;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct TopByIncrementalState {
@@ -110,16 +241,63 @@ impl TopByIncrementalState {
     where
         I: IntoIterator<Item = Vec<u8>>,
     {
-        for group in groups {
-            if self.groups.get(&group).is_some_and(BTreeMap::is_empty) {
-                self.groups.remove(&group);
-            }
-        }
+        self.groups.remove_empty_touched(groups);
+    }
+
+    pub(super) fn commit_overlay(&mut self) {
+        self.groups.commit_overlay();
     }
 
     #[cfg(test)]
     pub(super) fn group_count(&self) -> usize {
-        self.groups.len()
+        self.groups.keys_set().len()
+    }
+}
+#[cfg(test)]
+mod collect_by_state_tests {
+    use super::*;
+
+    #[test]
+    fn collect_by_snapshot_clone_shares_group_base_until_touched_group_write() {
+        let mut original = CollectByIncrementalState::default();
+        original.groups.update(vec![1], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"one")), 1);
+        });
+        original.groups.update(vec![2], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"two")), 1);
+        });
+        original.groups.commit_overlay();
+
+        let mut prepared = original.clone();
+        assert!(Rc::ptr_eq(&original.groups.base, &prepared.groups.base));
+        prepared.groups.update(vec![1], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"updated")), 1);
+        });
+        assert!(Rc::ptr_eq(&original.groups.base, &prepared.groups.base));
+        assert_eq!(
+            original.groups.get(&[1u8]),
+            prepared.groups.base.get(&vec![1u8])
+        );
+        assert_ne!(original.groups.get(&[1u8]), prepared.groups.get(&[1u8]));
+    }
+    #[test]
+    fn top_by_snapshot_clone_shares_group_base_until_touched_group_write() {
+        let mut original = TopByIncrementalState::default();
+        original.groups.update(vec![1], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"one")), 1);
+        });
+        original.groups.update(vec![2], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"two")), 1);
+        });
+        original.groups.commit_overlay();
+
+        let mut prepared = original.clone();
+        assert!(Rc::ptr_eq(&original.groups.base, &prepared.groups.base));
+        prepared.groups.update(vec![1], |group| {
+            group.insert((Vec::new(), Bytes::from_static(b"updated")), 1);
+        });
+        assert!(Rc::ptr_eq(&original.groups.base, &prepared.groups.base));
+        assert_ne!(original.groups.get(&[1u8]), prepared.groups.get(&[1u8]));
     }
 }
 
@@ -1759,21 +1937,18 @@ impl TickEvaluator<'_> {
             state.value_mut().groups.clear();
         }
         for (group_prefix, group_deltas) in &touched_groups {
-            let group = state
-                .value_mut()
-                .groups
-                .entry(group_prefix.clone())
-                .or_default();
             for delta in group_deltas {
                 let order_key = (
                     top_by_sort_key(output_desc, delta.raw(), top_by)?,
                     delta.record.clone(),
                 );
-                let weight = group.entry(order_key.clone()).or_default();
-                *weight += delta.weight;
-                if *weight == 0 {
-                    group.remove(&order_key);
-                }
+                state.value_mut().groups.update(group_prefix.clone(), |group| {
+                    let weight = group.entry(order_key.clone()).or_default();
+                    *weight += delta.weight;
+                    if *weight == 0 {
+                        group.remove(&order_key);
+                    }
+                });
             }
         }
         state

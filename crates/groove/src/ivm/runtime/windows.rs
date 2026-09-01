@@ -286,9 +286,15 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
     // consumers and cancels transient insert/delete pairs within one batch.
     let deltas =
         canonical_collect_by_terminal_deltas(input_desc, collect_by, direct_tree_slot, deltas)?;
+    let touched_group_keys = deltas
+        .iter()
+        .map(|delta| {
+            encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
     let root_groups_before = direct_tree_slot
         .is_none()
-        .then(|| state.groups.keys().cloned().collect::<BTreeSet<_>>());
+        .then(|| state.groups.keys_set());
     let mut operations = Vec::new();
     for delta in &deltas {
         let group_key =
@@ -307,15 +313,8 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             } else {
                 state.roots.insert(state_key.clone(), after_weight);
             }
-            if !emit || (before_weight > 0) == (after_weight > 0) {
-                continue;
-            }
             if after_weight > 0 {
-                let index = state
-                    .roots
-                    .range(..state_key)
-                    .filter(|(_, weight)| **weight > 0)
-                    .count();
+                let index = state.roots.count_positive_before(&state_key);
                 let record = collect_by_tree_parent_from_records(
                     input_desc,
                     output_desc,
@@ -366,20 +365,29 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             sort_directions,
         )?;
         let state_key = (sort_key, delta.record.clone());
-        let group = state.groups.entry(group_key.clone()).or_default();
-        let before_weight = group.get(&state_key).copied().unwrap_or_default();
+        let before_weight = state
+            .groups
+            .get(&group_key)
+            .and_then(|group| group.get(&state_key))
+            .copied()
+            .unwrap_or_default();
         let before_index = (before_weight > 0).then(|| {
-            group
+            state
+                .groups
+                .get(&group_key)
+                .expect("positive state weight has a group")
                 .range(..state_key.clone())
                 .filter(|(_, weight)| **weight > 0)
                 .count()
         });
         let after_weight = before_weight + delta.weight;
-        if after_weight == 0 {
-            group.remove(&state_key);
-        } else {
-            group.insert(state_key.clone(), after_weight);
-        }
+        state.groups.update(group_key.clone(), |group| {
+            if after_weight == 0 {
+                group.remove(&state_key);
+            } else {
+                group.insert(state_key.clone(), after_weight);
+            }
+        });
         if !emit || (before_weight > 0) == (after_weight > 0) {
             continue;
         }
@@ -409,8 +417,11 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         let child_key = encoded_record_key_part(child_descriptor, &child_record, &[0])?;
         let path = vec![TerminalPathSegment::Collection(collection_field.to_owned())];
         if after_weight > 0 {
-            let index = group
-                .range(..state_key)
+            let index = state
+                .groups
+                .get(&group_key)
+                .expect("positive state weight has a group")
+                .range(..state_key.clone())
                 .filter(|(_, weight)| **weight > 0)
                 .count();
             operations.push(TerminalOperation {
@@ -433,9 +444,9 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             debug_assert!(before_index.is_some());
         }
     }
-    state.groups.retain(|_, group| !group.is_empty());
+    state.groups.remove_empty_touched(touched_group_keys.iter().cloned());
     if let Some(root_groups_before) = root_groups_before {
-        let root_groups_after = state.groups.keys().cloned().collect::<BTreeSet<_>>();
+        let root_groups_after = state.groups.keys_set();
         operations.retain(|operation| {
             root_groups_before.contains(&operation.root_key)
                 && root_groups_after.contains(&operation.root_key)
@@ -561,9 +572,11 @@ fn update_collect_by_root_terminal_state(
         state.roots.clear();
     }
     let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
+    let mut touched_group_keys = BTreeSet::new();
     for delta in deltas {
         let group_key =
             encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
+        touched_group_keys.insert(group_key.clone());
         if emit && !before.contains_key(&group_key) {
             let rendered = state.groups.get(&group_key).map_or(Ok(None), |group| {
                 let records = group
@@ -576,15 +589,24 @@ fn update_collect_by_root_terminal_state(
         }
         let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
         let state_key = (sort_key, delta.record.clone());
-        let group = state.groups.entry(group_key).or_default();
-        let weight = group.get(&state_key).copied().unwrap_or_default() + delta.weight;
-        if weight == 0 {
-            group.remove(&state_key);
-        } else {
-            group.insert(state_key, weight);
-        }
+        let before_weight = state
+            .groups
+            .get(&group_key)
+            .and_then(|group| group.get(&state_key))
+            .copied()
+            .unwrap_or_default();
+        let weight = before_weight + delta.weight;
+        state.groups.update(group_key, |group| {
+            if weight == 0 {
+                group.remove(&state_key);
+            } else {
+                group.insert(state_key, weight);
+            }
+        });
     }
-    state.groups.retain(|_, group| !group.is_empty());
+    state
+        .groups
+        .remove_empty_touched(touched_group_keys.into_iter());
     if !emit {
         return Ok(Vec::new());
     }
@@ -605,8 +627,9 @@ fn update_collect_by_root_terminal_state(
             (None, Some(record)) => TerminalEdit::Insert {
                 index: state
                     .groups
-                    .keys()
-                    .take_while(|key| *key < &root_key)
+                    .keys_set()
+                    .into_iter()
+                    .take_while(|key| key < &root_key)
                     .count(),
                 key: root_key.clone(),
                 value: record.to_vec(),

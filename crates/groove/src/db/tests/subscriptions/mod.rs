@@ -342,6 +342,54 @@ async fn cancelling_cold_hydration_releases_completed_barriers() {
     );
 }
 
+/// Cancelling a parked hydration with multiple roots must not let its staged
+/// state reappear after the roots are garbage-collected.
+#[futures_test::test]
+async fn cancelled_parked_multi_root_hydration_drops_gc_state() {
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::String("cancelled album".to_owned()),
+        ],
+    );
+    batch.insert(
+        "artists",
+        vec![Value::U64(1), Value::String("cancelled artist".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    storage.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let subscription = database
+        .subscribe([
+            ("albums", GraphBuilder::table("albums")),
+            ("artists", GraphBuilder::table("artists")),
+        ])
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert!(database.unsubscribe(subscription.id()));
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    for _ in 0..32 {
+        database.drive_ready_progress().await.unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    let stats = database.runtime_stats();
+    assert_eq!(stats.active_subscriptions, 0);
+    assert_eq!(stats.eval_memo_entries, 0);
+    assert_eq!(stats.graph_nodes, 0);
+}
+
 /// A large entirely resident graph is CPU work, not a storage wait. The direct
 /// async API owns and drains that resident continuation chain before returning;
 /// the owner-loop API instead yields bounded turns and wakes its owner. Both

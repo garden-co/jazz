@@ -639,36 +639,46 @@ impl IncrementalEvaluation<'_> {
             .operator_states
             .retain(|key, _| !self.relevant_nodes.contains(&key.node));
         for state in self.operator_states.values_mut() {
-            if let OperatorState::Recursive(recursive) = state {
-                recursive.value_mut().commit_staged_positive();
+            match state {
+                OperatorState::Recursive(recursive) => {
+                    recursive.value_mut().commit_staged_positive();
+                }
+                OperatorState::TopBy(top_by) => {
+                    top_by.value_mut().commit_overlay();
+                }
+                OperatorState::CollectBy(collect_by) => {
+                    collect_by.commit_overlay();
+                }
+                _ => {}
             }
         }
         runtime
             .operator_states
-            .extend(std::mem::take(&mut self.operator_states));
-
+            .extend(std::mem::take(&mut self.operator_states).into_iter().filter(
+                |(key, _)| runtime.graph.node(key.node).is_some(),
+            ));
         runtime
             .arrangement_states
-            .retain(|key, _| !self.relevant_nodes.contains(&key.input));
-        for state in self.arrangement_states.values_mut() {
-            state.value_mut().commit_overlay();
-        }
-        runtime
-            .arrangement_states
-            .extend(std::mem::take(&mut self.arrangement_states));
+            .extend(
+                std::mem::take(&mut self.arrangement_states)
+                    .into_iter()
+                    .filter(|(key, _)| runtime.graph.node(key.input).is_some()),
+            );
         runtime
             .arrangement_keys_by_input
-            .retain(|node, _| !self.relevant_nodes.contains(node));
-        runtime
-            .arrangement_keys_by_input
-            .extend(std::mem::take(&mut self.arrangement_keys_by_input));
+            .extend(
+                std::mem::take(&mut self.arrangement_keys_by_input)
+                    .into_iter()
+                    .filter(|(node, _)| runtime.graph.node(*node).is_some()),
+            );
 
         runtime
             .eval_memo
-            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
-        runtime
-            .eval_memo
-            .extend(std::mem::take(&mut self.eval_memo));
+            .extend(
+                std::mem::take(&mut self.eval_memo)
+                    .into_iter()
+                    .filter(|(key, _)| runtime.graph.node(key.node).is_some()),
+            );
         runtime.eval_memo_bytes = runtime
             .eval_memo
             .values()
@@ -679,6 +689,9 @@ impl IncrementalEvaluation<'_> {
         // evaluation snapshot. Preserve their current live value when a
         // suspended continuation resumes after lifecycle activity.
         for node in &self.relevant_nodes {
+            if runtime.graph.node(*node).is_none() {
+                continue;
+            }
             match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
                 (Some(meta), Some(live)) => meta.retainers = live.retainers.clone(),
                 (None, Some(live)) => {
@@ -692,7 +705,11 @@ impl IncrementalEvaluation<'_> {
             .retain(|node, _| !self.relevant_nodes.contains(node));
         runtime
             .node_meta
-            .extend(std::mem::take(&mut self.node_meta));
+            .extend(
+                std::mem::take(&mut self.node_meta)
+                    .into_iter()
+                    .filter(|(node, _)| runtime.graph.node(*node).is_some()),
+            );
         runtime.table_frontiers = std::mem::take(&mut self.table_frontiers);
         runtime.binding_frontiers = std::mem::take(&mut self.binding_frontiers);
         runtime.current_tick = self.current_tick;
@@ -1392,14 +1409,25 @@ impl<'a> EvaluationSession<'a> {
         }
     }
 
-    fn install(self, runtime: &mut IvmRuntime) {
+    fn install(mut self, runtime: &mut IvmRuntime) {
         for node in &self.relevant_nodes {
             runtime.operator_states.remove(&OperatorStateKey {
                 scope: ScopeId::root(),
                 node: *node,
             });
         }
-        runtime.operator_states.extend(self.operator_states);
+        for state in self.operator_states.values_mut() {
+            match state {
+                OperatorState::TopBy(top_by) => top_by.value_mut().commit_overlay(),
+                OperatorState::CollectBy(collect_by) => collect_by.commit_overlay(),
+                _ => {}
+            }
+        }
+        runtime.operator_states.extend(
+            self.operator_states
+                .into_iter()
+                .filter(|(key, _)| runtime.graph.node(key.node).is_some()),
+        );
         for node in &self.relevant_nodes {
             if let Some(keys) = runtime.arrangement_keys_by_input.get(node) {
                 for key in keys {
@@ -1407,17 +1435,29 @@ impl<'a> EvaluationSession<'a> {
                 }
             }
         }
-        runtime.arrangement_states.extend(self.arrangement_states);
+        runtime.arrangement_states.extend(
+            self.arrangement_states
+                .into_iter()
+                .filter(|(key, _)| runtime.graph.node(key.input).is_some()),
+        );
         for node in &self.relevant_nodes {
             runtime.arrangement_keys_by_input.remove(node);
         }
         runtime
             .arrangement_keys_by_input
-            .extend(self.arrangement_keys_by_input);
+            .extend(
+                self.arrangement_keys_by_input
+                    .into_iter()
+                    .filter(|(node, _)| runtime.graph.node(*node).is_some()),
+            );
         runtime
             .eval_memo
             .retain(|key, _| !self.relevant_nodes.contains(&key.node));
-        runtime.eval_memo.extend(self.eval_memo);
+        runtime.eval_memo.extend(
+            self.eval_memo
+                .into_iter()
+                .filter(|(key, _)| runtime.graph.node(key.node).is_some()),
+        );
         runtime.eval_memo_bytes = runtime
             .eval_memo
             .values()
@@ -1427,7 +1467,11 @@ impl<'a> EvaluationSession<'a> {
         for node in &self.relevant_nodes {
             runtime.node_meta.remove(node);
         }
-        runtime.node_meta.extend(self.node_meta);
+        runtime.node_meta.extend(
+            self.node_meta
+                .into_iter()
+                .filter(|(node, _)| runtime.graph.node(*node).is_some()),
+        );
     }
 }
 
