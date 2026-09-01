@@ -1656,6 +1656,40 @@ pub struct BindingViewKey {
     pub read_view: ReadViewKey,
 }
 
+/// Exact identity of a result selected by an authority.
+///
+/// A canonical query binding alone is not a permission boundary: a relay may
+/// carry the same query for two delegated claim snapshots. The full policy
+/// snapshot is therefore part of the Jazz result identity, never a truncated
+/// or hash-only discriminator.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct AuthorityResultKey {
+    /// Canonical query binding and requested serving view.
+    pub binding_view: BindingViewKey,
+    /// Complete immutable policy snapshot that selected the result.
+    pub policy_binding: Option<PolicyBindingKey>,
+}
+
+impl AuthorityResultKey {
+    /// Construct a result identity for an already scope-isolated local view.
+    pub const fn unscoped(binding_view: BindingViewKey) -> Self {
+        Self {
+            binding_view,
+            policy_binding: None,
+        }
+    }
+
+    /// Construct a result identity for a delegated authority policy snapshot.
+    pub fn policy_scoped(binding_view: BindingViewKey, policy_binding: PolicyBindingKey) -> Self {
+        Self {
+            binding_view,
+            policy_binding: Some(policy_binding),
+        }
+    }
+}
+
 impl BindingViewKey {
     /// Create a canonical binding-view key.
     pub fn new(shape_id: ShapeId, binding_id: BindingId, read_view: ReadViewKey) -> Self {
@@ -1705,6 +1739,17 @@ pub struct PolicyBindingKey {
     /// Canonical postcard bytes of the claims map; retained rather than hashed
     /// so distinct snapshots can never share coverage on a hash collision.
     pub canonical_claims: Vec<u8>,
+}
+
+impl PolicyBindingKey {
+    /// Canonicalize the exact claims snapshot delegated with a subscription.
+    pub fn from_delegated_session(session: &DelegatedSessionBinding) -> Self {
+        Self {
+            identity: session.identity,
+            canonical_claims: postcard::to_allocvec(&session.claims)
+                .expect("claims map has a canonical postcard encoding"),
+        }
+    }
 }
 
 /// Versioned query AST carried by shape registration.

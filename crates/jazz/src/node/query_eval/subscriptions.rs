@@ -375,6 +375,12 @@ where
             binding_id: binding.binding_id(),
             read_view: subscribe.subscription.read_view,
         };
+        let authority_result_key = subscribe
+            .delegated_session
+            .as_ref()
+            .map(crate::protocol::PolicyBindingKey::from_delegated_session)
+            .map(|policy| AuthorityResultKey::policy_scoped(binding_view_key, policy))
+            .unwrap_or_else(|| AuthorityResultKey::unscoped(binding_view_key));
         // A new wire subscription needs an authority receipt. Discard a
         // browser-only materialized-window interpretation before any opening
         // reset can otherwise preserve its old member set.
@@ -407,6 +413,7 @@ where
                     values: subscribe.values,
                     read_view: subscribe.subscription.read_view,
                     binding_view_key,
+                    authority_result_key,
                 },
             );
         Ok(())

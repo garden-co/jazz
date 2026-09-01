@@ -36,11 +36,12 @@ use crate::ids::{
     RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::protocol::{
-    BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp, MigrationLens,
-    PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity, ProgramFactEntry,
-    ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef,
-    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
+    AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp,
+    MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
+    ProgramFactEntry, ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry,
+    RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
+    expand_version_carriers,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
@@ -914,6 +915,9 @@ struct RegisteredBinding {
     values: Vec<Value>,
     read_view: ReadViewKey,
     binding_view_key: BindingViewKey,
+    /// Exact, Jazz-owned namespace for authority-selected membership.  This
+    /// stays separate from the canonical local binding key.
+    authority_result_key: AuthorityResultKey,
 }
 
 /// Locally open transactions and local-only permission attribution.
