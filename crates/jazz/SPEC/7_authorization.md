@@ -53,6 +53,7 @@ Invariant digest:
   Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
   the reserved system issuer. Local intern handles MUST never become wire,
   storage, query, equality, or ordering values.
+- `INV-RLS-24`: Client mutation staging MUST NOT issue a definitive read- or write-policy verdict from partial local state. Update/upsert read visibility and write policy are enforced by the fate authority against its complete admitted policy inputs.
 
 ## Details
 
@@ -278,6 +279,16 @@ redact a copy already delivered to a receiving node (`INV-RLS-6`). A receiving
 node does not re-filter its own local reads or subscriptions by policy. The spec
 therefore makes no post-delivery confidentiality promise against a node that
 already received data: revocation is forward-looking sync narrowing.
+
+A client relay does not become an authority by retaining an authority-selected
+result. A scope-isolated relay may publish retained rows and repair payloads to
+an exactly same-scope foreground without re-running policy. For Edge/Global
+results it must use the exact policy-scoped membership emitted by the authority;
+for Local results it uses retained knowledge, including previously delivered
+rows that a later authority result removes. A multiplexed relay must keep each
+policy binding's authoritative membership separate and may not treat possession
+of a cached row as permission to reveal it to another scope (ch. 9,
+`INV-EDGE-21..24`).
 
 effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references
