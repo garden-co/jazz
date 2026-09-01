@@ -578,10 +578,8 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
     let (_core_dir, mut core) = open_node(node(4), schema.clone());
 
-    let mut core_to_edge = PeerState::relay();
     let mut edge_to_client = PeerState::edge_client(client_author);
 
-    assert_eq!(core_to_edge.role(), PeerRole::Relay);
     assert_eq!(
         edge_to_client.role(),
         PeerRole::ClientLink {
@@ -614,7 +612,10 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
         );
     }
 
-    refresh(&mut core, &mut edge, &mut core_to_edge);
+    // `relay_ingest` above gives the Edge the pending client units; fate
+    // settlement makes them visible there. Do not model this as a SYSTEM
+    // identity on a generic relay: an actual relay transport has no identity
+    // and can serve only a server-admitted foreground binding.
     refresh(&mut edge, &mut client, &mut edge_to_client);
 
     let expected_all = vec![
@@ -626,7 +627,6 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
     assert_eq!(rows(&mut core), expected_all);
     assert_eq!(rows(&mut edge), expected_all);
     assert_eq!(subscription_rows(&mut client), expected_client);
-    assert_eq!(core_to_edge.identity(), AuthorSubject::SYSTEM);
 }
 
 #[test]

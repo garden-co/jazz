@@ -3865,37 +3865,7 @@ fn admit_binding_claims(
     author: AuthorSubject,
     claims: BTreeMap<String, Value>,
 ) -> BTreeMap<String, Value> {
-    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
-        .expect("author subjects always have canonical issuer/subject JSON");
-    let mut admitted = claims
-        .into_iter()
-        .map(|(name, value)| (jazz::query::provider_claim_key(&name), value))
-        .collect::<BTreeMap<_, _>>();
-    admitted.insert(
-        jazz::query::provider_claim_key("iss"),
-        Value::String(issuer.clone()),
-    );
-    admitted.insert(
-        jazz::query::provider_claim_key("sub"),
-        Value::String(subject),
-    );
-    admitted.insert(
-        "user".to_owned(),
-        Value::String(author.canonical().to_owned()),
-    );
-    admitted.insert(
-        "authMode".to_owned(),
-        Value::String(auth_mode_for_author(&issuer).to_owned()),
-    );
-    admitted
-}
-
-fn auth_mode_for_author(issuer: &str) -> &'static str {
-    match issuer {
-        AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
-        AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
-        _ => "external",
-    }
+    jazz::tools::policy_claims::canonical_policy_binding_claims(&author, claims, Value::String)
 }
 
 fn claim_value_from_json(value: serde_json::Value) -> Result<Value, JsValue> {

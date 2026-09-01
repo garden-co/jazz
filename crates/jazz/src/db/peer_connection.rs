@@ -482,7 +482,7 @@ where
     pub(super) mutation_errors: SharedMutationErrors,
     pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(super) fail_next_subscription_refresh: Cell<bool>,
     pub(super) observed_subscriber_dirty_epoch: Cell<u64>,
     pub(super) observed_session_claim_revision: Cell<u64>,
@@ -1054,6 +1054,7 @@ where
         // one usage site and allocate a fresh opaque handle whose identity
         // includes the new immutable delegated snapshot.
         let mut upstream_replacements = Vec::new();
+        let mut refreshed_authority_sources = BTreeMap::new();
         let groups = coverage_groups
             .iter_mut()
             .map(|(coverage, group)| {
@@ -1076,6 +1077,26 @@ where
                         );
                         if old_upstream_subscription != fresh_upstream_subscription {
                             group.upstream_subscription = fresh_upstream_subscription;
+                            debug_assert_eq!(
+                                group.authority_result_subscription,
+                                old_upstream_subscription,
+                                "only a non-authoritative relay refreshes an upstream authority source"
+                            );
+                            group.authority_result_subscription = fresh_upstream_subscription;
+                            refreshed_authority_sources.insert(
+                                coverage.clone(),
+                                crate::protocol::AuthorityResultKey::policy_scoped(
+                                    BindingViewKey {
+                                        shape_id: group.shape.shape_id(),
+                                        binding_id: group.binding.binding_id(),
+                                        read_view: group.upstream_opts.read_view_key(),
+                                    },
+                                    crate::protocol::PolicyBindingKey::from_canonical_parts(
+                                        refreshed_direct_binding.0,
+                                        refreshed_direct_binding.1.clone(),
+                                    ),
+                                ),
+                            );
                             group.awaiting_upstream_settlement = true;
                             // Do not let the next owner-loop pass rehydrate a
                             // subscriber from the old result set. Once the
@@ -1126,6 +1147,18 @@ where
             downstream_subscriptions,
         ) in upstream_replacements
         {
+            // A direct coverage key is not itself policy-partitioned, so a
+            // claim refresh can replace U without changing the group key.
+            // In that case the old receiver would otherwise remain attached
+            // to B1 and later publish its stale membership as B2. Retire the
+            // group-owned receiver explicitly; it will reopen only after the
+            // fresh exact U settles.
+            let maintained_subscription = coverage_group_subscription_key(&coverage);
+            {
+                let mut node = self.node.borrow_mut();
+                node.apply_unsubscribe(maintained_subscription);
+                peer.forget_subscription_with_node(&mut node, maintained_subscription);
+            }
             let old_owner = retire_relay_upstream_subscription(
                 &self.relay_upstream_subscription_owners,
                 old_upstream_subscription,
@@ -1203,6 +1236,21 @@ where
                 }
             }
             if deferred_rehydrates.contains(&coverage) {
+                let source = refreshed_authority_sources
+                    .get(&coverage)
+                    .expect("every deferred relay refresh selects a new exact U source")
+                    .clone();
+                peer.set_subscription_authority_result_source(
+                    maintained_subscription,
+                    source.clone(),
+                );
+                peer.set_subscription_awaiting_selected_authority_source(
+                    maintained_subscription,
+                    true,
+                );
+                for subscription in &subscribers {
+                    peer.set_subscription_authority_result_source(*subscription, source.clone());
+                }
                 // The old maintained group was fed by the old upstream usage
                 // and may still contain rows now forbidden by the refreshed
                 // session. Tear it down rather than rehydrating from that
@@ -1508,13 +1556,60 @@ where
                     group.shape.clone(),
                     group.binding.clone(),
                     group.policy_binding.clone(),
+                    group.authority_result_subscription,
+                    group.awaiting_upstream_settlement,
                     group.subscribers.iter().copied().collect::<Vec<_>>(),
                 )
             })
             .collect::<Vec<_>>();
-        for (coverage, shape, binding, policy_binding, subscribers) in groups {
+        for (
+            coverage,
+            shape,
+            binding,
+            policy_binding,
+            authority_result_subscription,
+            awaiting_upstream_settlement,
+            subscribers,
+        ) in groups
+        {
             let group_subscription = coverage_group_subscription_key(&coverage);
             peer.set_subscription_policy_binding(group_subscription, policy_binding);
+            let scope_relay = self.node.borrow().client_relay_scope().is_some();
+            if awaiting_upstream_settlement {
+                let authority_result_source = self
+                    .node
+                    .borrow()
+                    .authority_result_key_for_subscription(authority_result_subscription)
+                    .ok();
+                let Some(authority_result_source) = authority_result_source else {
+                    // A strict scope relay may not rehydrate from its overlay
+                    // or guess a sibling's receipt. Its separately admitted U
+                    // source must be registered first.
+                    *serve_dirty = true;
+                    continue;
+                };
+                if scope_relay
+                    && !self
+                        .node
+                        .borrow()
+                        .has_settled_authority_result(&authority_result_source)
+                {
+                    // Recovery cannot turn an unsettled strict relay read into
+                    // a definitive empty result. Wait for the selected U.
+                    *serve_dirty = true;
+                    continue;
+                }
+                peer.set_subscription_authority_result_source(
+                    group_subscription,
+                    authority_result_source,
+                );
+                peer.set_subscription_awaiting_selected_authority_source(
+                    group_subscription,
+                    scope_relay,
+                );
+            } else {
+                peer.set_subscription_awaiting_selected_authority_source(group_subscription, false);
+            }
             let update = {
                 let mut node = self.node.lock().await;
                 let mut node = node.scoped_active_session_claims(
@@ -3181,7 +3276,7 @@ where
                         // returning it would discard this tick's progress receipt
                         // and make the already-consumed batch eligible for replay.
                         let refresh_result = {
-                            #[cfg(test)]
+                            #[cfg(any(test, feature = "testing"))]
                             {
                                 if self.fail_next_subscription_refresh.replace(false) {
                                     Err(Error::new(
@@ -3198,7 +3293,7 @@ where
                                     .await
                                 }
                             }
-                            #[cfg(not(test))]
+                            #[cfg(not(any(test, feature = "testing")))]
                             {
                                 refresh_subscriptions_in(
                                     &self.node,
@@ -3930,7 +4025,8 @@ where
                             }
                             let group_subscription = coverage_group_subscription_key(&coverage);
                             let local_subscriber = *local_receiver;
-                            let upstream_opts = if local_subscriber {
+                            let scope_relay = self.node.borrow().client_relay_scope().is_some();
+                            let upstream_opts = if local_subscriber || scope_relay {
                                 let mut opts = upstream_register_shape_options(
                                     opts.tier,
                                     opts.read_view.clone(),
@@ -3957,6 +4053,24 @@ where
                                 upstream_opts.read_view_key(),
                                 &subscription_policy_binding,
                             );
+                            // This is a topology-role distinction, not a
+                            // transport-direction distinction.  The browser
+                            // worker receives its foreground subscriber on a
+                            // `local_receiver = false` link, yet it is still
+                            // a non-authoritative scope relay: only its
+                            // separately registered upstream usage can
+                            // receive a live authority result.  A serving
+                            // authority, by contrast, evaluates the incoming
+                            // downstream usage itself and therefore owns D.
+                            let propagates_to_selected_authority = opts.propagate_upstream
+                                && (local_subscriber || scope_relay);
+                            let waits_for_selected_authority = propagates_to_selected_authority
+                                && opts.tier > DurabilityTier::Local;
+                            let authority_result_subscription = if propagates_to_selected_authority {
+                                upstream_subscription
+                            } else {
+                                subscription
+                            };
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
@@ -4011,6 +4125,48 @@ where
                                 binding_id: binding.binding_id(),
                                 read_view: upstream_opts.read_view_key(),
                             };
+                            let selected_authority_result_key =
+                                (scope_relay && propagates_to_selected_authority).then(|| {
+                                crate::protocol::AuthorityResultKey::policy_scoped(
+                                    upstream_binding_view,
+                                    crate::protocol::PolicyBindingKey::from_canonical_parts(
+                                        subscription_policy_binding.0,
+                                        subscription_policy_binding.1.clone(),
+                                    ),
+                                )
+                            });
+                            // Record the exact source on the concrete D
+                            // usage before any recovery/publication path can
+                            // emit a frame. The U wire registration is queued
+                            // later in this owner-loop turn, but its canonical
+                            // authority key is already determined by the
+                            // immutable admitted binding. This lets the send
+                            // boundary preserve opening provenance instead of
+                            // accidentally publishing D's empty local overlay
+                            // as a final strict result.
+                            if scope_relay && propagates_to_selected_authority {
+                                let selected_authority_result_key = selected_authority_result_key
+                                    .clone()
+                                    .expect("scope relay selects an exact authority result");
+                                // The coverage-group subscription owns the
+                                // maintained receiver. Install U on that
+                                // owner before any publication path can open
+                                // it; D only receives the group's retargeted
+                                // ViewUpdates and must not be mistaken for
+                                // the maintained receiver's source.
+                                peer.set_subscription_authority_result_source(
+                                    group_subscription,
+                                    selected_authority_result_key.clone(),
+                                );
+                                peer.set_subscription_awaiting_selected_authority_source(
+                                    group_subscription,
+                                    waits_for_selected_authority,
+                                );
+                                peer.set_subscription_authority_result_source(
+                                    subscription,
+                                    selected_authority_result_key,
+                                );
+                            }
                             if local_subscriber
                                 && upstream_opts.binding_source
                                     == BindingSource::RelayAuthoritySession
@@ -4036,23 +4192,37 @@ where
                             .await?;
                             stats.subscription_events += changed;
                             needs_subscription_refresh |= published;
-                            let local_waiting_for_upstream_settlement = local_subscriber
-                                && opts.propagate_upstream
-                                && opts.tier > DurabilityTier::Local
-                                && {
-                                    // This incoming usage site was just
-                                    // registered with its exact policy
-                                    // binding. A same-shaped sibling's
-                                    // receipt must neither settle nor block
-                                    // it.
-                                    let node = self.node.borrow();
-                                    !node
-                                        .authority_result_key_for_subscription(subscription)
-                                        .ok()
-                                        .is_some_and(|key| {
+                            // A strict child of a non-authoritative relay
+                            // cannot open its maintained receiver against the
+                            // local overlay: it must wait until the exact
+                            // upstream authority receipt selected above has
+                            // settled. `local_receiver` describes the link,
+                            // not the topology role, so a browser scope relay
+                            // needs this too even though its foreground link
+                            // is a normal subscriber connection. A serving
+                            // authority selects D and evaluates it locally,
+                            // so it deliberately does not take this handoff
+                            // path.
+                            let waiting_for_selected_authority_settlement =
+                                waits_for_selected_authority
+                                    && {
+                                        // This usage site owns a distinct
+                                        // receipt. A same-shaped sibling must
+                                        // neither settle nor block it.
+                                        let node = self.node.borrow();
+                                        let selected = selected_authority_result_key
+                                            .as_ref()
+                                            .cloned()
+                                            .or_else(|| {
+                                                node.authority_result_key_for_subscription(
+                                                    authority_result_subscription,
+                                                )
+                                                .ok()
+                                            });
+                                        !selected.is_some_and(|key| {
                                             node.has_settled_authority_result(&key)
                                         })
-                                };
+                                    };
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())
@@ -4086,14 +4256,24 @@ where
                                         subscribers: BTreeSet::new(),
                                         pending_initial_subscribers: BTreeSet::new(),
                                         initialized: false,
+                                        authority_result_subscription,
                                         upstream_subscription,
                                         upstream_opts: upstream_opts.clone(),
                                         awaiting_upstream_settlement:
-                                            local_waiting_for_upstream_settlement,
+                                            waiting_for_selected_authority_settlement,
                                     }
                                 });
                             group.subscribers.insert(subscription);
                             group.pending_initial_subscribers.insert(subscription);
+                            if let Some(selected) = selected_authority_result_key {
+                                // Keep the policy-scoped U source selected at
+                                // admission. A later owner-loop lookup must
+                                // not collapse it to an unscoped local cache.
+                                peer.set_subscription_authority_result_source(
+                                    group_subscription,
+                                    selected,
+                                );
+                            }
                             if group.upstream_opts.propagate_upstream {
                                 let owner = RelayUpstreamSubscriptionOwner {
                                     downstream_connection_epoch: connection_epoch,
@@ -4610,17 +4790,31 @@ where
                             group.policy_binding.clone(),
                         );
                         // The maintained receiver is addressed by the
-                        // policy-partitioned coverage-group key, while the
-                        // selected membership belongs to its separately
-                        // registered upstream usage key. Keep that exact
-                        // association even for groups that did not have to
-                        // wait on this turn; strict relay materialization
-                        // always needs it.
-                        let upstream_authority_result_key = self
-                            .node
-                            .borrow()
-                            .authority_result_key_for_subscription(group.upstream_subscription)
-                            .ok();
+                        // policy-partitioned coverage-group key. Its
+                        // membership source is the locally admitted
+                        // downstream usage on an authority, or the separate
+                        // upstream usage only on a non-authoritative relay.
+                        // Keep that exact association even for groups that
+                        // did not have to wait on this turn; strict relay
+                        // materialization always needs it.
+                        // Admission selected the canonical authority result
+                        // for this coverage group.  In particular, a scoped
+                        // client relay's U carries the immutable delegated
+                        // policy binding.  Do not re-derive it from the wire
+                        // subscription here: that can collapse a scoped U
+                        // into a sibling/unscoped cache entry between
+                        // registration and first publication.
+                        let upstream_authority_result_key = peer
+                            .subscription_authority_result_source(group_subscription)
+                            .cloned()
+                            .or_else(|| {
+                                self.node
+                                    .borrow()
+                                    .authority_result_key_for_subscription(
+                                        group.authority_result_subscription,
+                                    )
+                                    .ok()
+                            });
                         let upstream_authority_is_settled = {
                             let node = self.node.borrow();
                             upstream_authority_result_key
@@ -4994,6 +5188,10 @@ where
                         };
                         if settled_handoff {
                             group.awaiting_upstream_settlement = false;
+                            peer.set_subscription_awaiting_selected_authority_source(
+                                group_subscription,
+                                false,
+                            );
                         }
                         if settled_handoff || !view_update_is_empty(&update) {
                             #[cfg(feature = "sync-autopsy")]
@@ -6190,11 +6388,30 @@ pub(super) fn send_subscriber_with_sync_context<S>(
     transport: &mut dyn Transport,
     local_fate_routes: &LocalFateRoutes,
     downstream_fates: &PendingDownstreamFates,
-    message: SyncMessage,
+    mut message: SyncMessage,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    if let SyncMessage::ViewUpdate(payload) = &mut message
+        && node.borrow().client_relay_scope().is_some()
+    {
+        let source = peer
+            .subscription_authority_result_source(payload.subscription)
+            .cloned();
+        let source_settled = source
+            .as_ref()
+            .is_some_and(|source| node.borrow().has_settled_authority_result(source));
+        if source.is_some() && !source_settled {
+            // This D belongs to a non-authoritative scope relay. Its selected U
+            // source exists conceptually at admission but has not delivered a
+            // live authority reset yet. Every route to the foreground—including
+            // recovery/rehydration—must retain that fact; an ordinary empty reset
+            // would otherwise complete a strict Edge read and release U before
+            // the authority reply can arrive.
+            payload.peer_payload_inventory.opening_pending = true;
+        }
+    }
     let mut pending_tx_ids = BTreeSet::new();
     if let SyncMessage::ViewUpdate(payload) = &message {
         for carrier in &payload.version_carriers {

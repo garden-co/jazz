@@ -230,6 +230,9 @@ mod subscriptions;
 
 mod maintained_views;
 
+mod local_authority_reconciliation;
+pub(crate) use local_authority_reconciliation::LocalAuthorityReconciliation;
+
 #[cfg(feature = "testing")]
 pub(crate) use maintained_views::LocalMaintainedViewSubscriptionFootprint;
 use maintained_views::SubscriptionPreparedPlan;
@@ -1565,20 +1568,6 @@ where
     ) -> Option<BindingViewKey> {
         self.client_settled_binding_view_for_query(shape, binding, tier, read_view)
             .map(|view| view.key)
-    }
-
-    /// A browser worker relaying a strict Edge read must publish from its
-    /// dedicated authority-session membership. The worker's local overlay is
-    /// not a complete replacement for that server-selected result: an
-    /// unbounded filtered query can depend on supporting rows which are
-    /// intentionally absent from the overlay. Non-owner relays keep their
-    /// ordinary projection source.
-    pub(crate) fn relay_edge_query_requires_authority_source(
-        &self,
-        _shape: &ValidatedQuery,
-        _binding: &Binding,
-    ) -> bool {
-        self.is_relay_authority_session_owner()
     }
 
     fn client_settled_binding_view_for_query(

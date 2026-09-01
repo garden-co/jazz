@@ -12,10 +12,10 @@ use groove::ivm::MultisinkSubscription;
 use groove::records::Value;
 
 use super::super::ids::AuthorSubject;
-use super::super::node::PreparedQueryPlanHandle;
 use super::super::node::maintained_subscription_view::{
     MaintainedSubscriptionView, MaintainedTerminalSchemas,
 };
+use super::super::node::{LocalAuthorityReconciliation, PreparedQueryPlanHandle};
 use super::super::protocol::{
     AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry,
     ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
@@ -127,8 +127,17 @@ pub(super) struct PeerSubscriptionState {
     /// source key here preserves that relationship without trying to recover
     /// it from the (non-unique) canonical binding view.
     pub(super) authority_result_source: Option<AuthorityResultKey>,
+    /// This non-authoritative scope-relay usage must not materialize its
+    /// receiver until `authority_result_source` has a live reset.  It is
+    /// deliberately separate from the source key: direct authorities may
+    /// retain a D source without awaiting an upstream handoff.
+    pub(super) awaiting_selected_authority_source: bool,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
+    /// Shared Local-plus-authority provenance. Receiver/materialization state
+    /// remains peer-owned; exact-source reconciliation is shared with the DB
+    /// facade rather than reimplemented at this transport boundary.
+    pub(super) local_authority: LocalAuthorityReconciliation,
     pub(super) member_index: BTreeMap<MemberIndexKey, MemberSlot>,
     pub(super) maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     pub(super) prepared_query: Option<CachedPeerQueryPlan>,

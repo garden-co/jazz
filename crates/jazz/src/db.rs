@@ -2134,6 +2134,11 @@ struct CoverageGroup {
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
     initialized: bool,
+    /// The usage-site subscription whose authority result supplies this
+    /// group's membership. An authoritative server evaluates the incoming
+    /// downstream subscription directly; a relay that must ask its upstream
+    /// instead uses its separately allocated upstream usage handle.
+    authority_result_subscription: SubscriptionKey,
     upstream_subscription: SubscriptionKey,
     upstream_opts: RegisterShapeOptions,
     awaiting_upstream_settlement: bool,
@@ -2948,7 +2953,14 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeDecision { .. }
     ) || (matches!(message, SyncMessage::SessionClaims { .. })
         && (peer.rejects_raw_session_claims()
-            || !delegated_session_capability(ingest, peer.role())))
+            // A trusted backend is the one non-relay transport allowed to
+            // assert a session snapshot. It needs that snapshot to submit a
+            // user-attributed write whose policy reads session claims. The
+            // authenticated server admission selected its trust level; this
+            // must not turn an ordinary client or a subjectless relay into a
+            // claim issuer.
+            || (!ingest.trust.is_trusted()
+                && !delegated_session_capability(ingest, peer.role()))))
 }
 
 /// Only the host-admitted core-facing relay may carry another session's

@@ -2088,6 +2088,21 @@ impl CoreDb {
         )
     }
 
+    pub(super) fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
+        self.server.accept_scope_isolated_relay_subscriber(
+            transport,
+            identity,
+            claims,
+            admission_epoch,
+        )
+    }
+
     pub(super) fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
