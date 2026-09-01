@@ -1666,9 +1666,9 @@ mod tests {
             TableRef::named("albums"),
             TableRef::named("artists"),
             Expr::binary(
-                Expr::column("artist_id"),
+                Expr::column("title"),
                 BinaryOp::Eq,
-                Expr::column("id"),
+                Expr::column("name"),
             ),
         );
 
@@ -1676,7 +1676,7 @@ mod tests {
 
         assert_eq!(
             join_keys(&planned),
-            (&["artist_id".to_owned()][..], &["id".to_owned()][..])
+            (&["title".to_owned()][..], &["name".to_owned()][..])
         );
     }
 
