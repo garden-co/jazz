@@ -29,6 +29,7 @@ fn subscribe_query_binding_as_system(
     node: &mut NodeState<RocksDbStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
+    opts: &RegisterShapeOptions,
 ) {
     let values = shape
         .params()
@@ -46,7 +47,7 @@ fn subscribe_query_binding_as_system(
         subscription: SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
-            read_view: RegisterShapeOptions::default().read_view_key(),
+            read_view: opts.read_view_key(),
         },
         values,
         known_state: None,
@@ -140,16 +141,16 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         ..RegisterShapeOptions::default()
     };
     register_query_shape(&mut server, &shape, opts.clone());
-    subscribe_query_binding_as_system(&mut server, &shape, &binding);
+    subscribe_query_binding_as_system(&mut server, &shape, &binding, &opts);
     register_query_shape(&mut client, &shape, opts.clone());
-    subscribe_query_binding_as_system(&mut client, &shape, &binding);
+    subscribe_query_binding_as_system(&mut client, &shape, &binding, &opts);
 
     let initial_tx = commit_global_issue(&mut server, 0, "open", author(0), 1);
     let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
+        read_view: opts.read_view_key(),
     };
     let initial = peer
         .rehydrate_query_for_subscription_with_opts(
@@ -428,15 +429,15 @@ fn relay_edge_open_after_live_authority_receipt_seeds_initial_membership() {
         ..RegisterShapeOptions::default()
     };
     register_query_shape(&mut server, &shape, opts.clone());
-    subscribe_query_binding_as_system(&mut server, &shape, &binding);
+    subscribe_query_binding_as_system(&mut server, &shape, &binding, &opts);
     register_query_shape(&mut client, &shape, opts.clone());
-    subscribe_query_binding_as_system(&mut client, &shape, &binding);
+    subscribe_query_binding_as_system(&mut client, &shape, &binding, &opts);
 
     commit_global_issue(&mut server, 41, "open", author(41), 41);
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
+        read_view: opts.read_view_key(),
     };
     let mut server_peer = PeerState::edge_client(AuthorSubject::SYSTEM);
     let authority = server_peer
