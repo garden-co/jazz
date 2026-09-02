@@ -1846,9 +1846,9 @@ fn delegated_subscription_binding_survives_relay_claim_refresh() {
 }
 
 /// Closing a subscriber must retire the group-owned maintained receiver, not
-/// merely its concrete wire usage. Direct coverage uses the ordinary binding
-/// key, while a scope-isolated relay's admitted coverage is policy-partitioned;
-/// both ownership forms must leave no Groove work behind after normal detach.
+/// merely its concrete wire usage. Both direct coverage and a scope-isolated
+/// relay use an immutable admitted-policy key, so neither may leave Groove
+/// work behind after normal detach.
 #[test]
 fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     let direct_schema = schema();
@@ -1883,17 +1883,13 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
         let coverage = &state.served[&direct_attachment.subscription()];
         let maintained = coverage_group_subscription_key(coverage);
         assert!(
-            coverage.policy_binding.is_none(),
-            "direct coverage is not policy-partitioned"
+            coverage.policy_binding.is_some(),
+            "direct coverage is isolated by its admitted policy snapshot"
         );
-        assert_eq!(
+        assert_ne!(
             maintained,
-            SubscriptionKey {
-                shape_id: coverage.shape_id,
-                binding_id: coverage.binding_id,
-                read_view: coverage.opts.read_view_key(),
-            },
-            "ordinary direct coverage uses the unpartitioned maintained key"
+            direct_attachment.subscription(),
+            "a direct coverage evaluator must not reuse its public wire usage key"
         );
         assert!(state.peer.has_maintained_subscription(maintained));
         maintained
@@ -2176,6 +2172,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         unreachable!("edge keeps serving the direct client")
     };
     let coverage = &state.served[&downstream_subscription];
+    let fresh_group_subscription = coverage_group_subscription_key(coverage);
     let fresh_upstream_subscription = state.coverage_groups[coverage].upstream_subscription;
     drop(connection);
     let core_fresh = match &replacement_core_edge.borrow().link {
@@ -2210,13 +2207,14 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         matches!(
             &edge_client.borrow().link,
             ConnectionLink::Subscriber(state)
-                if state.peer.has_maintained_subscription(old_maintained_subscription)
+                if fresh_group_subscription != old_maintained_subscription
+                    && state.peer.has_maintained_subscription(fresh_group_subscription)
                     && state
                         .peer
-                        .subscription_authority_result_source(old_maintained_subscription)
+                        .subscription_authority_result_source(fresh_group_subscription)
                         == Some(&fresh_authority_source)
         ),
-        "claim refresh must retire the old receiver before reopening the same group key against fresh U"
+        "claim refresh must retire the old policy receiver and reopen a fresh group against fresh U"
     );
     assert_eq!(
         core_fresh.1,
