@@ -5886,6 +5886,10 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
   it("pins a pending flat read until its native result is released", async () => {
     const preparedQueries: object[] = [];
     let delayedRead = true;
+    let readStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
     let resolveRead!: (bytes: Uint8Array) => void;
     const pendingRead = new Promise<Uint8Array>((resolve) => {
       resolveRead = resolve;
@@ -5899,7 +5903,11 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
               preparedQueries.push(query);
               return query;
             },
-            allAsync: () => (delayedRead ? pendingRead : new Uint8Array([0])),
+            all: () => {
+              if (!delayedRead) return new Uint8Array([0]);
+              readStarted();
+              return pendingRead;
+            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -5919,7 +5927,7 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
       });
 
     const target = runtime.query(queryJson("pending"));
-    await Promise.resolve();
+    await started;
     delayedRead = false;
     for (let index = 0; index < 256; index += 1) await runtime.query(queryJson(`read-${index}`));
     expect(preparedQueries).toHaveLength(257);
@@ -5929,6 +5937,153 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
     for (let index = 256; index < 513; index += 1) await runtime.query(queryJson(`read-${index}`));
     await runtime.query(queryJson("pending"));
     expect(preparedQueries).toHaveLength(515);
+  });
+  it("rejects flat acquisition after close without invoking native preparation", async () => {
+    let preparations = 0;
+    let subscriptions = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              preparations += 1;
+              return {};
+            },
+            all: () => new Uint8Array([0]),
+            subscribe: () => {
+              subscriptions += 1;
+              return { readAll: () => [] };
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const queryJson = JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "title", op: "eq", value: "closed" }],
+    });
+
+    await runtime.close();
+    await expect(runtime.query(queryJson)).rejects.toThrow("Native runtime is closed");
+    const closedSubscription = runtime.createSubscription(queryJson);
+    const onError = vi.fn();
+    runtime.executeSubscription(closedSubscription, onError);
+    runtime.executeSubscription(closedSubscription, onError);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+    expect(onError.mock.calls[0]?.[0].message).toBe("Native runtime is closed");
+    expect(preparations).toBe(0);
+    expect(subscriptions).toBe(0);
+  });
+  it("releases the prepared lease when foreground native coverage fails", async () => {
+    const preparedQueries: object[] = [];
+    const failure = new Error("coverage failure");
+    let failRead = true;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: () => {
+              if (failRead) throw failure;
+              return new Uint8Array([0]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    await runtime.connectUpstreamPeer();
+    const queryJson = JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "title", op: "eq", value: "coverage" }],
+    });
+
+    await expect(
+      runtime.query(queryJson, null, "edge", JSON.stringify({ propagation: "full" })),
+    ).rejects.toBe(failure);
+    const failedQuery = preparedQueries.at(-1);
+    failRead = false;
+    for (let index = 0; index < 257; index += 1) {
+      await runtime.query(JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: `coverage-${index}` }],
+      }));
+    }
+    await expect(runtime.query(queryJson)).resolves.toEqual([]);
+    expect(preparedQueries.at(-1)).not.toBe(failedQuery);
+  });
+  it("releases the prepared lease when background native coverage fails", async () => {
+    const preparedQueries: object[] = [];
+    const failure = new Error("background coverage failure");
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: (_query: object, options: { tier?: string }) => {
+              if (options.tier === "edge") throw failure;
+              return new Uint8Array([0]);
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const failed = new Promise<Error>((resolve) => runtime.onServerTransportError(resolve));
+    Object.assign(runtime as object, {
+      serverTransport: new FakeTransport([]),
+      serverCarrier: {},
+      serverCarrierPromise: Promise.resolve(),
+    });
+    const queryJson = JSON.stringify({ table: "todos" });
+
+    await expect(
+      runtime.query(queryJson, null, null, JSON.stringify({ propagation: "full" })),
+    ).resolves.toEqual([]);
+    await expect(failed).resolves.toBe(failure);
+    const failedQuery = preparedQueries.at(-1);
+    for (let index = 0; index < 257; index += 1) {
+      await runtime.query(JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: `background-${index}` }],
+      }), null, "local", JSON.stringify({ propagation: "localOnly" }));
+    }
+    await expect(runtime.query(
+      queryJson, null, "local", JSON.stringify({ propagation: "localOnly" }),
+    )).resolves.toEqual([]);
+    expect(preparedQueries.at(-1)).not.toBe(failedQuery);
   });
 });
 
