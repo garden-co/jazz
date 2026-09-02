@@ -534,6 +534,11 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
         Some(head.values["branch_id"].decode().unwrap()),
         "an inherited base row must project the requested head coordinate"
     );
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, opts.clone())),
+        vec![selected_row],
+        "a strict receiver-local relation snapshot must retain the requested head projection"
+    );
 
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     assert!(server.server.detach_connection(&subscriber));

@@ -1179,6 +1179,7 @@ where
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
         result_schema_version: SchemaVersionId,
+        read_view: &ReadViewSpec,
         authority_result_key: &AuthorityResultKey,
     ) -> Result<Option<(QueryProgram, maintained_views::CoveredInputReceiver)>, Error> {
         let (runtime_sources, runtime_source_descriptors, provisional_local_gates, sources) =
@@ -1205,8 +1206,7 @@ where
                 return Err(error);
             }
         };
-        let mut receiver =
-            maintained_views::CoveredInputReceiver::new(sources, ReadViewSpec::default());
+        let mut receiver = maintained_views::CoveredInputReceiver::new(sources, read_view.clone());
         let installed = match self
             .replace_covered_input_receiver(
                 &mut receiver,
@@ -1436,6 +1436,7 @@ where
                     request,
                     access_paths,
                     shape.schema_version(),
+                    &ReadViewSpec::default(),
                     authority_result_key,
                 )
                 .await?
@@ -2463,6 +2464,7 @@ where
                     request,
                     access_paths,
                     shape.schema_version(),
+                    read_view,
                     authority_result_key,
                 )
                 .await?
