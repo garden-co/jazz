@@ -1180,18 +1180,27 @@ impl<'a> EvaluationSession<'a> {
                         root_ordering_windows: HashMap::default(),
                     };
                     let mut evaluation = evaluator.update_node(node);
-                    let result = match Pin::new(&mut evaluation).poll(cx) {
-                        Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
-                        Poll::Pending => Err(IvmRuntimeError::EvaluationBlocked),
-                    };
+                    let poll = Pin::new(&mut evaluation).poll(cx);
                     drop(evaluation);
                     self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
-                    if matches!(result, Err(IvmRuntimeError::EvaluationBlocked)) {
-                        self.work_queue.requeue_yielded(node);
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
+                    match poll {
+                        // A future which cooperatively yielded has not registered a
+                        // storage request. Preserve the CPU-yield distinction from
+                        // `IncrementalEvaluation`: requeue it for a fresh owner
+                        // turn rather than pretending it is a missing input.
+                        Poll::Pending => {
+                            self.work_queue.requeue_yielded(node);
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        // `EvaluationBlocked` is deliberately *ready*: the
+                        // evaluator has populated `evaluation_inputs.missing`.
+                        // Let the common branch below retain and poll those
+                        // requests; collapsing it with `Poll::Pending` causes a
+                        // self-waking replay loop that can never hydrate a large
+                        // indirect literal.
+                        Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
                     }
-                    result
                 };
                 match result {
                     Ok(mut records) => {

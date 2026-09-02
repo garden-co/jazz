@@ -802,10 +802,12 @@ impl TickEvaluator<'_> {
                         let mut deltas = Vec::new();
                         for delta in &input.deltas {
                             let record = delta.borrowed(&input.descriptor);
-                            let matches = match filter
+                            inputs.set_chunk_scope(Some(node));
+                            let result = filter
                                 .predicate
-                                .matches_indirect_literal_attempt(record, inputs)?
-                            {
+                                .matches_indirect_literal_attempt(record, inputs);
+                            inputs.set_chunk_scope(None);
+                            let matches = match result? {
                                 Some(matches) => matches,
                                 None => filter.predicate.matches(record, filter.comparison)?,
                             };
@@ -2581,11 +2583,14 @@ impl TickEvaluator<'_> {
                             .evaluation_inputs
                             .as_deref_mut()
                             .ok_or(IvmRuntimeError::EvaluationBlocked)?;
-                        let bytes = match crate::large_values::byte_range_attempt(
+                        inputs.set_chunk_scope(Some(node));
+                        let result = crate::large_values::byte_range_attempt(
                             streaming.cursor().value(),
                             range,
                             inputs,
-                        ) {
+                        );
+                        inputs.set_chunk_scope(None);
+                        let bytes = match result {
                             Ok(bytes) => bytes,
                             Err(IvmRuntimeError::EvaluationBlocked) => {
                                 self.operator_states
@@ -2595,7 +2600,7 @@ impl TickEvaluator<'_> {
                             Err(error) => return Err(error),
                         };
                         let should_yield = streaming.consume_window(&bytes)?;
-                        inputs.release_chunks();
+                        inputs.release_chunks_owned_by(node);
                         if should_yield {
                             streaming.record_yield()?;
                             self.operator_states
