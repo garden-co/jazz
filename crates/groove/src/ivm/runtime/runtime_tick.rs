@@ -2419,9 +2419,18 @@ fn subscription_snapshot_from_hydrated(
         if let Some(ordering) = &ordering {
             order_terminal_snapshot(&mut records, ordering)?;
         }
-        if let Some(terminal) =
-            terminal_delta_for_hydrated_output(graph, output.node, terminal_deltas)?
-        {
+        let (has_public_collector, terminal) =
+            terminal_delta_for_hydrated_output(graph, output.node, terminal_deltas)?;
+        // A hydrated root collector has no before-image, but it still owns
+        // the exact terminal key that later incremental edits address. Seed
+        // its opening through that same terminal representation instead of
+        // exposing a keyless record snapshot to a higher layer.
+        let terminal = match terminal {
+            Some(terminal) => Some(terminal),
+            None if has_public_collector => Some(terminal_deltas_from_record_deltas(&records)?),
+            None => None,
+        };
+        if let Some(terminal) = terminal.filter(|terminal| !terminal.is_empty()) {
             terminal_sinks.insert(sink.clone(), terminal);
         }
         sinks.insert(sink.clone(), records);
@@ -2432,18 +2441,19 @@ fn subscription_snapshot_from_hydrated(
     })
 }
 
-/// Locate the public root collector that belongs to one output and return its
-/// hydration seed operations. This mirrors the incremental terminal selection
-/// rule while keeping the hydration snapshot self-contained.
+/// Locate the public collector that belongs to one output and return its
+/// hydration seed operations. `Collect` renders a structured root tree while
+/// `Root` renders a flat root record; both own an opaque terminal key and both
+/// must seed an opening through the same terminal representation as updates.
 fn terminal_delta_for_hydrated_output(
     graph: &IvmGraph,
     output: NodeId,
     terminal_deltas: &HashMap<NodeId, TerminalDeltas>,
-) -> Result<Option<TerminalDeltas>, IvmRuntimeError> {
+) -> Result<(bool, Option<TerminalDeltas>), IvmRuntimeError> {
     let mut pending = vec![output];
     let mut seen = HashSet::new();
     let mut fallback = None;
-    let mut has_public_root = false;
+    let mut has_public_collector = false;
     while let Some(node) = pending.pop() {
         if !seen.insert(node) {
             continue;
@@ -2451,18 +2461,22 @@ fn terminal_delta_for_hydrated_output(
         let graph_node = graph
             .node(node)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        let is_public_root = matches!(
+        let is_public_collector = matches!(
             graph_node.descriptor.operator,
-            OpType::CollectBy(ref collect_by) if collect_by.mode == CollectByMode::Root
+            OpType::CollectBy(ref collect_by)
+                if matches!(collect_by.mode, CollectByMode::Collect | CollectByMode::Root)
         );
-        has_public_root |= is_public_root;
+        has_public_collector |= is_public_collector;
         if let Some(terminal) = terminal_deltas.get(&node) {
-            if is_public_root {
-                return Ok(Some(terminal.clone()));
+            if is_public_collector {
+                return Ok((true, Some(terminal.clone())));
             }
             fallback.get_or_insert_with(|| terminal.clone());
         }
         pending.extend(graph_node.descriptor.inputs.iter().copied());
     }
-    Ok((!has_public_root).then_some(fallback).flatten())
+    Ok((
+        has_public_collector,
+        (!has_public_collector).then_some(fallback).flatten(),
+    ))
 }

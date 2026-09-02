@@ -3805,6 +3805,14 @@ where
                 transitions
                     .program_fact_removes
                     .extend(snapshot_transitions.program_fact_removes);
+                // A root collector's opening is its first ordinary terminal
+                // transition.  Retain the same root and descendant edits that
+                // seeded `maintained`, so the first published/reset snapshot
+                // is folded from the receiver-local terminal tree rather than
+                // a relational root record with empty nested collections.
+                transitions
+                    .terminal_operations
+                    .extend(snapshot_transitions.terminal_operations);
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -3849,6 +3857,9 @@ where
                         transitions
                             .program_fact_removes
                             .extend(delta_transitions.program_fact_removes);
+                        transitions
+                            .terminal_operations
+                            .extend(delta_transitions.terminal_operations);
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {

@@ -5318,20 +5318,35 @@ fn apply_descendant_terminal_operation(
     operation: &groove::ivm::TerminalOperation,
 ) -> Result<(), Error> {
     let (descriptor, raw) = root.encoded_record();
+    let updated = apply_terminal_descendant_record(
+        OwnedRecord::new(raw.to_vec(), descriptor.clone()),
+        operation,
+    )?;
+    *root = CurrentRow::new(root.table().to_owned(), updated);
+    Ok(())
+}
+
+/// Fold one compiler-owned descendant terminal edit into a retained root
+/// record. Both the public facade snapshot and the local maintained receiver
+/// use this reducer, so an opening/reset and later updates cannot disagree
+/// about nested arrays.
+pub(crate) fn apply_terminal_descendant_record(
+    root: OwnedRecord,
+    operation: &groove::ivm::TerminalOperation,
+) -> Result<OwnedRecord, Error> {
+    let descriptor = root.descriptor();
     if descriptor != &operation.root_descriptor {
         return Err(Error::new(
             ErrorCode::Protocol,
             "terminal descendant descriptor disagrees with its retained root",
         ));
     }
-    let mut values = BorrowedRecord::new(raw, descriptor)
-        .to_values()
-        .map_err(|error| {
-            Error::new(
-                ErrorCode::Protocol,
-                format!("invalid retained terminal root payload: {error}"),
-            )
-        })?;
+    let mut values = root.borrowed().to_values().map_err(|error| {
+        Error::new(
+            ErrorCode::Protocol,
+            format!("invalid retained terminal root payload: {error}"),
+        )
+    })?;
     apply_terminal_path_edit(
         &mut values,
         descriptor,
@@ -5344,11 +5359,7 @@ fn apply_descendant_terminal_operation(
             format!("cannot encode retained terminal root after descendant edit: {error}"),
         )
     })?;
-    *root = CurrentRow::new(
-        root.table().to_owned(),
-        OwnedRecord::new(raw, descriptor.clone()),
-    );
-    Ok(())
+    Ok(OwnedRecord::new(raw, descriptor.clone()))
 }
 
 fn apply_terminal_path_edit(

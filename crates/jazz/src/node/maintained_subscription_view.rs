@@ -399,10 +399,40 @@ impl MaintainedSubscriptionView {
             if let MaintainedTerminalKind::RootCollectorAppRows { layout, .. } =
                 schemas.get(sink)?
             {
-                for operation in &terminal.operations {
-                    let operation = rebind_terminal_operation_to_layout(operation, layout)?;
+                let operations = terminal
+                    .operations
+                    .iter()
+                    .map(|operation| rebind_terminal_operation_to_layout(operation, layout))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // A root removal can share its batch with descendants which
+                // are being retracted beneath it. Fold every root first, then
+                // skip only those now-unreachable descendants. This mirrors
+                // the facade reducer and keeps malformed descendants for an
+                // otherwise retained root fail-closed.
+                let removed_roots = operations
+                    .iter()
+                    .filter(|operation| operation.path.is_empty())
+                    .filter_map(|operation| {
+                        matches!(operation.edit, TerminalEdit::Remove { .. })
+                            .then_some(operation.root_key.clone())
+                    })
+                    .collect::<BTreeSet<_>>();
+                for operation in operations
+                    .iter()
+                    .filter(|operation| operation.path.is_empty())
+                    .chain(
+                        operations
+                            .iter()
+                            .filter(|operation| !operation.path.is_empty()),
+                    )
+                {
+                    if !operation.path.is_empty()
+                        && removed_roots.contains(operation.root_key.as_slice())
+                    {
+                        continue;
+                    }
                     self.apply_structured_terminal_operation(&operation)?;
-                    transitions.terminal_operations.push(operation);
+                    transitions.terminal_operations.push(operation.clone());
                 }
             }
         }
@@ -855,7 +885,56 @@ impl MaintainedSubscriptionView {
         &mut self,
         operation: &TerminalOperation,
     ) -> Result<(), super::Error> {
+        // A descendant edit has the root collector's key, but its value is a
+        // nested element rather than an app-row record. Resolve its retained
+        // root before looking at the edit: attempting to decode that element
+        // as a root is both invalid and would create a second snapshot path.
         if !operation.path.is_empty() {
+            let root = self
+                .structured_root_keys
+                .get(&operation.root_key)
+                .copied()
+                .or_else(|| terminal_root_uuid_from_key(&operation.root_key))
+                .ok_or(super::Error::InvalidStoredValue(
+                    "terminal descendant operation addresses an unknown root key",
+                ))?;
+            let descriptor =
+                self.structured_app_row_descriptor
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "terminal descendant operation arrived before its root collector record",
+                    ))?;
+            if descriptor != operation.root_descriptor {
+                return Err(super::Error::InvalidStoredValue(
+                    "terminal descendant descriptor disagrees with retained collector layout",
+                ));
+            }
+            let records =
+                self.structured_app_rows
+                    .get_mut(&root)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "terminal descendant operation addressed an absent retained root",
+                    ))?;
+            let mut candidates = records
+                .iter()
+                .filter(|(_, weight)| **weight > 0)
+                .map(|(raw, weight)| (raw.clone(), *weight));
+            let (raw, weight) = candidates.next().ok_or(super::Error::InvalidStoredValue(
+                "terminal descendant operation addressed a non-positive retained root",
+            ))?;
+            if candidates.next().is_some() {
+                return Err(super::Error::InvalidStoredValue(
+                    "terminal descendant operation addressed an ambiguous retained root",
+                ));
+            }
+            let updated = crate::db::apply_terminal_descendant_record(
+                OwnedRecord::new(raw.clone(), descriptor),
+                operation,
+            )
+            .map_err(|_| {
+                super::Error::InvalidStoredValue("invalid collector descendant terminal operation")
+            })?;
+            records.remove(&raw);
+            records.insert(updated.into_raw(), weight);
             return Ok(());
         }
         let root = match &operation.edit {
