@@ -3631,7 +3631,58 @@ mod tests {
             )
             .unwrap();
         assert!(retract.program_fact_adds.is_empty());
-        assert_eq!(retract.program_fact_removes, vec![fact]);
+        assert_eq!(retract.program_fact_removes, vec![fact.clone()]);
+
+        let readd = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([("source-a".to_owned(), deltas(1))]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(readd.program_fact_adds, vec![fact.clone()]);
+
+        // This is one real multisink drain: source-a leaves while source-b
+        // takes over the same exact fact. The peer must receive neither an
+        // ordered remove/add pair nor a spurious reset.
+        let handoff = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([
+                        ("source-a".to_owned(), deltas(-1)),
+                        ("source-b".to_owned(), deltas(1)),
+                    ]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert!(handoff.program_fact_adds.is_empty());
+        assert!(handoff.program_fact_removes.is_empty());
+        assert!(
+            maintained
+                .active_peer_source_closure_facts()
+                .contains(&fact)
+        );
+
+        let final_retract = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([("source-b".to_owned(), deltas(-1))]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(final_retract.program_fact_removes, vec![fact]);
     }
 
     fn replacement_content(row: VersionRow) -> DecodedMaintainedEvent {
