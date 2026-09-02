@@ -26,6 +26,7 @@ import {
   applySubscriptionDeltaWithRootDelta,
   type Transport,
 } from "./native-runtime-adapter.js";
+import { PreparedQueryCache } from "./prepared-query-cache.js";
 import { encodeSchema } from "./schema-codec.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
@@ -5478,6 +5479,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 describe("NativeRuntimeAdapter prepared query retention", () => {
   it("bounds flat literal preparation while active subscriptions stay pinned", async () => {
     const preparedQueries: object[] = [];
+    let lastReadQuery: object | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -5487,7 +5489,10 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
               preparedQueries.push(query);
               return query;
             },
-            all: () => new Uint8Array([0]),
+            all: (query) => {
+              lastReadQuery = query;
+              return new Uint8Array([0]);
+            },
             subscribe: () => ({ readAll: () => [] }),
             tick: () => undefined,
           }),
@@ -5516,7 +5521,7 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
       await runtime.query(query(`literal-${index}`));
     }
     await expect(runtime.query(query("pinned"))).resolves.toEqual([]);
-    expect(preparedQueries.at(-1)).toBe(pinnedQuery);
+    expect(lastReadQuery).toBe(pinnedQuery);
 
     runtime.unsubscribe(pinnedHandle);
     for (let index = 256; index < 513; index += 1) {
@@ -5524,6 +5529,145 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
     }
     await expect(runtime.query(query("pinned"))).resolves.toEqual([]);
     expect(preparedQueries.at(-1)).not.toBe(pinnedQuery);
+  });
+  it("evicts an individually oversized inactive query and keeps clear generation safe", () => {
+    let preparations = 0;
+    const cache = new PreparedQueryCache<object>(() => undefined);
+    const oversized = new Uint8Array(1_048_577);
+    const first = cache.acquire(oversized, () => {
+      preparations += 1;
+      return {};
+    });
+    first.release();
+    const second = cache.acquire(oversized, () => {
+      preparations += 1;
+      return {};
+    });
+    expect(preparations).toBe(2);
+
+    cache.clear();
+    const replacement = cache.acquire(oversized, () => {
+      preparations += 1;
+      return {};
+    });
+    first.release();
+    first.release();
+    second.release();
+    expect(replacement.isCurrent()).toBe(true);
+    const reused = cache.acquire(oversized, () => ({}));
+    expect(reused.query).toBe(replacement.query);
+    reused.release();
+    replacement.release();
+  });
+
+  it("releases flat subscription leases on native close and readable EOF", async () => {
+    const preparedQueries: object[] = [];
+    let subscriptionCount = 0;
+    let nativeClose = vi.fn(() => true);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: () => new Uint8Array([0]),
+            subscribe: () => {
+              subscriptionCount += 1;
+              if (subscriptionCount === 1) {
+                nativeClose = vi.fn(() => true);
+                return { readAll: () => [{ type: "closed" }], close: nativeClose };
+              }
+              return new ReadableStream({
+                start(controller) {
+                  controller.close();
+                },
+              });
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const queryJson = (literal: string) =>
+      JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: literal }],
+      });
+
+    const nativeClosed = runtime.createSubscription(queryJson("closed"));
+    const closedQuery = preparedQueries.at(-1);
+    runtime.executeSubscription(nativeClosed, vi.fn());
+    await Promise.resolve();
+    expect(nativeClose).toHaveBeenCalledTimes(1);
+    for (let index = 0; index < 257; index += 1) await runtime.query(queryJson(`new-${index}`));
+    await runtime.query(queryJson("closed"));
+    expect(preparedQueries.at(-1)).not.toBe(closedQuery);
+
+    const eofHandle = runtime.createSubscription(queryJson("eof"));
+    const eofPrepared = preparedQueries.at(-1);
+    runtime.executeSubscription(eofHandle, vi.fn());
+    await Promise.resolve();
+    runtime.unsubscribe(eofHandle);
+    for (let index = 0; index < 257; index += 1) await runtime.query(queryJson(`eof-new-${index}`));
+    await runtime.query(queryJson("eof"));
+    expect(preparedQueries.at(-1)).not.toBe(eofPrepared);
+  });
+  it("pins a pending flat read until its native result is released", async () => {
+    const preparedQueries: object[] = [];
+    let delayedRead = true;
+    let resolveRead!: (bytes: Uint8Array) => void;
+    const pendingRead = new Promise<Uint8Array>((resolve) => {
+      resolveRead = resolve;
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            allAsync: () => (delayedRead ? pendingRead : new Uint8Array([0])),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const queryJson = (literal: string) =>
+      JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: literal }],
+      });
+
+    const target = runtime.query(queryJson("pending"));
+    await Promise.resolve();
+    delayedRead = false;
+    for (let index = 0; index < 256; index += 1) await runtime.query(queryJson(`read-${index}`));
+    expect(preparedQueries).toHaveLength(257);
+    resolveRead(new Uint8Array([0]));
+    await expect(target).resolves.toEqual([]);
+
+    for (let index = 256; index < 513; index += 1) await runtime.query(queryJson(`read-${index}`));
+    await runtime.query(queryJson("pending"));
+    expect(preparedQueries).toHaveLength(515);
   });
 });
 
