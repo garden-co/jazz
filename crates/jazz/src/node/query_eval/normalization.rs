@@ -2471,7 +2471,6 @@ fn normalize_inherited_parent_policy(
                 policy,
                 binding_source_shape,
                 param_types,
-                false,
                 &parent_inheritance_path,
             )?
         } else {
@@ -2542,7 +2541,6 @@ fn normalize_policy_branch_authorization(
     policy: &JazzQuery,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
-    record_inherited_contributions: bool,
     inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut union_inputs = Vec::new();
@@ -2574,7 +2572,7 @@ fn normalize_policy_branch_authorization(
             binding_source_shape,
             param_types,
             false,
-            record_inherited_contributions,
+            false,
             inheritance_path,
         )?;
         union_inputs.push(UnionInput {
@@ -2621,7 +2619,7 @@ fn normalize_policy_branch_authorization(
             binding_source_shape,
             param_types,
             false,
-            record_inherited_contributions,
+            false,
             inheritance_path,
         )?;
         union_inputs.push(UnionInput {
@@ -2875,7 +2873,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
-                    true,
+                    false,
                     &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {

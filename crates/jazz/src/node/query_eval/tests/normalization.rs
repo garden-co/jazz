@@ -150,9 +150,9 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
     assert!(flat.validate_runtime(&schema).is_ok());
 }
 
-/// A caller's inherited parent remains a receiver source even when the query
-/// uses policy-branch normalization.  This is distinct from inheritance nested
-/// inside a table read policy, whose proof sources stay authority-local.
+/// A caller's top-level inherited parent remains a receiver source through
+/// policy-branch normalization, while a branch's inherited proof stays
+/// authority-local.
 #[test]
 fn policy_branch_query_keeps_explicit_inherited_parent_contribution() {
     let schema = public_query_eval_schema(
@@ -162,11 +162,12 @@ fn policy_branch_query_keeps_explicit_inherited_parent_contribution() {
     );
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x24; 16]), schema.clone());
     let mut query = Query::from("children").inherits("parent");
+    let branch_inherits = Query::from("children").inherits("parent").inherits;
     query.policy_branches = vec![crate::query::PolicyBranch {
         filters: vec![eq(col("parent"), lit(uuid::Uuid::nil()))],
         joins: Vec::new(),
         reachable: Vec::new(),
-        inherits: Vec::new(),
+        inherits: branch_inherits,
     }];
     let shape = query.validate_runtime(&schema).unwrap();
     let normalized = node
@@ -181,6 +182,13 @@ fn policy_branch_query_keeps_explicit_inherited_parent_contribution() {
         contribution.source.path.components.as_slice(),
         [SourceRole::Alias(path)] if path == "policy_branch:base:inherits:0"
     ));
+    assert!(
+        normalized
+            .inherited_contributions
+            .iter()
+            .all(|contribution| !contribution.id.starts_with("policy_branch:0:")),
+        "policy-branch inheritance is an authority proof, not a receiver input"
+    );
 }
 
 /// Every flat join-side occurrence is an exact receiver source.  A chained
