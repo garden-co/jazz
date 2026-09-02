@@ -1703,7 +1703,6 @@ where
             .authority_results
             .entry(authority_result_key.clone())
             .or_default();
-        let predecessor_generation = state.applied_view_update_generation;
         state.applied_view_update_generation = state.applied_view_update_generation.wrapping_add(1);
         // In the current wire contract, a non-deferred reset is the single
         // frame that claims a complete replacement frontier.  Do not infer an
@@ -1716,33 +1715,42 @@ where
             state.source_closure = crate::node::AuthoritySourceClosure::Claimed {
                 generation: state.applied_view_update_generation,
             };
-            state.source_incremental = None;
-        } else if !defer_settlement
-            && matches!(
-                state.source_closure,
-                crate::node::AuthoritySourceClosure::Claimed { .. }
-            )
-        {
+            state.source_incrementals.clear();
+        } else if !defer_settlement {
             // Normal source updates retain their predecessor closure and are
             // applied as descriptor-bound runtime input deltas. They must not
             // be re-labelled as a complete reset merely because an authority
             // state map happens to contain the current closure.
-            state.source_incremental = Some(crate::node::AuthoritySourceIncremental {
-                predecessor_generation,
-                generation: state.applied_view_update_generation,
-                adds: persisted_fact_adds
-                    .iter()
-                    .filter(|fact| fact.is_peer_source_closure_fact())
-                    .cloned()
-                    .collect(),
-                removes: persisted_fact_removes
-                    .iter()
-                    .filter(|fact| fact.is_peer_source_closure_fact())
-                    .cloned()
-                    .collect(),
-            });
-        } else {
-            state.source_incremental = None;
+            let adds: BTreeSet<_> = persisted_fact_adds
+                .iter()
+                .filter(|fact| fact.is_peer_source_closure_fact())
+                .cloned()
+                .collect();
+            let removes: BTreeSet<_> = persisted_fact_removes
+                .iter()
+                .filter(|fact| fact.is_peer_source_closure_fact())
+                .cloned()
+                .collect();
+            if !adds.is_empty() || !removes.is_empty() {
+                let crate::node::AuthoritySourceClosure::Claimed {
+                    generation: predecessor_generation,
+                } = state.source_closure
+                else {
+                    return Err(Error::InvalidStoredValue(
+                        "incremental source closure arrived before a reset closure",
+                    ));
+                };
+                let generation = state.applied_view_update_generation;
+                state
+                    .source_incrementals
+                    .push(crate::node::AuthoritySourceIncremental {
+                        predecessor_generation,
+                        generation,
+                        adds,
+                        removes,
+                    });
+                state.source_closure = crate::node::AuthoritySourceClosure::Claimed { generation };
+            }
         }
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(

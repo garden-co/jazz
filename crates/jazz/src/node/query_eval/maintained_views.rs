@@ -53,9 +53,9 @@ pub(crate) struct CoveredInputReceiver {
     local_authority: LocalAuthorityReconciliation,
     /// `None` is pending, never an implicit empty closure.
     installed_closure: Option<(AuthorityResultKey, u64)>,
-    /// Last applied ViewUpdate generation. This advances for exact
-    /// predecessor-preserving deltas without changing `installed_closure`,
-    /// whose generation identifies only the last reset frontier.
+    /// Last exact source-closure receipt applied to the runtime inputs. This
+    /// is intentionally unrelated to generic ViewUpdate sequencing: frames
+    /// with no source change do not advance it.
     installed_generation: Option<u64>,
     /// Exact content facts currently materialized in each runtime input. A
     /// deletion-layer fact participates in closure provenance but deliberately
@@ -505,10 +505,17 @@ where
         receiver: &CoveredInputReceiver,
         authority_result_key: &AuthorityResultKey,
     ) -> bool {
-        receiver.local_authority.is_due(
-            authority_result_key,
-            self.applied_authority_result_generation(authority_result_key),
-        )
+        let Some(authority_result) = self.query.authority_results.get(authority_result_key) else {
+            return false;
+        };
+        let crate::node::AuthoritySourceClosure::Claimed { generation } =
+            authority_result.source_closure
+        else {
+            return false;
+        };
+        receiver
+            .local_authority
+            .is_due(authority_result_key, generation)
     }
 
     /// Replace the exact authority-covered source frontier of a receiver's
@@ -531,21 +538,18 @@ where
                 "covered input reconciliation has no exact authority receipt",
             ));
         };
-        let applied_generation = authority_result.applied_view_update_generation;
         let closure_generation = match authority_result.source_closure {
             crate::node::AuthoritySourceClosure::Pending => {
                 return Ok(false);
             }
             crate::node::AuthoritySourceClosure::Claimed { generation } => generation,
         };
-        let installed_matches_closure = local
+        let installed_for_authority = local
             .covered_input_receiver
             .installed_closure
             .as_ref()
-            .is_some_and(|(key, generation)| {
-                key == authority_result_key && *generation == closure_generation
-            });
-        if !installed_matches_closure {
+            .is_some_and(|(key, _)| key == authority_result_key);
+        if !installed_for_authority {
             return self
                 .replace_covered_input_receiver(
                     &mut local.covered_input_receiver,
@@ -554,13 +558,31 @@ where
                 )
                 .await;
         }
-        if local.covered_input_receiver.installed_generation == Some(applied_generation) {
+        // Generic ViewUpdate frames may change facts unrelated to the receiver
+        // input frontier.  Only the source-closure generation names the state
+        // an incremental source delta may be applied to.
+        if local.covered_input_receiver.installed_generation == Some(closure_generation) {
             return Ok(false);
         }
-        let incremental = authority_result.source_incremental.clone().ok_or(
-            Error::InvalidStoredValue(
-                "covered input receiver missed an incremental predecessor; authority reset required",
-            ),
+        // A claimed closure with no retained deltas is a reset successor. It
+        // intentionally replaces all sources; only a non-reset publication
+        // carries the predecessor-preserving incremental record below.
+        if authority_result.source_incrementals.is_empty() {
+            return self
+                .replace_covered_input_receiver(
+                    &mut local.covered_input_receiver,
+                    local.result_schema_version,
+                    authority_result_key,
+                )
+                .await;
+        }
+        let incremental = crate::node::coalesce_authority_source_incrementals(
+            &authority_result.source_incrementals,
+            local
+                .covered_input_receiver
+                .installed_generation
+                .expect("installed receiver has a source receipt"),
+            closure_generation,
         )?;
         self.apply_covered_input_receiver_incremental(
             &mut local.covered_input_receiver,
@@ -689,6 +711,7 @@ where
         receiver
             .local_authority
             .replace_source(authority_result_key.clone(), incremental.generation);
+        receiver.installed_closure = Some((authority_result_key.clone(), incremental.generation));
         receiver.installed_generation = Some(incremental.generation);
         receiver.installed_records = staged_records;
         Ok(true)
@@ -915,13 +938,11 @@ where
                 replacement_metrics.notification_records,
             );
         }
-        receiver.local_authority.replace_source(
-            authority_result_key.clone(),
-            self.applied_authority_result_generation(authority_result_key),
-        );
+        receiver
+            .local_authority
+            .replace_source(authority_result_key.clone(), closure_generation);
         receiver.installed_closure = Some((authority_result_key.clone(), closure_generation));
-        receiver.installed_generation =
-            Some(self.applied_authority_result_generation(authority_result_key));
+        receiver.installed_generation = Some(closure_generation);
         receiver.installed_records = records;
         Ok(true)
     }

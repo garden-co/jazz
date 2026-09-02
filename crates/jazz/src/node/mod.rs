@@ -986,11 +986,12 @@ pub(crate) struct AuthorityResultState {
     /// non-exact [`ProgramSourceCoverage`](crate::protocol::ProgramSourceCoverageEntry)
     /// set atomically rather than accidentally interpreting it as empty.
     source_closure: AuthoritySourceClosure,
-    /// The most recent exact predecessor-preserving source change after a
-    /// claimed closure. This is process-local delivery state, not durable
-    /// authority truth: a receiver that missed it must wait for a reset/repair
-    /// rather than treating an arbitrary current set as an incremental delta.
-    source_incremental: Option<AuthoritySourceIncremental>,
+    /// Exact predecessor-preserving source changes after the claimed reset
+    /// closure. This is process-local delivery state, not durable authority
+    /// truth. A receiver coalesces the contiguous suffix beginning at its
+    /// own installed closure receipt; it must never use an arbitrary current
+    /// source set as a synthetic incremental predecessor.
+    source_incrementals: Vec<AuthoritySourceIncremental>,
     /// This process has received a complete, exact authority settlement for
     /// this result since it was opened. It is deliberately live-only: durable
     /// membership recovered after a restart is useful cache material, but it
@@ -1037,6 +1038,94 @@ pub(crate) struct AuthoritySourceIncremental {
     pub(crate) generation: u64,
     pub(crate) adds: BTreeSet<ProgramFactEntry>,
     pub(crate) removes: BTreeSet<ProgramFactEntry>,
+}
+
+impl AuthoritySourceIncremental {
+    /// Coalesce contiguous wire frames into the one exact net transition from
+    /// the retained source receipt to the newest source receipt. This is
+    /// deliberately source-closure-local: unrelated ViewUpdate frames neither
+    /// advance nor invalidate this predecessor chain.
+    pub(crate) fn coalesce(
+        previous: Option<Self>,
+        predecessor_generation: u64,
+        generation: u64,
+        adds: BTreeSet<ProgramFactEntry>,
+        removes: BTreeSet<ProgramFactEntry>,
+    ) -> Result<Self, Error> {
+        if !adds.is_disjoint(&removes) {
+            return Err(Error::InvalidStoredValue(
+                "covered input incremental delta overlaps additions and removals",
+            ));
+        }
+        let mut result = match previous {
+            Some(previous) => {
+                if previous.generation != predecessor_generation {
+                    return Err(Error::InvalidStoredValue(
+                        "covered input incremental delta does not continue its retained predecessor",
+                    ));
+                }
+                previous
+            }
+            None => Self {
+                predecessor_generation,
+                generation: predecessor_generation,
+                adds: BTreeSet::new(),
+                removes: BTreeSet::new(),
+            },
+        };
+        for fact in adds {
+            if !result.removes.remove(&fact) {
+                result.adds.insert(fact);
+            }
+        }
+        for fact in removes {
+            if !result.adds.remove(&fact) {
+                result.removes.insert(fact);
+            }
+        }
+        debug_assert!(result.adds.is_disjoint(&result.removes));
+        result.generation = generation;
+        Ok(result)
+    }
+}
+
+/// Coalesce the one contiguous source-delta chain beginning at a receiver's
+/// installed receipt and ending at `successor_generation`. Missing, forked,
+/// replayed, or noncontiguous links are protocol errors: only a reset may
+/// repair a receiver that cannot prove its predecessor chain.
+pub(crate) fn coalesce_authority_source_incrementals(
+    frames: &[AuthoritySourceIncremental],
+    predecessor_generation: u64,
+    successor_generation: u64,
+) -> Result<AuthoritySourceIncremental, Error> {
+    let mut cursor = predecessor_generation;
+    let mut combined = None;
+    while cursor != successor_generation {
+        let mut candidates = frames
+            .iter()
+            .filter(|frame| frame.predecessor_generation == cursor);
+        let Some(frame) = candidates.next() else {
+            return Err(Error::InvalidStoredValue(
+                "covered input receiver missed an incremental predecessor; authority reset required",
+            ));
+        };
+        if candidates.next().is_some() || frame.generation <= cursor {
+            return Err(Error::InvalidStoredValue(
+                "covered input incremental chain is forked or nonmonotonic",
+            ));
+        }
+        combined = Some(AuthoritySourceIncremental::coalesce(
+            combined,
+            frame.predecessor_generation,
+            frame.generation,
+            frame.adds.clone(),
+            frame.removes.clone(),
+        )?);
+        cursor = frame.generation;
+    }
+    combined.ok_or(Error::InvalidStoredValue(
+        "covered input receiver has no incremental successor",
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -2677,4 +2766,84 @@ fn authority_result_store_prefix_round_trips_complete_policy_identity() {
         .unwrap(),
         key
     );
+}
+
+#[cfg(test)]
+mod authority_source_incremental_tests {
+    use super::*;
+
+    fn fact(table: &str) -> ProgramFactEntry {
+        ProgramFactEntry::ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry {
+            source: ProgramSourceId {
+                table: table.to_owned().into(),
+                path: vec![ProgramSourceRole::Root],
+            },
+            complete: true,
+        })
+    }
+
+    #[test]
+    fn coalesces_contiguous_source_frames_into_one_net_delta() {
+        let a = fact("a");
+        let b = fact("b");
+
+        let first = AuthoritySourceIncremental::coalesce(
+            None,
+            4,
+            5,
+            BTreeSet::from([a.clone(), b.clone()]),
+            BTreeSet::new(),
+        )
+        .unwrap();
+        // The second frame arrives before the receiver drains the first. Its
+        // net effect is remove A and retain B, so the receiver can apply one
+        // exact 4 → 6 delta without a reset or a generic frame-generation
+        // dependency.
+        let combined = AuthoritySourceIncremental::coalesce(
+            Some(first),
+            5,
+            6,
+            BTreeSet::new(),
+            BTreeSet::from([a]),
+        )
+        .unwrap();
+        assert_eq!(combined.predecessor_generation, 4);
+        assert_eq!(combined.generation, 6);
+        assert_eq!(combined.adds, BTreeSet::from([b]));
+        assert!(combined.removes.is_empty());
+    }
+
+    #[test]
+    fn coalescing_cancels_transient_add_remove_and_rejects_gaps() {
+        let a = fact("a");
+        let transient = AuthoritySourceIncremental::coalesce(
+            None,
+            10,
+            11,
+            BTreeSet::from([a.clone()]),
+            BTreeSet::new(),
+        )
+        .unwrap();
+        let cancelled = AuthoritySourceIncremental::coalesce(
+            Some(transient),
+            11,
+            12,
+            BTreeSet::new(),
+            BTreeSet::from([a]),
+        )
+        .unwrap();
+        assert!(cancelled.adds.is_empty());
+        assert!(cancelled.removes.is_empty());
+        assert_eq!(cancelled.predecessor_generation, 10);
+        assert_eq!(cancelled.generation, 12);
+
+        let gap = AuthoritySourceIncremental::coalesce(
+            Some(cancelled),
+            13,
+            14,
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+        assert!(matches!(gap, Err(Error::InvalidStoredValue(_))));
+    }
 }
