@@ -7,13 +7,10 @@
 import express, { Request, Response, NextFunction } from "express";
 import type { Application } from "express";
 import type { Server } from "node:http";
-import { tmpdir } from "node:os";
-import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { createJazzSession, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -69,6 +66,8 @@ interface ServerLifecycle {
 const serverLifecycles = new WeakMap<Application, ServerLifecycle>();
 const stopPromises = new WeakMap<Server, Promise<void>>();
 
+export type TodoServerStorage = { type: "persistent"; dataPath: string } | { type: "memory" };
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -76,17 +75,24 @@ const stopPromises = new WeakMap<Server, Promise<void>>();
 /**
  * Create a todo server.
  *
- * @param dataPath Optional path to local Fjall database file. If omitted, uses a temp directory.
+ * @param storage Explicit persistent path or in-memory storage selector.
  * @returns TodoServer with the Express app, administrative database handle, and lifecycle functions
  */
 export async function createServer(
-  dataPath?: string,
+  storage: TodoServerStorage,
   options: TodoServerOptions = {},
 ): Promise<TodoServer> {
-  const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
   const appId = options.appId ?? process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
   const serverUrl = options.serverUrl ?? process.env.JAZZ_SERVER_URL;
   const backendSecret = options.backendSecret ?? process.env.JAZZ_BACKEND_SECRET;
+  const driver =
+    storage.type === "persistent"
+      ? { type: "persistent" as const, dataPath: storage.dataPath }
+      : { type: "memory" as const };
+
+  if (storage.type === "persistent" && storage.dataPath.trim() === "") {
+    throw new Error("Persistent storage requires a non-empty dataPath");
+  }
 
   if (!serverUrl || !backendSecret) {
     throw new Error("JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required");
@@ -96,7 +102,7 @@ export async function createServer(
     appId,
     app: schemaApp,
     permissions,
-    driver: { type: "persistent", dataPath: dbPath },
+    driver,
     serverUrl,
     initial: { backendSecret },
     env: "dev",
@@ -438,8 +444,60 @@ export async function stopServer(server: RunningServer): Promise<void> {
 // CLI Entry Point
 // ============================================================================
 
+const DEFAULT_APP_ID = "019d4349-244c-74d4-8573-8e1b24cf21e2";
+
+function resolveStorage(argv: string[], env: NodeJS.ProcessEnv): TodoServerStorage {
+  let dataPath: string | undefined;
+  let inMemory = false;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--data-path") {
+      if (dataPath !== undefined) {
+        throw new Error("The --data-path option may only be provided once");
+      }
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("--") || value.trim() === "") {
+        throw new Error("--data-path requires a non-empty path");
+      }
+      dataPath = value;
+      index += 1;
+    } else if (argument === "--in-memory") {
+      if (inMemory) {
+        throw new Error("The --in-memory option may only be provided once");
+      }
+      inMemory = true;
+    } else {
+      throw new Error(`Unknown option: ${argument}`);
+    }
+  }
+
+  const environmentPath = env.DB_PATH;
+  if (environmentPath !== undefined && environmentPath.trim() === "") {
+    throw new Error("DB_PATH must be non-empty when set");
+  }
+  if (inMemory && (dataPath !== undefined || environmentPath !== undefined)) {
+    throw new Error("--in-memory conflicts with --data-path and DB_PATH");
+  }
+  if (dataPath !== undefined) {
+    return { type: "persistent", dataPath };
+  }
+  if (environmentPath !== undefined) {
+    return { type: "persistent", dataPath: environmentPath };
+  }
+  if (inMemory) {
+    return { type: "memory" };
+  }
+
+  const appId = env.JAZZ_APP_ID ?? DEFAULT_APP_ID;
+  const encodedAppId = Buffer.from(appId, "utf8").toString("base64url");
+  return {
+    type: "persistent",
+    dataPath: join("data", "todos", encodedAppId, "jazz.db"),
+  };
+}
 async function main() {
-  const todoServer = await createServer();
+  const todoServer = await createServer(resolveStorage(process.argv.slice(2), process.env));
 
   // Start server
   const port = parseInt(process.env.PORT ?? "3000", 10);

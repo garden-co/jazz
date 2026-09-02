@@ -64,6 +64,48 @@ async function stopChild(child: ChildProcess): Promise<void> {
   await once(child, "exit");
 }
 
+async function runCli(
+  cwd: string,
+  args: string[],
+  dbPath: string | undefined,
+): Promise<{ code: number | null; output: string }> {
+  const childEnv = {
+    ...process.env,
+    PORT: "0",
+    JAZZ_APP_ID: APP_ID,
+    JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
+  };
+  if (dbPath === undefined) delete childEnv.DB_PATH;
+  else childEnv.DB_PATH = dbPath;
+  const child = spawn(tsxLauncher, [join(exampleRoot, "src", "main.ts"), ...args], {
+    cwd,
+    env: childEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let output = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    output += chunk.toString();
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    output += chunk.toString();
+  });
+  const [code] = await once(child, "exit");
+  return { code: code as number | null, output };
+}
+
+const invalidCliCases = [
+  { name: "unknown options", args: ["--unknown"], dbPath: undefined },
+  { name: "missing data path", args: ["--data-path"], dbPath: undefined },
+  { name: "empty data path", args: ["--data-path", ""], dbPath: undefined },
+  {
+    name: "in-memory and data path conflict",
+    args: ["--in-memory", "--data-path", "/tmp/todo.db"],
+    dbPath: undefined,
+  },
+  { name: "empty DB_PATH", args: [], dbPath: "" },
+] as const;
+
 describe("Todo server CLI", () => {
   beforeAll(async () => {
     jwtIssuer = await startTestJwtIssuer();
@@ -102,6 +144,17 @@ describe("Todo server CLI", () => {
     } finally {
       if (first) await stopChild(first.process);
       if (second) await stopChild(second.process);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+  it.each(invalidCliCases)("$name fails before listening", async ({ args, dbPath }) => {
+    const cwd = mkdtempSync(join(tmpdir(), "jazz-todo-cli-invalid-"));
+    try {
+      const result = await runCli(cwd, args, dbPath);
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain("Fatal error:");
+      expect(result.output).not.toContain("Todo server listening");
+    } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
   });

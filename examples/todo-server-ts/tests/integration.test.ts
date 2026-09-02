@@ -110,8 +110,14 @@ describe("Todo Server Integration", () => {
       permissions,
     });
     primaryIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-integration");
-    // Create server with Fjall-backed storage (temp directory)
-    const todoServer = await createServer(undefined, jazzOptions());
+    // Create an isolated persistent server for the CRUD suite.
+    const todoServer = await createServer(
+      {
+        type: "persistent",
+        dataPath: join(mkdtempSync(join(tmpdir(), "jazz-integration-")), "jazz.db"),
+      },
+      jazzOptions(),
+    );
 
     // Start on random available port
     server = await startServer(todoServer, 0);
@@ -320,7 +326,13 @@ describe("Todo Server Integration", () => {
       const dbPath = join(dataDir, "jazz.db");
 
       // --- First boot: create some todos ---
-      const server1 = await startServer(await createServer(dbPath, jazzOptions()), 0);
+      const server1 = await startServer(
+        await createServer(
+          { type: "persistent", dataPath: dbPath },
+          jazzOptions(),
+        ),
+        0,
+      );
 
       const createRes1 = await authenticatedFetch(`${server1.baseUrl}/todos`, {
         method: "POST",
@@ -343,7 +355,13 @@ describe("Todo Server Integration", () => {
       await stopServer(server1);
 
       // --- Second boot: same data path, fresh server ---
-      const server2 = await startServer(await createServer(dbPath, jazzOptions()), 0);
+      const server2 = await startServer(
+        await createServer(
+          { type: "persistent", dataPath: dbPath },
+          jazzOptions(),
+        ),
+        0,
+      );
 
       // The server's public authenticated route must be able to serve the
       // persisted current state immediately after reopening, rather than only
@@ -416,7 +434,16 @@ describe("Todo Server Integration", () => {
   describe("SSE Live Endpoint", () => {
     it("streams only the authenticated caller's todos and updates on changes", async () => {
       // Use an isolated server instance so this test has an independent persistence context.
-      const sseServer = await startServer(await createServer(undefined, jazzOptions()), 0);
+      const sseServer = await startServer(
+        await createServer(
+          {
+            type: "persistent",
+            dataPath: join(mkdtempSync(join(tmpdir(), "jazz-sse-")), "jazz.db"),
+          },
+          jazzOptions(),
+        ),
+        0,
+      );
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
