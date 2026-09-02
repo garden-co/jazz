@@ -1205,7 +1205,8 @@ where
                 return Err(error);
             }
         };
-        let mut receiver = maintained_views::CoveredInputReceiver::new(sources);
+        let mut receiver =
+            maintained_views::CoveredInputReceiver::new(sources, ReadViewSpec::default());
         let installed = match self
             .replace_covered_input_receiver(
                 &mut receiver,
@@ -3484,6 +3485,7 @@ where
             initial_received,
             covered_input_receiver: maintained_views::CoveredInputReceiver::new(
                 covered_input_sources,
+                read_view.clone(),
             ),
         };
         let _ = self

@@ -50,6 +50,7 @@ pub(crate) fn local_first_bootstrap_gate_descriptor() -> RecordDescriptor {
 pub(crate) struct CoveredInputReceiver {
     /// These IDs have no wire meaning; full `ProgramSourceId` does.
     pub(crate) sources: BTreeMap<ProgramSourceId, CoveredInputSource>,
+    pub(crate) read_view: ReadViewSpec,
     local_authority: LocalAuthorityReconciliation,
     /// `None` is pending, never an implicit empty closure.
     installed_closure: Option<(AuthorityResultKey, u64)>,
@@ -64,9 +65,13 @@ pub(crate) struct CoveredInputReceiver {
 }
 
 impl CoveredInputReceiver {
-    pub(crate) fn new(sources: BTreeMap<ProgramSourceId, CoveredInputSource>) -> Self {
+    pub(crate) fn new(
+        sources: BTreeMap<ProgramSourceId, CoveredInputSource>,
+        read_view: ReadViewSpec,
+    ) -> Self {
         Self {
             sources,
+            read_view,
             ..Default::default()
         }
     }
@@ -358,7 +363,10 @@ where
             program_facts: BTreeSet::new(),
             root_occurrence_ids: Vec::new(),
             initial_received,
-            covered_input_receiver: CoveredInputReceiver::new(covered_input_sources),
+            covered_input_receiver: CoveredInputReceiver::new(
+                covered_input_sources,
+                read_view.clone(),
+            ),
         };
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
@@ -910,16 +918,28 @@ where
                     ));
                 }
             };
+            let branch_key = input
+                .version
+                .branch_or_prefix
+                .as_deref()
+                .map(BranchKey::from_canonical_bytes)
+                .transpose()
+                .map_err(|_| {
+                    Error::InvalidStoredValue("covered input branch witness is malformed")
+                })?
+                .unwrap_or_default();
             let version = self
-                .query_version_by_alias(
+                .query_version_by_alias_in_branch(
+                    result_schema_version,
                     input.version_table.as_str(),
+                    &branch_key,
                     input.source_row,
                     layer,
                     input.version.tx.time,
                     tx_alias,
                 )
-                .await?
-                .ok_or(Error::MissingTransaction(input.version.tx))?;
+                .await?;
+            let version = version.ok_or(Error::MissingTransaction(input.version.tx))?;
             if version.branch_key().canonical_bytes()
                 != input.version.branch_or_prefix.clone().unwrap_or_default()
             {
@@ -938,6 +958,13 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "authority covered content version cannot materialize a current row",
                 ))?;
+            let row = self.project_covered_input_row_in_read_view(
+                &source_table,
+                result_schema_version,
+                &receiver.read_view,
+                &version,
+                row,
+            )?;
             if row.table() != source_table.name {
                 return Err(Error::InvalidStoredValue(
                     "authority covered input does not project into its compiled source schema",
@@ -1032,9 +1059,19 @@ where
                 ));
             }
         };
+        let branch_key = input
+            .version
+            .branch_or_prefix
+            .as_deref()
+            .map(BranchKey::from_canonical_bytes)
+            .transpose()
+            .map_err(|_| Error::InvalidStoredValue("covered input branch witness is malformed"))?
+            .unwrap_or_default();
         let version = self
-            .query_version_by_alias(
+            .query_version_by_alias_in_branch(
+                result_schema_version,
                 input.version_table.as_str(),
+                &branch_key,
                 input.source_row,
                 layer,
                 input.version.tx.time,
@@ -1074,6 +1111,44 @@ where
             &row,
             schema_alias,
         )?))
+    }
+
+    fn project_covered_input_row_in_read_view(
+        &mut self,
+        table: &TableSchema,
+        schema: SchemaVersionId,
+        read_view: &ReadViewSpec,
+        version: &VersionRow,
+        row: CurrentRow,
+    ) -> Result<CurrentRow, Error> {
+        let ReadViewSourceSpec::BranchView { head, .. } = &read_view.source else {
+            return Ok(row);
+        };
+        let schema_definition = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema)
+            .ok_or(Error::InvalidStoredValue(
+                "covered input read schema is unknown",
+            ))?
+            .schema;
+        let (head, _) = schema_definition
+            .project_branch_view_selector(table, head)
+            .map_err(Error::InvalidBranchKey)?;
+        self.materialize_branch_view_winners(
+            table.name.as_str(),
+            schema,
+            &head,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([(version.row_uuid(), version.clone())]),
+            BTreeMap::new(),
+        )?
+        .into_iter()
+        .next()
+        .ok_or(Error::InvalidStoredValue(
+            "covered branch input did not materialize",
+        ))
     }
 
     async fn drain_local_maintained_view_subscription_transitions(

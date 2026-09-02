@@ -515,7 +515,7 @@ where
         Ok((base_rows, deleted_base_rows))
     }
 
-    fn materialize_branch_view_winners(
+    pub(super) fn materialize_branch_view_winners(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
