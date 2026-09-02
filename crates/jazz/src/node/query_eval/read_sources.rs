@@ -16,6 +16,11 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// closure. The mapping is keyed by normalized source identity, never by
     /// a table name, sink, collector, or storage prefix.
     pub(super) covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+    /// The exact compiler-owned descriptor registered for each receiver
+    /// source. Input lowering must reuse it rather than reconstructing an
+    /// authored descriptor after the physical catalogue has selected a
+    /// canonical enum/schema boundary.
+    pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     /// Local-first bootstrap gates keyed by the same exact source occurrence
     /// as its CoveredInput slot. The gate controls only the provisional
     /// retained-local arm and is cleared with the first exact closure.
@@ -70,6 +75,10 @@ where
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
         let covered_input_source = self.covered_input_sources.get(&request.source).copied();
+        let covered_input_descriptor = self.covered_input_descriptors.get(&request.source).cloned();
+        if covered_input_source.is_some() != covered_input_descriptor.is_some() {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        }
         let provisional_local_gate = self.provisional_local_gates.get(&request.source).copied();
         // A receiver-local Local source has exactly two possible inputs: the
         // authority-covered frontier and this node's still-pending Ahead
@@ -116,9 +125,9 @@ where
                 .table_in_schema(&request.source.table, self.read_view.read_schema)
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
             let metadata = inline_source_metadata(&request.requirements, None);
-            let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
-                &table, &metadata, false,
-            );
+            let descriptor = covered_input_descriptor
+                .clone()
+                .expect("checked alongside compiler-owned covered input source");
             return Ok(ResolvedSource {
                 table_schema: table,
                 graph: GraphBuilder::input_source(input_source, descriptor.clone()),
@@ -1321,6 +1330,12 @@ where
                 open_tx_overlay,
             )
             .await?;
+        // The descriptor attached to the receiver input is the compiler's
+        // canonical current-storage descriptor. The physical current arm
+        // reaches that same boundary through its variant projection; retain
+        // the allocated descriptor for the row shape rather than reconstruct
+        // the authored enum occurrence above.
+        let descriptor = covered_input_descriptor.clone().unwrap_or(descriptor);
         let graph = if let Some(input_source) = covered_input_source {
             // Local-first composes the authority's approved closure with the
             // eligible local-current overlay before it enters the same
@@ -1338,8 +1353,10 @@ where
                     request.source,
                 );
             }
+            let covered_descriptor = covered_input_descriptor
+                .expect("checked alongside compiler-owned covered input source");
             let mut inputs = vec![
-                GraphBuilder::input_source(input_source, descriptor.clone()),
+                GraphBuilder::input_source(input_source, covered_descriptor.clone()),
                 graph,
             ];
             if let Some(gate) = provisional_local_gate {
@@ -1349,7 +1366,7 @@ where
                 let provisional_global_base = self
                     .provisional_local_global_source_graph(request, &table)
                     .await?;
-                let (provisional_global, provisional_descriptor, _, _) =
+                let (provisional_global, _provisional_descriptor, _, _) =
                     resolved_current_source_graph(
                         self.node,
                         &table,
@@ -1362,12 +1379,6 @@ where
                         Some(provisional_global_base),
                     )
                     .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
-                if provisional_descriptor != descriptor {
-                    return Err(source_resolution_error(
-                        request,
-                        SourceGap::SchemaProjection,
-                    ));
-                }
                 inputs.push(gate_provisional_local_graph(
                     provisional_global,
                     &descriptor,
@@ -3441,6 +3452,43 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 ) -> RecordDescriptor {
     current_row_descriptor_with_hidden_source_fields_for_branch(table, metadata, false)
+}
+
+/// The current-source compatibility boundary is the schema's canonical
+/// current-row representation, not the authored column spelling.  Physical
+/// catalogue registration assigns stable enum identities there; a
+/// receiver-owned input that later unions with a current arm must retain those
+/// identities exactly.
+pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_storage(
+    table: &TableSchema,
+    metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+) -> RecordDescriptor {
+    let logical = current_row_descriptor_with_hidden_source_fields(table, metadata);
+    let current = table.global_current_storage_tables()[0].record_schema();
+    let current_types = table
+        .columns
+        .iter()
+        .filter_map(|column| {
+            let storage_name = format!("user_{}", column.name);
+            current
+                .field_index(&storage_name)
+                .and_then(|index| current.fields().get(index))
+                .map(|field| (user_column_field(&column.name), field.value_type.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    RecordDescriptor::new(logical.fields().iter().map(|field| {
+        let name = field
+            .name
+            .clone()
+            .expect("compiler-owned current source descriptor fields are named");
+        (
+            name.clone(),
+            current_types
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| field.value_type.clone()),
+        )
+    }))
 }
 
 fn current_row_descriptor_with_hidden_source_fields_for_branch(

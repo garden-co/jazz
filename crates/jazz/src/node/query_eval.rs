@@ -1089,12 +1089,14 @@ where
     ) -> Result<
         (
             BTreeMap<SourceId, InputSourceId>,
+            BTreeMap<SourceId, RecordDescriptor>,
             BTreeMap<SourceId, InputSourceId>,
             BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
         ),
         Error,
     > {
         let mut runtime_sources = BTreeMap::new();
+        let mut runtime_source_descriptors = BTreeMap::new();
         let mut provisional_local_gates = BTreeMap::new();
         let mut sources = BTreeMap::new();
         for source_request in query_program_source_requests(request)
@@ -1124,7 +1126,9 @@ where
             )?;
             let metadata = read_sources::inline_source_metadata(&source_request.requirements, None);
             let descriptor =
-                read_sources::current_row_descriptor_with_hidden_source_fields(&table, &metadata);
+                read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
+                    &table, &metadata,
+                );
             let input = self.database.allocate_input_source(descriptor.clone());
             let provisional_local_gate = local_first.then(|| {
                 self.database.allocate_input_source(
@@ -1148,11 +1152,17 @@ where
                 ));
             }
             runtime_sources.insert(source_request.source.clone(), input);
+            runtime_source_descriptors.insert(source_request.source.clone(), descriptor);
             if let Some(gate) = provisional_local_gate {
                 provisional_local_gates.insert(source_request.source, gate);
             }
         }
-        Ok((runtime_sources, provisional_local_gates, sources))
+        Ok((
+            runtime_sources,
+            runtime_source_descriptors,
+            provisional_local_gates,
+            sources,
+        ))
     }
 
     /// Recompile one client-side settled read against ephemeral, exact
@@ -1171,7 +1181,7 @@ where
         result_schema_version: SchemaVersionId,
         authority_result_key: &AuthorityResultKey,
     ) -> Result<Option<(QueryProgram, maintained_views::CoveredInputReceiver)>, Error> {
-        let (runtime_sources, provisional_local_gates, sources) =
+        let (runtime_sources, runtime_source_descriptors, provisional_local_gates, sources) =
             self.allocate_client_receiver_input_sources(&request, false)?;
         if sources.is_empty() {
             return Err(Error::InvalidStoredValue(
@@ -1184,6 +1194,7 @@ where
                 BTreeMap::new(),
                 access_paths,
                 runtime_sources,
+                runtime_source_descriptors,
                 provisional_local_gates,
             )
             .await
@@ -3643,12 +3654,21 @@ where
         // requirements before any source is resolved. This keeps the initial
         // lowering from consulting an authority result just to discover a
         // descriptor.
-        let (runtime_sources, provisional_local_gates, covered_input_sources) =
-            if authorization_mode == QueryAuthorizationMode::ClientLocal {
-                self.allocate_client_receiver_input_sources(&request, true)?
-            } else {
-                (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
-            };
+        let (
+            runtime_sources,
+            runtime_source_descriptors,
+            provisional_local_gates,
+            covered_input_sources,
+        ) = if authorization_mode == QueryAuthorizationMode::ClientLocal {
+            self.allocate_client_receiver_input_sources(&request, true)?
+        } else {
+            (
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            )
+        };
         let program = if runtime_sources.is_empty() {
             match self
                 .compile_query_program_request_with_access_paths(request, access_paths)
@@ -3668,6 +3688,7 @@ where
                     BTreeMap::new(),
                     access_paths,
                     runtime_sources,
+                    runtime_source_descriptors,
                     provisional_local_gates,
                 )
                 .await

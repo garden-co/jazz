@@ -458,6 +458,7 @@ where
             access_paths,
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
         )
         .await
     }
@@ -473,6 +474,7 @@ where
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
         covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+        covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         provisional_local_gates: BTreeMap<SourceId, groove::ivm::InputSourceId>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
@@ -480,6 +482,7 @@ where
             inline_sources,
             access_paths,
             covered_input_sources,
+            covered_input_descriptors,
             provisional_local_gates,
             true,
         )
@@ -497,6 +500,7 @@ where
             access_paths,
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
             false,
         )
         .await
@@ -508,6 +512,7 @@ where
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
         covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+        covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         provisional_local_gates: BTreeMap<SourceId, groove::ivm::InputSourceId>,
         count_access_path_metrics: bool,
     ) -> Result<QueryProgram, Error> {
@@ -530,6 +535,7 @@ where
             read_view: &read_view,
             inline_sources,
             covered_input_sources,
+            covered_input_descriptors,
             provisional_local_gates,
             access_paths,
             count_access_path_metrics,
@@ -566,6 +572,7 @@ where
                 read_view: &read_view,
                 inline_sources: BTreeMap::new(),
                 covered_input_sources: BTreeMap::new(),
+                covered_input_descriptors: BTreeMap::new(),
                 provisional_local_gates: BTreeMap::new(),
                 access_paths: BTreeMap::new(),
                 count_access_path_metrics: true,
