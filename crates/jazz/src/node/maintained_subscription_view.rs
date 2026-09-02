@@ -596,50 +596,55 @@ impl MaintainedSubscriptionView {
                     let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.versions
                         .apply_delta(identity, row, weight, node_aliases)?;
-                    self.apply_source_fact_delta(
+                    match self.apply_source_fact_delta(
                         SourceFactOrigin::Version,
                         ProgramFactEntry::CoveredInput(covered_input.clone()),
                         weight,
-                    );
-                    if weight > 0 {
-                        transitions
-                            .program_fact_adds
-                            .push(ProgramFactEntry::CoveredInput(covered_input));
-                    } else {
-                        transitions
-                            .program_fact_removes
-                            .push(ProgramFactEntry::CoveredInput(covered_input));
+                    ) {
+                        Some(true) => {
+                            transitions
+                                .program_fact_adds
+                                .push(ProgramFactEntry::CoveredInput(covered_input));
+                        }
+                        Some(false) => {
+                            transitions
+                                .program_fact_removes
+                                .push(ProgramFactEntry::CoveredInput(covered_input));
+                        }
+                        None => {}
                     }
                 }
                 NetEvent::Replacement(source, key, identity, row) => {
                     let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.replacements
                         .apply_delta(key, identity, row, weight, node_aliases)?;
-                    self.apply_source_fact_delta(
+                    match self.apply_source_fact_delta(
                         SourceFactOrigin::Replacement,
                         ProgramFactEntry::CoveredInput(covered_input.clone()),
                         weight,
-                    );
-                    if weight > 0 {
-                        transitions
-                            .program_fact_adds
-                            .push(ProgramFactEntry::CoveredInput(covered_input));
-                    } else {
-                        transitions
-                            .program_fact_removes
-                            .push(ProgramFactEntry::CoveredInput(covered_input));
+                    ) {
+                        Some(true) => {
+                            transitions
+                                .program_fact_adds
+                                .push(ProgramFactEntry::CoveredInput(covered_input));
+                        }
+                        Some(false) => {
+                            transitions
+                                .program_fact_removes
+                                .push(ProgramFactEntry::CoveredInput(covered_input));
+                        }
+                        None => {}
                     }
                 }
                 NetEvent::ProgramFact(fact) => {
-                    self.apply_source_fact_delta(
+                    match self.apply_source_fact_delta(
                         SourceFactOrigin::ProgramFact,
                         fact.clone(),
                         weight,
-                    );
-                    if weight > 0 {
-                        transitions.program_fact_adds.push(fact);
-                    } else {
-                        transitions.program_fact_removes.push(fact);
+                    ) {
+                        Some(true) => transitions.program_fact_adds.push(fact),
+                        Some(false) => transitions.program_fact_removes.push(fact),
+                        None => {}
                     }
                 }
                 NetEvent::StructuredAppRow(root, record) => {
@@ -669,12 +674,20 @@ impl MaintainedSubscriptionView {
             .collect()
     }
 
+    /// Apply one terminal's reference delta to a peer source fact. The wire
+    /// closure is a set, so only the aggregate 0→1 / 1→0 presence changes
+    /// may become peer additions/removals; independent source occurrences
+    /// commonly reference the same exact fact.
     fn apply_source_fact_delta(
         &mut self,
         origin: SourceFactOrigin,
         fact: ProgramFactEntry,
         weight: i64,
-    ) {
+    ) -> Option<bool> {
+        let was_present = self
+            .source_fact_weights
+            .get(&fact)
+            .is_some_and(|weights| weights.values().any(|weight| *weight > 0));
         let weights = self.source_fact_weights.entry(fact.clone()).or_default();
         let next = weights.get(&origin).copied().unwrap_or(0) + weight;
         if next == 0 {
@@ -685,6 +698,11 @@ impl MaintainedSubscriptionView {
         if weights.is_empty() {
             self.source_fact_weights.remove(&fact);
         }
+        let is_present = self
+            .source_fact_weights
+            .get(&fact)
+            .is_some_and(|weights| weights.values().any(|weight| *weight > 0));
+        (was_present != is_present).then_some(is_present)
     }
 
     pub(crate) fn replacement_for(
