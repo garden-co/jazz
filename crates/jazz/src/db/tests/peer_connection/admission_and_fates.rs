@@ -1725,24 +1725,54 @@ fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
     subscriber.borrow_mut().tick().unwrap();
     client.tick().unwrap();
 
+    // Discard the opening reset. The refresh must independently publish a
+    // replacement empty closure rather than letting this assertion pass on
+    // the original allowed snapshot.
+    server_sent.borrow_mut().clear();
     client.set_test_provider_claims(session_subject, denied_claims.clone());
     let expected_denied_claims = denied_claims.clone();
     subscriber
         .borrow_mut()
         .update_authenticated_session_claims(denied_claims);
     subscriber.borrow_mut().tick().unwrap();
+    let sent = server_sent.borrow();
+    let refreshed = sent
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert!(
-        server_sent.borrow().iter().any(|message| {
-            matches!(
-                message,
-                SyncMessage::ViewUpdate(update)
-                    if update.reset_result_set
-                        && update.result_member_adds.is_empty()
-                        && update.result_member_removes.is_empty()
-            )
-        }),
-        "claim refresh must publish an empty ordinary-subscription reset"
+        !refreshed.is_empty(),
+        "claim refresh must publish a replacement ViewUpdate, got {sent:?}"
     );
+    for update in refreshed {
+        assert_eq!(update.subscription, attachment.subscription());
+        assert!(update.reset_result_set);
+        assert!(update.version_carriers.is_empty());
+        assert!(update.result_member_adds.is_empty());
+        assert!(update.result_member_removes.is_empty());
+        assert!(update.program_fact_removes.is_empty());
+        assert!(
+            update
+                .peer_payload_inventory
+                .authorization_progress
+                .is_some()
+                && !update.peer_payload_inventory.opening_pending,
+            "the empty reset must carry its settled authorization receipt"
+        );
+        assert_eq!(
+            update.program_fact_adds.len(),
+            1,
+            "the empty reset must carry exactly its complete source manifest"
+        );
+        assert!(matches!(
+            update.program_fact_adds.as_slice(),
+            [crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage)] if coverage.complete
+        ));
+    }
+    drop(sent);
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
         unreachable!("accepted client is served by a subscriber link")
     };
