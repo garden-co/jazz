@@ -238,6 +238,48 @@ fn authority_covered_input_rejects_conflicting_retained_source_version_atomicall
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
+#[test]
+fn authority_covered_input_rejects_duplicate_and_impossible_live_deltas_atomically() {
+    let (_dir, mut receiver, authority_result, _initial, mut successor) =
+        covered_input_receiver_fixture();
+    let duplicate = successor
+        .program_fact_adds
+        .iter()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+            _ => None,
+        })
+        .expect("real successor has a covered input");
+    successor
+        .program_fact_adds
+        .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+
+    let (_dir, mut receiver, authority_result, initial, mut successor) =
+        covered_input_receiver_fixture();
+    let mut impossible_remove = initial;
+    impossible_remove.version.tx = TxId::new(node(0x7a), TxTime(0x7a));
+    successor
+        .program_fact_removes
+        .push(crate::protocol::ProgramFactEntry::CoveredInput(impossible_remove));
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+#[test]
+fn authority_covered_input_rejects_live_coverage_changes_atomically() {
+    let (_dir, mut receiver, authority_result, initial, mut successor) =
+        covered_input_receiver_fixture();
+    successor.program_fact_removes.push(
+        crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+            crate::protocol::ProgramSourceCoverageEntry {
+                source: initial.source,
+                complete: true,
+            },
+        ),
+    );
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
 /// This is an internal ingress receipt because the public API intentionally
 /// hides covered-source maps.  It protects the replacement contract that lets
 /// an authority send a successor closure without accumulating one retained
