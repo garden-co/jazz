@@ -56,3 +56,43 @@ describe("loadCompiledSchema", () => {
     expect(largeCount?.default).toBe(9007199254740993n);
   });
 });
+const FIXTURES_DIR = fileURLToPath(new URL("../tests/ts-dsl/fixtures", import.meta.url));
+
+const fixtureDir = (name: string) => `${FIXTURES_DIR}/${name}`;
+
+describe("bundled DSL schema loading", () => {
+  it("collects tables from a public bare jazz-tools side-effect import", async () => {
+    const loaded = await loadCompiledSchema(fixtureDir("side-effect-only"));
+
+    expect(loaded.schema.tables.map((table) => table.name)).toEqual(["side_effect_tasks"]);
+  });
+
+  it("preserves explicit schema precedence while consuming side-effect collection", async () => {
+    const explicit = await loadCompiledSchema(fixtureDir("explicit-precedence"));
+    expect(explicit.schema.tables.map((table) => table.name)).toEqual(["explicit_tasks"]);
+
+    const sideEffect = await loadCompiledSchema(fixtureDir("side-effect-only"));
+    expect(sideEffect.schema.tables.map((table) => table.name)).toEqual(["side_effect_tasks"]);
+  });
+
+  it("cleans failed bundle state so a retry can load the schema", async () => {
+    process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = "1";
+    await expect(loadCompiledSchema(fixtureDir("retry-after-failure"))).rejects.toThrow(
+      "intentional schema fixture failure",
+    );
+
+    delete process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+    const loaded = await loadCompiledSchema(fixtureDir("retry-after-failure"));
+    expect(loaded.schema.tables.map((table) => table.name)).toEqual(["retry_tasks"]);
+  });
+
+  it("isolates parallel top-level-await bundles deterministically", async () => {
+    const [a, b] = await Promise.all([
+      loadCompiledSchema(fixtureDir("parallel-tla-a")),
+      loadCompiledSchema(fixtureDir("parallel-tla-b")),
+    ]);
+
+    expect(a.schema.tables.map((table) => table.name)).toEqual(["parallel_a"]);
+    expect(b.schema.tables.map((table) => table.name)).toEqual(["parallel_b"]);
+  });
+});
