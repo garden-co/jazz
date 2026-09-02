@@ -1632,14 +1632,28 @@ mod root_terminal_tests {
         assert!(state.emitted_root_order.is_empty());
         assert!(state.emitted_root_keys.is_empty());
 
-        // The replacement snapshot reconciles that maintenance state and
-        // emits exactly one real occurrence once it becomes positive again.
+        // A matching replacement only reconciles the negative accounting; a
+        // zero-weight group never gets a terminal occurrence.
+        let reconciled = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(reconciled.is_empty());
+        assert!(state.emitted_root_order.is_empty());
+        assert!(state.emitted_root_keys.is_empty());
+
+        // Only a further positive replacement emits one real occurrence.
         let reopened = update_collect_by_root_terminal_state(
             input.clone(),
             output.clone(),
             &collect_by,
             &mut state,
-            &[delta(0xa1, 0x11, "alpha", 2)],
+            &[delta(0xa1, 0x11, "alpha", 1)],
             true,
         )
         .unwrap();
@@ -1674,12 +1688,23 @@ mod root_terminal_tests {
         assert!(state.emitted_root_order.is_empty());
         assert!(state.emitted_root_keys.is_empty());
 
+        let neutral_reentry = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(neutral_reentry.is_empty());
+
         let reentered = update_collect_by_root_terminal_state(
             input,
             output,
             &collect_by,
             &mut state,
-            &[delta(0xa1, 0x11, "alpha", 2)],
+            &[delta(0xa1, 0x11, "alpha", 1)],
             true,
         )
         .unwrap();
