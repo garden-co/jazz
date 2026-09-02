@@ -35,7 +35,7 @@ where
         // Legacy/default subscriptions carry `ReadViewKey::default()` rather
         // than recomputing the options key. Preserve the received options at
         // that wire identity as well; this is an alias, not reconstruction.
-        if opts.has_default_read_view() {
+        if opts == RegisterShapeOptions::default() {
             self.query
                 .registered_shape_options
                 .insert((shape_id, ReadViewKey::default()), opts.clone());
@@ -559,6 +559,21 @@ where
             .registered_shape_options
             .get(&(subscribe.shape_id, subscribe.subscription.read_view))
             .cloned()
+            .or_else(|| {
+                (subscribe.subscription.read_view == ReadViewKey::default())
+                    .then(|| {
+                        self.query
+                            .registered_shape_options
+                            .iter()
+                            .filter(|((shape_id, _), options)| {
+                                *shape_id == subscribe.shape_id
+                                    && **options == RegisterShapeOptions::default()
+                            })
+                            .map(|(_, options)| options.clone())
+                            .next()
+                    })
+                    .flatten()
+            })
             .ok_or(Error::InvalidStoredValue(
                 "subscription referenced unregistered read-view options",
             ))?;
