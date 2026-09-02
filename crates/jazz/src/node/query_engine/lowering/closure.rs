@@ -103,7 +103,8 @@ pub(super) fn reachable_contribution_membership_graph(
         .map_err(single_gap_report)?;
     let lowered = lower_relation_input_for_contributor(&plan, resolved_sources, request)
         .map_err(single_gap_report)?;
-    let join_field = user_column_field(&contribution.root_ref_field);
+    let join_field =
+        reachable_root_reference_field(contribution_source, &contribution.root_ref_field);
     if !lowered.fields.contains(&join_field) {
         return Err(Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Operator(format!(
@@ -132,6 +133,29 @@ pub(super) fn reachable_contribution_membership_graph(
         contribution_source,
         route_fields,
     )))
+}
+
+/// Return the lowered access-row field that identifies the visible root.
+///
+/// `ReachableVia` names the application-level `id` column even when a table
+/// uses Jazz's implicit row id. In that case normalization lowers the root
+/// join through `row_uuid`, rather than a nonexistent `user_id` field. The
+/// contributor terminal must use the same physical coordinate; otherwise a
+/// plain gather query is rejected before it can publish any receiver inputs.
+/// Declared ids and ordinary application columns remain `user_*` fields.
+fn reachable_root_reference_field(source: &ResolvedSource, field: &str) -> String {
+    let user_field = user_column_field(field);
+    if source
+        .row_shape
+        .descriptor
+        .field_index(&user_field)
+        .is_some()
+        || field != "id"
+    {
+        user_field
+    } else {
+        source.row_shape.row_uuid_field.clone()
+    }
 }
 
 /// Return the generic side stream owned by the one recursive step that
