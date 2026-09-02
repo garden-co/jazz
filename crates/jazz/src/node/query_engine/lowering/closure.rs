@@ -255,11 +255,24 @@ pub(super) fn flat_join_contribution_membership_graph(
 /// admitted root. Row fields are produced by the right input, while routing
 /// fields are produced by the left root. Preserve both explicitly before the
 /// source is frozen as a receiver input.
-fn project_join_contribution_fields_with_root_routes(
+pub(super) fn project_join_contribution_fields_with_root_routes(
     source: &ResolvedSource,
     route_fields: &BTreeSet<String>,
 ) -> Vec<ProjectField> {
-    let mut fields = project_source_fields_from_prefix(source, RIGHT_JOIN_PREFIX);
+    // A resolved child descriptor can itself retain the root's routing
+    // carrier.  That does *not* mean the child-side join input owns a
+    // `right.<route>` field: the carrier belongs to the admitted left/root
+    // frontier. Project it once from left and exclude the descriptor echo
+    // from the right projection, keeping the join layout unambiguous.
+    let mut fields = source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| field.name.as_ref())
+        .filter(|field| !route_fields.contains(*field))
+        .map(|field| ProjectField::renamed(format!("{RIGHT_JOIN_PREFIX}{field}"), field.clone()))
+        .collect::<Vec<_>>();
     fields.extend(
         route_fields.iter().map(|field| {
             ProjectField::renamed(format!("{LEFT_JOIN_PREFIX}{field}"), field.clone())

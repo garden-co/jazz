@@ -178,7 +178,12 @@ pub(super) fn lowered_terminals(
     if let AnalyzedQueryPlan::CorrelatedPath(path) = plan {
         collect_correlated_covered_source_members(
             path,
-            closure.visible_root.clone(),
+            // Correlated contributor joins consume the exact routed residual
+            // frontier.  `closure.visible_root` is only the membership graph
+            // and may conservatively omit a policy-route carrier; the
+            // descriptor-bound projection above is the compiler-owned point
+            // that restores it for every receiver source terminal.
+            visible_root_with_routes.clone(),
             source,
             resolved_sources,
             request,
@@ -634,14 +639,16 @@ fn collect_correlated_covered_source_members(
     )
     .map_err(single_gap_report)?
     .graph;
-    let child_members =
-        joined
-            .clone()
-            .project_fields(project_source_fields_with_routes_from_prefix(
-                child_source,
-                RIGHT_JOIN_PREFIX,
-                route_fields,
-            ));
+    // The child descriptor may retain the parent's route carrier, but after
+    // the parent/child join that carrier is owned by the left parent input.
+    // Reuse the closure boundary's explicit layout so we never ask Groove for
+    // a nonexistent `right.<route>` field or publish two competing routes.
+    let child_members = joined.clone().project_fields(
+        super::closure::project_join_contribution_fields_with_root_routes(
+            child_source,
+            route_fields,
+        ),
+    );
     members
         .entry(path.path.child.clone())
         .and_modify(|existing| {
@@ -660,10 +667,16 @@ fn collect_correlated_covered_source_members(
             members,
         )?;
     }
-    let child_parent = joined.project_fields(project_source_fields_from_prefix(
-        child_source,
-        RIGHT_JOIN_PREFIX,
-    ));
+    // Nested correlated paths use this child as their left parent.  Retain
+    // the same root-owned route carrier that scoped its covered input; a
+    // plain right-side source projection would silently drop it and make the
+    // next join ask for a nonexistent `left.<route>` field.
+    let child_parent = joined.project_fields(
+        super::closure::project_join_contribution_fields_with_root_routes(
+            child_source,
+            route_fields,
+        ),
+    );
     for nested in &path.nested {
         collect_correlated_covered_source_members(
             nested,
