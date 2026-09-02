@@ -6993,9 +6993,6 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
   );
 }
 
-function bytesKey(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
-}
 
 /** Deterministic cache-key encoding for JSON-derived session claims. */
 function canonicalJson(value: unknown): string {
