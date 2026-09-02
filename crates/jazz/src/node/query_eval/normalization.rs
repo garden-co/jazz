@@ -2346,6 +2346,7 @@ fn normalize_policy_atom_chain(
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
     record_join_contributions: bool,
+    record_inherited_contributions: bool,
     inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut current = normalize_filter_join_chain(
@@ -2376,7 +2377,7 @@ fn normalize_policy_atom_chain(
             &format!("{prefix}:inherits:{index}"),
             binding_source_shape,
             param_types,
-            record_join_contributions,
+            record_inherited_contributions,
             inheritance_path,
         )?;
     }
@@ -2470,6 +2471,7 @@ fn normalize_inherited_parent_policy(
                 policy,
                 binding_source_shape,
                 param_types,
+                false,
                 &parent_inheritance_path,
             )?
         } else {
@@ -2491,6 +2493,7 @@ fn normalize_inherited_parent_policy(
                 },
                 binding_source_shape,
                 param_types,
+                false,
                 false,
                 &parent_inheritance_path,
             )?
@@ -2539,6 +2542,7 @@ fn normalize_policy_branch_authorization(
     policy: &JazzQuery,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
+    record_inherited_contributions: bool,
     inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut union_inputs = Vec::new();
@@ -2570,6 +2574,7 @@ fn normalize_policy_branch_authorization(
             binding_source_shape,
             param_types,
             false,
+            record_inherited_contributions,
             inheritance_path,
         )?;
         union_inputs.push(UnionInput {
@@ -2616,6 +2621,7 @@ fn normalize_policy_branch_authorization(
             binding_source_shape,
             param_types,
             false,
+            record_inherited_contributions,
             inheritance_path,
         )?;
         union_inputs.push(UnionInput {
@@ -2822,6 +2828,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    true,
                     &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
@@ -2868,6 +2875,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    true,
                     &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
@@ -2930,6 +2938,7 @@ where
                 },
                 &binding_source_shape,
                 shape.params(),
+                true,
                 true,
                 &inheritance_path,
             )?;

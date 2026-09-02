@@ -150,6 +150,39 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
     assert!(flat.validate_runtime(&schema).is_ok());
 }
 
+/// A caller's inherited parent remains a receiver source even when the query
+/// uses policy-branch normalization.  This is distinct from inheritance nested
+/// inside a table read policy, whose proof sources stay authority-local.
+#[test]
+fn policy_branch_query_keeps_explicit_inherited_parent_contribution() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("parents").column("state", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("children").fk_column("parent", "parents")),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x24; 16]), schema.clone());
+    let mut query = Query::from("children").inherits("parent");
+    query.policy_branches = vec![crate::query::PolicyBranch {
+        filters: vec![eq(col("parent"), lit(uuid::Uuid::nil()))],
+        joins: Vec::new(),
+        reachable: Vec::new(),
+        inherits: Vec::new(),
+    }];
+    let shape = query.validate_runtime(&schema).unwrap();
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+
+    assert_eq!(normalized.inherited_contributions.len(), 1);
+    let contribution = &normalized.inherited_contributions[0];
+    assert_eq!(contribution.id, "policy_branch:base:inherits:0");
+    assert_eq!(contribution.source.table, "parents");
+    assert!(matches!(
+        contribution.source.path.components.as_slice(),
+        [SourceRole::Alias(path)] if path == "policy_branch:base:inherits:0"
+    ));
+}
+
 /// Every flat join-side occurrence is an exact receiver source.  A chained
 /// flat join used to exist only in the authority tuple plan, leaving the
 /// second source absent from the CoveredInput closure despite a claimed reset.
