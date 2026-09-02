@@ -81,22 +81,12 @@ pub(super) fn replacement_removals(
 
 pub(super) fn filter_program_facts_for_result_table(
     facts: Vec<ProgramFactEntry>,
-    result_table_filter: Option<&str>,
-    output_tables: &BTreeMap<String, TableSchema>,
+    _result_table_filter: Option<&str>,
+    _output_tables: &BTreeMap<String, TableSchema>,
 ) -> Vec<ProgramFactEntry> {
     facts
         .into_iter()
-        .filter(|fact| match fact {
-            ProgramFactEntry::ResultPayload(payload) => {
-                let Some(table_name) = payload.member.table_name() else {
-                    return false;
-                };
-                matches!(payload.member, ResultMemberEntry::Synthetic { .. })
-                    || (result_table_filter.is_none_or(|table| table_name == table)
-                        && output_tables.contains_key(table_name))
-            }
-            _ => true,
-        })
+        .filter(ProgramFactEntry::is_peer_source_closure_fact)
         .collect()
 }
 

@@ -350,48 +350,28 @@ where
         table: &str,
         settled: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let table_schema = self.table(table)?.clone();
-        let subscription = self.whole_table_subscription_key(table)?;
         match settled {
             DurabilityTier::None | DurabilityTier::Local => self.current_rows(table, settled).await,
             DurabilityTier::Edge => self.current_rows(table, settled).await,
             DurabilityTier::Global => {
-                let binding_view_key =
-                    BindingViewKey::from_canonical_subscription_key(subscription);
-                let Some(authority_result) =
-                    self.authority_result_state_for_binding_view(binding_view_key)
-                else {
-                    return Ok(Vec::new());
-                };
-                let row_result_set = &authority_result.settled_result_set;
-                let row_entries = row_result_set
-                    .iter()
-                    .filter_map(ResultMemberEntry::as_row)
-                    .collect::<Vec<_>>();
-                let mut rows = Vec::new();
-                for (entry_table, row_uuid, tx_id) in row_entries {
-                    if entry_table.as_str() != table {
-                        continue;
-                    }
-                    let tx_node_alias = self
-                        .node_aliases
-                        .get(&tx_id.node)
-                        .copied()
-                        .ok_or(Error::MissingTransaction(tx_id))?;
-                    let version = self
-                        .query_version_by_alias(
-                            table,
-                            row_uuid,
-                            VersionLayer::Content,
-                            tx_id.time,
-                            tx_node_alias,
-                        )
-                        .await?
-                        .ok_or(Error::MissingTransaction(tx_id))?;
-                    rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
-                }
-                sort_current_rows(&mut rows);
-                Ok(rows)
+                // This convenience surface is used by topology tests, but it
+                // must exercise the same local Groove terminal as a serving
+                // subscription. Reading the authority result cache here would
+                // silently preserve the retired result-output bypass.
+                let shape = crate::query::Query::from(table)
+                    .validate(&self.catalogue.schema)
+                    .map_err(|error| Error::Query(Box::new(error)))?;
+                let binding = shape
+                    .bind(BTreeMap::new())
+                    .map_err(|error| Error::Query(Box::new(error)))?;
+                self.query_rows_with_prepared_plan_for_identity(
+                    &shape,
+                    &binding,
+                    DurabilityTier::Global,
+                    None,
+                    AuthorSubject::SYSTEM,
+                )
+                .await
             }
         }
     }

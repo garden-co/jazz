@@ -42,34 +42,6 @@ fn row_from_u64(value: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-#[test]
-fn flat_tuple_source_vocabulary_is_derived_positionally_from_the_validated_query() {
-    let ordinary = Query::from("todos")
-        .validate(&schema())
-        .expect("validate ordinary query");
-    assert!(
-        crate::node::FlatTupleSourceTables::for_query(&ordinary)
-            .as_slice()
-            .is_empty(),
-        "a non-flat query has no tuple-source roles"
-    );
-
-    let shared_source_table = Query::from(table("todos").alias("root"))
-        .flat_join(table("todos").alias("first"), "root.title", "first.title")
-        .flat_join(
-            table("todos").alias("second"),
-            "first.title",
-            "second.title",
-        )
-        .validate(&schema())
-        .expect("validate two-source flat query");
-    assert_eq!(
-        crate::node::FlatTupleSourceTables::for_query(&shared_source_table).as_slice(),
-        &["todos".to_owned(), "todos".to_owned()],
-        "shared physical tables retain one contributor role per source position"
-    );
-}
-
 /// A self-join can observe the same physical version through two normalized
 /// source roles. Covered-input facts must retain those roles so a receiver can
 /// route each delta to the same local program frontier without borrowing a
@@ -2235,7 +2207,7 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
 }
 
 #[test]
-fn maintained_structured_change_ships_covered_relation_fact() {
+fn maintained_structured_change_ships_only_covered_inputs() {
     let schema = public_peer_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
@@ -2284,10 +2256,22 @@ fn maintained_structured_change_ships_covered_relation_fact() {
         panic!("expected child view update")
     };
     assert!(
+        child_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::CoveredInput(input)
+                    if input.source.table.as_str() == "todos"
+                        && input.source_row == row(0xb1)
+                        && input.version.tx == child_tx
+            )
+        }),
+        "child insertion must ship the nested source input, not a rendered relation edge: {child_fact_adds:?}"
+    );
+    assert!(
         child_fact_adds
             .iter()
-            .any(|fact| matches!(fact, ProgramFactEntry::RelationEdge(_))),
-        "child insertion should establish its relation fact"
+            .all(ProgramFactEntry::is_peer_source_closure_fact),
+        "nested publication must never expose relation or tuple output facts: {child_fact_adds:?}"
     );
     let canonical = subscription_key(&shape, &binding);
     let target = SubscriptionKey {
@@ -2312,16 +2296,31 @@ fn maintained_structured_change_ships_covered_relation_fact() {
     assert!(
         program_fact_adds
             .iter()
-            .any(|fact| matches!(fact, ProgramFactEntry::RelationEdge(_))),
-        "a duplicate structured usage needs the canonical relation facts, not only future deltas"
+            .all(ProgramFactEntry::is_peer_source_closure_fact),
+        "a duplicate structured usage receives the exact covered closure, never relation output: {program_fact_adds:?}"
+    );
+    assert!(
+        program_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::CoveredInput(input)
+                    if input.source.table.as_str() == "todos"
+                        && input.source_row == row(0xb1)
+                        && input.version.tx == child_tx
+            )
+        }),
+        "duplicate structured usage must receive the nested source closure"
     );
 
     let child_update_tx = core
         .commit_mergeable_settled(MergeableCommit::new("todos", row(0xb1), 1_002).cells(
-            BTreeMap::from([(
-                "title".to_owned(),
-                Value::String("updated child".to_owned()),
-            )]),
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("updated child".to_owned()),
+                ),
+                ("owner_id".to_owned(), Value::Uuid(user.0)),
+            ]),
         ))
         .unwrap();
     accept_global(&mut core, child_update_tx, 3);
@@ -2341,7 +2340,7 @@ fn maintained_structured_change_ships_covered_relation_fact() {
     assert!(result_member_removes.is_empty());
     assert!(
         !version_carriers.is_empty(),
-        "the peer ships the changed covered row input, not a terminal patch"
+        "the peer must ship the changed covered row input in the same successor frame, not defer it behind a terminal patch; adds={program_fact_adds:?} removes={program_fact_removes:?}"
     );
     assert!(
         program_fact_adds.iter().any(|fact| {
@@ -2366,6 +2365,13 @@ fn maintained_structured_change_ships_covered_relation_fact() {
             )
         }),
         "the superseded nested input must be retracted with its exact former version"
+    );
+    assert!(
+        program_fact_adds
+            .iter()
+            .chain(&program_fact_removes)
+            .all(ProgramFactEntry::is_peer_source_closure_fact),
+        "nested updates must never revive relation/tuple program facts"
     );
 
     let idempotent = peer.query_update(&mut core, &shape, &binding).unwrap();

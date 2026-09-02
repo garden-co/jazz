@@ -508,6 +508,11 @@ impl MaintainedSubscriptionView {
             if weight == 0 {
                 continue;
             }
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=apply_decoded_event event={event:?} weight={weight}"
+                );
+            }
             match event {
                 NetEvent::Result(entry, payload) => {
                     self.apply_result_delta(entry, payload, weight, &mut transitions);
@@ -569,38 +574,6 @@ impl MaintainedSubscriptionView {
 
     pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
         self.versions.versions_by_tx(tx_id)
-    }
-
-    /// Source records whose row identities occur in visible flat tuples.
-    /// The caller resolves each maintained record back to its authored history
-    /// version before publishing the result-to-contributor admission fact.
-    pub(crate) fn tuple_source_versions_for_members(
-        &self,
-        members: &[ResultMemberEntry],
-        source_tables: &[String],
-    ) -> Vec<(ResultMemberEntry, usize, VersionRow)> {
-        let mut tuples = Vec::new();
-        for member in members {
-            let Some(occurrence) = member.output_occurrence_id() else {
-                continue;
-            };
-            for (source_index, source) in occurrence.joined_sources().iter().enumerate() {
-                let Some(source_table) = source_tables.get(source_index) else {
-                    continue;
-                };
-                let source_row = RowUuid(*source.uuid());
-                for weighted in self.versions.by_identity.values() {
-                    if weighted.weight > 0
-                        && weighted.row.deletion().is_none()
-                        && weighted.row.table() == source_table
-                        && weighted.row.row_uuid() == source_row
-                    {
-                        tuples.push((member.clone(), source_index, weighted.row.clone()));
-                    }
-                }
-            }
-        }
-        tuples
     }
 
     pub(crate) fn replacement_for(
@@ -687,18 +660,6 @@ impl MaintainedSubscriptionView {
                 + versions_bytes
                 + replacements_bytes,
         }
-    }
-
-    pub(crate) fn payload_facts_for_members(
-        &self,
-        members: &[ResultMemberEntry],
-    ) -> Vec<ProgramFactEntry> {
-        members
-            .iter()
-            .filter_map(|member| self.result_payloads.get(member))
-            .cloned()
-            .map(ProgramFactEntry::ResultPayload)
-            .collect()
     }
 
     /// Current positive result memberships, including unchanged members during

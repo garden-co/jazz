@@ -1140,11 +1140,6 @@ impl PeerState {
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let known_state = self.downstream_known_states.get(&subscription).cloned();
-        let previous_program_facts = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::program_fact_set)
-            .unwrap_or_default();
         let bundle_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
@@ -1168,9 +1163,6 @@ impl PeerState {
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                         && self.role == PeerRole::Relay,
                     previous_result_set: previous_result_tx_ids,
-                    previous_program_facts,
-                    flat_tuple_source_tables:
-                        crate::node::FlatTupleSourceTables::for_query(shape),
                     result_member_adds,
                     result_member_removes,
                     program_fact_adds,
@@ -1718,11 +1710,6 @@ impl PeerState {
                 .read_policy
                 .is_some();
         let known_state = self.downstream_known_states.get(&subscription).cloned();
-        let previous_program_facts = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::program_fact_set)
-            .unwrap_or_default();
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
             self.fast_cursor_authorization_matches(subscription, &known_state);
@@ -1834,15 +1821,6 @@ impl PeerState {
                 complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                     && self.role == PeerRole::Relay,
                 previous_result_set: BTreeSet::new(),
-                // A non-reset rehydrate retains the receiver's existing fact
-                // set, so tuple-source closure must be diffed against it.
-                // A reset clears that receiver set before additions apply.
-                previous_program_facts: if reset_result_set {
-                    BTreeSet::new()
-                } else {
-                    previous_program_facts
-                },
-                flat_tuple_source_tables: crate::node::FlatTupleSourceTables::for_query(shape),
                 result_member_adds,
                 result_member_removes,
                 program_fact_adds,
@@ -2379,16 +2357,6 @@ impl PeerState {
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                         && self.role == PeerRole::Relay,
                     previous_result_set: BTreeSet::new(),
-                    previous_program_facts: BTreeSet::new(),
-                    // Rehydration forwards the canonical membership through a
-                    // new downstream subscription, but its fact vocabulary is
-                    // still the validated query's vocabulary. Flat tuples need
-                    // one contributor role per joined source so the receiver's
-                    // ordinary one-shot path can rebuild the same tuple from
-                    // immutable source versions instead of depending only on
-                    // the reset payload.
-                    flat_tuple_source_tables:
-                        crate::node::FlatTupleSourceTables::for_query(shape),
                     result_member_adds,
                     result_member_removes: target_result_member_removes,
                     // A newly attached usage site starts with no
@@ -2609,16 +2577,6 @@ impl PeerState {
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                         && self.role == PeerRole::Relay,
                     previous_result_set: BTreeSet::new(),
-                    previous_program_facts: BTreeSet::new(),
-                    // Rehydration forwards the canonical membership through a
-                    // new downstream subscription, but its fact vocabulary is
-                    // still the validated query's vocabulary. Flat tuples need
-                    // one contributor role per joined source so the receiver's
-                    // ordinary one-shot path can rebuild the same tuple from
-                    // immutable source versions instead of depending only on
-                    // the reset payload.
-                    flat_tuple_source_tables:
-                        crate::node::FlatTupleSourceTables::for_query(shape),
                     result_member_adds,
                     result_member_removes: target_result_member_removes,
                     // A newly attached usage site starts with no

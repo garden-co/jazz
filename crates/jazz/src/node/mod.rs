@@ -334,7 +334,7 @@ pub(crate) use query_eval::{
     CoveredInputReceiver, LocalAuthorityReconciliation, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate,
 };
-pub(crate) use views::{FlatTupleSourceTables, MaintainedViewBundleInputs};
+pub(crate) use views::MaintainedViewBundleInputs;
 
 type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 

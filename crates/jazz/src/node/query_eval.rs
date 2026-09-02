@@ -1177,7 +1177,7 @@ where
                 "client settled read has no covered-input source occurrences",
             ));
         }
-        let program = self
+        let program = match self
             .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
                 request,
                 BTreeMap::new(),
@@ -1185,24 +1185,53 @@ where
                 runtime_sources,
                 provisional_local_gates,
             )
-            .await?;
+            .await
+        {
+            Ok(program) => program,
+            Err(error) => {
+                self.retire_covered_input_sources(&sources).await?;
+                return Err(error);
+            }
+        };
         let mut receiver = maintained_views::CoveredInputReceiver::new(sources);
-        if !self
+        let installed = match self
             .replace_covered_input_receiver(
                 &mut receiver,
                 result_schema_version,
                 authority_result_key,
             )
-            .await?
+            .await
         {
-            let ids = receiver.sources.values().map(|source| source.id);
-            self.database
-                .retire_input_sources(ids)
-                .await
-                .map_err(Error::Groove)?;
+            Ok(installed) => installed,
+            Err(error) => {
+                self.retire_covered_input_sources(&receiver.sources).await?;
+                return Err(error);
+            }
+        };
+        if !installed {
+            self.retire_covered_input_sources(&receiver.sources).await?;
             return Ok(None);
         }
         Ok(Some((program, receiver)))
+    }
+
+    /// Every descriptor-bound receiver allocation has both a data source and,
+    /// for Local-first, an optional bootstrap gate. Compilation/closure
+    /// validation failures happen before either is owned by a subscription, so
+    /// they must retire both rather than leaving unreachable Groove inputs.
+    async fn retire_covered_input_sources(
+        &mut self,
+        sources: &BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
+    ) -> Result<(), Error> {
+        self.database
+            .retire_input_sources(
+                sources.values().flat_map(|source| {
+                    std::iter::once(source.id).chain(source.provisional_local_gate)
+                }),
+            )
+            .await
+            .map(|_| ())
+            .map_err(Error::Groove)
     }
 
     pub(crate) async fn query_rows_local_preview(
@@ -3493,17 +3522,35 @@ where
                 (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
             };
         let program = if runtime_sources.is_empty() {
-            self.compile_query_program_request_with_access_paths(request, access_paths)
-                .await?
+            match self
+                .compile_query_program_request_with_access_paths(request, access_paths)
+                .await
+            {
+                Ok(program) => program,
+                Err(error) => {
+                    self.retire_covered_input_sources(&covered_input_sources)
+                        .await?;
+                    return Err(error);
+                }
+            }
         } else {
-            self.compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
-                request,
-                BTreeMap::new(),
-                access_paths,
-                runtime_sources,
-                provisional_local_gates,
-            )
-            .await?
+            match self
+                .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
+                    request,
+                    BTreeMap::new(),
+                    access_paths,
+                    runtime_sources,
+                    provisional_local_gates,
+                )
+                .await
+            {
+                Ok(program) => program,
+                Err(error) => {
+                    self.retire_covered_input_sources(&covered_input_sources)
+                        .await?;
+                    return Err(error);
+                }
+            }
         };
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
@@ -3524,9 +3571,14 @@ where
         // immediate cached-open behavior through descriptor-bound runtime
         // inputs.  This is retired wholesale by the first claimed closure;
         // strict remote sources have no provisional records.
-        if authorization_mode == QueryAuthorizationMode::ClientLocal {
-            self.start_provisional_local_receiver_inputs(&covered_input_sources)
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && let Err(error) = self
+                .start_provisional_local_receiver_inputs(&covered_input_sources)
+                .await
+        {
+            self.retire_covered_input_sources(&covered_input_sources)
                 .await?;
+            return Err(error);
         }
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
@@ -3560,7 +3612,7 @@ where
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-        let subscription = self
+        let subscription = match self
             .subscribe_lowered_program(
                 program,
                 &binding,
@@ -3568,7 +3620,15 @@ where
                 prepared_claim_binding_mode,
                 progress_waker,
             )
-            .await?;
+            .await
+        {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                self.retire_covered_input_sources(&covered_input_sources)
+                    .await?;
+                return Err(error);
+            }
+        };
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
@@ -3589,12 +3649,20 @@ where
                 if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_snapshot");
                 }
-                let snapshot_transitions = maintained.apply_multisink_deltas(
+                let snapshot_transitions = match maintained.apply_multisink_deltas(
                     snapshot,
                     &terminal_schemas,
                     &tables,
                     &self.node_aliases,
-                )?;
+                ) {
+                    Ok(transitions) => transitions,
+                    Err(error) => {
+                        self.database.unsubscribe(subscription.id());
+                        self.retire_covered_input_sources(&covered_input_sources)
+                            .await?;
+                        return Err(error);
+                    }
+                };
                 transitions.adds.extend(snapshot_transitions.adds);
                 transitions.removes.extend(snapshot_transitions.removes);
                 transitions
@@ -3613,6 +3681,9 @@ where
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.database.unsubscribe(subscription.id());
+                self.retire_covered_input_sources(&covered_input_sources)
+                    .await?;
                 return Err(Error::InvalidStoredValue(
                     "seeded maintained subscription disconnected",
                 ));
@@ -3622,12 +3693,20 @@ where
             loop {
                 match subscription.try_recv() {
                     Ok(deltas) => {
-                        let delta_transitions = maintained.apply_multisink_deltas(
+                        let delta_transitions = match maintained.apply_multisink_deltas(
                             deltas,
                             &terminal_schemas,
                             &tables,
                             &self.node_aliases,
-                        )?;
+                        ) {
+                            Ok(transitions) => transitions,
+                            Err(error) => {
+                                self.database.unsubscribe(subscription.id());
+                                self.retire_covered_input_sources(&covered_input_sources)
+                                    .await?;
+                                return Err(error);
+                            }
+                        };
                         transitions.adds.extend(delta_transitions.adds);
                         transitions.removes.extend(delta_transitions.removes);
                         transitions
@@ -3645,6 +3724,9 @@ where
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.database.unsubscribe(subscription.id());
+                        self.retire_covered_input_sources(&covered_input_sources)
+                            .await?;
                         return Err(Error::InvalidStoredValue(
                             "seeded maintained subscription disconnected",
                         ));

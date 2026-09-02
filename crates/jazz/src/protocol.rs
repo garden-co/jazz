@@ -614,9 +614,9 @@ impl SyncMessage {
                 .program_fact_adds
                 .iter()
                 .chain(&view.program_fact_removes)
-                .any(|fact| matches!(fact, ProgramFactEntry::ResultPayload(_)))
+                .any(|fact| !fact.is_peer_source_closure_fact())
         {
-            return Err(WireContractError::AuthorityResultOutput);
+            return Err(WireContractError::NonClosurePeerViewFact);
         }
         if view
             .program_fact_adds
@@ -673,9 +673,9 @@ pub enum WireContractError {
     InvalidCoveredInput,
     /// A program-source closure receipt is incomplete or noncanonical.
     InvalidProgramSourceCoverage,
-    /// A peer frame attempted to carry authority terminal output rather than
-    /// the source closure from which a receiver must derive it.
-    AuthorityResultOutput,
+    /// A peer frame attempted to carry authority terminal output, an internal
+    /// proof, or another fact outside the receiver source-closure contract.
+    NonClosurePeerViewFact,
 }
 
 impl std::fmt::Display for WireContractError {
@@ -686,8 +686,8 @@ impl std::fmt::Display for WireContractError {
             Self::InvalidProgramSourceCoverage => {
                 write!(f, "program-source coverage receipt is invalid")
             }
-            Self::AuthorityResultOutput => {
-                write!(f, "peer view update carries authority result output")
+            Self::NonClosurePeerViewFact => {
+                write!(f, "peer view update carries a non-closure program fact")
             }
         }
     }
@@ -3464,6 +3464,16 @@ pub enum ProgramFactEntry {
     PredicateOutputSet(PredicateOutputSetEntry),
     /// Point row-read validation fact.
     PointRead(PointReadEntry),
+}
+
+impl ProgramFactEntry {
+    /// The only typed facts permitted in a peer `ViewUpdate` under
+    /// INV-SYNC-36. They describe the exact receiver input closure; every
+    /// other variant is authority output, policy-internal proof, or local
+    /// validation state and must not cross this boundary.
+    pub fn is_peer_source_closure_fact(&self) -> bool {
+        matches!(self, Self::ProgramSourceCoverage(_) | Self::CoveredInput(_))
+    }
 }
 
 /// Compatibility alias while current code still imports the previous name.

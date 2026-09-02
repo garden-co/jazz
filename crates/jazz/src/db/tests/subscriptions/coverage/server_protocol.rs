@@ -442,6 +442,8 @@ fn assert_protocol_view_update_rows(
         reset_result_set,
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = message
     else {
@@ -449,14 +451,23 @@ fn assert_protocol_view_update_rows(
     };
     assert_eq!(subscription, expected_subscription);
     assert_eq!(reset_result_set, expected_reset);
+    // A served peer subscription is now a source-closure receipt.  The
+    // receiver reconstructs result membership locally, so the authority must
+    // not send rendered result members as a second path.
+    assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
-    let added_rows = result_member_adds
+    assert!(program_fact_removes.is_empty());
+    assert!(
+        program_fact_adds
+            .iter()
+            .all(crate::protocol::ProgramFactEntry::is_peer_source_closure_fact)
+    );
+    let added_rows = program_fact_adds
         .iter()
-        .map(|member| {
-            member
-                .as_real_row()
-                .expect("whole-table query should only publish real rows")
-                .row_uuid
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_) => None,
+            _ => unreachable!("peer closure filter above excludes output facts"),
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(added_rows, expected_rows);
@@ -502,7 +513,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
             Value::String("A".to_owned()),
         )]))
         .unwrap();
-    let maintained_subscription = SubscriptionKey {
+    let _maintained_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: original_binding.binding_id(),
         read_view: opts.read_view_key(),
@@ -543,12 +554,6 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
         assert_eq!(state.served.len(), 1);
         assert_eq!(state.coverage_groups.len(), 1);
         assert_eq!(state.served_current_rows.len(), 0);
-        assert!(
-            state
-                .peer
-                .subscription_result_sets(maintained_subscription)
-                .is_some()
-        );
     }
 
     let dropped_before = server
@@ -645,12 +650,6 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
             1,
             "{reuse:?} installed conflicting coverage"
         );
-        assert!(
-            state
-                .peer
-                .subscription_result_sets(maintained_subscription)
-                .is_some()
-        );
     }
 
     let conflicting_row = seed(&server, "todos", cells("B", true, owner));
@@ -693,12 +692,6 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
     };
     assert!(state.served.is_empty());
     assert!(state.coverage_groups.is_empty());
-    assert!(
-        state
-            .peer
-            .subscription_result_sets(maintained_subscription)
-            .is_none()
-    );
 }
 
 /// A canonical replay keeps its existing subscription usage instead of creating a second producer.
@@ -837,12 +830,6 @@ fn current_row_subscription_key_rejects_ordinary_whole_table_collision() {
                 .map(|served| &served.table),
             Some(&"todos".to_owned())
         );
-        assert!(
-            state
-                .peer
-                .subscription_result_sets(current_rows_subscription)
-                .is_some()
-        );
     }
 
     let added_row = seed(&server, "todos", cells("current only", false, owner));
@@ -966,7 +953,6 @@ fn current_row_subscription_key_refuses_existing_ordinary_owner() {
     assert!(state.served.is_empty());
     assert!(state.coverage_groups.is_empty());
     assert!(state.served_current_rows.is_empty());
-    assert!(state.peer.subscription_result_sets(subscription).is_none());
 }
 
 #[test]
@@ -1329,19 +1315,31 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
         result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = drive_subscriber_until_payload(&subscriber, client_transport.as_mut())
     else {
         panic!("expected relation facade subscription view update");
     };
     assert_eq!(served, subscription);
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    assert!(program_fact_removes.is_empty());
     assert!(
-        result_member_adds.iter().any(|member| {
-            let Some(member) = member.as_real_row() else {
-                return false;
-            };
-            member.table.as_str() == "todos" && member.row_uuid == row(0x11)
+        program_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source.table.as_str() == "todos" && input.source_row == row(0x11)
+            )
         }),
-        "relation facade subscription should deliver the projected target row"
+        "relation facade subscription should deliver the target as a receiver source input"
+    );
+    assert!(
+        program_fact_adds
+            .iter()
+            .all(crate::protocol::ProgramFactEntry::is_peer_source_closure_fact)
     );
 }
