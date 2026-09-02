@@ -976,13 +976,33 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("restoration must publish the frozen base row");
-
-    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
-        panic!("flat branch query produced a structured maintained update");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = update
+    else {
+        panic!("the compiler-owned root collector must publish branch restoration");
     };
-    assert_eq!(added.len(), 1);
-    assert_eq!(added[0].1.row_uuid(), row_uuid);
-    assert!(removed.is_empty());
+    let inserted = terminal_operations
+        .iter()
+        .filter_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. } => {
+                Some(OwnedRecord::new(value.clone(), operation.root_descriptor.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inserted.len(), 1);
+    assert_eq!(
+        inserted[0].get("row_uuid"),
+        Ok(Value::Uuid(row_uuid.0)),
+        "the terminal collector must restore the frozen root row"
+    );
+    assert!(
+        terminal_operations
+            .iter()
+            .all(|operation| !matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })),
+        "restoring an empty frozen relation must not remove another root"
+    );
 }
 
 #[test]
@@ -1074,12 +1094,29 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("head rejection must restore the frozen base payload");
-    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
-        panic!("flat branch query produced a structured maintained update");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = update
+    else {
+        panic!("the compiler-owned root collector must publish branch restoration");
     };
-    assert_eq!(removed.len(), 1);
-    assert_eq!(added.len(), 1);
-    assert_eq!(added[0].1.cell(table, "title"), Some(v("frozen base")));
+    let restored = terminal_operations
+        .iter()
+        .find_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. }
+            | groove::ivm::TerminalEdit::Update { value, .. } => {
+                Some(OwnedRecord::new(value.clone(), operation.root_descriptor.clone()))
+            }
+            _ => None,
+        })
+        .expect("head rejection must replace the root terminal payload");
+    assert_eq!(restored.get("row_uuid"), Ok(Value::Uuid(row_uuid.0)));
+    let title = restored.get("user_title").expect("decode restored title");
+    assert!(
+        title == Value::String("frozen base".to_owned())
+            || title == Value::Nullable(Some(Box::new(Value::String("frozen base".to_owned())))),
+        "the root terminal must carry the frozen-base title"
+    );
 
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 30)
@@ -1111,14 +1148,28 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("replacement head content must remain live");
-    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = replacement else {
-        panic!("flat branch query produced a structured maintained update");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = replacement
+    else {
+        panic!("the compiler-owned root collector must publish replacement-head content");
     };
-    assert_eq!(removed.len(), 1);
-    assert_eq!(added.len(), 1);
-    assert_eq!(
-        added[0].1.cell(table, "title"),
-        Some(v("replacement head"))
+    let replacement = terminal_operations
+        .iter()
+        .find_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. }
+            | groove::ivm::TerminalEdit::Update { value, .. } => {
+                Some(OwnedRecord::new(value.clone(), operation.root_descriptor.clone()))
+            }
+            _ => None,
+        })
+        .expect("replacement head must replace the root terminal payload");
+    let title = replacement.get("user_title").expect("decode replacement title");
+    assert!(
+        title == Value::String("replacement head".to_owned())
+            || title
+                == Value::Nullable(Some(Box::new(Value::String("replacement head".to_owned())))),
+        "the root terminal must carry replacement-head content"
     );
 }
 
@@ -2423,11 +2474,21 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("live-base write must emit a maintained delta");
-    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
-        panic!("flat branch query produced a structured maintained update");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = update
+    else {
+        panic!("the compiler-owned root collector must publish the live-base edit");
     };
-    assert_eq!(added.len(), 1);
-    assert_eq!(removed.len(), 1);
+    assert!(
+        terminal_operations.iter().any(|operation| {
+            matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { .. } | groove::ivm::TerminalEdit::Update { .. }
+            )
+        }),
+        "the live-base edit must replace the root terminal payload"
+    );
 }
 
 #[test]
