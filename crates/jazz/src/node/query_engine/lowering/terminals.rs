@@ -104,7 +104,19 @@ pub(super) fn lowered_terminals(
     // conservative declaration may omit those carriers; publishing it raw
     // made routed join receipts fail only when the covered-input terminal
     // later joined it to a version witness.
-    let root_source_route_fields = source_terminal_route_fields(source, &root_route_fields);
+    // The root's post-closure graph is the authority's actual admission
+    // boundary. It can carry a user route introduced by the query residual
+    // even when the physical source's own routing descriptor does not. Keep
+    // that exact graph-local set on root-only terminals; child occurrences
+    // remain constrained by their own descriptors below.
+    let root_source_route_fields = graph_declared_output_fields(&closure.visible_root)
+        .map(|fields| {
+            root_route_fields
+                .intersection(&fields)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_else(|| source_terminal_route_fields(source, &root_route_fields));
     let visible_root_with_routes = if root_source_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
@@ -136,7 +148,13 @@ pub(super) fn lowered_terminals(
                     .clone()
                     .project_fields(project_source_fields_with_routes(
                         resolved_source,
-                        &source_terminal_route_fields(resolved_source, &root_route_fields),
+                        &terminal_route_fields_for_source(
+                            source_id,
+                            resolved_source,
+                            plan.root_source(),
+                            &root_route_fields,
+                            &root_source_route_fields,
+                        ),
                     )),
             ))
         })
@@ -594,8 +612,13 @@ pub(super) fn lowered_terminals(
                     // relation for version facts.
                     continue;
                 };
-                let source_route_fields =
-                    source_terminal_route_fields(resolved_source, &root_route_fields);
+                let source_route_fields = terminal_route_fields_for_source(
+                    source_id,
+                    resolved_source,
+                    plan.root_source(),
+                    &root_route_fields,
+                    &root_source_route_fields,
+                );
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::VersionWitnessContent,
@@ -628,8 +651,13 @@ pub(super) fn lowered_terminals(
                 let Some(covered_source) = covered_source_members.get(source_id) else {
                     continue;
                 };
-                let source_route_fields =
-                    source_terminal_route_fields(resolved_source, &root_route_fields);
+                let source_route_fields = terminal_route_fields_for_source(
+                    source_id,
+                    resolved_source,
+                    plan.root_source(),
+                    &root_route_fields,
+                    &root_source_route_fields,
+                );
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::ReplacementWitnessContent,
@@ -665,8 +693,13 @@ pub(super) fn lowered_terminals(
                         "covered source has no resolved descriptor".to_owned(),
                     ))
                 })?;
-                let source_route_fields =
-                    source_terminal_route_fields(resolved_source, &root_route_fields);
+                let source_route_fields = terminal_route_fields_for_source(
+                    source_id,
+                    resolved_source,
+                    plan.root_source(),
+                    &root_route_fields,
+                    &root_source_route_fields,
+                );
                 let output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::Primary,
@@ -1868,6 +1901,20 @@ fn source_terminal_route_fields(
         .intersection(root_route_fields)
         .cloned()
         .collect()
+}
+
+fn terminal_route_fields_for_source(
+    source_id: &SourceId,
+    source: &ResolvedSource,
+    root_source: &SourceId,
+    root_route_fields: &BTreeSet<String>,
+    root_terminal_route_fields: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    if source_id == root_source {
+        root_terminal_route_fields.clone()
+    } else {
+        source_terminal_route_fields(source, root_route_fields)
+    }
 }
 
 pub(super) fn project_source_fields_with_routes_from_prefix(
