@@ -1949,15 +1949,13 @@ where
         request: &SourceRequest,
         table: &TableSchema,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let projection_target = self.current_projection_target(request, table)?;
-        self.node
-            .physical_current_source_graph_with_projection_target(
-                self.read_view.read_schema,
-                &request.source.table,
-                PhysicalCurrentClass::Ahead,
-                projection_target,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
+        self.visible_current_physical_source_graph(
+            request,
+            table,
+            PhysicalCurrentClass::Ahead,
+            DurabilityTier::Local,
+        )
+        .await
     }
 
     /// Retained current state participates in Local-first only while its
@@ -1970,15 +1968,52 @@ where
         request: &SourceRequest,
         table: &TableSchema,
     ) -> Result<GraphBuilder, SourceResolutionError> {
+        self.visible_current_physical_source_graph(
+            request,
+            table,
+            PhysicalCurrentClass::Global,
+            DurabilityTier::Global,
+        )
+        .await
+    }
+
+    /// Read one physical current arm as logical *visible* rows.  Receiver
+    /// input arms are still physical storage-backed graphs, but they must
+    /// share the ordinary visible-current deletion fence: a pending deletion
+    /// retracts its pending content row, and a retained global deletion never
+    /// leaks through the provisional Local-first bootstrap gate.
+    ///
+    /// `deletion_tier` deliberately differs by arm.  The Ahead arm is overlaid
+    /// by the current Local deletion winner (Global ∪ Ahead), while the
+    /// provisional Global arm is fenced only by the settled Global register.
+    /// The exact authority CoveredInput arm remains independent of storage.
+    async fn visible_current_physical_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        current_class: PhysicalCurrentClass,
+        deletion_tier: DurabilityTier,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
         let projection_target = self.current_projection_target(request, table)?;
-        self.node
+        let content = self
+            .node
             .physical_current_source_graph_with_projection_target(
                 self.read_view.read_schema,
                 &request.source.table,
-                PhysicalCurrentClass::Global,
+                current_class,
                 projection_target,
             )
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let deleted_winners = self
+            .projected_deletion_register_current_source_graph(request, deletion_tier)?
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+            .project(["row_uuid"]);
+        Ok(GraphBuilder::anti_join(
+            content,
+            deleted_winners,
+            ["row_uuid"],
+            ["row_uuid"],
+        ))
     }
 
     /// Reuse the access paths chosen while compiling the already-prepared
