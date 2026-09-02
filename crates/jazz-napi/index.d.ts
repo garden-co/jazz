@@ -349,13 +349,13 @@ export interface SubscriptionDeltaEvent {
   tier: 'None' | 'Local' | 'Edge' | 'Global'
 }
 
+export type SubscriptionEvent =
+  SubscriptionDeltaEvent | SubscriptionRejectedEvent | SubscriptionClosedEvent
+
 export interface SubscriptionInvalidAuthoritySourceClosureReason {
   type: 'InvalidAuthoritySourceClosure'
   transition: string
 }
-
-export type SubscriptionEvent =
-  SubscriptionDeltaEvent | SubscriptionRejectedEvent | SubscriptionClosedEvent
 
 export interface SubscriptionRejectedEvent {
   type: 'rejected'
