@@ -746,6 +746,7 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
     };
     let run = |identity_conflict: bool| {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let mut conflicting_tx = base_tx.clone();
         if identity_conflict {
@@ -1091,6 +1092,7 @@ fn reset_scope_merge_is_order_independent_and_complete_dominates() {
         .flat_map(|path| [false, true].into_iter().map(move |order| (path, order)))
     {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let complete_tx = reset_scope_tx(tx_id, 2);
@@ -1528,6 +1530,7 @@ fn assert_reset_authored_columns_conflict(
 #[test]
 fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -1575,6 +1578,7 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
 #[test]
 fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -1631,7 +1635,10 @@ fn partial_exclusive_view_update(
     version: VersionRecord,
 ) -> ViewUpdateParts {
     let tx_id = tx.tx_id;
-    let source_closure = todos_source_closure(tx_id, std::slice::from_ref(&version));
+    // Callers install the whole-table source coverage in their reset. These
+    // subsequent partial fragments are live transitions and carry only their
+    // exact row fact.
+    let source_closure = vec![todos_covered_input(tx_id, &version)];
     let mut tx = tx;
     tx.n_total_writes = 1;
     ViewUpdateParts {
@@ -1869,6 +1876,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
 #[test]
 fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
