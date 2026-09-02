@@ -5536,6 +5536,10 @@ where
         .filter(|update| !update.authority_receipt_eligible)
         .map(|update| update.parts.settled_through)
         .max();
+    let publishing_subscriptions = pending
+        .iter()
+        .map(|update| update.parts.subscription)
+        .collect::<BTreeSet<_>>();
     let node_ref = node.borrow();
     let relay_authority_session_owner = node_ref.client_relay_scope().is_some();
     let confirmed_binding_views = confirmed_subscriptions
@@ -5569,7 +5573,7 @@ where
                 // receipt demotion visible before this stale authority frame
                 // can publish any ordinary update. A replacement connection
                 // must prove a fresh exact closure for every subscription.
-                demote_authority_receipt_subscriptions(subscriptions);
+                demote_authority_receipt_subscriptions(subscriptions, &publishing_subscriptions);
             }
         }
     }
@@ -5614,6 +5618,10 @@ where
             if settled_through < receipts.confirmation_floor {
                 continue;
             }
+            // Public streams are not query-coverage attachments, but their
+            // binding view is still the exact receipt required to settle the
+            // receiver-local graph. Coverage registrations retain only their
+            // own ownership accounting below.
             receipts.binding_views.insert(binding_view);
             if registrations.contains_key(&subscription) {
                 receipts.subscriptions.insert(subscription);

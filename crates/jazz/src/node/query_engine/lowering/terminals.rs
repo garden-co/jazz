@@ -2839,7 +2839,13 @@ fn prefixed_version_witness_fields_for_tagged_rows(
         ProjectField::null_typed("_deletion", ValueType::Nullable(Box::new(ValueType::U8))),
     ];
     fields.extend(source.table_schema.columns.iter().map(|column| {
-        ProjectField::renamed(
+        // History storage carries an authored cell at its native type, while
+        // an inline/current source may already carry the outer optional-cell
+        // wrapper. A version witness has one stable contract in both cases:
+        // every user field is Nullable(column type). Flatten an existing
+        // wrapper or add exactly one, so receiver decoding never depends on
+        // which source realization supplied this witness.
+        ProjectField::nullable_flat(
             format!("{prefix}{}", user_column_field(&column.name)),
             table_user_column_field(&source.table_schema.name, &column.name),
         )
@@ -2881,7 +2887,10 @@ fn inline_version_witness_fields_for_tagged_rows(
         ProjectField::null_typed("_deletion", ValueType::Nullable(Box::new(ValueType::U8))),
     ];
     fields.extend(source.table_schema.columns.iter().map(|column| {
-        ProjectField::renamed(
+        // CoveredInput sources and ordinary current sources can differ only
+        // in whether a missing authored cell has already been wrapped. Keep
+        // the witness contract identical to the physical-history path above.
+        ProjectField::nullable_flat(
             user_column_field(&column.name),
             table_user_column_field(&source.table_schema.name, &column.name),
         )

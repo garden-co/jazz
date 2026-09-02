@@ -1641,7 +1641,7 @@ where
     /// baseline. Keeping this path non-suspending ensures consumers observe
     /// the demotion before the replacement transport can publish anything.
     fn demote_authority_receipt_subscriptions(&self) {
-        demote_authority_receipt_subscriptions(&self.subscriptions);
+        demote_authority_receipt_subscriptions(&self.subscriptions, &BTreeSet::new());
     }
 
     /// Attach this node to an upstream peer over a binding-supplied transport.
@@ -3133,7 +3133,14 @@ where
                 .collect();
             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
             state_ref.settled = settled;
-            if state_ref.sender.unbounded_send(event).is_ok() {
+            // A strict remote opening is intentionally absent until its
+            // exact covered closure has reached the receiver-local terminal.
+            // Do not enqueue that provisional frame merely for the stream
+            // facade to discard later: raw/poll consumers must not observe a
+            // stale empty opening before the authoritative reset.
+            if subscription_event_is_publishable(&event)
+                && state_ref.sender.unbounded_send(event).is_ok()
+            {
                 changed += 1;
             }
             drop(state_ref);

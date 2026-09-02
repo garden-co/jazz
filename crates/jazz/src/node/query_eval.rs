@@ -1784,6 +1784,13 @@ where
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
     ) -> Option<ClientSettledBindingView> {
+        // A no-tier read is an ordinary process-local overlay read. It has no
+        // authority-receipt contract, so constructing a synthetic binding
+        // view here would make the caller wait for a receipt that cannot
+        // exist and incorrectly hide its local rows.
+        if tier == DurabilityTier::None {
+            return None;
+        }
         if tier == DurabilityTier::Local {
             // A non-durable foreground can use an active exact source page,
             // or reuse a detached page only through its compiler-owned

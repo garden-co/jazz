@@ -658,7 +658,19 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
+            // A claimed reset must close its exact source set independently
+            // of row cardinality. This fixture isolates the intentionally
+            // malformed version carrier below rather than relying on an
+            // obsolete empty-fact authority result path.
+            program_fact_adds: vec![crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source: crate::protocol::ProgramSourceId {
+                        table: "todos".to_owned().into(),
+                        path: vec![crate::protocol::ProgramSourceRole::Root],
+                    },
+                    complete: true,
+                },
+            )],
             program_fact_removes: Vec::new(),
         })
     };
@@ -688,7 +700,6 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
         client.tick().is_err(),
         "missing payload must reject the update"
     );
-
     let mut duplicate = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(
         duplicate.try_next_event().is_none(),

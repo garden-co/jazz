@@ -299,6 +299,14 @@ where
                 self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view)
             })
             .flatten();
+        // A newly attached local receiver must immediately consume an
+        // already-settled *exact* authority closure.  The binding-view key is
+        // only routing; resolve its unique scoped receipt here rather than
+        // opening an empty receiver and letting facade refresh infer output
+        // from a sibling/authority result.
+        let settled_authority_result_key = settled_binding_view.and_then(|binding_view| {
+            self.unique_authority_result_key_for_binding_view(binding_view)
+        });
         let (
             subscription,
             maintained,
@@ -316,7 +324,7 @@ where
                 read_view,
                 authorization_mode,
                 settled_binding_view,
-                None,
+                settled_authority_result_key.clone(),
                 PreparedClaimBindingMode::Strict,
                 progress_waker,
             )

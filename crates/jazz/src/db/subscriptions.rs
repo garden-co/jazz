@@ -523,7 +523,7 @@ where
         // current host scheduler as the cold-storage continuation owner,
         // rather than the short-lived foreground future opening this stream.
         let progress_waker = self.node.query_runtime_waker();
-        let (subscription, snapshot) = self
+        let (mut subscription, mut snapshot) = self
             .node
             .node
             .lock()
@@ -539,7 +539,6 @@ where
                 progress_waker.as_ref(),
             )
             .await?;
-        let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
         let local_runtime_token = local_node.lock().await.groove_runtime_token();
@@ -566,7 +565,6 @@ where
         // Compiler-owned root collectors, not surface query syntax, own the
         // terminal snapshot and positional edits.
         let terminal_rows = subscription.has_root_collector();
-        let maintained_subscription = Some(subscription);
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
@@ -650,6 +648,56 @@ where
         } else {
             None
         };
+        // `open_maintained...` creates a receiver-local graph but deliberately
+        // does not install a previously received authority closure: that
+        // installation must be folded into the public stream owner's snapshot
+        // with the same terminal reducer used for every later update.  In
+        // particular, do not materialize the authority result set here.
+        let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
+        snapshot_index.roots = subscription
+            .root_occurrence_ids()
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, occurrence)| (occurrence, index))
+            .collect();
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && let Some(authority_result_key) = settled_authority_result.as_ref()
+        {
+            let (update, _) = self
+                .node
+                .node
+                .lock()
+                .await
+                .drain_local_maintained_view_subscription_preserving_rows_with_waker(
+                    &mut subscription,
+                    Some(authority_result_key.clone()),
+                    &BTreeSet::new(),
+                    progress_waker.as_ref(),
+                )
+                .await?;
+            if let Some(update) = update {
+                let terminal_layout = subscription.terminal_root_layout();
+                let _ = apply_maintained_update_to_snapshot(
+                    &mut snapshot,
+                    &mut snapshot_index,
+                    update,
+                    prepared.shape.query().table.as_str(),
+                    read_tier,
+                    false,
+                    terminal_layout,
+                )?;
+            }
+        }
+        let covered_closure_installed = {
+            let node = self.node.node.lock().await;
+            settled_authority_result.as_ref().is_some_and(|key| {
+                subscription.has_installed_covered_closure(
+                    key,
+                    node.applied_authority_result_generation(key),
+                )
+            })
+        };
         let settled = {
             let node = self.node.node.lock().await;
             subscription_is_settled(
@@ -662,7 +710,7 @@ where
                 remote_propagate_upstream,
                 requires_authority_receipt,
                 settled_authority_result.as_ref(),
-            )
+            ) && (!subscription.has_covered_input_sources() || covered_closure_installed)
         };
         // An empty local opening carries no observable result information at
         // an Edge/Global request.  Until the authority replies, publishing it
@@ -677,16 +725,27 @@ where
             && snapshot.root_count == 0
             && snapshot.edges.is_empty();
         let (sender, receiver) = unbounded();
+        let mut root_occurrence_ids = snapshot_index
+            .roots
+            .iter()
+            .map(|(occurrence, index)| (*index, occurrence.clone()))
+            .collect::<Vec<_>>();
+        root_occurrence_ids.sort_by_key(|(index, _)| *index);
+        let root_occurrence_ids = root_occurrence_ids
+            .into_iter()
+            .map(|(_, occurrence)| occurrence)
+            .collect::<Vec<_>>();
         let initial_outputs =
             subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
-        let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
+        snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
         snapshot_index.roots = root_occurrence_ids
             .iter()
             .cloned()
             .enumerate()
             .map(|(index, occurrence)| (occurrence, index))
             .collect();
+        let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(SubscriptionState {
             closed: Rc::clone(&closed),

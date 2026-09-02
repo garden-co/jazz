@@ -4566,7 +4566,10 @@ fn subscription_delta_event(
 /// snapshot. A stale/nonselected authority update invalidates only the receipt:
 /// the same local collector continues to own the visible rows until a fresh
 /// exact closure arrives.
-pub(in crate::db) fn demote_authority_receipt_subscriptions(subscriptions: &SubscriptionList) {
+pub(in crate::db) fn demote_authority_receipt_subscriptions(
+    subscriptions: &SubscriptionList,
+    publishing_subscriptions: &BTreeSet<SubscriptionKey>,
+) {
     let mut retained = Vec::new();
     for weak in subscriptions.borrow().iter() {
         let Some(state) = weak.upgrade() else {
@@ -4578,14 +4581,24 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(subscriptions: &Subs
                 state_ref.requires_authority_receipt = true;
                 if state_ref.settled {
                     state_ref.settled = false;
-                    let event = subscription_delta_event(
-                        state_ref.read_tier,
-                        false,
-                        &state_ref.snapshot,
-                        &state_ref.snapshot,
-                        state_ref.terminal_rows,
-                    );
-                    let _ = state_ref.sender.unbounded_send(event);
+                    // The named receiver will publish the same demotion while
+                    // applying its frame. Other subscriptions share the
+                    // authority receipt but have no terminal frame of their
+                    // own, so publish only their receipt-only transition.
+                    let frame_will_publish = state_ref
+                        .upstream_subscription_handles
+                        .iter()
+                        .any(|handle| publishing_subscriptions.contains(&handle.subscription));
+                    if !frame_will_publish {
+                        let event = subscription_delta_event(
+                            state_ref.read_tier,
+                            false,
+                            &state_ref.snapshot,
+                            &state_ref.snapshot,
+                            state_ref.terminal_rows,
+                        );
+                        let _ = state_ref.sender.unbounded_send(event);
+                    }
                 }
             }
         }
