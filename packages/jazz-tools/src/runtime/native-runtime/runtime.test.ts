@@ -5489,7 +5489,7 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
               preparedQueries.push(query);
               return query;
             },
-            all: (query) => {
+            all: (query: unknown) => {
               lastReadQuery = query;
               return new Uint8Array([0]);
             },
@@ -5717,7 +5717,7 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
             prepareQuery: () => ({}),
             attachQuery: () => ({}),
             queryAttachmentIsCovered: () => false,
-            detachQuery: (attachment) => detached.push(attachment),
+            detachQuery: (attachment: unknown) => detached.push(attachment),
             allAsync: () => {
               throw new Error("coverage failure");
             },
@@ -5763,7 +5763,7 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
             })(),
             attachQuery: () => ({}),
             queryAttachmentIsCovered: () => false,
-            detachQuery: (attachment) => detached.push(attachment),
+            detachQuery: (attachment: unknown) => detached.push(attachment),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -5791,7 +5791,6 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
     expect(detached).toHaveLength(1);
   });
 });
-
 
 describe("NativeRuntimeAdapter streaming inserts", () => {
   it("infers the physical kind and applies backpressure to async chunks", async () => {
