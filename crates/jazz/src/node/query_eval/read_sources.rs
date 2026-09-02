@@ -12,6 +12,10 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+    /// Receiver-local mutable inputs for one exact authority-covered program
+    /// closure. The mapping is keyed by normalized source identity, never by
+    /// a table name, sink, collector, or storage prefix.
+    pub(super) covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     /// Whether access-path metrics should account for this logical graph
     /// fragment. A policy proof specialized from its outer source reuses the
@@ -61,6 +65,47 @@ where
         let Some(source) = self.read_view.sources.get(&request.source) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
+        let covered_input_source = self.covered_input_sources.get(&request.source).copied();
+        if let Some(input_source) = covered_input_source
+            && (matches!(source, SourceExpr::SettledBindingView { .. })
+                // Strict remote source occurrences have no eligible local
+                // alternative. Aggregate output is synthetic, so its raw
+                // remote contributor source likewise has to bottom out at
+                // the covered input rather than storage.
+                || matches!(
+                    source,
+                    SourceExpr::VisibleCurrent { tier, .. } if *tier >= DurabilityTier::Edge
+                ))
+        {
+            // The compiler created this source map only for an exact
+            // authority-covered occurrence. The explicit map, rather than
+            // the source expression's spelling, is the capability.
+            if request.visibility != RowVisibility::Visible {
+                return Err(source_resolution_error(request, SourceGap::Coverage));
+            }
+            let table = self
+                .node
+                .table_in_schema(&request.source.table, self.read_view.read_schema)
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let metadata = inline_source_metadata(&request.requirements, None);
+            let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+                &table, &metadata, false,
+            );
+            return Ok(ResolvedSource {
+                table_schema: table,
+                graph: GraphBuilder::input_source(input_source, descriptor.clone()),
+                row_shape: SourceRowShape {
+                    source: request.source.clone(),
+                    descriptor,
+                    row_uuid_field: "row_uuid".to_owned(),
+                    metadata,
+                },
+                routing_fields: BTreeSet::new(),
+                requires_result_payload: false,
+                content_version: None,
+                deletion_register: None,
+            });
+        }
         let (projection, graph_tier, history_position, snapshot, open_tx_overlay, branch_view) =
             match source {
                 SourceExpr::VisibleCurrent {
@@ -1309,6 +1354,18 @@ where
                 open_tx_overlay,
             )
             .await?;
+        let graph = if let Some(input_source) = covered_input_source {
+            // Local-first composes the authority's approved closure with the
+            // eligible local-current overlay before it enters the same
+            // maintained program. The union is per normalized source
+            // occurrence; table-level union would conflate aliases/self-joins.
+            GraphBuilder::union([
+                GraphBuilder::input_source(input_source, descriptor.clone()),
+                graph,
+            ])
+        } else {
+            graph
+        };
         Ok(ResolvedSource {
             table_schema: table,
             graph,
@@ -4201,6 +4258,25 @@ fn inline_current_record_with_source_metadata(
         schema_version_alias,
         coverage,
         branch_witness,
+        None,
+    )
+}
+
+/// Encode one already-authorized current row for a receiver-owned covered
+/// input. The descriptor comes from the exact compiled source occurrence;
+/// callers must never synthesize it from a table or result collector.
+pub(super) fn covered_input_record(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+) -> Result<Vec<u8>, Error> {
+    inline_current_record_with_source_metadata(
+        table,
+        descriptor,
+        row,
+        schema_version_alias,
+        "authority-covered-input",
         None,
     )
 }

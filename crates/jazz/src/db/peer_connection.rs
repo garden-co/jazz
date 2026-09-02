@@ -3906,14 +3906,19 @@ where
                                 .expect("subscriber claims")
                                 .clone();
                             let mut coverage = coverage_key(&shape, &binding, opts.clone());
-                            if peer.role() == PeerRole::Relay || subscription_has_delegated_session {
-                                coverage.policy_binding = Some(crate::protocol::PolicyBindingKey {
-                                    identity: subscription_policy_binding.0,
-                                    canonical_claims: crate::protocol::CanonicalPolicyClaims::new(
-                                        subscription_policy_binding.1.clone(),
-                                    ),
-                                });
-                            }
+                            // A coverage group is an authority evaluation
+                            // namespace, not merely a transport optimization.
+                            // Every admitted reader gets its own immutable
+                            // policy scope, including a direct subscriber on a
+                            // single authenticated connection. Otherwise two
+                            // direct readers with the same public query can
+                            // reuse one maintained authority result.
+                            coverage.policy_binding = Some(
+                                crate::protocol::PolicyBindingKey::from_canonical_parts(
+                                    subscription_policy_binding.0,
+                                    subscription_policy_binding.1.clone(),
+                                ),
+                            );
                             if served_current_rows.contains_key(&subscription) {
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
@@ -4069,7 +4074,15 @@ where
                             let authority_result_subscription = if propagates_to_selected_authority {
                                 upstream_subscription
                             } else {
-                                subscription
+                                // The concrete wire subscription is only a
+                                // publication handle. The shared server-side
+                                // evaluator belongs to the coverage group,
+                                // whose opaque handle incorporates the
+                                // admitted policy scope. Registering the
+                                // public handle here would let two direct
+                                // readers with an identical query overwrite
+                                // each other's NodeState usage entry.
+                                group_subscription
                             };
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
@@ -4113,12 +4126,20 @@ where
                                 group_subscription,
                                 subscription_policy_binding.clone(),
                             );
-                            let outcome = self
-                                .node
-                                .lock()
-                                .await
-                                .apply_sync_message(SyncMessage::Subscribe(subscribe))
-                                .await?;
+                            let outcome = {
+                                let mut node = self.node.lock().await;
+                                node.apply_subscribe_with_admitted_policy_binding(
+                                    Subscribe {
+                                        subscription: group_subscription,
+                                        ..subscribe
+                                    },
+                                    crate::protocol::PolicyBindingKey::from_canonical_parts(
+                                        subscription_policy_binding.0,
+                                        subscription_policy_binding.1.clone(),
+                                    ),
+                                )?;
+                                crate::node::PublicationOutcome::settled(Vec::<SyncMessage>::new())
+                            };
                             let upstream_binding_view = BindingViewKey {
                                 shape_id: shape.shape_id(),
                                 binding_id: binding.binding_id(),

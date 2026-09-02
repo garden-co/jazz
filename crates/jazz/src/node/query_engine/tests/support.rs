@@ -577,7 +577,7 @@ pub(super) fn production_output_request(
 pub(super) fn sync_facts() -> BTreeSet<ProgramFactKey> {
     BTreeSet::from([
         ProgramFactKey::ResultMembership,
-        ProgramFactKey::SourceCoverage(program_scope()),
+        ProgramFactKey::ProgramSourceCoverage(program_scope()),
         ProgramFactKey::VersionWitnesses,
     ])
 }

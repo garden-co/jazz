@@ -25,7 +25,7 @@ use crate::tools::{
 };
 use crate::tx::DeletionEvent;
 use crate::tx::{DurabilityTier, Fate, TxKind};
-use groove::records::{BorrowedRecord, Value};
+use groove::records::Value;
 use jazz_storage_rocksdb::RocksDbStorage;
 
 fn node(byte: u8) -> NodeUuid {
@@ -1968,21 +1968,6 @@ fn maintained_subscription_id(
         .map(|maintained| maintained.subscription.id())
 }
 
-fn aggregate_payload_count(fact: &ProgramFactEntry) -> Value {
-    let ProgramFactEntry::ResultPayload(payload) = fact else {
-        panic!("expected result payload fact");
-    };
-    let descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
-        .expect("maintained aggregate payload descriptor uses the canonical Groove codec");
-    let record = BorrowedRecord::new(&payload.record, &descriptor);
-    // Aggregate aliases are logical app names, but maintained-program
-    // payload descriptors use the dedicated physical aggregate namespace
-    // so they cannot collide with grouped source columns. Decode the
-    // protocol boundary instead of treating `count` as a record field.
-    let count_field = crate::node::query_engine::aggregate_output_field("count");
-    record.get(&count_field).unwrap().clone()
-}
-
 fn aggregate_cells(row: &crate::node::CurrentRow) -> BTreeMap<String, Value> {
     row.test_cells_by_descriptor()
 }
@@ -3526,7 +3511,7 @@ fn maintained_subscription_view_default_order_limited_variants_are_supported() {
 }
 
 #[test]
-fn maintained_subscription_view_aggregate_rehydrate_ships_payload_fact() {
+fn maintained_subscription_view_aggregate_rehydrate_ships_covered_inputs() {
     let (_dir, mut core) = open_node_with_uuid(node(0x90));
     let first_tx = core
         .commit_mergeable_settled(
@@ -3561,14 +3546,30 @@ fn maintained_subscription_view_aggregate_rehydrate_ships_payload_fact() {
     };
 
     assert!(reset_result_set);
-    assert_eq!(result_member_adds.len(), 1);
+    assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
-    assert_eq!(program_fact_adds.len(), 1);
-    assert!(program_fact_removes.is_empty());
-    assert_eq!(
-        aggregate_payload_count(&program_fact_adds[0]),
-        Value::U64(2)
+    assert!(
+        program_fact_adds
+            .iter()
+            .all(|fact| !matches!(fact, ProgramFactEntry::ResultPayload(_))),
+        "authority aggregate rehydration is source-only"
     );
+    assert!(program_fact_adds.iter().any(|fact| matches!(
+        fact,
+        ProgramFactEntry::ProgramSourceCoverage(coverage)
+            if coverage.source.table.as_ref() == "todos" && coverage.complete
+    )));
+    assert_eq!(
+        program_fact_adds
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0x10), row(0x11)]),
+    );
+    assert!(program_fact_removes.is_empty());
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.unsupported_skips_out, 0);
     assert!(maintained_subscription_id(&peer, aggregate_subscription).is_some());
@@ -3598,9 +3599,26 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
     else {
         panic!("expected view update");
     };
+    assert!(
+        program_fact_adds
+            .iter()
+            .all(|fact| !matches!(fact, ProgramFactEntry::ResultPayload(_))),
+        "authority aggregate publication is source-only"
+    );
+    assert!(program_fact_adds.iter().any(|fact| matches!(
+        fact,
+        ProgramFactEntry::ProgramSourceCoverage(coverage)
+            if coverage.source.table.as_ref() == "todos" && coverage.complete
+    )));
     assert_eq!(
-        aggregate_payload_count(&program_fact_adds[0]),
-        Value::U64(2)
+        program_fact_adds
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0x10), row(0x11)]),
     );
 
     let tx = core
@@ -3625,14 +3643,22 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
     };
 
     assert!(!reset_result_set);
-    assert_eq!(result_member_adds.len(), 1);
-    assert_eq!(result_member_removes.len(), 1);
-    assert_eq!(program_fact_adds.len(), 1);
-    assert_eq!(program_fact_removes.len(), 1);
-    assert_eq!(
-        aggregate_payload_count(&program_fact_adds[0]),
-        Value::U64(3)
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    assert!(
+        program_fact_adds
+            .iter()
+            .all(|fact| !matches!(fact, ProgramFactEntry::ResultPayload(_))),
+        "authority aggregate publication remains source-only"
     );
+    assert!(program_fact_removes.is_empty());
+    assert!(program_fact_adds.iter().any(|fact| {
+        matches!(
+            fact,
+            ProgramFactEntry::CoveredInput(input)
+            if input.source.table.as_ref() == "todos" && input.source_row == row(0x12)
+        )
+    }));
 }
 
 #[test]

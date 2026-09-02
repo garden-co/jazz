@@ -201,11 +201,12 @@ where
         shape_id: ShapeId,
         ast: ShapeAst,
         subscribe: Subscribe,
+        policy_binding: crate::protocol::PolicyBindingKey,
     ) -> Result<(), Error> {
         let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
         self.retain_validated_shape_registration(shape_id, ast, shape)?;
         let subscription = subscribe.subscription;
-        self.apply_subscribe(subscribe)?;
+        self.apply_subscribe_with_admitted_policy_binding(subscribe, policy_binding)?;
         self.query
             .outbound_shape_owners
             .entry(shape_id)
@@ -341,6 +342,59 @@ where
         self.apply_known_shape_subscribe(&shape, subscribe)
     }
 
+    /// Register a server-admitted subscriber usage under the exact immutable
+    /// policy snapshot selected by its connection. This is deliberately a
+    /// privileged server-side entry point: direct clients do not put their
+    /// claims on the wire, and a relay's transport identity must never be used
+    /// to recreate the subscriber's policy scope later.
+    pub(crate) fn apply_subscribe_with_admitted_policy_binding(
+        &mut self,
+        subscribe: Subscribe,
+        policy_binding: crate::protocol::PolicyBindingKey,
+    ) -> Result<(), Error> {
+        if let Some(delegated) = &subscribe.delegated_session
+            && crate::protocol::PolicyBindingKey::from_delegated_session(delegated)
+                != policy_binding
+        {
+            return Err(Error::InvalidStoredValue(
+                "delegated subscription policy binding disagrees with admission",
+            ));
+        }
+        let Some(shape) = self
+            .query
+            .registered_shapes
+            .get(&subscribe.shape_id)
+            .cloned()
+        else {
+            // Server admission always registers the shape before this call.
+            // Parking only the wire Subscribe would lose the immutable policy
+            // binding and could later reopen it under an unrelated reader.
+            return Err(Error::InvalidStoredValue(
+                "admitted subscription referenced unregistered shape",
+            ));
+        };
+        if subscribe.values.len() != shape.params().len() {
+            return Err(Error::InvalidStoredValue("binding arity mismatch"));
+        }
+        let value_map = shape
+            .params()
+            .keys()
+            .cloned()
+            .zip(subscribe.values.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
+        let binding = shape.bind(value_map)?;
+        let binding_view_key = BindingViewKey {
+            shape_id: subscribe.shape_id,
+            binding_id: binding.binding_id(),
+            read_view: subscribe.subscription.read_view,
+        };
+        self.apply_known_shape_subscribe_with_authority_result_key(
+            &shape,
+            subscribe,
+            AuthorityResultKey::policy_scoped(binding_view_key, policy_binding),
+        )
+    }
+
     /// Return the exact policy-scoped durable identity fixed at subscription
     /// admission. Wire updates contain only the usage handle and cannot choose
     /// or reconstruct this identity themselves.
@@ -435,6 +489,45 @@ where
             .map(crate::protocol::PolicyBindingKey::from_delegated_session)
             .map(|policy| AuthorityResultKey::policy_scoped(binding_view_key, policy))
             .unwrap_or_else(|| AuthorityResultKey::unscoped(binding_view_key));
+        self.apply_known_shape_subscribe_with_authority_result_key(
+            shape,
+            subscribe,
+            authority_result_key,
+        )
+    }
+
+    fn apply_known_shape_subscribe_with_authority_result_key(
+        &mut self,
+        shape: &ValidatedQuery,
+        subscribe: Subscribe,
+        authority_result_key: AuthorityResultKey,
+    ) -> Result<(), Error> {
+        if subscribe.values.len() != shape.params().len() {
+            return Err(Error::InvalidStoredValue("binding arity mismatch"));
+        }
+        let value_map = shape
+            .params()
+            .keys()
+            .cloned()
+            .zip(subscribe.values.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
+        let binding = shape.bind(value_map)?;
+        let binding_view_key = BindingViewKey {
+            shape_id: subscribe.shape_id,
+            binding_id: binding.binding_id(),
+            read_view: subscribe.subscription.read_view,
+        };
+        if authority_result_key.binding_view != binding_view_key {
+            return Err(Error::InvalidStoredValue(
+                "subscription authority result binding view disagrees with usage",
+            ));
+        }
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=subscribe_receipt binding={binding_view_key:?} delegated={:?} authority={authority_result_key:?}",
+                subscribe.delegated_session,
+            );
+        }
         // A new wire subscription needs an authority receipt. Discard a
         // browser-only materialized-window interpretation before any opening
         // reset can otherwise preserve its old member set.
@@ -459,15 +552,33 @@ where
             .entry(authority_result_key.clone())
             .or_default()
             .known_state_declared = subscribe.known_state.is_some();
+        let registered_key = (
+            subscribe.subscription.binding_id,
+            subscribe.subscription.read_view,
+        );
+        if let Some(existing) = self
+            .query
+            .registered_bindings
+            .get(&subscribe.shape_id)
+            .and_then(|bindings| bindings.get(&registered_key))
+            && existing.authority_result_key != authority_result_key
+        {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=subscription_scope_conflict usage={registered_key:?} old={:?} new={authority_result_key:?}",
+                    existing.authority_result_key,
+                );
+            }
+            return Err(Error::InvalidStoredValue(
+                "subscription policy binding changed without retiring its usage",
+            ));
+        }
         self.query
             .registered_bindings
             .entry(subscribe.shape_id)
             .or_default()
             .insert(
-                (
-                    subscribe.subscription.binding_id,
-                    subscribe.subscription.read_view,
-                ),
+                registered_key,
                 RegisteredBinding {
                     values: subscribe.values,
                     read_view: subscribe.subscription.read_view,
@@ -673,6 +784,23 @@ where
             .authority_results
             .get(authority_result_key)
             .map_or(0, |state| state.applied_view_update_generation)
+    }
+
+    /// Generation of the exact authority-selected source frontier, if this
+    /// usage site has claimed one. This is intentionally not the raw
+    /// ViewUpdate counter: later incremental receipt frames can advance that
+    /// counter without replacing the covered source closure.
+    pub(crate) fn authority_source_closure_generation(
+        &self,
+        authority_result_key: &AuthorityResultKey,
+    ) -> Option<u64> {
+        self.query
+            .authority_results
+            .get(authority_result_key)
+            .and_then(|state| match state.source_closure {
+                crate::node::AuthoritySourceClosure::Pending => None,
+                crate::node::AuthoritySourceClosure::Claimed { generation } => Some(generation),
+            })
     }
 
     #[cfg(test)]

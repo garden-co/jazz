@@ -612,6 +612,33 @@ impl SyncMessage {
         {
             return Err(WireContractError::InvalidCoveredInput);
         }
+        if view
+            .program_fact_adds
+            .iter()
+            .chain(&view.program_fact_removes)
+            .any(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ProgramSourceCoverage(coverage)
+                        if !coverage.complete || !coverage.source.is_wire_valid()
+                )
+            })
+        {
+            return Err(WireContractError::InvalidProgramSourceCoverage);
+        }
+        // A closure is a set of exact compiled source occurrences. Rejecting
+        // duplicate entries at the wire boundary preserves the distinction
+        // between one empty source and two competing receipts before the
+        // receiver's durable fact set can coalesce them.
+        let mut coverage_sources = std::collections::BTreeSet::new();
+        if view.program_fact_adds.iter().any(|fact| {
+            let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact else {
+                return false;
+            };
+            !coverage_sources.insert(coverage.source.clone())
+        }) {
+            return Err(WireContractError::InvalidProgramSourceCoverage);
+        }
         Ok(())
     }
 
@@ -630,6 +657,8 @@ pub enum WireContractError {
     VersionCarrier(VersionBundleRunError),
     /// A covered source input has no canonical source identity.
     InvalidCoveredInput,
+    /// A program-source closure receipt is incomplete or noncanonical.
+    InvalidProgramSourceCoverage,
 }
 
 impl std::fmt::Display for WireContractError {
@@ -637,6 +666,9 @@ impl std::fmt::Display for WireContractError {
         match self {
             Self::VersionCarrier(error) => error.fmt(f),
             Self::InvalidCoveredInput => write!(f, "covered input source identity is invalid"),
+            Self::InvalidProgramSourceCoverage => {
+                write!(f, "program-source coverage receipt is invalid")
+            }
         }
     }
 }
@@ -3384,8 +3416,8 @@ pub enum ProgramFactEntry {
     RelationEdge(RelationEdgeEntry),
     /// Coverage for one correlated path expansion.
     PathCorrelationCoverage(PathCorrelationCoverageEntry),
-    /// Source/table coverage fact.
-    SourceCoverage(SourceCoverageEntry),
+    /// Complete authority-selected closure for one normalized program source.
+    ProgramSourceCoverage(ProgramSourceCoverageEntry),
     /// Settled read-frontier fact.
     ReadFrontierSettled(ReadFrontierSettledEntry),
     /// Complete transaction payload coverage fact.
@@ -3709,17 +3741,18 @@ pub struct PathCorrelationCoverageEntry {
     pub complete: bool,
 }
 
-/// Source/table coverage fact.
+/// Complete authority-selected closure for one normalized program source.
+///
+/// This is a control-plane receipt, not a row/range fact. A complete receiver
+/// receipt has exactly one entry for every compiled [`ProgramSourceId`], even
+/// when that source contributes zero rows. Its enclosing view-update generation
+/// identifies the immutable closure being installed.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct SourceCoverageEntry {
-    /// Logical source id/path encoded for the wire.
-    pub source: String,
-    /// Logical table.
-    pub table: groove::Intern<String>,
-    /// Optional covered row.
-    pub row: Option<RowUuid>,
-    /// Canonical encoded coverage/range key.
-    pub coverage: Vec<u8>,
+pub struct ProgramSourceCoverageEntry {
+    /// Exact normalized source occurrence whose input closure is complete.
+    pub source: ProgramSourceId,
+    /// Must be true for a receipt that may settle a receiver.
+    pub complete: bool,
 }
 
 /// Settled read-frontier fact.

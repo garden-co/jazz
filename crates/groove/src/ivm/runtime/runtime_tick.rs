@@ -2095,7 +2095,7 @@ impl IvmRuntime {
         let mut changed_bindings = Vec::new();
         for delta in binding_deltas
             .iter()
-            .filter(|delta| !delta.deltas.is_empty())
+            .filter(|delta| !delta.deltas.is_empty() || delta.initializes_snapshot)
         {
             *self.binding_frontiers.entry(delta.key.clone()).or_default() += 1;
             changed_bindings.push(&delta.key);

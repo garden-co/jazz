@@ -1219,6 +1219,10 @@ struct AutoDirectFamilyPlan {
 pub(super) struct BindingSourceState {
     pub(super) descriptor: RecordDescriptor,
     pub(super) refcounts: HashMap<BindingKey, usize>,
+    /// Runtime-owned inputs must acknowledge their first complete replacement
+    /// even when it is empty. An empty multiset is a meaningful frontier for
+    /// an ungrouped aggregate, which has an identity output.
+    pub(super) initialized: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1226,6 +1230,8 @@ pub(super) struct BindingDelta {
     pub(super) key: BindingSourceKey,
     pub(super) descriptor: RecordDescriptor,
     pub(super) deltas: Vec<RecordDelta>,
+    /// This is a complete empty initial snapshot, not a synthetic row delta.
+    pub(super) initializes_snapshot: bool,
 }
 
 /// One exact replacement in a runtime-owned mutable input source.
@@ -2553,9 +2559,11 @@ impl IvmRuntime {
                 .map(|(key, _)| key.0.clone())
                 .collect::<BTreeSet<_>>();
             let changed = previous != replacement;
-            if !changed {
+            let initializes_snapshot = !source.initialized;
+            if !changed && !initializes_snapshot {
                 continue;
             }
+            source.initialized = true;
             let records = previous
                 .difference(&replacement)
                 .map(|record| RecordDelta {
@@ -2575,6 +2583,7 @@ impl IvmRuntime {
                 key,
                 descriptor,
                 deltas: records,
+                initializes_snapshot,
             });
         }
         if deltas.is_empty() {
@@ -2635,6 +2644,7 @@ impl IvmRuntime {
                     key,
                     descriptor: source.descriptor,
                     deltas: records,
+                    initializes_snapshot: false,
                 });
             }
             source.refcounts.clear();
@@ -2950,6 +2960,7 @@ impl IvmRuntime {
                 vacant.insert(BindingSourceState {
                     descriptor: binding_descriptor,
                     refcounts: HashMap::default(),
+                    initialized: true,
                 });
             }
         }
@@ -3795,6 +3806,7 @@ impl IvmRuntime {
                     weight: 1,
                 }]
             },
+            initializes_snapshot: false,
         })
     }
 
@@ -3820,6 +3832,7 @@ impl IvmRuntime {
             } else {
                 Vec::new()
             },
+            initializes_snapshot: false,
         })
     }
 
@@ -3847,6 +3860,7 @@ impl IvmRuntime {
                 key: BindingSourceKey::prepared(shape),
                 descriptor: source.descriptor,
                 deltas: Vec::new(),
+                initializes_snapshot: false,
             });
         }
         source.refcounts.remove(binding);
@@ -3857,6 +3871,7 @@ impl IvmRuntime {
                 record: binding.0.clone().into(),
                 weight: -1,
             }],
+            initializes_snapshot: false,
         })
     }
 

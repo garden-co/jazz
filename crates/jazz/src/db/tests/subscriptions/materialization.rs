@@ -289,7 +289,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
 }
 
 #[test]
-fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change() {
+fn runtime_reset_rebuilds_occurrence_sidecar_after_order_change() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
@@ -317,7 +317,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             },
         )
         .unwrap();
-    let last_write = client
+    let _last_write = client
         .insert(
             "todos",
             cells("omega", false, client_author),
@@ -341,7 +341,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         vec![first, middle, last]
     );
 
-    let first_updated = client
+    let _first_updated = client
         .update(
             "todos",
             first,
@@ -349,36 +349,11 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             Default::default(),
         )
         .unwrap();
-    let binding_view_key = BindingViewKey::new(
-        prepared.shape().shape_id(),
-        prepared.binding().binding_id(),
-        RegisterShapeOptions {
-            tier: opts.tier,
-            read_view: opts.read_view,
-            ..RegisterShapeOptions::default()
-        }
-        .read_view_key(),
-    );
-    client
-        .node
-        .node
-        .borrow_mut()
-        .inject_pending_authoritative_reset_for_test(
-            binding_view_key,
-            [
-                ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    first,
-                    first_updated.mergeable_tx_id(),
-                )),
-                ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    last,
-                    last_write.mergeable_tx_id(),
-                )),
-            ],
-            GlobalTime(42),
-        );
+    // A runtime replacement is a genuine local reset.  The retired test
+    // injected an unscoped authority result to choose a synthetic subset;
+    // INV-SYNC-36 instead requires an exact covered-input receipt for remote
+    // authority changes.
+    client.invalidate_groove_runtime_for_test();
 
     assert_eq!(client.refresh_subscriptions().unwrap(), 1);
     let event = block_on(subscription.next_raw()).unwrap();
@@ -396,7 +371,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
     };
     assert_eq!(
         added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
-        vec![last, first],
+        vec![middle, last, first],
         "the reset wire payload must preserve the maintained snapshot order"
     );
 
@@ -418,8 +393,8 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             .iter()
             .map(|output| output.row_uuid())
             .collect::<Vec<_>>(),
-        vec![last, first],
-        "reset rows reordered after the title update and removed the middle row"
+        vec![middle, last, first],
+        "reset rows reordered after the title update"
     );
     assert_eq!(
         paired
@@ -427,6 +402,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             .map(|output| output.occurrence_id.clone())
             .collect::<Vec<_>>(),
         vec![
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(middle.0)),
             OutputOccurrenceId::single_source(ObjectId::from_uuid(last.0)),
             OutputOccurrenceId::single_source(ObjectId::from_uuid(first.0)),
         ],
@@ -434,7 +410,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
     );
     assert_ne!(
         first_write.mergeable_tx_id(),
-        first_updated.mergeable_tx_id()
+        _first_updated.mergeable_tx_id()
     );
 }
 

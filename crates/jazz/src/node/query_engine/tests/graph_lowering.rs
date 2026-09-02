@@ -82,7 +82,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
             request
                 .output
                 .facts
-                .contains(&ProgramFactKey::SourceCoverage(program_scope()))
+                .contains(&ProgramFactKey::ProgramSourceCoverage(program_scope()))
         );
 
         let mut resolver = FakeSourceResolver::default();
@@ -138,6 +138,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                     descriptor,
                     hidden_fields,
                     carrier: AppRowCarrier::CurrentRow,
+                    terminal: AppRowTerminal::RootCollector,
                     ..
                 }) if descriptor.field_index("user_title").is_some()
                     && hidden_fields.is_empty()
@@ -160,9 +161,9 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
             matches!(
                 terminal,
                 OutputTerminalSchema::Fact(ProgramFactOutput {
-                    key: ProgramFactKey::SourceCoverage(CoverageScope::Program),
+                    key: ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
                     terminal: ProgramFactTerminal::Primary,
-                    schema: ProgramFactSchema::SourceCoverage(_),
+                    schema: ProgramFactSchema::ProgramSourceCoverage(_),
                 })
             )
         }));

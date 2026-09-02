@@ -299,6 +299,7 @@ impl IvmRuntime {
                 entry.insert(BindingSourceState {
                     descriptor,
                     refcounts: HashMap::default(),
+                    initialized: false,
                 });
             }
             // `next_input_source_id` is checked before this point, so an

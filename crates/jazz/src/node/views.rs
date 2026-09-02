@@ -1805,6 +1805,26 @@ where
             .entry(authority_result_key.clone())
             .or_default();
         state.applied_view_update_generation = state.applied_view_update_generation.wrapping_add(1);
+        // In the current wire contract, a non-deferred reset is the single
+        // frame that claims a complete replacement frontier.  Do not infer an
+        // empty closure from an opened result container or an incremental
+        // frame: receiver-local maintained graphs must wait for this marker.
+        // The receiver validates the exact compiler-owned coverage set before
+        // it installs the replacement, so this marker never makes a partial
+        // closure publishable.
+        if reset_result_set && !defer_settlement {
+            state.source_closure = crate::node::AuthoritySourceClosure::Claimed {
+                generation: state.applied_view_update_generation,
+            };
+        }
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=view_update_applied reset={reset_result_set} deferred={defer_settlement} generation={} facts={} closure={:?}",
+                state.applied_view_update_generation,
+                state.settled_program_facts.len(),
+                state.source_closure,
+            );
+        }
         Ok(())
     }
 

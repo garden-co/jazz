@@ -1606,11 +1606,48 @@ impl ClientDbInner {
                         "remote one-shot subscription closed before settlement".to_owned(),
                     )
                 })?;
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    match &event {
+                        CoreSubscriptionEvent::Delta {
+                            reset,
+                            publishable,
+                            added,
+                            updated,
+                            removed,
+                            terminal_operations,
+                            settled,
+                            tier,
+                        } => eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_event reset={reset} publishable={publishable} added={} updated={} removed={} terminal_ops={} settled={settled} tier={tier:?}",
+                            added.len(), updated.len(), removed.len(), terminal_operations.len(),
+                        ),
+                        CoreSubscriptionEvent::Rejected { reason } => eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_rejected reason={reason:?}"
+                        ),
+                        CoreSubscriptionEvent::Closed => eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_closed"
+                        ),
+                    }
+                }
                 match event {
                     CoreSubscriptionEvent::Delta { settled: true, .. } => {
                         let snapshot = stream
                             .settled_receiver_local_snapshot()
-                            .map_err(|error| JazzError::Query(error.to_string()))?;
+                            .map_err(|error| {
+                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                    eprintln!(
+                                        "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_snapshot_error error={error}"
+                                    );
+                                }
+                                JazzError::Query(error.to_string())
+                            })?;
+                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                            eprintln!(
+                                "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_settled roots={} rows={}",
+                                snapshot.root_count,
+                                snapshot.rows.len(),
+                            );
+                        }
                         return Ok(snapshot
                             .rows
                             .into_iter()
@@ -2466,10 +2503,10 @@ fn aggregate_public_values(
     let Some(aggregate) = &query.aggregate else {
         return Ok(Vec::new());
     };
-    // Aggregate result descriptors are compiler records, not public table
-    // rows. Like all compiler records, their application-facing fields carry
-    // the `user_` prefix. Keep the public label only for diagnostics and
-    // translate the lookup to that physical field name at this boundary.
+    // Aggregate collector records are normalized to the same `CurrentRow`
+    // representation as incremental aggregate updates before they reach this
+    // boundary.  Aggregate aliases remain in their compiler-reserved logical
+    // namespace, nested inside the ordinary physical `user_` cell namespace.
     let mut columns: Vec<(String, String, Option<ColumnType>)> = Vec::new();
     if let Some(group_by) = &aggregate.group_by {
         let idx = table_schema.columns.column_index(group_by).ok_or_else(|| {
@@ -2484,9 +2521,9 @@ fn aggregate_public_values(
             Some(table_schema.columns.columns[idx].column_type.clone()),
         ));
     }
-    // Core stores aggregate fields in canonical order so equivalent queries
-    // can share one shape. Public results retain the caller's declaration
-    // order by resolving each requested alias against that physical record.
+    // The public API preserves the output order requested by the caller.
+    // It resolves those names from the compiler-owned aggregate record, whose
+    // internal order may be canonicalized for shape sharing.
     for output in &aggregate.aggregates {
         let public_name = output.alias.clone();
         columns.push((
@@ -2501,6 +2538,16 @@ fn aggregate_public_values(
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
             let idx = descriptor.field_index(&physical_column).ok_or_else(|| {
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    eprintln!(
+                        "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
+                        descriptor
+                            .fields()
+                            .iter()
+                            .map(|field| field.name.as_deref())
+                            .collect::<Vec<_>>(),
+                    );
+                }
                 JazzError::Query(format!(
                     "aggregate row missing column {public_column} (physical field {physical_column})"
                 ))
@@ -2893,12 +2940,20 @@ impl PublicQueryDecoder {
         );
         #[cfg(feature = "testing")]
         let public = {
-            let fields = self
-                .core_rows_to_query_results(db, query, vec![row.row.clone()])
-                .ok()
-                .and_then(|mut results| results.pop())
-                .map(|result| result.fields)
-                .unwrap_or_default();
+            let fields = match self.core_rows_to_query_results(db, query, vec![row.row.clone()]) {
+                Ok(mut results) => results
+                    .pop()
+                    .map(|result| result.fields)
+                    .unwrap_or_default(),
+                Err(error) => {
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=subscription_public_fields_error error={error}"
+                        );
+                    }
+                    Vec::new()
+                }
+            };
             public.with_fields(fields)
         };
         Ok(public)

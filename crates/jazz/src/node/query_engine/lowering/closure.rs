@@ -12,14 +12,23 @@ pub(super) struct ClosureLowering {
 }
 
 impl ClosureLowering {
-    fn all_visible_members(&self, root_source: SourceId) -> Vec<(SourceId, GraphBuilder)> {
-        std::iter::once((root_source, self.visible_root.clone()))
-            .chain(
-                self.result_members
-                    .iter()
-                    .map(|(source, graph)| (source.clone(), graph.clone())),
-            )
-            .collect()
+    /// The exact source relations whose rows are allowed to cross an
+    /// authority-program boundary.  This is deliberately derived from the
+    /// same closure that establishes public root membership: a source graph
+    /// alone only applies source-local policy and can miss residual/reachable
+    /// constraints owned by the complete program.
+    pub(super) fn covered_source_members(
+        &self,
+        root_source: SourceId,
+    ) -> BTreeMap<SourceId, GraphBuilder> {
+        let mut members = self.result_members.clone();
+        members
+            .entry(root_source)
+            .and_modify(|existing| {
+                *existing = GraphBuilder::union([existing.clone(), self.visible_root.clone()]);
+            })
+            .or_insert_with(|| self.visible_root.clone());
+        members
     }
 }
 

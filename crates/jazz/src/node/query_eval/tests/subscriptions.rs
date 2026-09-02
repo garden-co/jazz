@@ -1601,10 +1601,32 @@ fn settled_binding_view_sources_provide_source_coverage_metadata() {
         )]))
         .unwrap();
 
+    let scoped_subscribe = Subscribe {
+        shape_id: shape.shape_id(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: Default::default(),
+        },
+        values: vec![Value::String("alice".to_owned())],
+        known_state: None,
+        // The direct test peer is a trusted relay acting for its actual
+        // SYSTEM reader. Keep the registration in the exact policy scope
+        // that rehydration will later use; an unscoped test fixture is not a
+        // valid predecessor under scope-isolated receipts.
+        delegated_session: Some(DelegatedSessionBinding {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+        }),
+    };
     register_query_shape(&mut server, &shape, RegisterShapeOptions::default());
-    subscribe_query_binding(&mut server, &shape, &binding);
+    server
+        .apply_sync_message_settled(SyncMessage::Subscribe(scoped_subscribe.clone()))
+        .unwrap();
     register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
-    subscribe_query_binding(&mut reader, &shape, &binding);
+    reader
+        .apply_sync_message_settled(SyncMessage::Subscribe(scoped_subscribe))
+        .unwrap();
 
     commit_global_user(&mut server, alice, "alice", 1);
     let mut peer = PeerState::new();
@@ -1630,7 +1652,9 @@ fn settled_binding_view_sources_provide_source_coverage_metadata() {
     request
         .output
         .facts
-        .insert(ProgramFactKey::SourceCoverage(CoverageScope::Program));
+        .insert(ProgramFactKey::ProgramSourceCoverage(
+            CoverageScope::Program,
+        ));
 
     let program = reader
         .compile_query_program_request(request)
@@ -1642,7 +1666,7 @@ fn settled_binding_view_sources_provide_source_coverage_metadata() {
                 if terminals.iter().any(|terminal| matches!(
                     terminal,
                     OutputTerminalSchema::Fact(ProgramFactOutput {
-                        key: ProgramFactKey::SourceCoverage(CoverageScope::Program),
+                    key: ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
                         ..
                     })
                 ))
@@ -1711,7 +1735,9 @@ fn settled_binding_view_root_with_reference_include_sources_lowers() {
     request
         .output
         .facts
-        .insert(ProgramFactKey::SourceCoverage(CoverageScope::Program));
+        .insert(ProgramFactKey::ProgramSourceCoverage(
+            CoverageScope::Program,
+        ));
 
     let sources = format!("{:?}", request.reads);
     assert!(sources.contains("SettledBindingView"), "{sources}");

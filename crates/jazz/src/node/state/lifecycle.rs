@@ -1649,6 +1649,7 @@ where
             state.settled_result_set.clear();
             state.settled_result_row_index.clear();
             state.settled_program_facts.clear();
+            state.source_closure = crate::node::AuthoritySourceClosure::Pending;
         }
         self.query
             .local_materialized_window_binding_views

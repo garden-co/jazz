@@ -2879,6 +2879,13 @@ where
         };
         let groove_runtime_token = node.borrow().groove_runtime_token();
         if state.borrow().groove_runtime_token != groove_runtime_token {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=reopen_runtime stale={} current={}",
+                    state.borrow().groove_runtime_token,
+                    groove_runtime_token,
+                );
+            }
             let (shape, binding) = {
                 let state = state.borrow();
                 match &state.kind {
@@ -3039,7 +3046,6 @@ where
             };
             if authorization_mode == QueryAuthorizationMode::ClientLocal
                 && remote_read_tier.is_some()
-                && shape.query().aggregate.is_none()
             {
                 let mut state_ref = state.borrow_mut();
                 let SubscriptionKind::Prepared {
@@ -3047,7 +3053,9 @@ where
                     ..
                 } = &mut state_ref.kind;
                 if let Some(maintained) = maintained_subscription.as_mut() {
-                    if let Some(key) = authoritative_result.as_ref() {
+                    if let Some(key) = authoritative_result.as_ref()
+                        && !maintained.has_covered_input_sources()
+                    {
                         node.borrow()
                             .seed_local_maintained_authoritative_generation(maintained, key);
                     }
@@ -3058,7 +3066,21 @@ where
                 }
             }
             if let Some(authority_result_key) = pending_authority_result {
-                if has_conflicting_local_overlay {
+                // Covered-input receivers never consume an authority result
+                // snapshot directly.  A newly arrived receipt is an input
+                // frontier replacement for the receiver-local graph, even
+                // when it has no optimistic overlay to preserve.
+                let receiver_owns_authority_frontier = {
+                    let state_ref = state.borrow();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &state_ref.kind;
+                    maintained_subscription
+                        .as_ref()
+                        .is_some_and(LocalMaintainedViewSubscription::has_covered_input_sources)
+                };
+                if has_conflicting_local_overlay || receiver_owns_authority_frontier {
                     let mut maintained = {
                         let mut state_ref = state.borrow_mut();
                         let SubscriptionKind::Prepared {
@@ -3090,6 +3112,18 @@ where
                     let (update, suppressed) = drained?;
                     debug_assert!(suppressed);
                     if let Some(update) = update {
+                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                            eprintln!(
+                                "JAZZ_COVERED_INPUT_TRACE stage=pending_authority_update kind={}",
+                                match &update {
+                                    LocalMaintainedViewSubscriptionUpdate::Structured {
+                                        terminal_operations,
+                                    } => format!("structured:{}", terminal_operations.len()),
+                                    LocalMaintainedViewSubscriptionUpdate::Flat { .. } =>
+                                        "flat".to_owned(),
+                                },
+                            );
+                        }
                         let state_ref = state.borrow();
                         let SubscriptionKind::Prepared {
                             maintained_subscription,
@@ -3152,14 +3186,10 @@ where
                     }
                 }
             }
-            let root_occurrence_ids = if shape.query().aggregate.is_some()
-                || !shape.query().array_subqueries.is_empty()
-            {
-                // A fresh structured subscription has not necessarily rebuilt
-                // its local terminal collector when its first authoritative
-                // reset arrives. Structured roots are always their own public
-                // occurrence, so pair that reset directly with its snapshot
-                // roots instead of the still-cold collector sidecar.
+            let root_occurrence_ids = if shape.query().aggregate.is_some() || terminal_rows {
+                // A fresh compiler-owned root collector has already produced
+                // this reset snapshot. Pair its roots directly rather than
+                // reconstructing positions from membership state.
                 snapshot
                     .rows
                     .iter()
@@ -3337,9 +3367,6 @@ where
                             )
                     })
                 });
-            if let Some(key) = authoritative_reset_result.as_ref() {
-                consumed_authoritative_resets.insert(key.clone());
-            }
             if authoritative_result
                 .as_ref()
                 .is_some_and(|key| node.borrow().publication_deferred_for_authority_result(key))
@@ -3370,7 +3397,22 @@ where
             let authoritative_reset = authoritative_reset_pending
                 && (!reconciles_remote_authoritative_membership
                     || (local_snapshot_is_empty && !has_conflicting_local_overlay));
-            if authoritative_reset && terminal_rows {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=refresh terminal_rows={terminal_rows} covered={} reset_pending={authoritative_reset_pending} authoritative_reset={authoritative_reset} delivered={delivered_authority_result:?} settled={settled_authority_result:?} authoritative={authoritative_result:?}",
+                    refresh
+                        .maintained
+                        .as_ref()
+                        .is_some_and(LocalMaintainedViewSubscription::has_covered_input_sources),
+                );
+            }
+            if authoritative_reset
+                && terminal_rows
+                && refresh
+                    .maintained
+                    .as_ref()
+                    .is_none_or(|maintained| !maintained.has_covered_input_sources())
+            {
                 let Some(maintained) = refresh.maintained.as_mut() else {
                     return Err(Error::new(
                         ErrorCode::Protocol,
@@ -3423,7 +3465,12 @@ where
                     snapshot_tier,
                     true,
                 )
-            } else if authoritative_reset {
+            } else if authoritative_reset
+                && refresh
+                    .maintained
+                    .as_ref()
+                    .is_none_or(|maintained| !maintained.has_covered_input_sources())
+            {
                 let authority_result_key = authoritative_reset_result
                     .as_ref()
                     .expect("a reset has an exact authority receipt");
@@ -3556,45 +3603,79 @@ where
                     force_reset_event,
                 )
             } else {
-                let (maintained_update, suppressed_authoritative_change) =
-                    if let Some(maintained) = refresh.maintained.as_mut() {
-                        let mut node_ref = node.lock().await;
-                        // Every client-local remote subscription must
-                        // drain against the authority's binding view. The
-                        // non-durable browser runtime additionally uses
-                        // that same view to preserve its local overlay;
-                        // restricting the view to only that runtime makes
-                        // ordinary Local clients miss a later authority
-                        // revoke until a further refresh.
-                        let authoritative_result_key = (authorization_mode
-                            == QueryAuthorizationMode::ClientLocal
-                            && remote_read_tier.is_some()
-                            && shape.query().aggregate.is_none())
-                        .then(|| settled_authority_result.clone())
-                        .flatten();
-                        match node_ref
-                            .drain_local_maintained_view_subscription_preserving_rows_with_waker(
-                                maintained,
-                                authoritative_result_key,
-                                &local_overlay_row_keys,
-                                progress_waker,
-                            )
-                            .await
-                        {
-                            Ok(update) => update,
-                            Err(crate::node::Error::MissingTransaction(_)) => {
-                                node_ref.record_authoritative_reset_missing_payload_fallback();
-                                if let Some(key) = authoritative_reset_result.as_ref() {
-                                    node_ref.defer_authoritative_reset(key);
-                                }
-                                retained.push(Rc::downgrade(&state));
-                                continue;
+                let (maintained_update, suppressed_authoritative_change) = if let Some(maintained) =
+                    refresh.maintained.as_mut()
+                {
+                    let mut node_ref = node.lock().await;
+                    // Every client-local remote subscription must
+                    // drain against the authority's binding view. The
+                    // non-durable browser runtime additionally uses
+                    // that same view to preserve its local overlay;
+                    // restricting the view to only that runtime makes
+                    // ordinary Local clients miss a later authority
+                    // revoke until a further refresh.
+                    let authoritative_result_key = (authorization_mode
+                        == QueryAuthorizationMode::ClientLocal
+                        && remote_read_tier.is_some())
+                    .then(|| settled_authority_result.clone())
+                    .flatten();
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=runtime_drain sources={} authority={authoritative_result_key:?}",
+                            maintained.has_covered_input_sources(),
+                        );
+                    }
+                    match node_ref
+                        .drain_local_maintained_view_subscription_preserving_rows_with_waker(
+                            maintained,
+                            authoritative_result_key,
+                            &local_overlay_row_keys,
+                            progress_waker,
+                        )
+                        .await
+                    {
+                        Ok(update) => update,
+                        Err(crate::node::Error::MissingTransaction(_)) => {
+                            node_ref.record_authoritative_reset_missing_payload_fallback();
+                            if let Some(key) = authoritative_reset_result.as_ref() {
+                                node_ref.defer_authoritative_reset(key);
                             }
-                            Err(error) => return Err(error.into()),
+                            retained.push(Rc::downgrade(&state));
+                            continue;
                         }
-                    } else {
-                        (None, false)
-                    };
+                        Err(error) => return Err(error.into()),
+                    }
+                } else {
+                    (None, false)
+                };
+                // A reset claims an authority successor, but it is publishable
+                // only after the receiver has installed that exact closure
+                // and drained the same local graph. `Pending` is not empty:
+                // retain the receipt until its ProgramSourceCoverage manifest
+                // is available, rather than emitting the graph's opening
+                // state as a strict remote answer.
+                if authoritative_reset
+                    && let (Some(authority_result_key), Some(maintained)) = (
+                        authoritative_reset_result.as_ref(),
+                        refresh.maintained.as_ref(),
+                    )
+                    && maintained.has_covered_input_sources()
+                    && !node
+                        .borrow()
+                        .authority_source_closure_generation(authority_result_key)
+                        .is_some_and(|generation| {
+                            maintained
+                                .has_installed_covered_closure(authority_result_key, generation)
+                        })
+                {
+                    node.borrow_mut()
+                        .defer_authoritative_reset(authority_result_key);
+                    retained.push(Rc::downgrade(&state));
+                    continue;
+                }
+                if let Some(key) = authoritative_reset_result.as_ref() {
+                    consumed_authoritative_resets.insert(key.clone());
+                }
                 if let Some(update) = maintained_update {
                     match update {
                         LocalMaintainedViewSubscriptionUpdate::Structured {
@@ -3622,6 +3703,13 @@ where
                                             "terminal operation arrived without a prepared root layout",
                                         )
                                     })?;
+                                let terminal_operation_count = terminal_operations.len();
+                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                    eprintln!(
+                                        "JAZZ_COVERED_INPUT_TRACE stage=terminal_ops detail={terminal_operations:?}"
+                                    );
+                                }
+                                let previous_snapshot = refresh.snapshot.clone();
                                 let event = apply_terminal_operations_to_subscription_snapshot(
                                     &mut refresh.snapshot,
                                     &mut refresh.snapshot_index,
@@ -3632,6 +3720,31 @@ where
                                     snapshot_tier,
                                     settled,
                                 )?;
+                                // A newly received authority closure is a
+                                // reset boundary.  Its complete value comes
+                                // from the same receiver-local terminal
+                                // reducer just advanced above, never from an
+                                // authority result snapshot or a re-run
+                                // query.  Later local/covered updates remain
+                                // incremental terminal operations.
+                                let event = if authoritative_reset {
+                                    subscription_delta_event_with_reset(
+                                        snapshot_tier,
+                                        settled,
+                                        &previous_snapshot,
+                                        &refresh.snapshot,
+                                        true,
+                                        terminal_rows,
+                                    )
+                                } else {
+                                    event
+                                };
+                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                    eprintln!(
+                                        "JAZZ_COVERED_INPUT_TRACE stage=publish_terminal ops={} roots={}",
+                                        terminal_operation_count, refresh.snapshot.root_count,
+                                    );
+                                }
                                 refresh.settled = settled;
                                 retained.push(Rc::downgrade(&state));
                                 if refresh.sender.unbounded_send(event).is_ok() {
@@ -3639,85 +3752,21 @@ where
                                 }
                                 continue;
                             }
-                            let Some(maintained) = refresh.maintained.as_ref() else {
-                                return Err(Error::new(
-                                    ErrorCode::Protocol,
-                                    "structured subscription lost its Groove terminal",
-                                ));
-                            };
-                            let materialized = node
-                                .lock()
-                                .await
-                                .materialize_local_maintained_relation_snapshot_with_occurrences(
-                                    maintained,
-                                )
-                                .await?;
-                            let snapshot = materialized.snapshot;
-                            let current_root_occurrences = materialized.root_occurrence_ids;
-                            let settled = subscription_is_settled(
-                                &node.borrow(),
-                                active_authority_view_receipts,
-                                &shape,
-                                &binding,
-                                settled_tier,
-                                read_view,
-                                remote_propagate_upstream,
-                                requires_authority_receipt,
-                                settled_authority_result.as_ref(),
-                            );
-                            let state_ref = &mut refresh;
-                            let previous_root_occurrences = snapshot_root_occurrences(
-                                &state_ref.snapshot,
-                                &state_ref.snapshot_index,
-                            )?;
-                            let mut event = subscription_terminal_delta_event(
-                                snapshot_tier,
-                                settled,
-                                &state_ref.snapshot,
-                                &previous_root_occurrences,
-                                &snapshot,
-                                &current_root_occurrences,
-                            )?;
-                            let SubscriptionEvent::Delta {
-                                publishable,
-                                added,
-                                updated,
-                                removed,
-                                terminal_operations,
-                                ..
-                            } = &mut event
-                            else {
-                                unreachable!("terminal snapshot diffs always emit deltas")
-                            };
-                            *publishable = state_ref.settled != settled
-                                || !added.is_empty()
-                                || !updated.is_empty()
-                                || !removed.is_empty()
-                                || !terminal_operations.is_empty();
-                            state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-                            state_ref.snapshot_index =
-                                relation_snapshot_index_with_root_occurrences(
-                                    &state_ref.snapshot,
-                                    &current_root_occurrences,
-                                )?;
-                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
-                            if state_ref.sender.unbounded_send(event).is_ok() {
-                                changed += 1;
-                            }
-                            continue;
+                            // No terminal delta means the receiver-local
+                            // collector state did not change. In particular,
+                            // do not materialize a replacement from Jazz
+                            // storage here: the only authority input is the
+                            // covered source closure above. The common reset
+                            // publication below handles an unchanged but
+                            // newly complete closure.
                         }
                         LocalMaintainedViewSubscriptionUpdate::Flat {
                             authoritative_membership_changed,
                             added,
                             removed,
-                            terminal_operations,
                         } => {
                             let state_ref = &mut refresh;
-                            let previous = authoritative_membership_changed.then(|| {
-                                (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
-                            });
+                            let previous_snapshot = state_ref.snapshot.clone();
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
@@ -3725,42 +3774,12 @@ where
                                     authoritative_membership_changed,
                                     added,
                                     removed,
-                                    terminal_operations,
                                 },
                                 shape.query().table.as_str(),
                                 snapshot_tier,
                                 previous_settled,
                                 None,
                             )?;
-                            if authoritative_membership_changed {
-                                let (previous_snapshot, previous_snapshot_index) = previous.expect(
-                                    "authoritative membership changes retain prior snapshot",
-                                );
-                                order_maintained_snapshot_roots(
-                                    &node.borrow(),
-                                    &shape.query(),
-                                    &mut state_ref.snapshot,
-                                    &mut state_ref.snapshot_index,
-                                )?;
-                                // Authority reconciliation carries row
-                                // additions/removals without positions.
-                                // Re-publish the first changed ordered
-                                // suffix so consumers apply TopBy order.
-                                event = subscription_terminal_delta_event(
-                                    snapshot_tier,
-                                    previous_settled,
-                                    &previous_snapshot,
-                                    &snapshot_root_occurrences(
-                                        &previous_snapshot,
-                                        &previous_snapshot_index,
-                                    )?,
-                                    &state_ref.snapshot,
-                                    &snapshot_root_occurrences(
-                                        &state_ref.snapshot,
-                                        &state_ref.snapshot_index,
-                                    )?,
-                                )?;
-                            }
                             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                             let settled = subscription_is_settled(
                                 &node.borrow(),
@@ -3778,13 +3797,23 @@ where
                                     shape.query(),
                                     &state_ref.snapshot,
                                 )?;
+                            if authoritative_reset {
+                                event = subscription_delta_event_with_reset(
+                                    snapshot_tier,
+                                    settled,
+                                    &previous_snapshot,
+                                    &state_ref.snapshot,
+                                    true,
+                                    terminal_rows,
+                                );
+                            }
                             if let SubscriptionEvent::Delta {
                                 reset,
                                 publishable,
                                 added,
                                 updated,
                                 removed,
-                                terminal_operations,
+                                terminal_operations: _,
                                 settled: event_settled,
                                 ..
                             } = &mut event
@@ -3793,8 +3822,7 @@ where
                                     || *reset
                                     || !added.is_empty()
                                     || !updated.is_empty()
-                                    || !removed.is_empty()
-                                    || !terminal_operations.is_empty();
+                                    || !removed.is_empty();
                                 *event_settled = settled;
                             }
                             state_ref.settled = settled;
@@ -3805,6 +3833,78 @@ where
                             continue;
                         }
                     }
+                }
+                if authoritative_reset
+                    && refresh
+                        .maintained
+                        .as_ref()
+                        .is_some_and(LocalMaintainedViewSubscription::has_covered_input_sources)
+                {
+                    // Aggregate fact terminals have no structural app-row
+                    // collector: their self-contained payload is the local
+                    // terminal state. Refresh the facade from that state
+                    // after the exact covered closure has quiesced, rather
+                    // than retaining the opening snapshot or consulting an
+                    // authority result payload.
+                    if shape.query().aggregate.is_some() {
+                        let materialized = {
+                            let maintained = refresh
+                                .maintained
+                                .as_ref()
+                                .expect("covered reset retained its maintained graph");
+                            node.lock()
+                                .await
+                                .materialize_local_maintained_relation_snapshot_with_occurrences(
+                                    maintained,
+                                )
+                                .await?
+                        };
+                        refresh.snapshot = materialized.snapshot;
+                    }
+                    let settled = subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view,
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
+                    // A complete closure can be observably unchanged (for
+                    // example an empty grouped aggregate). It is still the
+                    // exact authority boundary for this receiver and must
+                    // publish a reset from the collector state, not from a
+                    // result cache or a re-run query.
+                    let snapshot = refresh.snapshot.clone();
+                    let event = subscription_delta_event_with_reset(
+                        snapshot_tier,
+                        settled,
+                        &snapshot,
+                        &snapshot,
+                        true,
+                        terminal_rows,
+                    );
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=publish_covered_reset roots={} settled={settled}",
+                            snapshot.root_count,
+                        );
+                    }
+                    refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                    refresh.settled = settled;
+                    retained.push(Rc::downgrade(&state));
+                    let delivered = refresh.sender.unbounded_send(event).is_ok();
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=covered_reset_delivery delivered={delivered}"
+                        );
+                    }
+                    if delivered {
+                        changed += 1;
+                    }
+                    continue;
                 }
                 let preserve_local_overlay = suppressed_authoritative_change;
                 let (snapshot, snapshot_source) = if terminal_rows {

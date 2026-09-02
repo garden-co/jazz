@@ -249,13 +249,19 @@ pub(super) fn fact_public_fields(
             let witness = schema.content.as_ref().or(schema.deletion.as_ref()).ok_or(
                 Error::InvalidStoredValue("version witness fact schema has no terminal schema"),
             )?;
-            Ok(version_witness_public_fields(&schema.role_field, witness))
+            let mut fields = version_witness_public_fields(&schema.role_field, witness);
+            fields.extend(schema.routing_param_fields.iter().cloned());
+            Ok(fields)
+        }
+        ProgramFactSchema::ProgramSourceCoverage(schema) => {
+            let mut fields = vec!["complete".to_owned()];
+            fields.extend(schema.routing_param_fields.iter().cloned());
+            Ok(fields)
         }
         unsupported => Err(Error::InvalidStoredValue(match unsupported {
             ProgramFactSchema::PathCorrelationCoverage(_) => {
                 "path correlation coverage facts are not prepared yet"
             }
-            ProgramFactSchema::SourceCoverage(_) => "source coverage facts are not prepared yet",
             ProgramFactSchema::ReadFrontierSettled(_) => "read frontier facts are not prepared yet",
             ProgramFactSchema::CompleteTxPayloadCoverage(_) => {
                 "complete transaction coverage facts are not prepared yet"
@@ -276,6 +282,7 @@ pub(super) fn fact_public_fields(
             ProgramFactSchema::AuthorizedRows(_)
             | ProgramFactSchema::ResultMembership(_)
             | ProgramFactSchema::AggregateResult(_)
+            | ProgramFactSchema::ProgramSourceCoverage(_)
             | ProgramFactSchema::RelationEdges(_)
             | ProgramFactSchema::VersionWitnesses(_)
             | ProgramFactSchema::ReplacementWitnesses(_) => unreachable!(),
@@ -310,7 +317,11 @@ pub(super) fn output_routing_fields_for_query_eval(
         super::query_engine::ProgramFactSchema::AggregateResult(schema) => {
             schema.routing_param_fields.clone()
         }
-        super::query_engine::ProgramFactSchema::SourceCoverage(schema) => {
+        super::query_engine::ProgramFactSchema::ProgramSourceCoverage(schema) => {
+            schema.routing_param_fields.clone()
+        }
+        super::query_engine::ProgramFactSchema::VersionWitnesses(schema)
+        | super::query_engine::ProgramFactSchema::ReplacementWitnesses(schema) => {
             schema.routing_param_fields.clone()
         }
         super::query_engine::ProgramFactSchema::ReadFrontierSettled(schema) => {
@@ -441,10 +452,32 @@ where
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
+            request,
+            inline_sources,
+            access_paths,
+            BTreeMap::new(),
+        )
+        .await
+    }
+
+    /// Compile a receiver-local authority-covered program. Each entry is an
+    /// already allocated, runtime-owned input keyed by its complete normalized
+    /// source occurrence. This is intentionally separate from ordinary inline
+    /// snapshots: the caller can atomically replace these records after the
+    /// graph is subscribed.
+    pub(super) async fn compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
+        &mut self,
+        request: QueryProgramRequest,
+        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+    ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
             request,
             inline_sources,
             access_paths,
+            covered_input_sources,
             true,
         )
         .await
@@ -459,6 +492,7 @@ where
             request,
             BTreeMap::new(),
             access_paths,
+            BTreeMap::new(),
             false,
         )
         .await
@@ -469,6 +503,7 @@ where
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
         count_access_path_metrics: bool,
     ) -> Result<QueryProgram, Error> {
         let replaced_policy_graphs =
@@ -480,6 +515,7 @@ where
             node: self,
             read_view: &read_view,
             inline_sources,
+            covered_input_sources,
             access_paths,
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
@@ -514,6 +550,7 @@ where
                 node: self,
                 read_view: &read_view,
                 inline_sources: BTreeMap::new(),
+                covered_input_sources: BTreeMap::new(),
                 access_paths: BTreeMap::new(),
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
@@ -783,7 +820,9 @@ where
 mod tests {
     use super::*;
     use crate::node::query_engine::{
-        ContentVersionFields, ProgramFactSchema, ResultMembershipSchema,
+        ContentVersionFields, ProgramFactOutput, ProgramFactSchema, ProgramFactTerminal,
+        ProgramSourceCoverageSchema, ResultMembershipSchema, VersionWitnessSchema,
+        VersionWitnessSchemas,
     };
 
     #[test]
@@ -818,5 +857,64 @@ mod tests {
                 "settle_position",
             ]
         );
+    }
+
+    #[test]
+    fn covered_input_facts_retain_policy_route_until_multisink_partitioning() {
+        let route = "__jazz_claim_v1:6:claims3:sub".to_owned();
+        let source = ProgramSourceId {
+            table: "todos".to_owned().into(),
+            path: vec![crate::protocol::ProgramSourceRole::Root],
+        };
+        let witness = VersionWitnessSchema {
+            source: source.clone(),
+            descriptor: RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
+            identity: VersionIdentityFields {
+                table_field: "table_name".to_owned(),
+                row_field: "row_uuid".to_owned(),
+                tx_time_field: "tx_time".to_owned(),
+                tx_node_field: "tx_node_id".to_owned(),
+                batch_id_field: None,
+                branch_or_prefix_field: None,
+                row_digest_field: None,
+                schema_field: "schema_version".to_owned(),
+                layer_field: "layer".to_owned(),
+            },
+            created_by_field: "created_by".to_owned(),
+            created_at_field: "created_at".to_owned(),
+            updated_by_field: "updated_by".to_owned(),
+            updated_at_field: "updated_at".to_owned(),
+            parents_field: "parents".to_owned(),
+            authored_columns_field: "authored_columns".to_owned(),
+            deletion_field: "_deletion".to_owned(),
+            user_fields: BTreeMap::new(),
+        };
+        let witness_schema = ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
+            role_field: "event_kind".to_owned(),
+            content: Some(witness),
+            deletion: None,
+            routing_param_fields: BTreeSet::from([route.clone()]),
+        });
+        let coverage_schema =
+            ProgramFactSchema::ProgramSourceCoverage(ProgramSourceCoverageSchema {
+                source,
+                complete: true,
+                routing_param_fields: BTreeSet::from([route.clone()]),
+            });
+
+        for schema in [witness_schema, coverage_schema] {
+            assert!(
+                fact_public_fields(&schema).unwrap().contains(&route),
+                "a missing route field would make this fact terminal run for every policy binding"
+            );
+            assert_eq!(
+                output_routing_fields_for_query_eval(&ProgramFactOutput {
+                    key: ProgramFactKey::VersionWitnesses,
+                    terminal: ProgramFactTerminal::VersionWitnessContent,
+                    schema,
+                }),
+                BTreeSet::from([route.clone()]),
+            );
+        }
     }
 }

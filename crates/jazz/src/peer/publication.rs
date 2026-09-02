@@ -344,6 +344,12 @@ impl PeerState {
         subscription: SubscriptionKey,
         binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
     ) {
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} identity={:?} claims={:?}",
+                self, self.publication_owner, self.role, binding.0, binding.1,
+            );
+        }
         self.publication_states
             .entry(subscription)
             .or_default()
@@ -406,13 +412,24 @@ impl PeerState {
     /// Network admission records this before any owner-loop rehydrate can run.
     /// A relay must never substitute its SYSTEM transport identity when a
     /// multiplexed subscriber's binding was lost.
+    #[track_caller]
     fn served_subscription_policy_binding(
         &self,
         subscription: SubscriptionKey,
     ) -> Result<(AuthorSubject, BTreeMap<String, groove::records::Value>), Error> {
-        self.subscription_policy_binding(subscription).ok_or(
-            Error::InvalidStoredValue("served subscription is missing its immutable policy binding"),
-        )
+        self.subscription_policy_binding(subscription).ok_or_else(|| {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=missing_served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} states={:?} caller={}",
+                    self,
+                    self.publication_owner,
+                    self.role,
+                    self.publication_states.keys().collect::<Vec<_>>(),
+                    std::panic::Location::caller(),
+                );
+            }
+            Error::InvalidStoredValue("served subscription is missing its immutable policy binding")
+        })
     }
 
     /// Standalone no-waker helpers serve one peer identity directly. Their
@@ -561,6 +578,7 @@ impl PeerState {
         subscription: SubscriptionKey,
         shape: &ValidatedQuery,
         binding: &Binding,
+        policy_binding: &(AuthorSubject, BTreeMap<String, groove::records::Value>),
     ) -> Result<(), Error>
     where
         S: OrderedKvStorage,
@@ -576,6 +594,10 @@ impl PeerState {
                 known_state: None,
                 delegated_session: None,
             },
+            crate::protocol::PolicyBindingKey::from_canonical_parts(
+                policy_binding.0,
+                policy_binding.1.clone(),
+            ),
         )?;
         Ok(())
     }
@@ -606,7 +628,14 @@ impl PeerState {
         // still have installed the admitted subscriber snapshot themselves.
         self.ensure_direct_internal_subscription_policy_binding(node, subscription)?;
         self.clear_stale_groove_runtime_handles(node, subscription);
-        self.ensure_query_subscription_registered(node, subscription, &shape, &binding)?;
+        let policy_binding = self.served_subscription_policy_binding(subscription)?;
+        self.ensure_query_subscription_registered(
+            node,
+            subscription,
+            &shape,
+            &binding,
+            &policy_binding,
+        )?;
         let needs_prepare = self
             .publication_states
             .get(&subscription)
@@ -855,7 +884,14 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, subscription);
-        self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
+        let policy_binding = self.served_subscription_policy_binding(subscription)?;
+        self.ensure_query_subscription_registered(
+            node,
+            subscription,
+            shape,
+            binding,
+            &policy_binding,
+        )?;
         let Some(_) = self.publication_states.get(&subscription) else {
             return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
@@ -1281,6 +1317,17 @@ impl PeerState {
                             requires_authoritative_membership_reconcile |=
                                 transitions.requires_authoritative_membership_reconcile;
                         }
+                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+                            && (!transitions.adds.is_empty()
+                                || !transitions.program_fact_adds.is_empty())
+                        {
+                            eprintln!(
+                                "JAZZ_COVERED_INPUT_TRACE stage=publication_filter subscription={subscription:?} table={} result_filter={result_table_filter:?} authority={source_authority_result:?} members={:?} raw_facts={:?}",
+                                shape.query().table,
+                                transitions.adds,
+                                transitions.program_fact_adds,
+                            );
+                        }
                         // Groove terminals belong to the local host binding ABI.
                         // Peer sync carries the maintained program's covered inputs,
                         // never this authority-owned output.
@@ -1484,6 +1531,13 @@ impl PeerState {
             None
         };
         let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=rehydrate peer={:p} owner={} subscription={subscription:?} identity={policy_identity:?} source={source_authority_result_key:?} purpose={purpose:?}",
+                self,
+                self.publication_owner,
+            );
+        }
         let opened = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             match purpose {
@@ -1553,9 +1607,15 @@ impl PeerState {
             }
             Err(error) => return Err(error),
             };
-        let retains_structured_terminal = !shape.query().array_subqueries.is_empty()
-            || !shape.query().order_by.is_empty();
-        if !retains_structured_terminal {
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=rehydrate_opened owner={} subscription={subscription:?} identity={policy_identity:?} initial={initial_received} adds={:?} facts={:?}",
+                self.publication_owner,
+                transitions.adds,
+                transitions.program_fact_adds,
+            );
+        }
+        if !terminal_schemas.has_root_collector() {
             maintained.discard_structured_app_rows();
         }
         if !initial_received {
@@ -1964,7 +2024,13 @@ impl PeerState {
         // registering first would make this teardown release the just-created
         // outbound shape owner on an initial hydration too.
         self.forget_subscription_with_node(node, subscription);
-        self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
+        self.ensure_query_subscription_registered(
+            node,
+            subscription,
+            shape,
+            binding,
+            &policy_binding,
+        )?;
         if let Some(known_state) = known_state {
             self.downstream_known_states
                 .insert(subscription, known_state);

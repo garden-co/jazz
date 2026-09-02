@@ -11,7 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
 
-use groove::ivm::{LiteralValue, PreparedShapeId, RoutedMultisinkTerminal, StaticScanSpec};
+use groove::ivm::{
+    InputSourceId, InputSourceReplacement, LiteralValue, PreparedShapeId, RoutedMultisinkTerminal,
+    StaticScanSpec,
+};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
 use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
@@ -50,9 +53,10 @@ use super::query_engine::{
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
-    ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef,
-    RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
+    ProgramFactEntry, ProgramSourceId, ReadViewKey, ReadViewSourceSpec, ReadViewSpec,
+    RegisterShapeOptions, RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry,
+    ResultRowLayer, RowVersionRef, RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe,
+    SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -778,16 +782,18 @@ where
         force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
         let policy = self.query_program_policy_context(identity);
-        // Linked client shapes carry their read-policy alternatives so an
-        // identity-scoped server can maintain the authorized result. System
-        // authority is different: it bypasses those alternatives entirely.
-        // Drop them before normalization, rather than merely clearing their
-        // prepared claim descriptor later. Otherwise normalization lowers a
-        // policy `Claim` into `__jazz_claim_*` and the System program still
-        // attempts to execute that unbound predicate.
-        let system_shape;
-        let system_binding;
-        let (shape, binding) = if matches!(policy, PolicyContext::System)
+        // Linked shapes carry read-policy alternatives so a trusted serving
+        // authority can establish the authorized residual frontier.  Neither
+        // System authority nor a client-local receiver may evaluate those
+        // alternatives: System bypasses them, while a receiver consumes the
+        // exact already-authorized CoveredInput closure.  Retaining branches
+        // locally would both re-evaluate policy and turn policy-proof sources
+        // into receiver inputs.
+        let residual_shape;
+        let residual_binding;
+        let strips_policy_branches = matches!(policy, PolicyContext::System)
+            || authorization_mode == QueryAuthorizationMode::ClientLocal;
+        let (shape, binding) = if strips_policy_branches
             && !shape.query().policy_branches.is_empty()
         {
             let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
@@ -802,16 +808,16 @@ where
             };
             let mut query = shape.query().clone();
             query.policy_branches.clear();
-            system_shape = query.validate_with_schema_version(schema, shape.schema_version())?;
-            system_binding = system_shape.bind(
+            residual_shape = query.validate_with_schema_version(schema, shape.schema_version())?;
+            residual_binding = residual_shape.bind(
                 binding
                     .values()
                     .iter()
-                    .filter(|(name, _)| system_shape.params().contains_key(*name))
+                    .filter(|(name, _)| residual_shape.params().contains_key(*name))
                     .map(|(name, value)| (name.clone(), value.clone()))
                     .collect(),
             )?;
-            (&system_shape, &system_binding)
+            (&residual_shape, &residual_binding)
         } else {
             (shape, binding)
         };
@@ -910,6 +916,13 @@ where
                 .map(|scope| format!("{source_shape}:session:{scope}"))
                 .unwrap_or(source_shape)
         });
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=program_scope identity={identity:?} mode={authorization_mode:?} prepared={use_prepared_binding_source} source_shape={source_shape:?} strips_policy_branches={strips_policy_branches} query_policy_branches={} query_includes={} policy={policy:?}",
+                shape.query().policy_branches.len(),
+                shape.query().includes.len(),
+            );
+        }
         let query_schema = self
             .catalogue
             .catalogue_schemas
@@ -2796,14 +2809,6 @@ where
         shape.schema_version() != self.catalogue.current_schema_version_id
     }
 
-    pub(crate) fn apply_query_order(
-        &self,
-        query: &crate::query::Query,
-        rows: &mut [CurrentRow],
-    ) -> Result<(), Error> {
-        self.apply_query_order_in_schema(query, self.catalogue.current_write_schema.schema, rows)
-    }
-
     pub(crate) fn apply_query_order_with_occurrences(
         &self,
         query: &crate::query::Query,
@@ -3208,6 +3213,18 @@ where
             progress_waker,
         )
         .await
+        .map(
+            |(subscription, maintained, schemas, transitions, tables, received, _)| {
+                (
+                    subscription,
+                    maintained,
+                    schemas,
+                    transitions,
+                    tables,
+                    received,
+                )
+            },
+        )
     }
 
     /// Re-publish an Edge window from a durable relay to its non-durable
@@ -3277,6 +3294,18 @@ where
             progress_waker,
         )
         .await
+        .map(
+            |(subscription, maintained, schemas, transitions, tables, received, _)| {
+                (
+                    subscription,
+                    maintained,
+                    schemas,
+                    transitions,
+                    tables,
+                    received,
+                )
+            },
+        )
     }
 
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an
@@ -3339,6 +3368,18 @@ where
             progress_waker,
         )
         .await
+        .map(
+            |(subscription, maintained, schemas, transitions, tables, received, _)| {
+                (
+                    subscription,
+                    maintained,
+                    schemas,
+                    transitions,
+                    tables,
+                    received,
+                )
+            },
+        )
     }
 
     async fn open_seeded_maintained_subscription_view_in_authorization_mode(
@@ -3361,6 +3402,7 @@ where
             super::maintained_subscription_view::ResultTransitions,
             BTreeMap<String, TableSchema>,
             bool,
+            BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
         ),
         Error,
     > {
@@ -3389,6 +3431,20 @@ where
                 prepared_claim_binding_mode,
             )
             .await?;
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=opened_program node={:?} mode={authorization_mode:?} identity={identity:?} tier={tier:?} settled_view={settled_binding_view:?} authority_key={settled_authority_result_key:?} sources={:?} descriptors={:?}",
+                self.node_uuid,
+                program
+                    .request
+                    .reads
+                    .primary
+                    .sources
+                    .keys()
+                    .collect::<Vec<_>>(),
+                program.source_descriptors.keys().collect::<Vec<_>>(),
+            );
+        }
         if let Some(authority_result_key) = settled_authority_result_key {
             for source in program.request.reads.primary.sources.values_mut() {
                 if let crate::node::query_engine::SourceExpr::SettledBindingView {
@@ -3397,6 +3453,89 @@ where
                 } = source
                 {
                     *selected = Some(authority_result_key.clone());
+                }
+            }
+        }
+        // A settled authority receipt supplies source input, not output.
+        // Allocate receiver-local mutable sources after the bootstrap pass
+        // has established their descriptors, then lower the same request
+        // against those sources. No authority result is evaluated or copied
+        // during this step.
+        let mut covered_input_sources = BTreeMap::new();
+        if authorization_mode == QueryAuthorizationMode::ClientLocal {
+            let mut runtime_sources = BTreeMap::new();
+            for (source, source_expr) in &program.request.reads.primary.sources {
+                let uses_receiver_local_input = matches!(
+                    source_expr,
+                    SourceExpr::SettledBindingView { .. }
+                        | SourceExpr::VisibleCurrent {
+                            tier: DurabilityTier::Local,
+                            ..
+                        }
+                );
+                let uses_settled_covered_input = settled_binding_view.is_some()
+                    && matches!(
+                        source_expr,
+                        // Aggregate plans deliberately retain their raw
+                        // Global source rather than pretending synthetic
+                        // aggregate output is source input. The explicit
+                        // runtime-source map below is the capability that
+                        // lets this one occurrence consume a CoveredInput
+                        // closure instead of storage.
+                        SourceExpr::VisibleCurrent { tier, .. }
+                            if *tier >= DurabilityTier::Edge
+                    );
+                if !(uses_receiver_local_input || uses_settled_covered_input) {
+                    continue;
+                }
+                let source_id = source.program_source_id();
+                let Some(descriptor) = program
+                    .covered_input_source_descriptors
+                    .get(&source_id)
+                    .cloned()
+                else {
+                    // This resolved read is authority-local policy/proof or
+                    // an existence gate, not a receiver residual input. It
+                    // must never be revived as a mutable source merely
+                    // because it shares a table with one that is admitted.
+                    continue;
+                };
+                let input_id = self.database.allocate_input_source(descriptor.clone());
+                if covered_input_sources
+                    .insert(
+                        source_id,
+                        maintained_views::CoveredInputSource {
+                            id: input_id,
+                            descriptor,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "duplicate compiled settled program source identity",
+                    ));
+                }
+                runtime_sources.insert(source.clone(), input_id);
+            }
+            if !runtime_sources.is_empty() {
+                program = self
+                    .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
+                        program.request.clone(),
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                        runtime_sources,
+                    )
+                    .await?;
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    eprintln!(
+                        "JAZZ_COVERED_INPUT_TRACE stage=opened_receiver_program node={:?} mode={authorization_mode:?} identity={identity:?} runtime_sources={:?} descriptors={:?}",
+                        self.node_uuid,
+                        covered_input_sources.keys().collect::<Vec<_>>(),
+                        program
+                            .covered_input_source_descriptors
+                            .keys()
+                            .collect::<Vec<_>>(),
+                    );
                 }
             }
         }
@@ -3525,6 +3664,7 @@ where
             transitions,
             tables,
             initial_received,
+            covered_input_sources,
         ))
     }
 
@@ -3577,31 +3717,68 @@ where
     }
 }
 
-/// Wrap a compiler aggregate record in the minimal [`CurrentRow`] envelope.
+/// Normalize a compiler aggregate record into the one application-row layout.
 ///
-/// Aggregate result fields deliberately retain their compiler names here: a
-/// grouped public column can have the same logical label as an aggregate
-/// output, and collapsing either into a table-schema cell map loses one of
-/// them. Consumers with a public aggregate query translate those names through
-/// the centralized helpers at their boundary.
+/// Groove aggregate terminals use `__jazz_aggregate_*` names so an aggregate
+/// alias can never collide with a grouped source field.  That is an internal
+/// graph representation, not a second public record format.  Both a fresh
+/// collector reset and later aggregate deltas pass through this conversion so
+/// they expose the same synthetic `CurrentRow` descriptor.
 fn aggregate_current_row_from_record(
-    table: &str,
+    query: &crate::query::Query,
     row_uuid: RowUuid,
     record: &BorrowedRecord<'_>,
 ) -> Result<CurrentRow, Error> {
     let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
     let mut values = vec![Value::Uuid(row_uuid.0)];
-    for (index, field) in record.descriptor().fields().iter().enumerate() {
-        let name = field.name.clone().ok_or(Error::InvalidStoredValue(
-            "aggregate record field must be named",
-        ))?;
-        fields.push((name, field.value_type.clone()));
+    let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
+        "aggregate record has no aggregate query shape",
+    ))?;
+
+    if let Some(group_by) = &aggregate.group_by {
+        let logical = user_column_field(group_by);
+        let index = record
+            .descriptor()
+            .field_index(&logical)
+            .or_else(|| record.descriptor().field_index(group_by))
+            .ok_or(Error::InvalidStoredValue(
+                "aggregate record is missing group output",
+            ))?;
+        let descriptor = record.descriptor();
+        let field = descriptor
+            .fields()
+            .get(index)
+            .ok_or(Error::InvalidStoredValue(
+                "aggregate group descriptor is missing",
+            ))?;
+        fields.push((logical, field.value_type.clone()));
+        values.push(record.get_idx(index)?);
+    }
+
+    for output in &aggregate.aggregates {
+        let app_field = aggregate_output_app_field(&output.alias);
+        let internal_field = aggregate_output_field(&output.alias);
+        let index = record
+            .descriptor()
+            .field_index(&app_field)
+            .or_else(|| record.descriptor().field_index(&internal_field))
+            .ok_or(Error::InvalidStoredValue(
+                "aggregate record is missing aggregate output",
+            ))?;
+        let descriptor = record.descriptor();
+        let field = descriptor
+            .fields()
+            .get(index)
+            .ok_or(Error::InvalidStoredValue(
+                "aggregate output descriptor is missing",
+            ))?;
+        fields.push((app_field, field.value_type.clone()));
         values.push(record.get_idx(index)?);
     }
     let descriptor = RecordDescriptor::new(fields);
     let raw = descriptor.create(&values)?;
     Ok(CurrentRow::new(
-        table.to_owned(),
+        query.table.clone(),
         OwnedRecord::new(raw, descriptor),
     ))
 }

@@ -1195,7 +1195,7 @@ fn app_rows_are_separate_from_hidden_terminal_facts() {
     let request = row_set_output(BTreeSet::from([
         ProgramFactKey::ResultMembership,
         ProgramFactKey::RelationEdges,
-        ProgramFactKey::SourceCoverage(program_scope()),
+        ProgramFactKey::ProgramSourceCoverage(program_scope()),
     ]));
 
     let app_rows = request.app_rows.as_ref().expect("app rows requested");

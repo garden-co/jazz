@@ -563,12 +563,9 @@ where
         // was absent from that close's snapshot, so reject it and let this
         // guard transfer cleanup to the still-live node owner.
         self.node.ensure_subscription_finalization_open()?;
-        // A projected ordered root needs terminal patches even without nested
-        // arrays: an unprojected sort-key mutation can move a visible row
-        // without changing the projected payload. Unprojected roots retain
-        // ordinary row deltas, including scope re-entry membership changes.
-        let terminal_rows = !local_shape.query().array_subqueries.is_empty()
-            || (local_shape.query().select.is_some() && !local_shape.query().order_by.is_empty());
+        // Compiler-owned root collectors, not surface query syntax, own the
+        // terminal snapshot and positional edits.
+        let terminal_rows = subscription.has_root_collector();
         let mut maintained_subscription = Some(subscription);
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
@@ -670,7 +667,8 @@ where
             };
             if let Some(maintained) = maintained_subscription.as_mut() {
                 let node = self.node.node.lock().await;
-                if let Some(authority_result_key) = settled_authority_result.as_ref()
+                if !maintained.has_covered_input_sources()
+                    && let Some(authority_result_key) = settled_authority_result.as_ref()
                     && authority_result_key.binding_view == binding_view_key
                 {
                     node.seed_local_maintained_authoritative_generation(

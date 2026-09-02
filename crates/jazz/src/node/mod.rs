@@ -882,6 +882,17 @@ struct QueryServing {
 pub(crate) struct AuthorityResultState {
     /// Monotonically increasing receipt for received ViewUpdates.
     applied_view_update_generation: u64,
+    /// Whether this usage-site receipt has actually claimed a complete
+    /// successor input closure for a receiver-local maintained graph.
+    ///
+    /// Merely opening a subscription creates an authority result state, but
+    /// that is not evidence that an empty source closure was selected.  The
+    /// first non-deferred reset claims a particular immutable closure
+    /// generation.  A receiver may wait while this remains pending; once it
+    /// is claimed it must reject any missing, duplicate, or otherwise
+    /// non-exact [`ProgramSourceCoverage`](crate::protocol::ProgramSourceCoverageEntry)
+    /// set atomically rather than accidentally interpreting it as empty.
+    source_closure: AuthoritySourceClosure,
     /// This process has received a complete, exact authority settlement for
     /// this result since it was opened. It is deliberately live-only: durable
     /// membership recovered after a restart is useful cache material, but it
@@ -904,6 +915,21 @@ pub(crate) struct AuthorityResultState {
     deferred_publication: bool,
     pending_authoritative_reset: bool,
     pending_opening: bool,
+}
+
+/// Receipt state for the authority-selected source closure of one usage site.
+///
+/// This is intentionally distinct from membership settlement.  A query may
+/// have an authority-result container before any ViewUpdate selects input
+/// sources, and treating that absence as an empty closure would let a strict
+/// receiver settle before its policy-scoped input arrived.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AuthoritySourceClosure {
+    #[default]
+    Pending,
+    Claimed {
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

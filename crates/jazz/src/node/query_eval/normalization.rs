@@ -7,6 +7,7 @@
 //! build executable Groove graphs.
 
 use super::*;
+use crate::node::query_engine::CoverageScope;
 
 pub(super) fn root_source_id(table: &str) -> SourceId {
     SourceId {
@@ -54,18 +55,29 @@ pub(super) fn current_query_output_request(
             ])
         }
         CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::new(),
+        // A maintained aggregate receiver derives its synthetic groups from
+        // the exact source closure. Aggregate ResultPayload facts are derived
+        // output, not authority input, and retaining them would create a
+        // second result-snapshot path alongside the receiver-local graph.
+        CurrentQueryProgramOutput::MaintainedView if query.aggregate.is_some() => BTreeSet::from([
+            ProgramFactKey::VersionWitnesses,
+            ProgramFactKey::ReplacementWitnesses,
+            ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
+        ]),
         CurrentQueryProgramOutput::MaintainedView if !query.array_subqueries.is_empty() => {
             BTreeSet::from([
                 ProgramFactKey::ResultMembership,
                 ProgramFactKey::VersionWitnesses,
                 ProgramFactKey::ReplacementWitnesses,
                 ProgramFactKey::RelationEdges,
+                ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
             ])
         }
         CurrentQueryProgramOutput::MaintainedView => BTreeSet::from([
             ProgramFactKey::ResultMembership,
             ProgramFactKey::VersionWitnesses,
             ProgramFactKey::ReplacementWitnesses,
+            ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
         ]),
     };
     RowSetOutputRequest {

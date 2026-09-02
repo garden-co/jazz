@@ -4562,6 +4562,7 @@ fn subscription_delta_event(
 ///
 /// Every changed occurrence carries its previous and final position, so
 /// consumers never reconstruct ordering from a suffix convention.
+#[cfg(test)]
 fn subscription_terminal_delta_event(
     tier: DurabilityTier,
     settled: bool,
@@ -4751,22 +4752,26 @@ fn apply_maintained_update_to_snapshot(
     settled: bool,
     terminal_layout: Option<&TerminalRootLayout>,
 ) -> Result<SubscriptionEvent, Error> {
+    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        let update_kind = match &update {
+            LocalMaintainedViewSubscriptionUpdate::Structured {
+                terminal_operations,
+            } => format!("structured:{}", terminal_operations.len()),
+            LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } => {
+                format!("flat:add={} remove={}", added.len(), removed.len())
+            }
+        };
+        eprintln!(
+            "JAZZ_COVERED_INPUT_TRACE stage=apply_maintained_snapshot roots={} update={update_kind}",
+            snapshot.root_count,
+        );
+    }
     match update {
         LocalMaintainedViewSubscriptionUpdate::Flat {
             authoritative_membership_changed: _,
             added,
             removed,
-            terminal_operations,
         } => {
-            if terminal_operations
-                .iter()
-                .any(|operation| !operation.path.is_empty())
-            {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "flat maintained update emitted a descendant terminal operation",
-                ));
-            }
             let mut event = apply_maintained_membership_update_to_snapshot(
                 snapshot,
                 snapshot_index,
@@ -4775,10 +4780,6 @@ fn apply_maintained_update_to_snapshot(
                 tier,
                 settled,
             );
-            // A flat join can have several public occurrences for one root
-            // even though Groove addresses that root only once. Membership
-            // owns the rows; terminal root edits order the occurrence groups.
-            apply_membership_terminal_root_order(snapshot, snapshot_index, &terminal_operations)?;
             let SubscriptionEvent::Delta { added, updated, .. } = &mut event else {
                 unreachable!("maintained updates always emit deltas")
             };
@@ -4859,92 +4860,6 @@ fn apply_maintained_update_to_snapshot(
     }
 }
 
-/// Apply Groove's root order to membership-owned output occurrences.
-///
-/// Groove app rows are keyed by root row, while flat joins can expose several
-/// occurrences of that root. Treat those occurrences as one ordered group and
-/// keep their exact identities in deterministic order within the group.
-fn apply_membership_terminal_root_order(
-    snapshot: &mut RelationSnapshot,
-    snapshot_index: &mut RelationSnapshotIndex,
-    operations: &[groove::ivm::TerminalOperation],
-) -> Result<(), Error> {
-    let occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
-    let roots = snapshot.rows[..snapshot.root_count].to_vec();
-    let mut groups = Vec::<([u8; 16], Vec<(OutputOccurrenceId, CurrentRow)>)>::new();
-    let mut group_positions = BTreeMap::<[u8; 16], usize>::new();
-    for (occurrence, row) in occurrences.into_iter().zip(roots) {
-        let root = occurrence_root_bytes(&occurrence);
-        if let Some(position) = group_positions.get(&root).copied() {
-            groups[position].1.push((occurrence, row));
-        } else {
-            group_positions.insert(root, groups.len());
-            groups.push((root, vec![(occurrence, row)]));
-        }
-    }
-    for (_, entries) in &mut groups {
-        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-    }
-
-    for operation in operations {
-        let root = terminal_occurrence_root_bytes(&operation.root_key)?;
-        let Some(previous_index) = groups.iter().position(|(candidate, _)| *candidate == root)
-        else {
-            // Membership may have filtered an operation emitted for another
-            // binding sharing the maintained graph.
-            continue;
-        };
-        let target_index = match operation.edit {
-            groove::ivm::TerminalEdit::Insert { index, .. }
-            | groove::ivm::TerminalEdit::Move { index, .. } => index,
-            groove::ivm::TerminalEdit::Update { .. } | groove::ivm::TerminalEdit::Remove { .. } => {
-                continue;
-            }
-        };
-        let group = groups.remove(previous_index);
-        groups.insert(target_index.min(groups.len()), group);
-    }
-
-    let mut ordered_occurrences = Vec::with_capacity(snapshot.root_count);
-    let mut ordered_roots = Vec::with_capacity(snapshot.root_count);
-    for (_, entries) in groups {
-        for (occurrence, row) in entries {
-            ordered_occurrences.push(occurrence);
-            ordered_roots.push(row);
-        }
-    }
-    snapshot.rows[..snapshot.root_count].clone_from_slice(&ordered_roots);
-    snapshot_index.roots = root_occurrence_positions(&ordered_occurrences);
-    Ok(())
-}
-
-fn occurrence_root_bytes(occurrence: &OutputOccurrenceId) -> [u8; 16] {
-    occurrence.canonical_bytes()[..16]
-        .try_into()
-        .expect("an output occurrence always begins with its root UUID")
-}
-
-/// Read only the public root UUID from a flat terminal key. Groove may append
-/// hidden binding-route fields (for example an explicit identity claim), while
-/// membership owns the exact public occurrence identity for this path.
-fn terminal_occurrence_root_bytes(encoded: &[u8]) -> Result<[u8; 16], Error> {
-    if encoded.first().copied() != Some(10) {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal root key must begin with a UUID",
-        ));
-    }
-    encoded
-        .get(1..17)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::Protocol,
-                "terminal root key contains a truncated UUID",
-            )
-        })
-}
-
 fn apply_maintained_membership_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
@@ -4995,7 +4910,14 @@ fn apply_maintained_membership_update_to_snapshot(
 
     for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
-            if !snapshot.rows[position].subscription_equivalent(row) {
+            let equivalent = snapshot.rows[position].subscription_equivalent(row);
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=flat_snapshot_replace occurrence={key:?} position={position} equivalent={equivalent} old={:?} new={:?}",
+                    snapshot.rows[position], row,
+                );
+            }
+            if !equivalent {
                 snapshot.rows[position] = row.clone();
                 updated.push(SubscriptionOutputRow {
                     occurrence_id: key.clone(),
@@ -5234,6 +5156,19 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
+    // The facade retains the exact collector tree by folding the same
+    // root/descendant terminal stream it exposes to consumers.  This is not
+    // a second materializer: a later reset is simply a snapshot of this
+    // receiver-local reducer after the ordered operations below have been
+    // applied.  In particular, an authority-covered receiver must never
+    // reconstruct nested children from result membership or authority facts.
+    apply_descendant_terminal_operations_to_snapshot(
+        snapshot,
+        &occurrences,
+        &affected,
+        &descendant_operations,
+    )?;
+
     *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
     snapshot_index.roots = root_occurrence_positions(&occurrences);
 
@@ -5283,6 +5218,272 @@ fn apply_terminal_operations_to_subscription_snapshot(
         settled,
         tier,
     })
+}
+
+/// Fold descendant edits into the private receiver snapshot while preserving
+/// the original operations for public incremental delivery.  A terminal path
+/// names only compiler-owned collection fields and source-row UUID keys, so a
+/// malformed path or non-canonical child identity is a protocol error rather
+/// than a reason to search a table/result relation for a plausible match.
+fn apply_descendant_terminal_operations_to_snapshot(
+    snapshot: &mut RelationSnapshot,
+    occurrences: &[OutputOccurrenceId],
+    roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
+    operations: &[groove::ivm::TerminalOperation],
+) -> Result<(), Error> {
+    for operation in operations {
+        if operation.path.is_empty() {
+            continue;
+        }
+        let occurrence = terminal_root_occurrence_id(&operation.root_key)?;
+        let Some(root_index) = occurrences
+            .iter()
+            .position(|candidate| candidate == &occurrence)
+        else {
+            // A collector can emit the child retractions belonging to a root
+            // it retracts in the same terminal batch.  The public operation
+            // remains useful to a consumer which folds its child state before
+            // the root removal, but the receiver snapshot has already
+            // dropped that root in the root-edit phase above.
+            if roots_changed_in_batch.contains(&occurrence) {
+                continue;
+            }
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "terminal descendant operation addressed a missing root",
+            ));
+        };
+        let root = snapshot.rows.get_mut(root_index).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "terminal root position is outside the receiver snapshot",
+            )
+        })?;
+        apply_descendant_terminal_operation(root, operation)?;
+    }
+    Ok(())
+}
+
+fn apply_descendant_terminal_operation(
+    root: &mut CurrentRow,
+    operation: &groove::ivm::TerminalOperation,
+) -> Result<(), Error> {
+    let (descriptor, raw) = root.encoded_record();
+    if descriptor != &operation.root_descriptor {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant descriptor disagrees with its retained root",
+        ));
+    }
+    let mut values = BorrowedRecord::new(raw, descriptor)
+        .to_values()
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid retained terminal root payload: {error}"),
+            )
+        })?;
+    apply_terminal_path_edit(
+        &mut values,
+        descriptor,
+        operation.path.as_slice(),
+        &operation.edit,
+    )?;
+    let raw = descriptor.create(&values).map_err(|error| {
+        Error::new(
+            ErrorCode::Protocol,
+            format!("cannot encode retained terminal root after descendant edit: {error}"),
+        )
+    })?;
+    *root = CurrentRow::new(
+        root.table().to_owned(),
+        OwnedRecord::new(raw, descriptor.clone()),
+    );
+    Ok(())
+}
+
+fn apply_terminal_path_edit(
+    owner_values: &mut [Value],
+    owner_descriptor: &RecordDescriptor,
+    path: &[groove::ivm::TerminalPathSegment],
+    edit: &groove::ivm::TerminalEdit,
+) -> Result<(), Error> {
+    use groove::ivm::TerminalPathSegment;
+    use groove::records::ValueType;
+
+    let Some((head, rest)) = path.split_first() else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant operation has no collection path",
+        ));
+    };
+    let TerminalPathSegment::Collection(name) = head else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant path must begin with a collection",
+        ));
+    };
+    let field_index = owner_descriptor.field_index(name).ok_or_else(|| {
+        Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant path names an unknown collection",
+        )
+    })?;
+    let child_descriptor = match owner_descriptor
+        .fields()
+        .get(field_index)
+        .map(|field| &field.value_type)
+    {
+        Some(ValueType::Array(element)) => match element.as_ref() {
+            ValueType::Record(descriptor) => (**descriptor).clone(),
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "terminal descendant collection does not contain records",
+                ));
+            }
+        },
+        _ => {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "terminal descendant path names a non-array field",
+            ));
+        }
+    };
+    let Some(Value::Array(children)) = owner_values.get_mut(field_index) else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant collection payload is not an array",
+        ));
+    };
+    match rest {
+        [] => apply_terminal_collection_edit(children, &child_descriptor, edit),
+        [TerminalPathSegment::Key(key), tail @ ..] => {
+            let child_index = terminal_child_index(children, key, "path")?;
+            let Value::Record(child) = &children[child_index] else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "terminal descendant collection contains a non-record child",
+                ));
+            };
+            let mut child_values = child.to_values().map_err(|error| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    format!("invalid retained terminal child payload: {error}"),
+                )
+            })?;
+            apply_terminal_path_edit(&mut child_values, &child_descriptor, tail, edit)?;
+            let raw = child_descriptor.create(&child_values).map_err(|error| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    format!("cannot encode retained terminal child after edit: {error}"),
+                )
+            })?;
+            children[child_index] = Value::Record(OwnedRecord::new(raw, child_descriptor));
+            Ok(())
+        }
+        _ => Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant path does not alternate collection and key",
+        )),
+    }
+}
+
+fn apply_terminal_collection_edit(
+    children: &mut Vec<Value>,
+    descriptor: &RecordDescriptor,
+    edit: &groove::ivm::TerminalEdit,
+) -> Result<(), Error> {
+    use groove::ivm::TerminalEdit;
+
+    let key = match edit {
+        TerminalEdit::Insert { key, .. }
+        | TerminalEdit::Update { key, .. }
+        | TerminalEdit::Remove { key }
+        | TerminalEdit::Move { key, .. } => key,
+    };
+    match edit {
+        TerminalEdit::Insert { index, value, .. } => {
+            let record = OwnedRecord::new(value.clone(), descriptor.clone());
+            if terminal_child_key(&Value::Record(record.clone()))? != *key {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "terminal child insertion payload key disagrees with edit key",
+                ));
+            }
+            if let Some(existing) = terminal_child_index_if_present(children, key)? {
+                children.remove(existing);
+            }
+            children.insert((*index).min(children.len()), Value::Record(record));
+            Ok(())
+        }
+        TerminalEdit::Update { value, .. } => {
+            let index = terminal_child_index(children, key, "update")?;
+            let record = OwnedRecord::new(value.clone(), descriptor.clone());
+            if terminal_child_key(&Value::Record(record.clone()))? != *key {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "terminal child update payload key disagrees with edit key",
+                ));
+            }
+            children[index] = Value::Record(record);
+            Ok(())
+        }
+        TerminalEdit::Remove { .. } => {
+            let index = terminal_child_index(children, key, "removal")?;
+            children.remove(index);
+            Ok(())
+        }
+        TerminalEdit::Move { index, .. } => {
+            let previous = terminal_child_index(children, key, "move")?;
+            let value = children.remove(previous);
+            children.insert((*index).min(children.len()), value);
+            Ok(())
+        }
+    }
+}
+
+fn terminal_child_index_if_present(children: &[Value], key: &[u8]) -> Result<Option<usize>, Error> {
+    for (index, value) in children.iter().enumerate() {
+        if terminal_child_key(value)? == key {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn terminal_child_index(children: &[Value], key: &[u8], operation: &str) -> Result<usize, Error> {
+    terminal_child_index_if_present(children, key)?.ok_or_else(|| {
+        Error::new(
+            ErrorCode::Protocol,
+            format!("terminal child {operation} addressed a missing key"),
+        )
+    })
+}
+
+fn terminal_child_key(value: &Value) -> Result<Vec<u8>, Error> {
+    let Value::Record(record) = value else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant collection contains a non-record child",
+        ));
+    };
+    let Value::Uuid(row_uuid) = record.get_idx(0).map_err(|error| {
+        Error::new(
+            ErrorCode::Protocol,
+            format!("cannot decode terminal child key: {error}"),
+        )
+    })?
+    else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant child key must be its physical row UUID",
+        ));
+    };
+    let mut key = Vec::with_capacity(17);
+    key.push(10);
+    key.extend_from_slice(row_uuid.as_bytes());
+    Ok(key)
 }
 
 fn terminal_subscription_output_row(
@@ -5449,27 +5650,6 @@ fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId, Err
             )
         })
     }
-}
-
-/// Restore the query's observable root order after applying a maintained
-/// membership transition. Groove owns membership/windowing, while this helper
-/// only orders the selected roots before their row-only delta is bridged to an
-/// application subscription.
-fn order_maintained_snapshot_roots<S>(
-    node: &NodeState<S>,
-    query: &crate::query::Query,
-    snapshot: &mut RelationSnapshot,
-    snapshot_index: &mut RelationSnapshotIndex,
-) -> Result<(), Error>
-where
-    S: OrderedKvStorage,
-{
-    let mut roots = snapshot.rows[..snapshot.root_count].to_vec();
-    let mut occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
-    node.apply_query_order_with_occurrences(query, &mut roots, &mut occurrences)?;
-    snapshot.rows[..snapshot.root_count].clone_from_slice(&roots);
-    snapshot_index.roots = root_occurrence_positions(&occurrences);
-    Ok(())
 }
 
 fn snapshot_root_occurrences(

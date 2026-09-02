@@ -21,11 +21,12 @@ pub(super) fn lowered_terminals(
             request,
             plan,
             source,
+            resolved_sources,
             routing_param_fields,
             available_fields,
         );
     }
-    let root_route_fields = routing_param_fields
+    let initial_root_route_fields = routing_param_fields
         .intersection(available_fields)
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -33,6 +34,54 @@ pub(super) fn lowered_terminals(
     // routes. Ordinary query parameters can be absent from provenance-only
     // closure graphs; requiring those fields would either reject the program
     // or suppress raw evidence needed for local evaluation.
+    let root_occurrence_fields = root_join_occurrence_fields(plan, resolved_sources, request)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| available_fields.contains(name))
+        .collect::<BTreeSet<_>>();
+    let initial_closure_root_carrier_fields = initial_root_route_fields
+        .union(&root_occurrence_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut terminals = Vec::new();
+    let initial_closure = lower_closure_membership(
+        graph.clone(),
+        request,
+        source,
+        resolved_sources,
+        &initial_root_route_fields,
+        &initial_closure_root_carrier_fields,
+    )?;
+    // The source graph's conservative field declaration can omit a route
+    // carrier introduced by correlated/policy lowering. Discover it from the
+    // actual post-policy residual root, then rebuild the complete closure
+    // with that exact carrier. Every CoveredInput terminal below is derived
+    // from this rebuilt closure; otherwise the public root can be scoped
+    // while its source witnesses are accidentally unscoped.
+    let root_route_fields = graph_declared_output_fields(&initial_closure.visible_root)
+        .map(|fields| {
+            routing_param_fields
+                .intersection(&fields)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or(initial_root_route_fields.clone());
+    let closure_root_carrier_fields = root_route_fields
+        .union(&root_occurrence_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let closure = if root_route_fields == initial_root_route_fields {
+        initial_closure
+    } else {
+        lower_closure_membership(
+            graph.clone(),
+            request,
+            source,
+            resolved_sources,
+            &root_route_fields,
+            &closure_root_carrier_fields,
+        )?
+    };
     let claim_route_fields = parameter_domain_for_request(request)
         .map_err(single_gap_report)?
         .claim_params
@@ -40,36 +89,16 @@ pub(super) fn lowered_terminals(
         .filter(|field| root_route_fields.contains(*field))
         .cloned()
         .collect::<BTreeSet<_>>();
-    let root_occurrence_fields = root_join_occurrence_fields(plan, resolved_sources, request)?
-        .into_iter()
-        .map(|(name, _)| name)
-        .filter(|name| available_fields.contains(name))
-        .collect::<BTreeSet<_>>();
-    let closure_root_carrier_fields = root_route_fields
-        .union(&root_occurrence_fields)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut terminals = Vec::new();
-    let closure = lower_closure_membership(
-        graph.clone(),
-        request,
-        source,
-        resolved_sources,
-        &root_route_fields,
-        &closure_root_carrier_fields,
-    )?;
+    // Covered inputs are not generic source snapshots.  Their only lawful
+    // producer is the complete authority closure for the exact source
+    // occurrence.  In particular, source.graph may have applied table policy
+    // but still lacks residual/reachable constraints from the surrounding
+    // program.
+    let covered_source_members = closure.covered_source_members(plan.root_source().clone());
     // Correlated include paths can preserve routes in the graph while their
     // conservative root field set omits them. Use the graph's declared output
     // after closure lowering when choosing the fields retained by maintained
     // result-membership facts.
-    let root_route_fields = graph_declared_output_fields(&closure.visible_root)
-        .map(|fields| {
-            routing_param_fields
-                .intersection(&fields)
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or(root_route_fields);
     let visible_root_with_routes = if root_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
@@ -88,111 +117,121 @@ pub(super) fn lowered_terminals(
     // cannot retain any routed binding fields yet.
     if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
-        let (graph, descriptor, hidden_fields, carrier, field_carriers, public_field_names) =
-            match app_rows.projection.clone() {
-                _ if !app_rows.public_terminal => (
+        let (
+            graph,
+            descriptor,
+            hidden_fields,
+            carrier,
+            field_carriers,
+            public_field_names,
+            terminal,
+        ) = match app_rows.projection.clone() {
+            _ if !app_rows.public_terminal => (
+                closure.visible_root.clone(),
+                source.row_shape.descriptor.clone(),
+                hidden_source_fields(&source.row_shape),
+                AppRowCarrier::CurrentRow,
+                BTreeMap::new(),
+                BTreeMap::new(),
+                AppRowTerminal::Direct,
+            ),
+            PayloadProjection::Tree(tree) => {
+                let collected = lower_collect_by_app_rows(
                     closure.visible_root.clone(),
-                    source.row_shape.descriptor.clone(),
-                    hidden_source_fields(&source.row_shape),
-                    AppRowCarrier::CurrentRow,
-                    BTreeMap::new(),
-                    BTreeMap::new(),
-                ),
-                PayloadProjection::Tree(tree) => {
-                    let collected = lower_collect_by_app_rows(
-                        closure.visible_root.clone(),
-                        &tree,
-                        plan,
-                        source,
-                        resolved_sources,
-                        request,
-                        &root_route_fields,
-                        available_fields,
-                    )?;
-                    (
-                        collected.graph,
-                        collected.descriptor,
-                        collected.hidden_fields,
-                        collected.carrier,
-                        collected.field_carriers,
-                        collected.public_field_names,
+                    &tree,
+                    plan,
+                    source,
+                    resolved_sources,
+                    request,
+                    &root_route_fields,
+                    available_fields,
+                )?;
+                (
+                    collected.graph,
+                    collected.descriptor,
+                    collected.hidden_fields,
+                    collected.carrier,
+                    collected.field_carriers,
+                    collected.public_field_names,
+                    collected.terminal,
+                )
+            }
+            _ if projected_output.is_some() => {
+                let (output_source_id, output_fields, _is_flat) = projected_output
+                    .as_ref()
+                    .expect("guarded projected multi-source output");
+                let output_source = resolved_sources.get(output_source_id).ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(format!(
+                        "projected output source {output_source_id:?} was not resolved"
+                    )))
+                })?;
+                let hidden_fields = hidden_source_fields(&output_source.row_shape)
+                    .into_iter()
+                    .chain(
+                        output_fields
+                            .iter()
+                            .filter(|field| field.name.starts_with("__flat_join_row_"))
+                            .map(|field| field.name.clone()),
                     )
-                }
-                _ if projected_output.is_some() => {
-                    let (output_source_id, output_fields, _is_flat) = projected_output
-                        .as_ref()
-                        .expect("guarded projected multi-source output");
-                    let output_source =
-                        resolved_sources.get(output_source_id).ok_or_else(|| {
-                            single_gap_report(UnsupportedReason::Runtime(format!(
-                                "projected output source {output_source_id:?} was not resolved"
-                            )))
-                        })?;
-                    let hidden_fields = hidden_source_fields(&output_source.row_shape)
-                        .into_iter()
-                        .chain(
-                            output_fields
-                                .iter()
-                                .filter(|field| field.name.starts_with("__flat_join_row_"))
-                                .map(|field| field.name.clone()),
+                    .collect::<BTreeSet<_>>();
+                let public_fields = output_fields
+                    .iter()
+                    .filter(|field| !hidden_fields.contains(&field.name))
+                    .collect::<Vec<_>>();
+                let descriptor = RecordDescriptor::new(
+                    public_fields
+                        .iter()
+                        .map(|field| (field.name.clone(), field.ty.clone())),
+                );
+                let graph = graph.clone().project_fields(
+                    public_fields
+                        .iter()
+                        .map(|field| ProjectField::named(&field.name)),
+                );
+                let public_field_names = public_fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name.clone(),
+                            logical_user_column(&field.name).to_owned(),
                         )
-                        .collect::<BTreeSet<_>>();
-                    let public_fields = output_fields
-                        .iter()
-                        .filter(|field| !hidden_fields.contains(&field.name))
-                        .collect::<Vec<_>>();
-                    let descriptor = RecordDescriptor::new(
-                        public_fields
-                            .iter()
-                            .map(|field| (field.name.clone(), field.ty.clone())),
-                    );
-                    let graph = graph.clone().project_fields(
-                        public_fields
-                            .iter()
-                            .map(|field| ProjectField::named(&field.name)),
-                    );
-                    let public_field_names = public_fields
-                        .iter()
-                        .map(|field| {
-                            (
-                                field.name.clone(),
-                                logical_user_column(&field.name).to_owned(),
-                            )
-                        })
-                        .collect();
-                    (
-                        graph,
-                        descriptor,
-                        BTreeSet::new(),
-                        AppRowCarrier::Logical,
-                        BTreeMap::new(),
-                        public_field_names,
-                    )
-                }
-                _ => {
-                    let collected = lower_collect_by_app_rows(
-                        closure.visible_root.clone(),
-                        &AppProjectionTree {
-                            fields: FieldProjection::All,
-                            paths: Vec::new(),
-                        },
-                        plan,
-                        source,
-                        resolved_sources,
-                        request,
-                        &root_route_fields,
-                        available_fields,
-                    )?;
-                    (
-                        collected.graph,
-                        collected.descriptor,
-                        collected.hidden_fields,
-                        collected.carrier,
-                        collected.field_carriers,
-                        collected.public_field_names,
-                    )
-                }
-            };
+                    })
+                    .collect();
+                (
+                    graph,
+                    descriptor,
+                    BTreeSet::new(),
+                    AppRowCarrier::Logical,
+                    BTreeMap::new(),
+                    public_field_names,
+                    AppRowTerminal::Direct,
+                )
+            }
+            _ => {
+                let collected = lower_collect_by_app_rows(
+                    closure.visible_root.clone(),
+                    &AppProjectionTree {
+                        fields: FieldProjection::All,
+                        paths: Vec::new(),
+                    },
+                    plan,
+                    source,
+                    resolved_sources,
+                    request,
+                    &root_route_fields,
+                    available_fields,
+                )?;
+                (
+                    collected.graph,
+                    collected.descriptor,
+                    collected.hidden_fields,
+                    collected.carrier,
+                    collected.field_carriers,
+                    collected.public_field_names,
+                    collected.terminal,
+                )
+            }
+        };
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
             graph,
@@ -202,6 +241,7 @@ pub(super) fn lowered_terminals(
                 carrier,
                 field_carriers,
                 public_field_names,
+                terminal,
             }),
         });
     }
@@ -340,6 +380,13 @@ pub(super) fn lowered_terminals(
             }
         } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
+                let Some(covered_source) = covered_source_members.get(source_id) else {
+                    // Coverage is emitted independently below.  An exact
+                    // source with no visible contribution has an empty input
+                    // relation, not an authorization to reopen its storage
+                    // relation for version facts.
+                    continue;
+                };
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::VersionWitnessContent,
@@ -348,37 +395,30 @@ pub(super) fn lowered_terminals(
                     resolved_source,
                     resolved_sources,
                     request,
-                    BTreeSet::new(),
+                    root_route_fields.clone(),
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
-                    graph: content_version_witness_graph(resolved_source, "version_content")?,
+                    graph: content_version_witness_graph_from_visible_graph(
+                        resolved_source,
+                        covered_source.clone(),
+                        "version_content",
+                        &root_route_fields,
+                    )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
-                if resolved_source.deletion_register.is_none() {
-                    continue;
-                }
-                let deletion_output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::VersionWitnessDeletion,
-                    plan,
-                    source_id,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    BTreeSet::new(),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: deletion_witness_graph_for_current_register(
-                        resolved_source,
-                        "version_deletion",
-                    )?,
-                    output: OutputTerminalSchema::Fact(deletion_output),
-                });
+                // A deletion is a successor-closure retraction of the
+                // previously admitted content witness.  Do not reopen the
+                // deletion register merely to synthesize a body: that would
+                // disclose a historical row that the current policy closure
+                // no longer permits.  The receiver removes the old exact
+                // CoveredInput when this content terminal retracts it.
             }
         } else if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
+                let Some(covered_source) = covered_source_members.get(source_id) else {
+                    continue;
+                };
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::ReplacementWitnessContent,
@@ -387,33 +427,52 @@ pub(super) fn lowered_terminals(
                     resolved_source,
                     resolved_sources,
                     request,
-                    BTreeSet::new(),
+                    root_route_fields.clone(),
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
-                    graph: content_version_witness_graph(resolved_source, "replacement_content")?,
+                    graph: content_version_witness_graph_from_visible_graph(
+                        resolved_source,
+                        covered_source.clone(),
+                        "replacement_content",
+                        &root_route_fields,
+                    )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
-                if resolved_source.deletion_register.is_none() {
-                    continue;
-                }
-                let deletion_output = fact_output_with_terminal(
+                // See VersionWitnesses above: a complete successor closure
+                // retracts the old input; it never needs an unscoped deleted
+                // body to do so.
+            }
+        } else if matches!(fact, ProgramFactKey::ProgramSourceCoverage(_)) {
+            // Closure coverage is control-plane evidence, not a projection of
+            // source rows. Seed exactly one complete receipt for every
+            // compiled source occurrence so an empty table is distinguishable
+            // from a partial or missing authority closure.
+            for source_id in covered_source_members.keys() {
+                let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(
+                        "covered source has no resolved descriptor".to_owned(),
+                    ))
+                })?;
+                let output = fact_output_with_terminal(
                     fact,
-                    ProgramFactTerminal::ReplacementWitnessDeletion,
+                    ProgramFactTerminal::Primary,
                     plan,
                     source_id,
                     resolved_source,
                     resolved_sources,
                     request,
-                    BTreeSet::new(),
+                    root_route_fields.clone(),
                 )?;
+                let ProgramFactSchema::ProgramSourceCoverage(schema) = &output.schema else {
+                    unreachable!("program-source coverage key has matching schema")
+                };
+                let graph =
+                    program_source_coverage_graph(request, schema.complete, &root_route_fields)?;
                 terminals.push(LoweredTerminal {
-                    sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: deletion_witness_graph_for_current_register(
-                        resolved_source,
-                        "replacement_deletion",
-                    )?,
-                    output: OutputTerminalSchema::Fact(deletion_output),
+                    sink: scoped_fact_sink_name(fact, source_id),
+                    graph,
+                    output: OutputTerminalSchema::Fact(output),
                 });
             }
         } else {
@@ -501,6 +560,7 @@ struct LoweredCollectByAppRows {
     pub(super) carrier: AppRowCarrier,
     pub(super) field_carriers: BTreeMap<String, AppRowCarrier>,
     pub(super) public_field_names: BTreeMap<String, String>,
+    pub(super) terminal: AppRowTerminal,
 }
 
 fn lower_collect_by_app_rows(
@@ -627,6 +687,7 @@ fn lower_collect_by_app_rows(
             carrier,
             field_carriers,
             public_field_names,
+            terminal: AppRowTerminal::RootCollector,
         });
     }
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
@@ -736,6 +797,7 @@ fn lower_collect_by_app_rows(
         carrier: AppRowCarrier::Logical,
         field_carriers,
         public_field_names,
+        terminal: AppRowTerminal::RootCollector,
     })
 }
 
@@ -1157,10 +1219,36 @@ fn lowered_aggregate_terminals(
     request: &QueryProgramRequest,
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     routing_param_fields: &BTreeSet<String>,
     available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<LoweredTerminal>> {
     let mut terminals = Vec::new();
+    // A maintained authority is an input publisher, not an aggregate-result
+    // renderer. Its receiver owns the identical aggregate graph and derives
+    // the synthetic row after the admitted source closure is installed.
+    // Retaining an authority ResultPayload here would reintroduce a second
+    // truth path for aggregates.
+    let authority_publishes_covered_inputs = request.authorization_mode
+        == QueryAuthorizationMode::TrustedServing
+        && request
+            .output
+            .facts
+            .contains(&ProgramFactKey::VersionWitnesses);
+    // An aggregate result cannot tell a receiver which input rows were
+    // authorized. Rebuild the graph immediately before the aggregate so the
+    // root contributor witness is selected by the same filters and policy
+    // graph as the authority result. Reading `resolved_source.graph` here
+    // would leak an invisible row into a client-local aggregate.
+    let aggregate_input_graph = aggregate_input_graph(plan, source, resolved_sources, request)?;
+    // Current aggregate lowering accepts aggregate expressions over the root
+    // occurrence only. Joined relations may be authority-local existence
+    // gates, but are not aggregate contributors and must not cross into a
+    // receiver as raw inputs. Keep this registry explicit so supporting a
+    // future aggregate over a joined occurrence requires adding its admitted
+    // residual frontier here rather than silently reopening storage below.
+    let aggregate_contributors =
+        BTreeMap::from([(plan.root_source().clone(), aggregate_input_graph.clone())]);
     let root_route_fields = routing_param_fields
         .intersection(available_fields)
         .cloned()
@@ -1176,7 +1264,8 @@ fn lowered_aggregate_terminals(
                 .collect::<Vec<_>>(),
         )
     };
-    if request.output.app_rows.is_some() {
+    if request.output.app_rows.is_some() && !authority_publishes_covered_inputs {
+        let aggregate_schema = aggregate_result_schema(plan, source, root_route_fields.clone())?;
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
             graph: aggregate_graph.clone(),
@@ -1186,11 +1275,15 @@ fn lowered_aggregate_terminals(
                 carrier: AppRowCarrier::Logical,
                 field_carriers: BTreeMap::new(),
                 public_field_names: BTreeMap::new(),
+                terminal: AppRowTerminal::Aggregate(aggregate_schema),
             }),
         });
     }
     for fact in &request.output.facts {
         if matches!(fact, ProgramFactKey::ResultMembership) {
+            if authority_publishes_covered_inputs {
+                continue;
+            }
             let output = fact_output(
                 fact,
                 plan,
@@ -1214,9 +1307,179 @@ fn lowered_aggregate_terminals(
                 graph,
                 output: OutputTerminalSchema::Fact(output),
             });
+        } else if matches!(fact, ProgramFactKey::ProgramSourceCoverage(_)) {
+            for source_id in aggregate_contributors.keys() {
+                let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(
+                        "aggregate contributor has no resolved descriptor".to_owned(),
+                    ))
+                })?;
+                let output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::Primary,
+                    plan,
+                    source_id,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    root_route_fields.clone(),
+                )?;
+                let ProgramFactSchema::ProgramSourceCoverage(schema) = &output.schema else {
+                    unreachable!("program-source coverage key has matching schema")
+                };
+                let graph =
+                    program_source_coverage_graph(request, schema.complete, &root_route_fields)?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_fact_sink_name(fact, source_id),
+                    graph,
+                    output: OutputTerminalSchema::Fact(output),
+                });
+            }
+        } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
+            // Aggregate result membership is derived output, not an input
+            // snapshot a receiver may replay.  Ship the exact versioned
+            // contributors for every compiled source so a covered receiver
+            // can rebuild the same aggregate graph locally.
+            for (source_id, contributor_graph) in &aggregate_contributors {
+                let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(
+                        "aggregate contributor has no resolved descriptor".to_owned(),
+                    ))
+                })?;
+                let content_output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::VersionWitnessContent,
+                    plan,
+                    source_id,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    root_route_fields.clone(),
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_fact_sink_name(fact, source_id),
+                    graph: content_version_witness_graph_from_visible_graph(
+                        resolved_source,
+                        contributor_graph.clone(),
+                        "version_content",
+                        &root_route_fields,
+                    )?,
+                    output: OutputTerminalSchema::Fact(content_output),
+                });
+                if resolved_source.deletion_register.is_none() {
+                    continue;
+                }
+                let deletion_output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::VersionWitnessDeletion,
+                    plan,
+                    source_id,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    root_route_fields.clone(),
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_deletion_fact_sink_name(fact, source_id),
+                    graph: deletion_witness_graph_for_current_register(
+                        resolved_source,
+                        "version_deletion",
+                    )?,
+                    output: OutputTerminalSchema::Fact(deletion_output),
+                });
+            }
+        } else if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
+            // Keep aggregate contributor replacement evidence in the same
+            // source-fact family as ordinary maintained queries.  A receiver
+            // only admits the source closure, never the aggregate result.
+            for (source_id, contributor_graph) in &aggregate_contributors {
+                let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(
+                        "aggregate contributor has no resolved descriptor".to_owned(),
+                    ))
+                })?;
+                let content_output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::ReplacementWitnessContent,
+                    plan,
+                    source_id,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    root_route_fields.clone(),
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_fact_sink_name(fact, source_id),
+                    graph: content_version_witness_graph_from_visible_graph(
+                        resolved_source,
+                        contributor_graph.clone(),
+                        "replacement_content",
+                        &root_route_fields,
+                    )?,
+                    output: OutputTerminalSchema::Fact(content_output),
+                });
+                if resolved_source.deletion_register.is_none() {
+                    continue;
+                }
+                let deletion_output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::ReplacementWitnessDeletion,
+                    plan,
+                    source_id,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    root_route_fields.clone(),
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_deletion_fact_sink_name(fact, source_id),
+                    graph: deletion_witness_graph_for_current_register(
+                        resolved_source,
+                        "replacement_deletion",
+                    )?,
+                    output: OutputTerminalSchema::Fact(deletion_output),
+                });
+            }
         }
     }
     Ok(terminals)
+}
+
+/// Lower the authority-visible relation immediately before the root aggregate.
+///
+/// The aggregate operator intentionally discards contributor identity. A
+/// covered receiver instead receives version witnesses from this graph and
+/// derives the aggregate itself. Keeping this reconstruction in the compiler
+/// means policy filtering remains authoritative and cannot be bypassed by a
+/// terminal that reopens a physical source relation.
+fn aggregate_input_graph(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<GraphBuilder> {
+    let AnalyzedQueryPlan::Linear(mut input_plan) = plan.clone() else {
+        return Err(single_gap_report(UnsupportedReason::Runtime(
+            "aggregate contributor input requires a linear root plan".to_owned(),
+        )));
+    };
+    match input_plan.steps.pop() {
+        Some(LinearStep::Aggregate { .. }) => {}
+        _ => {
+            return Err(single_gap_report(UnsupportedReason::Runtime(
+                "aggregate contributor input is missing its terminal aggregate step".to_owned(),
+            )));
+        }
+    }
+    lower_plan_steps(
+        source.graph.clone(),
+        &AnalyzedQueryPlan::Linear(input_plan),
+        source,
+        resolved_sources,
+        request,
+    )
+    .map(|lowered| lowered.graph)
+    .map_err(single_gap_report)
 }
 
 fn fact_input_graph(
@@ -1386,14 +1649,11 @@ fn fact_output_with_terminal(
                 routing_param_fields,
             })
         }
-        ProgramFactKey::SourceCoverage(_scope) => {
-            let coverage = coverage_fields(&source.row_shape)?;
-            ProgramFactSchema::SourceCoverage(SourceCoverageSchema {
-                source_field: "source".to_owned(),
-                table_field: "table".to_owned(),
-                row_field: None,
-                coverage_field: coverage.coverage_field.clone(),
-                routing_param_fields: BTreeSet::new(),
+        ProgramFactKey::ProgramSourceCoverage(_scope) => {
+            ProgramFactSchema::ProgramSourceCoverage(ProgramSourceCoverageSchema {
+                source: source_id.program_source_id(),
+                complete: true,
+                routing_param_fields,
             })
         }
         ProgramFactKey::VersionWitnesses => {
@@ -1403,6 +1663,7 @@ fn fact_output_with_terminal(
                 role_field: "event_kind".to_owned(),
                 content: Some(witness.clone()),
                 deletion: Some(witness),
+                routing_param_fields,
             })
         }
         ProgramFactKey::ReplacementWitnesses => {
@@ -1412,6 +1673,7 @@ fn fact_output_with_terminal(
                 role_field: "event_kind".to_owned(),
                 content: Some(witness.clone()),
                 deletion: Some(witness),
+                routing_param_fields,
             })
         }
         ProgramFactKey::RelationEdges => {
@@ -1584,7 +1846,9 @@ pub(super) fn output_routing_fields(output: &ProgramFactOutput) -> BTreeSet<Stri
         ProgramFactSchema::AuthorizedRows(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::ResultMembership(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::AggregateResult(schema) => schema.routing_param_fields.clone(),
-        ProgramFactSchema::SourceCoverage(schema) => schema.routing_param_fields.clone(),
+        ProgramFactSchema::ProgramSourceCoverage(schema) => schema.routing_param_fields.clone(),
+        ProgramFactSchema::VersionWitnesses(schema)
+        | ProgramFactSchema::ReplacementWitnesses(schema) => schema.routing_param_fields.clone(),
         ProgramFactSchema::ReadFrontierSettled(schema) => schema.routing_param_fields.clone(),
         _ => BTreeSet::new(),
     }
@@ -1598,7 +1862,7 @@ fn fact_sink_name(key: &ProgramFactKey) -> String {
         ProgramFactKey::ReplacementWitnesses => "maintained.replacement_content".to_owned(),
         ProgramFactKey::RelationEdges => "maintained.relation_edges".to_owned(),
         ProgramFactKey::PathCorrelationCoverage => "maintained.path_coverage".to_owned(),
-        ProgramFactKey::SourceCoverage(_) => "maintained.source_coverage".to_owned(),
+        ProgramFactKey::ProgramSourceCoverage(_) => "maintained.program_source_coverage".to_owned(),
         other => format!("fact.{other:?}"),
     }
 }
@@ -1670,24 +1934,11 @@ fn fact_terminal_graph(
         )),
         ProgramFactKey::ResultMembership => {
             if root_aggregate_step(plan).is_some() {
-                let graph = match root_aggregate_step(plan) {
-                    Some((group_by, outputs))
-                        if group_by.is_empty()
-                            && matches!(
-                                outputs,
-                                [AggregateExpr {
-                                    function: AggregateFunction::Count,
-                                    ..
-                                }]
-                            ) =>
-                    {
-                        graph.filter(GroovePredicateExpr::Neq {
-                            field: aggregate_output_field(&outputs[0].output.name),
-                            value: LiteralValue::U64(0),
-                        })
-                    }
-                    _ => graph,
-                };
+                // Groove models an ungrouped aggregate as one logical empty
+                // group, including COUNT(*) = 0. Keep that identity in the
+                // ordinary fact terminal: filtering it here used to make
+                // maintained and covered-input reads disagree with one-shot
+                // aggregate evaluation.
                 return Ok(graph.project_fields(aggregate_result_membership_fields(
                     plan,
                     source,
@@ -1723,17 +1974,16 @@ fn fact_terminal_graph(
             let _ = path_correlation_coverage_schema(plan, source, resolved_sources)?;
             Ok(graph)
         }
-        ProgramFactKey::SourceCoverage(_) => {
-            let coverage = coverage_fields(&source.row_shape)?;
-            Ok(graph.project_fields(vec![
-                ProjectField::literal(
-                    "source",
-                    Value::String(source.row_shape.source.table.clone()),
-                ),
-                ProjectField::literal("table", Value::String(source.table_schema.name.clone())),
-                ProjectField::renamed(coverage.coverage_field, "coverage"),
-            ]))
-        }
+        ProgramFactKey::ProgramSourceCoverage(_) => Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
+            explain: ExplainPlan {
+                capabilities: vec![
+                    "program source coverage is an independently seeded control-plane terminal"
+                        .to_owned(),
+                ],
+                ..ExplainPlan::default()
+            },
+        })),
         _ => Err(Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
             explain: ExplainPlan {
@@ -1742,6 +1992,46 @@ fn fact_terminal_graph(
             },
         })),
     }
+}
+
+/// Emit a source-completeness receipt for the currently bound program scope.
+///
+/// A coverage receipt must exist even when the admitted residual relation is
+/// empty. For routed programs, attach the already-admitted binding literals so
+/// it carries exactly the same compiler-owned policy-route fields as the
+/// CoveredInput terminals. The multisink terminal filters those hidden fields
+/// before the receipt is frozen into a protocol fact.
+fn program_source_coverage_graph(
+    request: &QueryProgramRequest,
+    complete: bool,
+    routing_param_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
+    if routing_param_fields.is_empty() {
+        let descriptor = RecordDescriptor::new([("complete", ValueType::Bool)]);
+        return GraphBuilder::values(descriptor, [vec![Value::Bool(complete)]]).map_err(|error| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "could not seed program-source coverage terminal: {error}"
+            )))
+        });
+    }
+    let graph = GraphBuilder::values(
+        RecordDescriptor::new([("complete", ValueType::Bool)]),
+        [vec![Value::Bool(complete)]],
+    )
+    .map_err(|error| {
+        single_gap_report(UnsupportedReason::Runtime(format!(
+            "could not seed routed program-source coverage terminal: {error}"
+        )))
+    })?;
+    let mut fields = vec![ProjectField::named("complete")];
+    fields.extend(
+        routing_param_fields
+            .iter()
+            .map(|field| route_literal_project_field(field, request))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(single_gap_report)?,
+    );
+    Ok(graph.project_fields(fields))
 }
 
 pub(super) fn route_literal_project_field(
@@ -1985,25 +2275,68 @@ fn content_version_witness_graph(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<GraphBuilder> {
+    content_version_witness_graph_from_visible_graph(
+        source,
+        source.graph.clone(),
+        event_kind,
+        &BTreeSet::new(),
+    )
+}
+
+/// Attach immutable version evidence to rows that have already passed the
+/// authority program's visibility graph. This is deliberately separate from
+/// `content_version_witness_graph`: the latter is appropriate for a local
+/// source, while a covered-input publication must not re-open the physical
+/// source and bypass policy/filter selection.
+fn content_version_witness_graph_from_visible_graph(
+    source: &ResolvedSource,
+    visible_graph: GraphBuilder,
+    event_kind: &str,
+    routing_param_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
     let Some(content_version) = &source.content_version else {
-        return Ok(source.graph.clone().project_fields(
-            inline_version_witness_fields_for_tagged_rows(source, event_kind)?,
-        ));
+        let mut fields = inline_version_witness_fields_for_tagged_rows(source, event_kind)?;
+        fields.extend(
+            routing_param_fields
+                .iter()
+                .cloned()
+                .map(ProjectField::named),
+        );
+        return Ok(visible_graph.project_fields(fields));
     };
     let version = version_witness_fields(&source.row_shape)?;
-    Ok(GraphBuilder::semi_join(
+    if routing_param_fields.is_empty() {
+        return Ok(GraphBuilder::semi_join(
+            content_version.graph.clone(),
+            visible_graph,
+            ["row_uuid", "tx_time", "tx_node_id"],
+            [
+                source.row_shape.row_uuid_field.clone(),
+                version.tx_time_field.clone(),
+                version.tx_node_field.clone(),
+            ],
+        )
+        .project_fields(unprefixed_version_witness_fields_for_tagged_rows(
+            source, event_kind,
+        )?));
+    }
+    let mut fields = prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "right.")?;
+    fields.extend(
+        routing_param_fields
+            .iter()
+            .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone())),
+    );
+    Ok(GraphBuilder::join(
+        visible_graph,
         content_version.graph.clone(),
-        source.graph.clone(),
-        ["row_uuid", "tx_time", "tx_node_id"],
         [
             source.row_shape.row_uuid_field.clone(),
             version.tx_time_field.clone(),
             version.tx_node_field.clone(),
         ],
+        ["row_uuid", "tx_time", "tx_node_id"],
     )
-    .project_fields(unprefixed_version_witness_fields_for_tagged_rows(
-        source, event_kind,
-    )?))
+    .project_fields(fields))
 }
 
 fn result_membership_fields(

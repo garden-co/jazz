@@ -26,6 +26,10 @@ pub(crate) fn aggregate_output_field(output: &str) -> String {
     aggregate_output_column(output)
 }
 
+/// Aggregate values in an application `CurrentRow` use the normal physical
+/// cell namespace.  The unprefixed aggregate field is a compiler-internal
+/// graph record name only; it must be normalized before it crosses the
+/// app-row boundary.
 pub(crate) fn aggregate_output_app_field(output: &str) -> String {
     user_column_field(&aggregate_output_field(output))
 }

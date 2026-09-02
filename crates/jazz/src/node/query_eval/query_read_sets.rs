@@ -44,16 +44,24 @@ pub(super) fn current_query_read_set(
         })
         .collect::<BTreeMap<_, _>>();
     for source in &shape.auxiliary_sources {
-        if let Some(binding_view) = settled_binding_view
-            && let Some(source_index) = flat_tuple_source_index(source)
-        {
+        if let Some(binding_view) = settled_binding_view {
             sources.insert(
                 source.clone(),
                 SourceExpr::SettledBindingView {
                     projection: projection.clone(),
                     binding_view,
                     authority_result_key: settled_authority_result_key.clone(),
-                    rows: SettledBindingRows::FlatTupleContributor { source_index },
+                    // Covered inputs are source-occurrence-scoped. The old
+                    // flat-tuple contributor partition existed only because
+                    // result members were (incorrectly) being re-used as
+                    // source data. Keep the enum for durable old state while
+                    // all authority-covered source compilation takes the
+                    // exact source closure instead.
+                    rows: flat_tuple_source_index(source)
+                        .map(|source_index| SettledBindingRows::FlatTupleContributor {
+                            source_index,
+                        })
+                        .unwrap_or(SettledBindingRows::ResultMembers),
                     requires_result_payload: settled_requires_result_payload,
                 },
             );

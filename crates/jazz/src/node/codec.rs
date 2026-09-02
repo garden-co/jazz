@@ -11,10 +11,10 @@ use crate::protocol::{
     CompleteTxPayloadCoverageEntry, ContributingMembersEntry, CoveredInputEntry,
     PathCorrelationCoverageEntry, PathHoleState, PointReadEntry, PolicyDecisionEntry,
     PolicyDecisionOutcomeEntry, PolicyWitnessEntry, PredicateOutputSetEntry,
-    PredicateOutputSetRoleEntry, PredicateReadEntry, ProgramSourceId, ProgramSourceRole,
-    ReadFrontierSettledEntry, RelationEdgeEntry, RelationEdgeKind, RelationEdgeRole,
-    ResultMemberPayloadEntry, ResultRowLayer, ResultRowSource, RowVersionRefEntry, SnapshotRef,
-    SourceCoverageEntry, SyntheticReplacementToken, VersionWitnessEntry,
+    PredicateOutputSetRoleEntry, PredicateReadEntry, ProgramSourceCoverageEntry, ProgramSourceId,
+    ProgramSourceRole, ReadFrontierSettledEntry, RelationEdgeEntry, RelationEdgeKind,
+    RelationEdgeRole, ResultMemberPayloadEntry, ResultRowLayer, ResultRowSource,
+    RowVersionRefEntry, SnapshotRef, SyntheticReplacementToken, VersionWitnessEntry,
     ViewCompleteExclusiveCoverageEntry,
 };
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
@@ -4631,15 +4631,10 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
             program_fact_put_bytes(&mut bytes, &v.correlation_key)?;
             bytes.push(u8::from(v.complete));
         }
-        ProgramFactEntry::SourceCoverage(v) => {
+        ProgramFactEntry::ProgramSourceCoverage(v) => {
             bytes.push(3);
-            program_fact_put_string(&mut bytes, &v.source)?;
-            program_fact_put_string(&mut bytes, v.table.as_str())?;
-            program_fact_put_option(&mut bytes, &v.row, |b, v| {
-                program_fact_put_uuid(b, v.0);
-                Ok(())
-            })?;
-            program_fact_put_bytes(&mut bytes, &v.coverage)?;
+            program_fact_put_source(&mut bytes, &v.source)?;
+            bytes.push(u8::from(v.complete));
         }
         ProgramFactEntry::ReadFrontierSettled(v) => {
             bytes.push(4);
@@ -4859,11 +4854,17 @@ pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramF
                 }
             },
         }),
-        3 => ProgramFactEntry::SourceCoverage(SourceCoverageEntry {
-            source: r.string()?,
-            table: r.string()?.into(),
-            row: program_fact_option(&mut r, |r| Ok(RowUuid(r.uuid()?)))?,
-            coverage: r.bytes()?,
+        3 => ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+            source: program_fact_source(&mut r)?,
+            complete: match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact boolean is invalid",
+                    ));
+                }
+            },
         }),
         4 => ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
             scope: r.string()?,
@@ -6414,11 +6415,9 @@ mod result_member_storage_codec_tests {
                 correlation_key: vec![10],
                 complete: true,
             }),
-            ProgramFactEntry::SourceCoverage(SourceCoverageEntry {
-                source: "s".into(),
-                table: "a".to_owned().into(),
-                row: Some(RowUuid::from_bytes([11; 16])),
-                coverage: vec![12],
+            ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+                source: fixture_source_with_all_roles(),
+                complete: true,
             }),
             ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
                 scope: "s".into(),

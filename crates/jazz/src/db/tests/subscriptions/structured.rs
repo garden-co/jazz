@@ -178,19 +178,11 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert_eq!(added[0].index, 0);
     assert!(terminal_operations.is_empty());
 
-    let binding_view_key = BindingViewKey::new(
-        prepared_query.shape().shape_id(),
-        prepared_query.binding().binding_id(),
-        RegisterShapeOptions::default().read_view_key(),
-    );
-    db.node
-        .node
-        .borrow_mut()
-        .inject_pending_authoritative_reset_for_test(
-            binding_view_key,
-            std::iter::empty(),
-            GlobalTime(0),
-        );
+    // A local runtime replacement is a legitimate reset boundary.  The old
+    // test injected an unscoped `AuthorityResultKey` into a Local stream,
+    // which has no usage-site receipt and therefore cannot name a
+    // `CoveredInput` closure under INV-SYNC-36.
+    db.invalidate_groove_runtime_for_test();
     assert_eq!(db.refresh_subscriptions().unwrap(), 1);
     let reset = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
@@ -204,7 +196,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert_eq!(
         db.active_groove_subscriptions_for_test(),
         1,
-        "an authoritative reset must replace, not leak, its Groove terminal"
+        "a runtime reset must replace, not leak, its Groove terminal"
     );
 
     db.update(
@@ -558,13 +550,12 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     );
 }
 
-/// A structured authority reset can arrive after a live catalogue change has
-/// invalidated the local terminal, but before Groove has rebuilt that
-/// terminal's structured collector. The reset still has authoritative root
-/// rows, so its public occurrence sidecar must be rebuilt from those roots
-/// rather than the intentionally cold local collector.
+/// An unscoped result-payload cache entry is not an authority receipt.  In
+/// particular it cannot hydrate a cold receiver terminal: INV-SYNC-36 admits
+/// only the exact policy-scoped covered-input closure selected at a usage
+/// site.  This guards against reviving the former result-snapshot shortcut.
 #[test]
-fn structured_authoritative_reset_rehydrates_with_cold_occurrence_sidecar() {
+fn structured_unscoped_result_payload_cannot_hydrate_cold_terminal() {
     let schema = relation_schema();
     let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
     let query = Query::from("users").array_subquery(ArraySubquery::new(
@@ -618,9 +609,9 @@ fn structured_authoritative_reset_rehydrates_with_cold_occurrence_sidecar() {
             GlobalTime(42),
         );
 
-    // Same-version policy activation keeps the authority reset but gives the
-    // stream a replacement prepared-runtime token. Do not create local roots
-    // before this reset: the new terminal must be genuinely cold here.
+    // Replace the runtime while its terminal is cold.  The synthetic legacy
+    // cache entry remains deliberately unscoped, so this reset has no exact
+    // covered closure to install.
     db.invalidate_groove_runtime_for_test();
     assert_eq!(db.refresh_subscriptions().unwrap(), 1);
     let mut reset = block_on(subscription.next_raw()).unwrap();
@@ -635,15 +626,21 @@ fn structured_authoritative_reset_rehydrates_with_cold_occurrence_sidecar() {
         ..
     } = reset
     else {
-        panic!("expected rehydrated structured authority reset")
+        panic!("expected cold runtime reset")
     };
     assert!(reset);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
-    assert_eq!(
-        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
-        vec![row(0xc2)],
-        "the authoritative root survives the cold structured replacement"
+    assert!(
+        added.is_empty(),
+        "an unscoped payload must not hydrate a root"
+    );
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .has_pending_authoritative_reset_for_test(binding_view_key),
+        "without an exact usage-site receipt the synthetic reset remains ineligible"
     );
 }
 
@@ -1600,10 +1597,28 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         server.server.tick().unwrap();
         client.tick().unwrap();
         if let Some(event) = subscription.try_next_event() {
+            let SubscriptionEvent::Delta {
+                reset,
+                terminal_operations,
+                ..
+            } = &event
+            else {
+                panic!("expected authority-covered receiver delta")
+            };
+            let reset = *reset;
+            let terminal_operations_empty = terminal_operations.is_empty();
             let snapshot = snapshot_from_event(event);
             if terminal_nested_text_values(&snapshot, row(0xa6), "todosViaOwner", "title")
                 == vec!["remote child".to_owned()]
             {
+                assert!(
+                    reset,
+                    "the first scoped covered-input frontier publishes its complete collector tree as a reset"
+                );
+                assert!(
+                    terminal_operations_empty,
+                    "a reset carries the receiver-local collector snapshot rather than replaying its construction patches"
+                );
                 delivered = Some(snapshot);
                 break;
             }

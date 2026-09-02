@@ -1929,7 +1929,12 @@ fn served_subscription_rows_for_author_with_claims(
         .set_test_provider_claims(author, claims.clone());
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, author);
+    // This direct test models an authenticated reader, not a trusted backend
+    // connection.  The provider cache above supports local test setup but is
+    // not wire/session admission evidence; bind the exact claims that the
+    // policy is expected to evaluate for this subscription.
+    let _subscriber =
+        server.accept_subscriber_with_claims(server_transport, author, claims.clone());
     server
         .node()
         .borrow_mut()

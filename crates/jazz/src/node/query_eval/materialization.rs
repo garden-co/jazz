@@ -398,7 +398,7 @@ where
         let mut rows = Vec::new();
         for (record, _weight) in deltas.iter().filter(|(_, weight)| *weight > 0) {
             rows.push(aggregate_current_row_from_record(
-                &query.table,
+                query,
                 aggregate_query_row_uuid(query, &record)?,
                 &record,
             )?);
@@ -841,7 +841,7 @@ where
         }
         let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
         aggregate_current_row_from_record(
-            query.table.as_str(),
+            query,
             aggregate_result_member_row_uuid(member)?,
             &payload_record,
         )
@@ -1399,14 +1399,13 @@ where
         &mut self,
         local: &LocalMaintainedViewSubscription,
     ) -> Result<LocalMaintainedRelationSnapshot, Error> {
-        if !local.result_query.array_subqueries.is_empty() {
-            let mut rows = local
+        if local.terminal_schemas.has_root_collector() {
+            let rows = local
                 .maintained
-                .structured_app_rows()
+                .structured_app_rows_in_terminal_order()
                 .into_iter()
                 .map(|(_, record)| CurrentRow::new(local.result_table.clone(), record))
                 .collect::<Vec<_>>();
-            self.apply_query_order(&local.result_query, &mut rows)?;
             let root_occurrence_ids = rows
                 .iter()
                 .map(|row| OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0)))

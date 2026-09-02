@@ -1834,6 +1834,115 @@ async fn input_source_replacements_are_atomic_idempotent_and_revoke_cleanly() {
     );
 }
 
+/// Ungrouped aggregates own one empty group. This stays in the ordinary Groove
+/// graph so direct queries, maintained subscriptions, and runtime-owned
+/// covered inputs all observe the same identity transition; no caller creates
+/// a synthetic aggregate record for an empty source.
+#[futures_test::test]
+async fn input_source_ungrouped_aggregate_seeds_and_restores_its_empty_identity() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let source = database.allocate_input_source(descriptor);
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::input_source(source, descriptor),
+        Vec::<String>::new(),
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("count".to_owned()),
+        }],
+    );
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(0)], 1)],
+        "the initial empty input has the SQL aggregate identity"
+    );
+
+    // An explicit complete empty replacement acknowledges the runtime-owned
+    // source frontier but does not duplicate the identity already seeded by
+    // subscription hydration.
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: source,
+            descriptor,
+            records: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let one = descriptor.create(&[Value::U64(1)]).unwrap();
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: source,
+            descriptor,
+            records: vec![one],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(0)], -1), (vec![Value::U64(1)], 1)]
+    );
+
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: source,
+            descriptor,
+            records: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(0)], 1), (vec![Value::U64(1)], -1)],
+        "removing the final input restores the same empty group identity"
+    );
+}
+
+/// Grouped aggregates have no group when their source is empty, unlike the
+/// single logical empty group of an ungrouped aggregate above.
+#[futures_test::test]
+async fn input_source_grouped_aggregate_has_no_empty_group() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("bucket", ColumnType::U64)]);
+    let source = database.allocate_input_source(descriptor);
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::input_source(source, descriptor),
+        ["bucket"],
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("count".to_owned()),
+        }],
+    );
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: source,
+            descriptor,
+            records: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().is_err());
+}
+
 /// Mutable inputs share the binding delta engine with prepared shapes, but
 /// their identity is not a caller-controlled binding name. In particular, a
 /// user may prepare the exact string that older runtimes synthesized for the

@@ -2005,18 +2005,6 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        if input.deltas.is_empty() {
-            if self.context.eval_mode == EvalMode::Hydrate && aggregate.group_key.is_empty() {
-                let record =
-                    aggregate_row_from_records(input.descriptor, output_desc, aggregate, &[])?
-                        .ok_or(IvmRuntimeError::UnsupportedOperator)?;
-                return Ok(RecordDeltas {
-                    descriptor: output_desc,
-                    deltas: vec![RecordDelta { record, weight: 1 }],
-                });
-            }
-            return Ok(RecordDeltas::empty(output_desc));
-        }
         let [input_node] = self
             .graph
             .node(node)
@@ -2029,6 +2017,35 @@ impl TickEvaluator<'_> {
         };
         let input_desc = input.descriptor;
         let group_fields = self.aggregate_group_fields(node, aggregate);
+        let arrangement_key = self.arrangement_key(
+            *input_node,
+            input_desc,
+            &group_fields,
+            ValueComparison::Exact,
+        )?;
+        if input.deltas.is_empty() {
+            // An ungrouped aggregate has one logical empty group. Its
+            // identity is emitted by Groove itself on the first complete
+            // empty frontier; grouped aggregates have no empty group. The
+            // empty arrangement records that this identity has been seeded.
+            let should_seed_empty_group = aggregate.group_key.is_empty()
+                && (self.context.eval_mode == EvalMode::Hydrate
+                    || !self.arrangement_states.contains_key(&arrangement_key));
+            if should_seed_empty_group {
+                let record = aggregate_row_from_records(input_desc, output_desc, aggregate, &[])?
+                    .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                if !self.arrangement_states.contains_key(&arrangement_key) {
+                    let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
+                    arrangement.mark_forward_as_of(self.arrangement_sub_tick(&arrangement_key))?;
+                    self.insert_arrangement(arrangement_key, arrangement);
+                }
+                return Ok(RecordDeltas {
+                    descriptor: output_desc,
+                    deltas: vec![RecordDelta { record, weight: 1 }],
+                });
+            }
+            return Ok(RecordDeltas::empty(output_desc));
+        }
         if self.context.eval_mode == EvalMode::Hydrate {
             let mut groups = BTreeMap::<Vec<u8>, Vec<(Bytes, i64)>>::new();
             for delta in &input.deltas {
@@ -2043,12 +2060,6 @@ impl TickEvaluator<'_> {
                     .push((delta.record.clone(), delta.weight));
             }
             if self.context.hydrate_arrangements {
-                let arrangement_key = self.arrangement_key(
-                    *input_node,
-                    input_desc,
-                    &group_fields,
-                    ValueComparison::Exact,
-                )?;
                 let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
                 arrangement.value_mut().apply_record_deltas(
                     input_desc,
@@ -2072,12 +2083,6 @@ impl TickEvaluator<'_> {
                 deltas: output,
             });
         }
-        let arrangement_key = self.arrangement_key(
-            *input_node,
-            input_desc,
-            &group_fields,
-            ValueComparison::Exact,
-        )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {

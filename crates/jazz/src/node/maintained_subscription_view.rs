@@ -67,6 +67,10 @@ pub(crate) struct MaintainedSubscriptionView {
     /// the encoded tree so a -/+ replacement for one root never requires
     /// touching the rendered trees for other roots.
     structured_app_rows: BTreeMap<RowUuid, BTreeMap<Vec<u8>, i64>>,
+    /// Collector-owned root sequence from the initial Groove terminal
+    /// snapshot.  This is intentionally a sequence rather than a map: Jazz
+    /// must not reconstruct query order from row values after lowering.
+    structured_app_row_order: Vec<RowUuid>,
     structured_app_row_descriptor: Option<RecordDescriptor>,
     /// Whether this maintained subscription retains the recursive app-row
     /// collector. Flat unordered subscriptions release it after their reset;
@@ -92,6 +96,7 @@ impl Default for MaintainedSubscriptionView {
             result_payloads: BTreeMap::new(),
             published_result_payloads: BTreeMap::new(),
             structured_app_rows: BTreeMap::new(),
+            structured_app_row_order: Vec::new(),
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
@@ -217,6 +222,7 @@ pub(crate) enum DecodedMaintainedEvent {
         source: ProgramSourceId,
         row: VersionRow,
     },
+    ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry),
     RelationEdge(RelationEdgeEntry),
     StructuredAppRow {
         root: RowUuid,
@@ -237,14 +243,21 @@ enum MaintainedTerminalKind {
     VersionDeletion(VersionWitnessSchema),
     ReplacementContent(VersionWitnessSchema),
     ReplacementDeletion(VersionWitnessSchema),
+    ProgramSourceCoverage(super::query_engine::ProgramSourceCoverageSchema),
     RelationEdge(RelationEdgeSchema),
-    StructuredAppRows {
+    /// A compiler-lowered public root collector. Its initial state and later
+    /// positional edits are both owned by Groove's terminal reducer.
+    RootCollectorAppRows {
         schema: AppRowSchema,
         layout: TerminalRootLayout,
     },
-    /// Public aggregate rows are a one-shot output sibling. Maintained state
-    /// is driven by the typed AggregateResult fact terminal instead.
-    IgnoredAggregateAppRows,
+    /// Ordinary relational app-row tuples. These have no terminal position
+    /// stream and remain on the membership/materialization bridge.
+    DirectAppRows(AppRowSchema),
+    /// Compiler-owned aggregate app rows. The same local terminal drives its
+    /// reset state and subsequent replacements; derived aggregate results are
+    /// never accepted from an authority snapshot.
+    AggregateAppRows(AggregateResultSchema),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -300,9 +313,6 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
-        if matches!(kind, MaintainedTerminalKind::IgnoredAggregateAppRows) {
-            return Ok(ResultTransitions::default());
-        }
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
         // Deletion witnesses are part of the membership proof: a current-row
         // anti-join can become empty solely because its deletion-register
@@ -342,7 +352,18 @@ impl MaintainedSubscriptionView {
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
         for (sink, terminal) in &deltas.terminal_sinks {
-            if let MaintainedTerminalKind::StructuredAppRows { layout, .. } = schemas.get(sink)? {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+                && !terminal.operations.is_empty()
+            {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=terminal_operations sink={sink} kind={:?} operations={}",
+                    schemas.get(sink)?,
+                    terminal.operations.len(),
+                );
+            }
+            if let MaintainedTerminalKind::RootCollectorAppRows { layout, .. } =
+                schemas.get(sink)?
+            {
                 for operation in &terminal.operations {
                     transitions
                         .terminal_operations
@@ -351,8 +372,22 @@ impl MaintainedSubscriptionView {
             }
         }
         for (sink, deltas) in deltas.sinks {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() && !deltas.is_empty() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=terminal_sink sink={sink} kind={:?} records={}",
+                    schemas.get(&sink)?,
+                    deltas.deltas.len(),
+                );
+            }
+            let root_collector_schema = match schemas.get(&sink)? {
+                MaintainedTerminalKind::RootCollectorAppRows { schema, .. } => Some(schema.clone()),
+                _ => None,
+            };
             let delta_transitions =
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
+            if let Some(schema) = root_collector_schema {
+                self.replace_structured_app_row_order_from_snapshot(&schema, &deltas)?;
+            }
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
             transitions
@@ -373,6 +408,16 @@ impl MaintainedSubscriptionView {
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
         self.finalize_multisink_transitions(&mut transitions, node_aliases);
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+            && (!transitions.adds.is_empty()
+                || !transitions.program_fact_adds.is_empty()
+                || !transitions.program_fact_removes.is_empty())
+        {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=maintained_transition results={:?} fact_adds={:?} fact_removes={:?}",
+                transitions.adds, transitions.program_fact_adds, transitions.program_fact_removes,
+            );
+        }
         Ok(transitions)
     }
 
@@ -437,6 +482,9 @@ impl MaintainedSubscriptionView {
                     let identity = VersionIdentity::for_row(&row);
                     let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
                     NetEvent::Replacement(source, key, identity, row)
+                }
+                DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => {
+                    NetEvent::ProgramFact(ProgramFactEntry::ProgramSourceCoverage(coverage))
                 }
                 DecodedMaintainedEvent::RelationEdge(edge) => {
                     NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
@@ -681,9 +729,20 @@ impl MaintainedSubscriptionView {
             .next()
     }
 
+    #[cfg(test)]
     pub(crate) fn structured_app_rows(&self) -> Vec<(RowUuid, OwnedRecord)> {
         self.structured_app_rows
             .keys()
+            .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
+            .collect()
+    }
+
+    /// The exact public root order emitted by the collector's initial
+    /// snapshot.  Later terminal operations update the subscription snapshot
+    /// directly, so this is only the reset/initial materialization source.
+    pub(crate) fn structured_app_rows_in_terminal_order(&self) -> Vec<(RowUuid, OwnedRecord)> {
+        self.structured_app_row_order
+            .iter()
             .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
             .collect()
     }
@@ -694,6 +753,7 @@ impl MaintainedSubscriptionView {
     /// and version witnesses.
     pub(crate) fn discard_structured_app_rows(&mut self) {
         self.structured_app_rows.clear();
+        self.structured_app_row_order.clear();
         self.structured_app_row_descriptor = None;
         self.retains_structured_app_rows = false;
     }
@@ -709,7 +769,37 @@ impl MaintainedSubscriptionView {
         }
         if records.is_empty() {
             self.structured_app_rows.remove(&root);
+            self.structured_app_row_order
+                .retain(|candidate| candidate != &root);
+        } else if !self.structured_app_row_order.contains(&root) {
+            self.structured_app_row_order.push(root);
         }
+    }
+
+    fn replace_structured_app_row_order_from_snapshot(
+        &mut self,
+        schema: &AppRowSchema,
+        deltas: &RecordDeltas,
+    ) -> Result<(), super::Error> {
+        let row_uuid =
+            schema
+                .descriptor
+                .field_index("row_uuid")
+                .ok_or(super::Error::InvalidStoredValue(
+                    "root collector terminal has no row_uuid field",
+                ))?;
+        let mut order = Vec::new();
+        for (record, weight) in deltas.iter() {
+            if weight <= 0 {
+                continue;
+            }
+            let root = RowUuid(record.get_uuid(row_uuid)?);
+            if !order.contains(&root) {
+                order.push(root);
+            }
+        }
+        self.structured_app_row_order = order;
+        Ok(())
     }
 
     /// Rebase aggregate terminal state after an authoritative remote reset.
@@ -1170,20 +1260,29 @@ impl MaintainedTerminalSchemas {
         let mut sinks = BTreeMap::new();
         for terminal in &program.lowered.terminals {
             if let OutputTerminalSchema::AppRows(rows) = &terminal.output {
-                if rows.descriptor.field_index("row_uuid").is_some() {
-                    sinks.insert(
-                        terminal.sink.clone(),
-                        MaintainedTerminalKind::StructuredAppRows {
+                let kind = match &rows.terminal {
+                    crate::node::query_engine::AppRowTerminal::RootCollector => {
+                        if rows.descriptor.field_index("row_uuid").is_none() {
+                            panic!("public root collector app-row terminal has no row_uuid");
+                        }
+                        MaintainedTerminalKind::RootCollectorAppRows {
                             schema: rows.clone(),
                             layout: terminal_root_layout(rows),
-                        },
-                    );
-                } else {
-                    sinks.insert(
-                        terminal.sink.clone(),
-                        MaintainedTerminalKind::IgnoredAggregateAppRows,
-                    );
-                }
+                        }
+                    }
+                    crate::node::query_engine::AppRowTerminal::Direct
+                        if rows.descriptor.field_index("row_uuid").is_some() =>
+                    {
+                        MaintainedTerminalKind::DirectAppRows(rows.clone())
+                    }
+                    crate::node::query_engine::AppRowTerminal::Aggregate(schema) => {
+                        MaintainedTerminalKind::AggregateAppRows(schema.clone())
+                    }
+                    crate::node::query_engine::AppRowTerminal::Direct => {
+                        panic!("direct app-row terminal has no row_uuid")
+                    }
+                };
+                sinks.insert(terminal.sink.clone(), kind);
                 continue;
             };
             let OutputTerminalSchema::Fact(fact) = &terminal.output else {
@@ -1200,6 +1299,13 @@ impl MaintainedTerminalSchemas {
                     ProgramFactTerminal::Primary,
                     ProgramFactSchema::AggregateResult(schema),
                 ) => Some(MaintainedTerminalKind::AggregateResult(schema.clone())),
+                (
+                    ProgramFactKey::ProgramSourceCoverage(_),
+                    ProgramFactTerminal::Primary,
+                    ProgramFactSchema::ProgramSourceCoverage(schema),
+                ) => Some(MaintainedTerminalKind::ProgramSourceCoverage(
+                    schema.clone(),
+                )),
                 (
                     ProgramFactKey::RelationEdges,
                     ProgramFactTerminal::Primary,
@@ -1254,9 +1360,15 @@ impl MaintainedTerminalSchemas {
 
     pub(crate) fn terminal_root_layout(&self) -> Option<&TerminalRootLayout> {
         self.sinks.values().find_map(|kind| match kind {
-            MaintainedTerminalKind::StructuredAppRows { layout, .. } => Some(layout),
+            MaintainedTerminalKind::RootCollectorAppRows { layout, .. } => Some(layout),
             _ => None,
         })
+    }
+
+    pub(crate) fn has_root_collector(&self) -> bool {
+        self.sinks
+            .values()
+            .any(|kind| matches!(kind, MaintainedTerminalKind::RootCollectorAppRows { .. }))
     }
 }
 
@@ -1372,8 +1484,8 @@ fn decode_typed_terminal_record(
     decode_plan_cache: &mut VersionDecodePlanCache,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
-        MaintainedTerminalKind::IgnoredAggregateAppRows => {
-            unreachable!("ignored aggregate app-row terminals are filtered before record decoding")
+        MaintainedTerminalKind::AggregateAppRows(schema) => {
+            decode_aggregate_app_row(record, schema)
         }
         MaintainedTerminalKind::ResultCurrent(schema) => {
             let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
@@ -1562,6 +1674,27 @@ fn decode_typed_terminal_record(
                     .collect(),
             })
         }
+        MaintainedTerminalKind::ProgramSourceCoverage(schema) => {
+            let complete = match record.get_idx(field_idx(record, "complete")?)? {
+                Value::Bool(complete) => complete,
+                _ => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "program-source coverage complete field must be bool",
+                    ));
+                }
+            };
+            if complete != schema.complete {
+                return Err(super::Error::InvalidStoredValue(
+                    "program-source coverage terminal disagrees with compiled schema",
+                ));
+            }
+            Ok(DecodedMaintainedEvent::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source: schema.source.clone(),
+                    complete,
+                },
+            ))
+        }
         MaintainedTerminalKind::VersionContent(schema) => {
             validate_witness_event_kind(record, "version_content")?;
             decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
@@ -1602,7 +1735,8 @@ fn decode_typed_terminal_record(
             decode_typed_relation_edge(record, schema, tables, node_aliases)
                 .map(DecodedMaintainedEvent::RelationEdge)
         }
-        MaintainedTerminalKind::StructuredAppRows { schema, .. } => {
+        MaintainedTerminalKind::RootCollectorAppRows { schema, .. }
+        | MaintainedTerminalKind::DirectAppRows(schema) => {
             let root = RowUuid(record.get_uuid(field_idx(record, "row_uuid")?)?);
             Ok(DecodedMaintainedEvent::StructuredAppRow {
                 root,
@@ -1610,6 +1744,81 @@ fn decode_typed_terminal_record(
             })
         }
     }
+}
+
+/// Decode the aggregate graph's sole application terminal into the synthetic
+/// member/payload pair used by the maintained reducer.  The member identity is
+/// derived from the group key (or the one ungrouped empty group) and the
+/// replacement token from the aggregate value; neither is an authority-sent
+/// result row.
+fn decode_aggregate_app_row(
+    record: BorrowedRecord<'_>,
+    schema: &AggregateResultSchema,
+) -> Result<DecodedMaintainedEvent, super::Error> {
+    if schema.group_key_fields.len() > 1 {
+        return Err(super::Error::InvalidStoredValue(
+            "aggregate app-row terminal has unsupported multi-column group identity",
+        ));
+    }
+    let descriptor = record.descriptor();
+    let (row_value, row_type) = match schema.group_key_fields.first() {
+        Some(group) => {
+            let index =
+                descriptor
+                    .field_index(&group.name)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "aggregate app-row terminal is missing group identity",
+                    ))?;
+            let field = descriptor
+                .fields()
+                .get(index)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate app-row group descriptor is missing",
+                ))?;
+            (record.get_idx(index)?, field.value_type.clone())
+        }
+        None => (Value::String("global".to_owned()), ValueType::String),
+    };
+    let row = settled_result_value_storage_bytes(&row_value, &row_type)?;
+    let (replacement_value, replacement_type) = match schema.value_fields.first() {
+        Some(output) => {
+            let index =
+                descriptor
+                    .field_index(&output.name)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "aggregate app-row terminal is missing aggregate output",
+                    ))?;
+            let field = descriptor
+                .fields()
+                .get(index)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate app-row output descriptor is missing",
+                ))?;
+            (record.get_idx(index)?, field.value_type.clone())
+        }
+        None => (Value::String("empty".to_owned()), ValueType::String),
+    };
+    let replacement = settled_result_value_storage_bytes(&replacement_value, &replacement_type)?;
+    let member = ResultMemberEntry::Synthetic {
+        table: "aggregate_result".to_owned(),
+        row,
+        replacement: SyntheticReplacementToken::from_encoded_record(replacement),
+    };
+    let payload = ResultMemberPayloadEntry {
+        member: member.clone(),
+        descriptor: encode_record_descriptor(&descriptor)?,
+        record: record.raw().to_vec(),
+    };
+    Ok(DecodedMaintainedEvent::AggregateResult {
+        member,
+        payload,
+        synthetic: schema.synthetic.clone(),
+        value_fields: schema
+            .value_fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect(),
+    })
 }
 
 /// Domain separation for the durable flat-join result revision.
@@ -2723,6 +2932,7 @@ mod tests {
                 ),
                 ("__jazz_include_project".to_owned(), "project".to_owned()),
             ]),
+            terminal: crate::node::query_engine::AppRowTerminal::RootCollector,
         };
         let layout = terminal_root_layout(&rows);
         assert_eq!(

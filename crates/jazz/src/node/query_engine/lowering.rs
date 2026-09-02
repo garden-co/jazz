@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::ProgramSourceId;
 mod collect_layout;
 use collect_layout::*;
 use groove::ivm::{
@@ -135,15 +136,11 @@ pub(crate) async fn prepare_and_lower_query_program(
                     }));
                 }
             };
-        if graph_contains_input_source(&resolved_source.graph) {
-            return Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Runtime(
-                    "runtime-owned Groove input sources cannot be used as Jazz query sources"
-                        .to_owned(),
-                )],
-                explain: explain_with_request(&request, explain),
-            }));
-        }
+        // A receiver-local maintained subscription may replace an
+        // authority-approved source closure through runtime-owned input
+        // sources.  Those inputs are allocated by the receiving database and
+        // remain wholly local; the frozen `ProgramSourceId` maps them back to
+        // exactly one normalized source before this lowering boundary.
         explain.physical.push(format!(
             "source {:?} ({:?}) -> resolved table {}",
             source,
@@ -237,6 +234,10 @@ pub(crate) fn lower_resolved_query_program(
             .map(|terminal| terminal.output.clone())
             .collect(),
     );
+    // `resolved_sources` also contains authority-local proof and existence
+    // reads. A receiver may allocate only the exact occurrences that have a
+    // post-policy residual version-witness terminal.
+    let covered_input_source_descriptors = covered_input_source_descriptors(&terminals)?;
 
     for terminal in &terminals {
         collect_binding_source_params(&terminal.graph, &mut parameters);
@@ -265,9 +266,47 @@ pub(crate) fn lower_resolved_query_program(
                 })
                 .collect(),
         },
+        source_descriptors: resolved_sources
+            .iter()
+            .map(|(source, resolved)| {
+                (
+                    source.program_source_id(),
+                    resolved.row_shape.descriptor.clone(),
+                )
+            })
+            .collect(),
+        covered_input_source_descriptors,
         request,
         explain,
     })
+}
+
+fn covered_input_source_descriptors(
+    terminals: &[LoweredTerminal],
+) -> CapabilityResult<BTreeMap<ProgramSourceId, RecordDescriptor>> {
+    let mut descriptors = BTreeMap::new();
+    for terminal in terminals {
+        let OutputTerminalSchema::Fact(ProgramFactOutput {
+            key: ProgramFactKey::VersionWitnesses,
+            schema: ProgramFactSchema::VersionWitnesses(schema),
+            ..
+        }) = &terminal.output
+        else {
+            continue;
+        };
+        let Some(witness) = schema.content.as_ref() else {
+            continue;
+        };
+        if let Some(existing) =
+            descriptors.insert(witness.source.clone(), witness.descriptor.clone())
+            && existing != witness.descriptor
+        {
+            return Err(single_gap_report(UnsupportedReason::Runtime(
+                "covered input source has conflicting compiled descriptors".to_owned(),
+            )));
+        }
+    }
+    Ok(descriptors)
 }
 
 #[cfg(test)]
@@ -456,16 +495,22 @@ fn source_authorization_for_source(
     // Client-local results are scoped by the upstream emission boundary, not
     // by a second, potentially stale/incomplete local policy evaluation.
     if request.authorization_mode == QueryAuthorizationMode::ClientLocal {
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=source_authorization mode=client_local source={source:?} policy={:?} authorization=system",
+                request.policy,
+            );
+        }
         return Ok(SourceAuthorizationRequest::System);
     }
-    match &request.policy {
-        PolicyContext::System => Ok(SourceAuthorizationRequest::System),
+    let authorization = match &request.policy {
+        PolicyContext::System => SourceAuthorizationRequest::System,
         PolicyContext::AuthorizationSubplan {
             protected_source, ..
-        } if protected_source == source => Ok(SourceAuthorizationRequest::System),
+        } if protected_source == source => SourceAuthorizationRequest::System,
         PolicyContext::Identity {
             permission_subject, ..
-        } => Ok(SourceAuthorizationRequest::PolicyFiltered {
+        } => SourceAuthorizationRequest::PolicyFiltered {
             permission_subject: *permission_subject,
             plan: PolicyAuthorizationPlan {
                 protected_source: source.clone(),
@@ -475,11 +520,18 @@ fn source_authorization_for_source(
                 binding_user_params: binding_user_param_types(&request.input.binding)?,
                 binding_claim_params: request.input.binding.claim_params.clone(),
             },
-        }),
+        },
         // Auxiliary closure and payload sources do not establish policy
         // membership, so proof compilation reads them under system authority.
-        PolicyContext::AuthorizationSubplan { .. } => Ok(SourceAuthorizationRequest::System),
+        PolicyContext::AuthorizationSubplan { .. } => SourceAuthorizationRequest::System,
+    };
+    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        eprintln!(
+            "JAZZ_COVERED_INPUT_TRACE stage=source_authorization mode=trusted_serving source={source:?} policy={:?} authorization={authorization:?}",
+            request.policy,
+        );
     }
+    Ok(authorization)
 }
 
 fn binding_user_param_types(
@@ -816,6 +868,13 @@ pub(crate) struct QueryProgram {
     pub(crate) request: QueryProgramRequest,
     /// Groove graph and its boundary contracts.
     pub(crate) lowered: LoweredGraph,
+    /// Canonical record descriptor for every normalized source occurrence.
+    /// Receiver-owned authority closures use this solely to allocate and
+    /// validate local mutable Groove inputs; it is never a wire identity.
+    pub(crate) source_descriptors: BTreeMap<ProgramSourceId, RecordDescriptor>,
+    /// Exact post-policy source occurrences that may cross into a
+    /// receiver-local maintained graph as CoveredInput.
+    pub(crate) covered_input_source_descriptors: BTreeMap<ProgramSourceId, RecordDescriptor>,
     /// Human-readable debugging and test artifact.
     pub(crate) explain: ExplainPlan,
 }
