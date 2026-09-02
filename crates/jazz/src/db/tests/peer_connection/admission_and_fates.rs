@@ -2208,6 +2208,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
             &edge_client.borrow().link,
             ConnectionLink::Subscriber(state)
                 if fresh_group_subscription != old_maintained_subscription
+                    && !state.peer.has_maintained_subscription(old_maintained_subscription)
                     && state.peer.has_maintained_subscription(fresh_group_subscription)
                     && state
                         .peer
