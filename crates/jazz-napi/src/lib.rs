@@ -5823,6 +5823,63 @@ mod tests {
     use serde_json::json;
     use std::cell::RefCell;
 
+    /// An initialized raw streaming handle must relinquish its durable
+    /// retainer when JavaScript drops it. The zero-age maintenance pass is
+    /// deliberately run only after a binding tick, so this distinguishes
+    /// asynchronous Drop cleanup from the TTL backstop.
+    #[test]
+    fn dropped_initialized_stream_is_cleaned_by_the_binding_tick() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("payload", ColumnType::Bytea)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = serde_json::to_vec(&source).expect("encode streaming schema");
+        let author = CoreAuthorSubject::for_test_bytes([0xd1; 16]);
+        let config = encode_persistent_open_config(author);
+        let db = NapiDb::open_memory(Uint8Array::from(schema), Uint8Array::from(config))
+            .expect("open streaming fixture");
+        let descriptor = RecordDescriptor::new(Vec::<(String, ValueType)>::new());
+        let raw = descriptor.create(&[]).expect("encode streaming cells");
+        let cells = postcard::to_allocvec(&(descriptor, raw)).expect("encode streaming cells");
+        let mut stream = db
+            .begin_streaming_mutation_encoded(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xd2; 16]),
+                Uint8Array::from(cells),
+                "payload".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("begin streaming mutation");
+        stream
+            .push(Uint8Array::from(b"orphaned".to_vec()))
+            .expect("stage streaming bytes");
+        drop(stream);
+        std::thread::sleep(Duration::from_millis(2));
+
+        db.set_large_value_staging_policy(9_000_000_000_000_000.0, 1.0, Some(0.0))
+            .expect("set immediate expiry backstop");
+        db.tick().expect("binding tick");
+        assert_eq!(
+            db.evict_expired_staged_large_values()
+                .expect("maintenance pass"),
+            0,
+            "Drop cleanup must win before the TTL backstop"
+        );
+    }
+
     /// The direct NAPI mutation surface is intentionally synchronous only for
     /// its first resident admission turn. This internal receipt needs a
     /// controlled storage future because neither public NAPI storage adapter
