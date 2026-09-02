@@ -1276,6 +1276,7 @@ fn reset_rejects_view_payload_outside_complete_set_in_both_orders() {
 fn reopened_scope_conflicts_preserve_persisted_transaction() {
     for stored_complete in [false, true] {
         let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let first = version_record(row(1), Vec::new(), title_cells("one"), None);
@@ -1293,19 +1294,22 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
                     stored_scope,
                     vec![first.clone()],
                 )],
-                true,
+                false,
             ))
             .unwrap();
         drop(reader);
 
         let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+        register_whole_table_receiver(&mut reader, "todos");
         let conflicting_scope = if stored_complete {
             crate::protocol::VersionBundleScope::ViewScoped
         } else {
             crate::protocol::VersionBundleScope::CompleteTransaction
         };
-        let result = reader
-            .apply_view_update(reset_scope_update(
+        // This reset conflict has no logical input removal. The old fixture's
+        // unrelated row-9 removal was deliberately absent after reopen and
+        // masked the persisted-transaction scope conflict under test.
+        let conflicting_update = reset_scope_update(
                 subscription,
                 tx_id,
                 vec![reset_scope_bundle(
@@ -1318,8 +1322,10 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
                         None,
                     )],
                 )],
-                true,
-            ))
+                false,
+            );
+        let result = reader
+            .apply_view_update(conflicting_update)
             .resolve();
         assert!(matches!(
             result,

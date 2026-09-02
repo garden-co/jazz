@@ -1213,6 +1213,7 @@ fn storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement() {
     let row_uuid = row(25);
     let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
     commit_mergeable_global(
         &mut writer,
         &mut core,
