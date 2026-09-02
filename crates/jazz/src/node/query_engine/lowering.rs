@@ -92,6 +92,31 @@ pub(crate) fn query_program_source_requests(
         .collect()
 }
 
+/// Prepare the policy-filtered include-deleted sibling only for a visible
+/// source that actually requested an exact deletion-register witness. This
+/// retains the normal source occurrence and authorization plan, while keeping
+/// ordinary non-deletion programs on their existing one-source path.
+pub(crate) fn authorized_deletion_preimage_source_request(
+    request: &SourceRequest,
+) -> Option<SourceRequest> {
+    if request.visibility != RowVisibility::Visible
+        || !request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::DeletionMarkers)
+    {
+        return None;
+    }
+    let mut preimage = request.clone();
+    preimage.visibility = RowVisibility::IncludeDeleted;
+    // The sibling supplies only the policy-filtered preimage. It must not ask
+    // an IncludeDeleted resolver for visible-only witnesses: the ordinary
+    // source retains the exact register tx/branch/schema carrier, and the
+    // terminal joins this sibling solely by its canonical deleted winner.
+    preimage.requirements.metadata.clear();
+    Some(preimage)
+}
+
 /// Prepare concrete source descriptions, then synchronously lower the program.
 ///
 /// This is an explicit compatibility boundary while snapshot capture and
@@ -123,7 +148,7 @@ pub(crate) async fn prepare_and_lower_query_program(
         // Policy programs have already been prepared by compilation
         // orchestration; this future is only for source-local snapshot and
         // physical-layout work that has not migrated to Groove yet.
-        let resolved_source =
+        let mut resolved_source =
             match Box::pin(source_preparer.prepare_source_graph(&source_request)).await {
                 Ok(resolved_source) => resolved_source,
                 Err(err) => {
@@ -137,6 +162,29 @@ pub(crate) async fn prepare_and_lower_query_program(
                     }));
                 }
             };
+        if resolved_source.deletion_register.is_some()
+            && let Some(preimage_request) =
+                authorized_deletion_preimage_source_request(&source_request)
+        {
+            let preimage = Box::pin(source_preparer.prepare_source_graph(&preimage_request))
+                .await
+                .map_err(|err| {
+                    Box::new(CapabilityReport {
+                        gaps: vec![UnsupportedReason::Source(err.gap)],
+                        explain: explain_with_request(
+                            &request,
+                            ExplainPlan {
+                                read: vec![format!(
+                                    "failed authorized deletion preimage request: {:#?}",
+                                    err.request
+                                )],
+                                ..ExplainPlan::default()
+                            },
+                        ),
+                    })
+                })?;
+            resolved_source.authorized_deletion_preimage = Some(preimage.graph);
+        }
         // A receiver-local maintained subscription may replace an
         // authority-approved source closure through runtime-owned input
         // sources.  Those inputs are allocated by the receiving database and

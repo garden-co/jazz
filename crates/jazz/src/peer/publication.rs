@@ -26,35 +26,6 @@ fn ordinary_current_content_member(member: &ResultMemberEntry) -> bool {
         && row.batch.is_none())
 }
 
-/// A raw deletion-register row is not itself read authorization.  It is safe
-/// to deliver only as the exact successor of content this receiver's current
-/// source closure retracted in the same IVM drain.  That distinguishes an
-/// authorized delete from a policy withdrawal, a later delete after access
-/// revocation, and a cold deletion the receiver never observed.
-fn deletion_witness_has_same_drain_content_retraction(
-    fact: &ProgramFactEntry,
-    predecessor: &BTreeSet<ProgramFactEntry>,
-    removals: &[ProgramFactEntry],
-) -> bool {
-    let ProgramFactEntry::CoveredInput(deletion) = fact else {
-        return true;
-    };
-    if deletion.version.layer != crate::protocol::ResultRowLayer::Deletion {
-        return true;
-    }
-    let is_matching_content = |fact: &ProgramFactEntry| {
-        let ProgramFactEntry::CoveredInput(content) = fact else {
-            return false;
-        };
-        content.version.layer == crate::protocol::ResultRowLayer::Content
-            && content.source == deletion.source
-            && content.version_table == deletion.version_table
-            && content.source_row == deletion.source_row
-            && content.version.branch_or_prefix == deletion.version.branch_or_prefix
-    };
-    predecessor.iter().any(is_matching_content) && removals.iter().any(is_matching_content)
-}
-
 /// Reconcile a retained downstream result set against a cold maintained-view
 /// snapshot that contains a static deletion witness. The active membership is
 /// authoritative for removals. Publishability only gates members the
@@ -1094,8 +1065,8 @@ impl PeerState {
             removes: mut result_member_removes,
             result_payload_adds: _,
             result_payload_removes: _,
-            program_fact_adds: raw_program_fact_adds,
-            program_fact_removes: raw_program_fact_removes,
+            program_fact_adds,
+            program_fact_removes,
             allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
@@ -1117,8 +1088,8 @@ impl PeerState {
         // full closure in an incremental frame, repeating its coverage
         // manifest and previously acknowledged content.
         if public_result_is_silent
-            && raw_program_fact_adds.is_empty()
-            && raw_program_fact_removes.is_empty()
+            && program_fact_adds.is_empty()
+            && program_fact_removes.is_empty()
             && (requires_authoritative_membership_reconcile
                 || (observed_result_delta_batches > 0
                     ))
@@ -1183,13 +1154,6 @@ impl PeerState {
                 "maintained subscription view is missing source closure state",
             ))?
             .into_iter()
-            .filter(|fact| {
-                deletion_witness_has_same_drain_content_retraction(
-                    fact,
-                    &previous_program_fact_set,
-                    &raw_program_fact_removes,
-                )
-            })
             .collect::<BTreeSet<_>>();
         let (program_fact_adds, program_fact_removes) =
             canonical_set_delta(&previous_program_fact_set, &current_program_fact_set);
@@ -1760,11 +1724,6 @@ impl PeerState {
                 .read_policy
                 .is_some();
         let known_state = self.downstream_known_states.get(&subscription).cloned();
-        let previous_program_fact_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::program_fact_set)
-            .unwrap_or_default();
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
             self.fast_cursor_authorization_matches(subscription, &known_state);
@@ -1839,19 +1798,8 @@ impl PeerState {
             result_member_removes.clear();
             (Vec::new(), Vec::new(), false)
         } else {
-            let deletion_witness_removals = transitions.program_fact_removes.clone();
             (
-                transitions
-                    .program_fact_adds
-                    .into_iter()
-                    .filter(|fact| {
-                        deletion_witness_has_same_drain_content_retraction(
-                            fact,
-                            &previous_program_fact_set,
-                            &deletion_witness_removals,
-                        )
-                    })
-                    .collect(),
+                transitions.program_fact_adds,
                 transitions.program_fact_removes,
                 reset_result_set,
             )

@@ -2706,6 +2706,34 @@ fn deletion_witness_graph_for_current_register(
             explain: ExplainPlan::default(),
         }));
     };
+    let Some(authorized_preimage) = &source.authorized_deletion_preimage else {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(
+                "resolved source did not provide authorized deletion preimage".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        }));
+    };
+    // The raw register owns the exact deletion transaction/branch/schema
+    // witness. The sibling is the same source occurrence evaluated under its
+    // current IncludeDeleted policy, so it authorizes only the preimage that
+    // the receiver may learn is deleted. Match the register's exact winner,
+    // not merely a row id: a later deletion of the same row must never borrow
+    // authorization from an earlier one.
+    let authorized_deleted_winner = authorized_preimage
+        .clone()
+        .filter(GroovePredicateExpr::from_field_literal(
+            PredicateKind::Eq,
+            "__jazz_deleted",
+            LiteralValue::Bool(true),
+        ))
+        .project(["row_uuid", "tx_time", "tx_node_id"]);
+    let authorized_register = GraphBuilder::semi_join(
+        register.graph.clone(),
+        authorized_deleted_winner,
+        [register.row_uuid_field.as_str(), "tx_time", "tx_node_id"],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    );
     let mut fields = deletion_witness_fields_for_tagged_rows(source, event_kind)?;
     fields.extend(
         routing_param_fields
@@ -2714,7 +2742,7 @@ fn deletion_witness_graph_for_current_register(
             .collect::<Result<Vec<_>, _>>()
             .map_err(single_gap_report)?,
     );
-    Ok(register.graph.clone().project_fields(fields))
+    Ok(authorized_register.project_fields(fields))
 }
 
 fn content_version_witness_graph(

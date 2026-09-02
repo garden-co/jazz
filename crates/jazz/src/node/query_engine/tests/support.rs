@@ -693,6 +693,7 @@ impl SourceGraphPreparer for FakeSourceResolver {
                 requires_result_payload: false,
                 content_version,
                 deletion_register,
+                authorized_deletion_preimage: None,
             })
         })
     }
@@ -927,6 +928,7 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                 requires_result_payload: false,
                 content_version: None,
                 deletion_register: None,
+                authorized_deletion_preimage: None,
             })
         })
     }

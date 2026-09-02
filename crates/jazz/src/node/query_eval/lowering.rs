@@ -565,6 +565,20 @@ where
     ) -> Result<BTreeMap<String, Option<PolicyAuthorizationGraph>>, Error> {
         let source_requests = query_program_source_requests(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
+        // A deletion terminal carries the raw register but must be gated by
+        // the same source occurrence resolved with its deleted preimage.
+        // Preload that policy dependency before the source preparer reaches
+        // the sibling; this is only dependency compilation, not another
+        // physical source preparation for ordinary reads.
+        let policy_source_requests = source_requests
+            .iter()
+            .cloned()
+            .chain(
+                source_requests
+                    .iter()
+                    .filter_map(authorized_deletion_preimage_source_request),
+            )
+            .collect::<Vec<_>>();
         let read_view = request.reads.primary.clone();
         let dependencies = {
             let mut preparer = JazzSourceGraphPreparer {
@@ -578,7 +592,7 @@ where
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
             };
-            source_requests
+            policy_source_requests
                 .iter()
                 .map(|source| preparer.policy_dependency_request(source))
                 .collect::<Result<Vec<_>, _>>()?

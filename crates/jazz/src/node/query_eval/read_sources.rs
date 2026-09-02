@@ -141,6 +141,7 @@ where
                 requires_result_payload: false,
                 content_version: None,
                 deletion_register: None,
+                authorized_deletion_preimage: None,
             });
         }
         let (projection, graph_tier, history_position, snapshot, open_tx_overlay, branch_view) =
@@ -275,6 +276,7 @@ where
                 requires_result_payload: false,
                 content_version: None,
                 deletion_register: None,
+                authorized_deletion_preimage: None,
             });
         }
         let (graph, descriptor, metadata, routing_fields) = if let Some((head, base)) = branch_view
@@ -352,6 +354,7 @@ where
                     requires_result_payload: false,
                     content_version: None,
                     deletion_register: None,
+                    authorized_deletion_preimage: None,
                 });
             }
             if request.visibility != RowVisibility::Visible {
@@ -504,6 +507,7 @@ where
                     requires_result_payload: true,
                     content_version,
                     deletion_register,
+                    authorized_deletion_preimage: None,
                 });
             }
             if matches!(base, Some(BranchViewSourceBase::Snapshot(_, _))) {
@@ -743,6 +747,7 @@ where
                             row_uuid_field: "row_uuid".to_owned(),
                         }),
                     deletion_register: None,
+                    authorized_deletion_preimage: None,
                 });
             }
             let rows = self
@@ -1406,6 +1411,7 @@ where
             requires_result_payload: false,
             content_version,
             deletion_register,
+            authorized_deletion_preimage: None,
         })
     }
 
@@ -1504,6 +1510,7 @@ where
             requires_result_payload: false,
             content_version,
             deletion_register,
+            authorized_deletion_preimage: None,
         })
     }
 
@@ -1662,6 +1669,7 @@ where
             requires_result_payload: false,
             content_version,
             deletion_register,
+            authorized_deletion_preimage: None,
         })
     }
 }
@@ -1740,6 +1748,7 @@ where
             requires_result_payload: false,
             content_version: None,
             deletion_register: None,
+            authorized_deletion_preimage: None,
         })
     }
 }
