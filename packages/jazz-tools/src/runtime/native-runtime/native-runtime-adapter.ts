@@ -3997,7 +3997,6 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 }
 
-
 function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
   subscription.deferredVisiblePublication = false;
   subscription.deferredVisibleReset = false;
