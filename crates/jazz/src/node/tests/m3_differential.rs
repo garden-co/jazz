@@ -35,7 +35,7 @@ struct DifferentialOracle {
     peers: Vec<PeerState>,
     receivers: Vec<NodeState<MemoryStorage>>,
     shapes: Vec<DifferentialShape>,
-    rows: Vec<BTreeSet<(String, RowUuid)>>,
+    rows: Vec<BTreeMap<(String, RowUuid), BTreeMap<String, Value>>>,
     aggregates: Vec<AggregateDifferential>,
 }
 
@@ -108,7 +108,7 @@ impl DifferentialOracle {
                     shape.name
                 )
             });
-            let shape_rows = m3_receiver_rows(
+            let shape_rows = m3_receiver_row_bodies(
                 &mut receiver,
                 &shape.shape,
                 &shape.binding,
@@ -216,7 +216,8 @@ impl DifferentialOracle {
                     shape.name
                 )
             });
-            *rows = m3_receiver_rows(receiver, &shape.shape, &shape.binding, shape.identity);
+            *rows =
+                m3_receiver_row_bodies(receiver, &shape.shape, &shape.binding, shape.identity);
         }
         for aggregate in &mut self.aggregates {
             let aggregate_update = aggregate
@@ -266,10 +267,10 @@ impl DifferentialOracle {
         checkpoint: &str,
     ) {
         for (maintained, shape) in self.rows.iter().zip(self.shapes.iter()) {
-            let one_shot = one_shot_rows(core, &shape.shape, &shape.binding, shape.identity);
+            let one_shot = one_shot_row_bodies(core, &shape.shape, &shape.binding, shape.identity);
             assert_eq!(
                 maintained, &one_shot,
-                "seed {seed}: maintained/one-shot divergence for {} at {checkpoint}",
+                "seed {seed}: maintained/one-shot selected-body divergence for {} at {checkpoint}",
                 shape.name
             );
         }
@@ -350,6 +351,36 @@ fn run_m3_differential_seed(seed: u64) {
         }
         differential.tick_and_assert(&mut core, seed, &format!("fuzz-step-{step}"));
     }
+}
+
+#[test]
+fn m3_differential_plain_body_cells_match_one_shot() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x75), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let shape = Query::from("docs").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let mut oracle = DifferentialOracle::open_with_aggregate_specs(
+        &mut core,
+        &schema,
+        vec![DifferentialShape {
+            name: "docs_plain_body_cells",
+            shape,
+            binding,
+            identity: user(0xa1),
+            subscription,
+        }],
+        Vec::new(),
+        0,
+    );
+    let mut parents = m3_differential_parent_map(&mut core);
+    add_visible_doc(&mut core, &mut parents, 0);
+    oracle.tick_and_assert(&mut core, 0, "after-visible-doc");
 }
 
 fn run_m3_aggregate_churn_curve() {
@@ -847,7 +878,9 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
 
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     reader.apply_sync_message_settled(initial).unwrap();
-    let mut maintained_rows = m3_receiver_rows(&mut reader, &shape, &binding, identity);
+    let mut maintained_rows = m3_receiver_row_bodies(&mut reader, &shape, &binding, identity)
+        .into_keys()
+        .collect::<BTreeSet<_>>();
     assert!(!maintained_rows.is_empty());
 
     for row_uuid in [row(0x11), row(0x12), row(0x14)] {
@@ -865,7 +898,9 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
     }
     let reset = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     reader.apply_sync_message_settled(reset).unwrap();
-    maintained_rows = m3_receiver_rows(&mut reader, &shape, &binding, identity);
+    maintained_rows = m3_receiver_row_bodies(&mut reader, &shape, &binding, identity)
+        .into_keys()
+        .collect();
     assert!(
         one_shot_rows(&mut core, &shape, &binding, identity).is_empty(),
         "fixture must make the serving node one-shot result genuinely empty"
@@ -1696,10 +1731,36 @@ fn one_shot_rows<S: OrderedKvStorage>(
     binding: &Binding,
     identity: AuthorSubject,
 ) -> BTreeSet<(String, RowUuid)> {
+    one_shot_row_bodies(core, shape, binding, identity)
+        .into_keys()
+        .collect()
+}
+
+/// Compare identity and public body cells. Provenance fields begin with `$`
+/// and are intentionally excluded: this oracle checks receiver query output,
+/// not independently generated author/timestamp metadata.
+fn selected_body_cells(row: &CurrentRow) -> BTreeMap<String, Value> {
+    row.test_cells_by_descriptor()
+        .into_iter()
+        .filter(|(name, _)| !name.starts_with('$'))
+        .collect()
+}
+
+fn one_shot_row_bodies<S: OrderedKvStorage>(
+    core: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+) -> BTreeMap<(String, RowUuid), BTreeMap<String, Value>> {
     core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
         .unwrap()
         .into_iter()
-        .map(|row| (row.table().to_owned(), row.row_uuid()))
+        .map(|row| {
+            (
+                (row.table().to_owned(), row.row_uuid()),
+                selected_body_cells(&row),
+            )
+        })
         .collect()
 }
 
@@ -1775,12 +1836,12 @@ fn register_maintained_receiver<S: OrderedKvStorage + ReopenableStorage>(
         .expect("register policy-scoped maintained receiver subscription");
 }
 
-fn m3_receiver_rows<S: OrderedKvStorage>(
+fn m3_receiver_row_bodies<S: OrderedKvStorage>(
     receiver: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorSubject,
-) -> BTreeSet<(String, RowUuid)> {
+) -> BTreeMap<(String, RowUuid), BTreeMap<String, Value>> {
     let (shape, binding, plan) = receiver
         .prepare_query_binding_for_link_in_authorization_mode(
             shape,
@@ -1806,7 +1867,12 @@ fn m3_receiver_rows<S: OrderedKvStorage>(
     snapshot
         .rows
         .into_iter()
-        .map(|row| (row.table().to_owned(), row.row_uuid()))
+        .map(|row| {
+            (
+                (row.table().to_owned(), row.row_uuid()),
+                selected_body_cells(&row),
+            )
+        })
         .collect()
 }
 
