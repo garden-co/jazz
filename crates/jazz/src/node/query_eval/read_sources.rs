@@ -281,7 +281,9 @@ where
         }
         let (graph, descriptor, metadata, routing_fields) = if let Some((head, base)) = branch_view
         {
-            if request.visibility == RowVisibility::IncludeDeleted && base.is_none() {
+            if request.visibility == RowVisibility::IncludeDeleted
+                && base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_)))
+            {
                 let tier = graph_tier.expect("branch view has a current tier");
                 let head_keys = self
                     .node
@@ -291,12 +293,58 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let content = self
+                let head_content = self
                     .projected_branch_content_source_graph(request, &table, tier, &head_keys)
                     .await?;
-                let deletions = self
+                let head_deletions = self
                     .projected_branch_deletion_source_graph(request, tier, &head_keys)
                     .await?;
+                // A head-over-current BranchView selects its winner from the
+                // head when present and otherwise from the base.  The
+                // IncludeDeleted sibling must use that exact same selection
+                // before policy evaluation, or an authorized base preimage
+                // could accidentally attest to a distinct head deletion.
+                let (content, deletions) = match base {
+                    Some(BranchViewSourceBase::Current(base)) if base != head => {
+                        let base_keys = self
+                            .node
+                            .equivalent_stored_branch_keys(
+                                &request.source.table,
+                                self.read_view.read_schema,
+                                base,
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let base_content = self
+                            .projected_branch_content_source_graph(
+                                request, &table, tier, &base_keys,
+                            )
+                            .await?;
+                        let base_deletions = self
+                            .projected_branch_deletion_source_graph(request, tier, &base_keys)
+                            .await?;
+                        (
+                            GraphBuilder::union([
+                                head_content.clone(),
+                                GraphBuilder::anti_join(
+                                    base_content,
+                                    head_content,
+                                    ["row_uuid"],
+                                    ["row_uuid"],
+                                ),
+                            ]),
+                            GraphBuilder::union([
+                                head_deletions.clone(),
+                                GraphBuilder::anti_join(
+                                    base_deletions,
+                                    head_deletions,
+                                    ["row_uuid"],
+                                    ["row_uuid"],
+                                ),
+                            ]),
+                        )
+                    }
+                    _ => (head_content, head_deletions),
+                };
                 let base = include_deleted_branch_graph(&table, head, content, deletions)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let graph = match &authorization {

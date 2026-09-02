@@ -119,6 +119,38 @@ fn covered_inputs_distinguish_same_table_self_join_source_roles() {
         retracted_source_paths, source_paths,
         "each normalized source frontier retracts exactly its former witness before accepting the replacement"
     );
+
+    let deletion_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", shared, 1_002).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, deletion_tx, 3);
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        program_fact_adds,
+        ..
+    }) = peer.query_update(&mut core, &shape, &binding).unwrap()
+    else {
+        panic!("expected self-join deletion update")
+    };
+    let deletion_source_paths = program_fact_adds
+        .into_iter()
+        .filter_map(|fact| match fact {
+            ProgramFactEntry::CoveredInput(input)
+                if input.source.table.as_str() == "todos"
+                    && input.source_row == shared
+                    && input.version.tx == deletion_tx
+                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion =>
+            {
+                Some(input.source.path)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        deletion_source_paths, source_paths,
+        "each root and alias source occurrence authorizes its own exact deletion witness"
+    );
 }
 
 fn settled_member(row_uuid: RowUuid, position: u64) -> ResultMemberEntry {
@@ -2193,8 +2225,15 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
         .unwrap()
         .groove_runtime_token = Some(stale_runtime_token);
     let update = peer
-        .query_update_for_subscription(&mut core, subscription, &shape, &binding)
-        .unwrap();
+        .query_update_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            opts.clone(),
+        )
+        .unwrap()
+        .expect("branch rehydrate must publish a replacement closure");
     // A stale authority runtime is repaired with a reset closure, not an
     // incremental removal. The reset closure contains exactly the surviving
     // receiver input; the receiver-local branch graph derives the public
