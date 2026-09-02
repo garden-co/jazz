@@ -5521,9 +5521,21 @@ async fn apply_pending_authority_view_updates<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    // A replacement authority selection is connection-scoped. Frames which
+    // were already queued on an older transport retain their transport-local
+    // `authority_receipt_eligible` bit, so combine it with the currently
+    // selected connection here before those frames can touch a shared
+    // authority result slot.
+    let authority_link_selected = active_authority_view_receipts
+        .borrow()
+        .as_ref()
+        .is_none_or(|receipts| receipts.connection_epoch == connection_epoch);
+    let frame_is_selected = |update: &PendingAuthorityViewUpdate| {
+        authority_link_selected && update.authority_receipt_eligible
+    };
     let confirmed_subscriptions = pending
         .iter()
-        .filter(|update| update.authority_receipt_eligible && !update.parts.opening_pending)
+        .filter(|update| frame_is_selected(update) && !update.parts.opening_pending)
         .map(|update| (update.parts.subscription, update.parts.settled_through))
         .collect::<Vec<_>>();
     let batch_cut = pending
@@ -5533,11 +5545,12 @@ where
         .unwrap_or_default();
     let ineligible_cut = pending
         .iter()
-        .filter(|update| !update.authority_receipt_eligible)
+        .filter(|update| !frame_is_selected(update))
         .map(|update| update.parts.settled_through)
         .max();
     let publishing_subscriptions = pending
         .iter()
+        .filter(|update| frame_is_selected(update))
         .map(|update| update.parts.subscription)
         .collect::<BTreeSet<_>>();
     let node_ref = node.borrow();
@@ -5583,7 +5596,7 @@ where
     let ledger_bundles = if relay_authority_session_owner {
         pending
             .iter()
-            .filter(|update| update.authority_receipt_eligible)
+            .filter(|update| frame_is_selected(update))
             .flat_map(|update| {
                 expand_version_carriers(&update.parts.version_carriers).unwrap_or_default()
             })
@@ -5591,16 +5604,36 @@ where
     } else {
         Vec::new()
     };
+    // A frame from a nonselected upstream is only evidence that the selected
+    // receipt is no longer current. It is not an input to that receipt's
+    // receiver-local graph: applying its source closure here would mutate the
+    // selected authority slot, then make the selected successor look like a
+    // duplicate incremental witness. The selected link must publish its own
+    // exact predecessor→successor closure. This also keeps a stale authority
+    // from changing the locally derived result during receipt demotion.
+    let unselected_carriers = pending
+        .iter()
+        .filter(|update| !frame_is_selected(update))
+        .flat_map(|update| update.parts.version_carriers.iter().cloned())
+        .collect::<Vec<_>>();
     let updates = std::mem::take(pending)
         .into_iter()
+        .filter(|update| frame_is_selected(update))
         .map(|update| update.parts)
         .collect::<Vec<_>>();
-    let mut node_ref = node.lock().await;
-    node_ref.apply_view_updates_in_batch(updates).await?;
-    node_ref
-        .record_scope_relay_authoritative_bundles(&ledger_bundles)
-        .await?;
-    drop(node_ref);
+    if !unselected_carriers.is_empty() {
+        node.lock()
+            .await
+            .ingest_unselected_authority_view_bundles(&unselected_carriers)
+            .await?;
+    }
+    if !updates.is_empty() {
+        let mut node_ref = node.lock().await;
+        node_ref.apply_view_updates_in_batch(updates).await?;
+        node_ref
+            .record_scope_relay_authoritative_bundles(&ledger_bundles)
+            .await?;
+    }
     if relay_authority_session_owner {
         // A relay authority view is input to every locally served browser
         // Edge child. Advance the shared generation only after the validated

@@ -22,6 +22,41 @@ pub(super) fn maintained_view_update_is_empty(
         && program_fact_removes.is_empty()
 }
 
+/// Produce the one unambiguous unordered transition between two exact sets.
+/// Runtime terminals may have crossed intermediate states while a publisher
+/// drained; those intermediate operations are not peer-wire operations.
+pub(super) fn canonical_set_delta<T: Ord + Clone>(
+    predecessor: &BTreeSet<T>,
+    successor: &BTreeSet<T>,
+) -> (Vec<T>, Vec<T>) {
+    (
+        successor.difference(predecessor).cloned().collect(),
+        predecessor.difference(successor).cloned().collect(),
+    )
+}
+
+#[cfg(test)]
+mod canonical_set_delta_tests {
+    use std::collections::BTreeSet;
+
+    use super::canonical_set_delta;
+
+    #[test]
+    fn emits_only_the_exact_predecessor_to_successor_transition() {
+        let empty = BTreeSet::<u8>::new();
+        let present = BTreeSet::from([7]);
+
+        // absent → absent
+        assert_eq!(canonical_set_delta(&empty, &empty), (vec![], vec![]));
+        // present → present
+        assert_eq!(canonical_set_delta(&present, &present), (vec![], vec![]));
+        // absent → present
+        assert_eq!(canonical_set_delta(&empty, &present), (vec![7], vec![]));
+        // present → absent
+        assert_eq!(canonical_set_delta(&present, &empty), (vec![], vec![7]));
+    }
+}
+
 fn member_row_key(member: &ResultMemberEntry) -> Option<RowKey> {
     let row = member.as_real_row()?;
     Some((

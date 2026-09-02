@@ -1650,6 +1650,7 @@ where
             state.settled_result_row_index.clear();
             state.settled_program_facts.clear();
             state.source_closure = crate::node::AuthoritySourceClosure::Pending;
+            state.source_incremental = None;
         }
         self.query
             .retained_root_window_sources

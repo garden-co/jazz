@@ -1246,6 +1246,19 @@ pub struct InputSourceReplacement {
     pub records: Vec<Vec<u8>>,
 }
 
+/// One atomic, set-like change to a runtime-owned mutable input source.
+///
+/// Unlike [`InputSourceReplacement`], this preserves work proportional to the
+/// changed records. The runtime still preflights the complete batch before it
+/// touches any source, and all source changes enter one IVM tick.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputSourceDelta {
+    pub id: InputSourceId,
+    pub descriptor: RecordDescriptor,
+    pub adds: Vec<Vec<u8>>,
+    pub removes: Vec<Vec<u8>>,
+}
+
 /// Result of lowering a graph-builder fragment into the deduplicated graph.
 #[derive(Clone, Debug)]
 pub(super) struct CompiledNode {
@@ -2510,6 +2523,140 @@ fn replace_binding_shape(graph: &GraphBuilder, shape: &str) -> GraphBuilder {
 }
 
 impl IvmRuntime {
+    /// Atomically apply record-level changes to runtime-owned inputs.
+    ///
+    /// Inputs are sets. Replayed additions and removals of already-absent
+    /// records are no-ops; conflicting add/remove requests for one record
+    /// cancel before state changes. Every descriptor and record is checked
+    /// before the first source mutates.
+    pub async fn apply_input_source_deltas<S>(
+        &mut self,
+        input_deltas: impl IntoIterator<Item = InputSourceDelta>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        let mut canonical = BTreeMap::<
+            InputSourceId,
+            (RecordDescriptor, BTreeSet<Vec<u8>>, BTreeSet<Vec<u8>>),
+        >::new();
+        for delta in input_deltas {
+            let adds = delta.adds.into_iter().collect::<BTreeSet<_>>();
+            let removes = delta.removes.into_iter().collect::<BTreeSet<_>>();
+            for record in adds.iter().chain(&removes) {
+                let borrowed = BorrowedRecord::new(record, &delta.descriptor);
+                let _ = borrowed.to_values()?;
+            }
+            match canonical.entry(delta.id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((delta.descriptor, adds, removes));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (descriptor, existing_adds, existing_removes) = entry.get_mut();
+                    if *descriptor != delta.descriptor {
+                        return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                            entry.key().diagnostic_name(),
+                        ));
+                    }
+                    existing_adds.extend(adds);
+                    existing_removes.extend(removes);
+                }
+            }
+        }
+        for (id, (descriptor, _, _)) in &canonical {
+            if !id.belongs_to(self.input_source_runtime_namespace) {
+                return Err(IvmRuntimeError::ForeignInputSource);
+            }
+            let key = id.binding_key();
+            let Some(source) = self.binding_sources.get(&key) else {
+                return Err(
+                    if id.was_allocated_by(
+                        self.input_source_runtime_namespace,
+                        self.next_input_source_id,
+                    ) {
+                        IvmRuntimeError::InputSourceRetired
+                    } else {
+                        IvmRuntimeError::ForeignInputSource
+                    },
+                );
+            };
+            if source.descriptor != *descriptor {
+                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                    id.diagnostic_name(),
+                ));
+            }
+        }
+
+        let mut deltas = Vec::new();
+        for (id, (descriptor, adds, removes)) in canonical {
+            let key = id.binding_key();
+            let source = self
+                .binding_sources
+                .get_mut(&key)
+                .expect("preflight retained every active input source");
+            let cancelled = adds
+                .intersection(&removes)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let removals = removes
+                .difference(&cancelled)
+                .filter(|record| {
+                    source
+                        .refcounts
+                        .contains_key(&BindingKey((*record).clone()))
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let additions = adds
+                .difference(&cancelled)
+                .filter(|record| {
+                    !source
+                        .refcounts
+                        .contains_key(&BindingKey((*record).clone()))
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let records = removals
+                .iter()
+                .cloned()
+                .map(|record| RecordDelta {
+                    record: record.into(),
+                    weight: -1,
+                })
+                .chain(additions.iter().cloned().map(|record| RecordDelta {
+                    record: record.into(),
+                    weight: 1,
+                }))
+                .collect::<Vec<_>>();
+            if records.is_empty() {
+                continue;
+            }
+            for record in &removals {
+                source.refcounts.remove(&BindingKey(record.clone()));
+            }
+            for record in &additions {
+                source.refcounts.insert(BindingKey(record.clone()), 1);
+            }
+            deltas.push(BindingDelta {
+                key,
+                descriptor,
+                deltas: records,
+                initializes_snapshot: false,
+            });
+        }
+        if deltas.is_empty() {
+            return Ok(TickMetrics::default());
+        }
+        self.tick_with_params(
+            Vec::new(),
+            deltas,
+            OwnedStorage::new(Rc::clone(storage)),
+            None,
+        )
+        .await
+    }
+
     /// Atomically replace the complete record multisets of runtime-owned
     /// mutable inputs and drive one ordinary incremental tick.
     ///

@@ -887,6 +887,15 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        // Losing the Groove runtime also loses the maintained source frontier.
+        // Its replacement is necessarily a complete successor closure: an
+        // incremental add list cannot retract source facts that belonged to
+        // the retired runtime.
+        let runtime_was_stale = self.publication_states.get(&subscription).is_some_and(|state| {
+            state
+                .groove_runtime_token
+                .is_some_and(|token| token != node.groove_runtime_token())
+        });
         self.clear_stale_groove_runtime_handles(node, subscription);
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
         self.ensure_query_subscription_registered(
@@ -965,7 +974,7 @@ impl PeerState {
                 binding,
                 subscription,
                 previous_member_result_set: &previous_member_result_set,
-                reset_result_set: false,
+                reset_result_set: runtime_was_stale,
                 result_table_filter: None,
                 tier,
                 read_view: &read_view,
@@ -1041,8 +1050,8 @@ impl PeerState {
             removes: mut result_member_removes,
             result_payload_adds: _,
             result_payload_removes: _,
-            program_fact_adds,
-            program_fact_removes,
+            program_fact_adds: raw_program_fact_adds,
+            program_fact_removes: raw_program_fact_removes,
             allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
@@ -1050,8 +1059,6 @@ impl PeerState {
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
-        let fact_add_count = program_fact_adds.len();
-        let fact_remove_count = program_fact_removes.len();
         let previous_member_result_set = self
             .publication_states
             .get(&subscription)
@@ -1065,8 +1072,8 @@ impl PeerState {
         if public_result_is_silent
             && (requires_authoritative_membership_reconcile
                 || (observed_result_delta_batches > 0
-                    && program_fact_adds.is_empty()
-                    && program_fact_removes.is_empty()))
+                    && raw_program_fact_adds.is_empty()
+                    && raw_program_fact_removes.is_empty()))
         {
             let (tier, read_view) = self
                 .publication_states
@@ -1108,6 +1115,29 @@ impl PeerState {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        // Source terminals can emit a transient +/− pair in separate runtime
+        // batches before this publication drain returns. Peer wire frames are
+        // unordered set transitions, not an operation log, so derive their
+        // disjoint delta from the acknowledged predecessor and the maintained
+        // successor closure. This preserves O(changed inputs) without sending
+        // an ambiguous pair or a replacement snapshot.
+        let previous_program_fact_set = self
+            .publication_states
+            .get(&subscription)
+            .map(PeerSubscriptionState::program_fact_set)
+            .unwrap_or_default();
+        let current_program_fact_set = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .map(|view| view.maintained.active_peer_source_closure_facts())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained subscription view is missing source closure state",
+            ))?;
+        let (program_fact_adds, program_fact_removes) =
+            canonical_set_delta(&previous_program_fact_set, &current_program_fact_set);
+        let fact_add_count = program_fact_adds.len();
+        let fact_remove_count = program_fact_removes.len();
         if maintained_view_update_is_empty(
             &result_member_adds,
             &result_member_removes,

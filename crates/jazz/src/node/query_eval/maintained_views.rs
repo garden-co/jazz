@@ -6,7 +6,7 @@
 //! public deltas.
 
 use super::*;
-use crate::protocol::ProgramSourceId;
+use crate::protocol::{CoveredInputEntry, ProgramSourceId};
 
 pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) subscription: MultisinkSubscription,
@@ -53,6 +53,14 @@ pub(crate) struct CoveredInputReceiver {
     local_authority: LocalAuthorityReconciliation,
     /// `None` is pending, never an implicit empty closure.
     installed_closure: Option<(AuthorityResultKey, u64)>,
+    /// Last applied ViewUpdate generation. This advances for exact
+    /// predecessor-preserving deltas without changing `installed_closure`,
+    /// whose generation identifies only the last reset frontier.
+    installed_generation: Option<u64>,
+    /// Exact content facts currently materialized in each runtime input. A
+    /// deletion-layer fact participates in closure provenance but deliberately
+    /// has no source tuple, so it is not retained here.
+    installed_records: BTreeMap<ProgramSourceId, BTreeMap<CoveredInputEntry, Vec<u8>>>,
 }
 
 impl CoveredInputReceiver {
@@ -518,14 +526,173 @@ where
         local: &mut LocalMaintainedViewSubscription,
         authority_result_key: &AuthorityResultKey,
     ) -> Result<bool, Error> {
-        self.replace_covered_input_receiver(
+        let Some(authority_result) = self.query.authority_results.get(authority_result_key) else {
+            return Err(Error::InvalidStoredValue(
+                "covered input reconciliation has no exact authority receipt",
+            ));
+        };
+        let applied_generation = authority_result.applied_view_update_generation;
+        let closure_generation = match authority_result.source_closure {
+            crate::node::AuthoritySourceClosure::Pending => {
+                return Ok(false);
+            }
+            crate::node::AuthoritySourceClosure::Claimed { generation } => generation,
+        };
+        let installed_matches_closure = local
+            .covered_input_receiver
+            .installed_closure
+            .as_ref()
+            .is_some_and(|(key, generation)| {
+                key == authority_result_key && *generation == closure_generation
+            });
+        if !installed_matches_closure {
+            return self
+                .replace_covered_input_receiver(
+                    &mut local.covered_input_receiver,
+                    local.result_schema_version,
+                    authority_result_key,
+                )
+                .await;
+        }
+        if local.covered_input_receiver.installed_generation == Some(applied_generation) {
+            return Ok(false);
+        }
+        let incremental = authority_result.source_incremental.clone().ok_or(
+            Error::InvalidStoredValue(
+                "covered input receiver missed an incremental predecessor; authority reset required",
+            ),
+        )?;
+        self.apply_covered_input_receiver_incremental(
             &mut local.covered_input_receiver,
             local.result_schema_version,
             authority_result_key,
+            incremental,
         )
         .await
     }
 
+    /// Apply one authority frame's exact source delta to the already-installed
+    /// receiver frontier. This is intentionally distinct from reset: it never
+    /// scans/replaces an unchanged source set.
+    async fn apply_covered_input_receiver_incremental(
+        &mut self,
+        receiver: &mut CoveredInputReceiver,
+        result_schema_version: SchemaVersionId,
+        authority_result_key: &AuthorityResultKey,
+        incremental: crate::node::AuthoritySourceIncremental,
+    ) -> Result<bool, Error> {
+        if receiver.installed_generation != Some(incremental.predecessor_generation) {
+            return Err(Error::InvalidStoredValue(
+                "covered input incremental delta does not name receiver predecessor",
+            ));
+        }
+        if incremental
+            .adds
+            .iter()
+            .chain(&incremental.removes)
+            .any(|fact| matches!(fact, ProgramFactEntry::ProgramSourceCoverage(_)))
+        {
+            return Err(Error::InvalidStoredValue(
+                "incremental covered input frame must retain its source coverage manifest",
+            ));
+        }
+        // Stage the local successor before changing Groove or receipt state.
+        // The runtime validates its complete batch before mutation; keeping
+        // this mirror staged gives the same all-or-nothing failure boundary.
+        let mut staged_records = receiver.installed_records.clone();
+        let mut changes = BTreeMap::<ProgramSourceId, (Vec<Vec<u8>>, Vec<Vec<u8>>)>::new();
+        for fact in &incremental.removes {
+            let ProgramFactEntry::CoveredInput(input) = fact else {
+                return Err(Error::InvalidStoredValue(
+                    "incremental receiver frame contains a non-source fact",
+                ));
+            };
+            let Some(records) = staged_records.get_mut(&input.source) else {
+                return Err(Error::InvalidStoredValue(
+                    "incremental covered input removes an unknown source occurrence",
+                ));
+            };
+            if let Some(record) = records.remove(input) {
+                changes
+                    .entry(input.source.clone())
+                    .or_default()
+                    .1
+                    .push(record);
+            } else if input.version.layer == ResultRowLayer::Content {
+                return Err(Error::InvalidStoredValue(
+                    "incremental covered input removes a content witness absent from receiver predecessor",
+                ));
+            }
+        }
+        for fact in &incremental.adds {
+            let ProgramFactEntry::CoveredInput(input) = fact else {
+                return Err(Error::InvalidStoredValue(
+                    "incremental receiver frame contains a non-source fact",
+                ));
+            };
+            let runtime_source =
+                receiver
+                    .sources
+                    .get(&input.source)
+                    .ok_or(Error::InvalidStoredValue(
+                        "incremental covered input names no compiled source occurrence",
+                    ))?;
+            let Some(record) = self
+                .covered_input_runtime_record(input, runtime_source, result_schema_version)
+                .await?
+            else {
+                continue;
+            };
+            let records = staged_records
+                .get_mut(&input.source)
+                .expect("receiver records are initialized with every compiled source");
+            if records.insert(input.clone(), record.clone()).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "incremental covered input duplicates a receiver content witness",
+                ));
+            }
+            changes
+                .entry(input.source.clone())
+                .or_default()
+                .0
+                .push(record);
+        }
+        let deltas = changes
+            .into_iter()
+            .map(|(source, (adds, removes))| {
+                let runtime_source = receiver
+                    .sources
+                    .get(&source)
+                    .expect("changed source was validated above");
+                groove::ivm::InputSourceDelta {
+                    id: runtime_source.id,
+                    descriptor: runtime_source.descriptor.clone(),
+                    adds,
+                    removes,
+                }
+            })
+            .collect::<Vec<_>>();
+        let metrics = self
+            .database
+            .apply_input_source_deltas(deltas)
+            .await
+            .map_err(Error::Groove)?;
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=incremental_receiver_delta predecessor={} generation={} tick={} processed={}",
+                incremental.predecessor_generation,
+                incremental.generation,
+                metrics.tick,
+                metrics.records_processed,
+            );
+        }
+        receiver
+            .local_authority
+            .replace_source(authority_result_key.clone(), incremental.generation);
+        receiver.installed_generation = Some(incremental.generation);
+        receiver.installed_records = staged_records;
+        Ok(true)
+    }
     /// Install one exact authority closure into a receiver-owned source map.
     /// Both the facade and relay publication use this same source-only path.
     pub(crate) async fn replace_covered_input_receiver(
@@ -619,8 +786,8 @@ where
             .sources
             .keys()
             .cloned()
-            .map(|source| (source, Vec::new()))
-            .collect::<BTreeMap<_, Vec<Vec<u8>>>>();
+            .map(|source| (source, BTreeMap::new()))
+            .collect::<BTreeMap<_, BTreeMap<CoveredInputEntry, Vec<u8>>>>();
 
         for fact in facts {
             let ProgramFactEntry::CoveredInput(input) = fact else {
@@ -693,15 +860,16 @@ where
                     "authority covered input does not project into its compiled source schema",
                 ));
             }
+            let record = super::read_sources::covered_input_record(
+                &source_table,
+                &runtime_source.descriptor,
+                &row,
+                schema_alias,
+            )?;
             records
                 .get_mut(&input.source)
                 .expect("source presence was checked above")
-                .push(super::read_sources::covered_input_record(
-                    &source_table,
-                    &runtime_source.descriptor,
-                    &row,
-                    schema_alias,
-                )?);
+                .insert(input, record);
         }
         let replacement_record_counts = records
             .iter()
@@ -713,7 +881,10 @@ where
             .map(|(source, runtime_source)| InputSourceReplacement {
                 id: runtime_source.id,
                 descriptor: runtime_source.descriptor.clone(),
-                records: records.remove(source).unwrap_or_default(),
+                records: records
+                    .get(source)
+                    .map(|rows| rows.values().cloned().collect())
+                    .unwrap_or_default(),
             })
             .collect::<Vec<_>>();
         // Retire every Local-first provisional cache gate in this *same*
@@ -749,7 +920,79 @@ where
             self.applied_authority_result_generation(authority_result_key),
         );
         receiver.installed_closure = Some((authority_result_key.clone(), closure_generation));
+        receiver.installed_generation =
+            Some(self.applied_authority_result_generation(authority_result_key));
+        receiver.installed_records = records;
         Ok(true)
+    }
+
+    /// Decode one exact covered source fact into its descriptor-bound runtime
+    /// tuple. Deletion witnesses are validated but intentionally contribute no
+    /// tuple: their absence retracts a previously installed content carrier.
+    async fn covered_input_runtime_record(
+        &mut self,
+        input: &CoveredInputEntry,
+        runtime_source: &CoveredInputSource,
+        result_schema_version: SchemaVersionId,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let source_table =
+            self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
+        let tx_alias = self
+            .node_aliases
+            .get(&input.version.tx.node)
+            .copied()
+            .ok_or(Error::MissingTransaction(input.version.tx))?;
+        let layer = match input.version.layer {
+            ResultRowLayer::Content => VersionLayer::Content,
+            ResultRowLayer::Deletion => VersionLayer::Deletion,
+            ResultRowLayer::ContentOrDeletion => {
+                return Err(Error::InvalidStoredValue(
+                    "covered input must name one concrete version layer",
+                ));
+            }
+        };
+        let version = self
+            .query_version_by_alias(
+                input.version_table.as_str(),
+                input.source_row,
+                layer,
+                input.version.tx.time,
+                tx_alias,
+            )
+            .await?
+            .ok_or(Error::MissingTransaction(input.version.tx))?;
+        if version.branch_key().canonical_bytes()
+            != input.version.branch_or_prefix.clone().unwrap_or_default()
+        {
+            return Err(Error::InvalidStoredValue(
+                "authority covered input branch witness disagrees with stored version",
+            ));
+        }
+        if layer == VersionLayer::Deletion {
+            return Ok(None);
+        }
+        let row = self
+            .projected_current_row_from_materialized_version_in_read_schema(
+                result_schema_version,
+                &version,
+            )?
+            .ok_or(Error::InvalidStoredValue(
+                "authority covered content version cannot materialize a current row",
+            ))?;
+        if row.table() != source_table.name {
+            return Err(Error::InvalidStoredValue(
+                "authority covered input does not project into its compiled source schema",
+            ));
+        }
+        let schema_alias = self
+            .ensure_schema_version_alias(result_schema_version)
+            .await?;
+        Ok(Some(super::read_sources::covered_input_record(
+            &source_table,
+            &runtime_source.descriptor,
+            &row,
+            schema_alias,
+        )?))
     }
 
     async fn drain_local_maintained_view_subscription_transitions(

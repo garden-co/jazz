@@ -986,6 +986,11 @@ pub(crate) struct AuthorityResultState {
     /// non-exact [`ProgramSourceCoverage`](crate::protocol::ProgramSourceCoverageEntry)
     /// set atomically rather than accidentally interpreting it as empty.
     source_closure: AuthoritySourceClosure,
+    /// The most recent exact predecessor-preserving source change after a
+    /// claimed closure. This is process-local delivery state, not durable
+    /// authority truth: a receiver that missed it must wait for a reset/repair
+    /// rather than treating an arbitrary current set as an incremental delta.
+    source_incremental: Option<AuthoritySourceIncremental>,
     /// This process has received a complete, exact authority settlement for
     /// this result since it was opened. It is deliberately live-only: durable
     /// membership recovered after a restart is useful cache material, but it
@@ -1023,6 +1028,15 @@ pub(crate) enum AuthoritySourceClosure {
     Claimed {
         generation: u64,
     },
+}
+
+/// One receiver input delta with an exact prior receipt generation.
+#[derive(Clone, Debug)]
+pub(crate) struct AuthoritySourceIncremental {
+    pub(crate) predecessor_generation: u64,
+    pub(crate) generation: u64,
+    pub(crate) adds: BTreeSet<ProgramFactEntry>,
+    pub(crate) removes: BTreeSet<ProgramFactEntry>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

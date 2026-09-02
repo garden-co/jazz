@@ -1834,6 +1834,91 @@ async fn input_source_replacements_are_atomic_idempotent_and_revoke_cleanly() {
     );
 }
 
+/// Incremental runtime input changes share the replacement API's atomic
+/// cross-source frontier, but do not require callers to resend untouched
+/// records. This is the primitive used by receiver-side source closures.
+#[futures_test::test]
+async fn input_source_deltas_are_atomic_and_proportional_to_changed_records() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let left = database.allocate_input_source(descriptor);
+    let right = database.allocate_input_source(descriptor);
+    let graph = GraphBuilder::join(
+        GraphBuilder::input_source(left, descriptor),
+        GraphBuilder::input_source(right, descriptor),
+        ["id"],
+        ["id"],
+    );
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let one = descriptor.create(&[Value::U64(1)]).unwrap();
+    let two = descriptor.create(&[Value::U64(2)]).unwrap();
+    database
+        .replace_input_sources([
+            InputSourceReplacement {
+                id: left,
+                descriptor,
+                records: vec![one.clone()],
+            },
+            InputSourceReplacement {
+                id: right,
+                descriptor,
+                records: vec![one.clone()],
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::U64(1)], 1)]
+    );
+
+    let metrics = database
+        .apply_input_source_deltas([
+            InputSourceDelta {
+                id: left,
+                descriptor,
+                adds: vec![two.clone()],
+                removes: vec![one.clone()],
+            },
+            InputSourceDelta {
+                id: right,
+                descriptor,
+                adds: vec![two.clone()],
+                removes: vec![one],
+            },
+        ])
+        .await
+        .unwrap();
+    assert!(metrics.records_processed >= 2);
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![Value::U64(1), Value::U64(1)], -1),
+            (vec![Value::U64(2), Value::U64(2)], 1),
+        ],
+        "one tick exposes only old and new join frontiers"
+    );
+    assert_eq!(
+        database
+            .apply_input_source_deltas([InputSourceDelta {
+                id: left,
+                descriptor,
+                adds: vec![two],
+                removes: Vec::new(),
+            }])
+            .await
+            .unwrap(),
+        TickMetrics::default(),
+        "replayed set addition does not advance the input frontier"
+    );
+}
+
 /// Ungrouped aggregates own one empty group. This stays in the ordinary Groove
 /// graph so direct queries, maintained subscriptions, and runtime-owned
 /// covered inputs all observe the same identity transition; no caller creates

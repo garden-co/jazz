@@ -169,10 +169,17 @@ impl PeerSubscriptionState {
     }
 
     pub(super) fn previous_tx_ids(&self) -> BTreeSet<TxId> {
-        self.result_member_set
+        // A peer's resumable knowledge is the exact source closure it has
+        // received, not the authority's locally rendered output.  A join or
+        // filter can need inputs that do not themselves occur in the public
+        // terminal; carrying only result-member transaction ids would let a
+        // fast cursor suppress a required CoveredInput on the next receipt.
+        self.program_fact_set
             .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, _, tx_id)| tx_id)
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::CoveredInput(input) => Some(input.version.tx),
+                _ => None,
+            })
             .collect()
     }
 }

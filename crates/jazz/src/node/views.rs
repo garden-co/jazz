@@ -1282,6 +1282,26 @@ where
         Ok(())
     }
 
+    /// Persist immutable bodies carried by a stale authority link without
+    /// accepting that link's source closure as an authority receipt.
+    ///
+    /// A replacement upstream can have a later receipt selected while an old
+    /// transport still has a frame in flight. Its bodies are ordinary
+    /// immutable replication data and may be needed for the selected link's
+    /// later exact closure, but its covered-input facts must not mutate the
+    /// selected receiver frontier or derived terminal.
+    pub(crate) async fn ingest_unselected_authority_view_bundles(
+        &mut self,
+        carriers: &[VersionCarrier],
+    ) -> Result<(), Error> {
+        let bundle_refs = version_bundle_refs_for_carriers(carriers)?;
+        let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
+        for bundle in preflight.bundles.values() {
+            self.ingest_view_bundle(bundle.clone()).await?;
+        }
+        Ok(())
+    }
+
     /// Validate all row bundles carried by a receiver frame without changing
     /// storage or in-memory receiver state.
     fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
@@ -1304,6 +1324,16 @@ where
             {
                 return Err(Error::InvalidStoredValue(
                     "peer view update must carry only covered-input closure facts",
+                ));
+            }
+            let added_facts = update.program_fact_adds.iter().collect::<BTreeSet<_>>();
+            if update
+                .program_fact_removes
+                .iter()
+                .any(|fact| added_facts.contains(fact))
+            {
+                return Err(Error::InvalidStoredValue(
+                    "peer view update overlaps source-closure adds and removes",
                 ));
             }
             for bundle in version_bundle_refs_for_carriers(&update.version_carriers)? {
@@ -1673,6 +1703,7 @@ where
             .authority_results
             .entry(authority_result_key.clone())
             .or_default();
+        let predecessor_generation = state.applied_view_update_generation;
         state.applied_view_update_generation = state.applied_view_update_generation.wrapping_add(1);
         // In the current wire contract, a non-deferred reset is the single
         // frame that claims a complete replacement frontier.  Do not infer an
@@ -1685,6 +1716,33 @@ where
             state.source_closure = crate::node::AuthoritySourceClosure::Claimed {
                 generation: state.applied_view_update_generation,
             };
+            state.source_incremental = None;
+        } else if !defer_settlement
+            && matches!(
+                state.source_closure,
+                crate::node::AuthoritySourceClosure::Claimed { .. }
+            )
+        {
+            // Normal source updates retain their predecessor closure and are
+            // applied as descriptor-bound runtime input deltas. They must not
+            // be re-labelled as a complete reset merely because an authority
+            // state map happens to contain the current closure.
+            state.source_incremental = Some(crate::node::AuthoritySourceIncremental {
+                predecessor_generation,
+                generation: state.applied_view_update_generation,
+                adds: persisted_fact_adds
+                    .iter()
+                    .filter(|fact| fact.is_peer_source_closure_fact())
+                    .cloned()
+                    .collect(),
+                removes: persisted_fact_removes
+                    .iter()
+                    .filter(|fact| fact.is_peer_source_closure_fact())
+                    .cloned()
+                    .collect(),
+            });
+        } else {
+            state.source_incremental = None;
         }
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(

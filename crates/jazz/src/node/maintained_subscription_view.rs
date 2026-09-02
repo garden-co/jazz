@@ -34,6 +34,17 @@ use crate::tx::TxId;
 type TableSchemas = BTreeMap<String, TableSchema>;
 type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan>;
 
+/// Distinguishes independent maintained terminals that can witness the same
+/// peer source fact. Their union, rather than a summed terminal refcount, is
+/// the exact receiver closure: a replacement witness disappearing must not
+/// retract a still-live version witness (or vice versa).
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SourceFactOrigin {
+    Version,
+    Replacement,
+    ProgramFact,
+}
+
 #[derive(Clone, Debug)]
 struct VersionDecodePlan {
     descriptor: RecordDescriptor,
@@ -84,6 +95,12 @@ pub(crate) struct MaintainedSubscriptionView {
     /// version identity. They do not emit a live Stream-B witness when a head
     /// deletion or rejection exposes the inherited member.
     inline_content_branch_keys: BTreeSet<Vec<u8>>,
+    /// Exact active source-closure facts, independent of the transient
+    /// multisink batches used to reach the current graph state. Peer
+    /// publication diffs this set against its acknowledged predecessor so a
+    /// +/− pair observed in one drain is never serialized as an ambiguous
+    /// ordered operation.
+    source_fact_weights: BTreeMap<ProgramFactEntry, BTreeMap<SourceFactOrigin, i64>>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -101,6 +118,7 @@ impl Default for MaintainedSubscriptionView {
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
             inline_content_branch_keys: BTreeSet::new(),
+            source_fact_weights: BTreeMap::new(),
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
         }
@@ -531,6 +549,11 @@ impl MaintainedSubscriptionView {
                     let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.versions
                         .apply_delta(identity, row, weight, node_aliases)?;
+                    self.apply_source_fact_delta(
+                        SourceFactOrigin::Version,
+                        ProgramFactEntry::CoveredInput(covered_input.clone()),
+                        weight,
+                    );
                     if weight > 0 {
                         transitions
                             .program_fact_adds
@@ -545,6 +568,11 @@ impl MaintainedSubscriptionView {
                     let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.replacements
                         .apply_delta(key, identity, row, weight, node_aliases)?;
+                    self.apply_source_fact_delta(
+                        SourceFactOrigin::Replacement,
+                        ProgramFactEntry::CoveredInput(covered_input.clone()),
+                        weight,
+                    );
                     if weight > 0 {
                         transitions
                             .program_fact_adds
@@ -556,6 +584,11 @@ impl MaintainedSubscriptionView {
                     }
                 }
                 NetEvent::ProgramFact(fact) => {
+                    self.apply_source_fact_delta(
+                        SourceFactOrigin::ProgramFact,
+                        fact.clone(),
+                        weight,
+                    );
                     if weight > 0 {
                         transitions.program_fact_adds.push(fact);
                     } else {
@@ -574,6 +607,37 @@ impl MaintainedSubscriptionView {
 
     pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
         self.versions.versions_by_tx(tx_id)
+    }
+
+    /// The final peer-safe source closure after every drained terminal batch.
+    /// This intentionally exposes neither rendered result rows nor internal
+    /// proof/relationship facts.
+    pub(crate) fn active_peer_source_closure_facts(&self) -> BTreeSet<ProgramFactEntry> {
+        self.source_fact_weights
+            .iter()
+            .filter(|(fact, weights)| {
+                weights.values().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
+            })
+            .map(|(fact, _)| fact.clone())
+            .collect()
+    }
+
+    fn apply_source_fact_delta(
+        &mut self,
+        origin: SourceFactOrigin,
+        fact: ProgramFactEntry,
+        weight: i64,
+    ) {
+        let weights = self.source_fact_weights.entry(fact.clone()).or_default();
+        let next = weights.get(&origin).copied().unwrap_or(0) + weight;
+        if next == 0 {
+            weights.remove(&origin);
+        } else {
+            weights.insert(origin, next);
+        }
+        if weights.is_empty() {
+            self.source_fact_weights.remove(&fact);
+        }
     }
 
     pub(crate) fn replacement_for(

@@ -640,6 +640,21 @@ impl SyncMessage {
         {
             return Err(WireContractError::InvalidProgramSourceCoverage);
         }
+        // A peer update is an unordered predecessor→successor set delta. A
+        // fact in both sides has no stable meaning at ingress (and would make
+        // a receiver depend on arbitrary application order), so only the
+        // authority may collapse terminal batches into a disjoint transition.
+        let added_facts = view
+            .program_fact_adds
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if view
+            .program_fact_removes
+            .iter()
+            .any(|fact| added_facts.contains(fact))
+        {
+            return Err(WireContractError::OverlappingPeerSourceClosureDelta);
+        }
         // A closure is a set of exact compiled source occurrences. Rejecting
         // duplicate entries at the wire boundary preserves the distinction
         // between one empty source and two competing receipts before the
@@ -676,6 +691,9 @@ pub enum WireContractError {
     /// A peer frame attempted to carry authority terminal output, an internal
     /// proof, or another fact outside the receiver source-closure contract.
     NonClosurePeerViewFact,
+    /// One unordered peer source-closure frame attempted to both add and
+    /// remove the same fact rather than naming a canonical net transition.
+    OverlappingPeerSourceClosureDelta,
 }
 
 impl std::fmt::Display for WireContractError {
@@ -688,6 +706,12 @@ impl std::fmt::Display for WireContractError {
             }
             Self::NonClosurePeerViewFact => {
                 write!(f, "peer view update carries a non-closure program fact")
+            }
+            Self::OverlappingPeerSourceClosureDelta => {
+                write!(
+                    f,
+                    "peer view update overlaps source-closure adds and removes"
+                )
             }
         }
     }
@@ -5449,6 +5473,37 @@ mod tests {
     };
     use crate::tx::TxKind;
     use groove::schema::{ColumnSchema, ColumnType};
+
+    #[test]
+    fn peer_view_rejects_overlapping_source_closure_delta() {
+        let fact = ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+            source: ProgramSourceId {
+                table: "todos".to_owned().into(),
+                path: vec![ProgramSourceRole::Root],
+            },
+            complete: true,
+        });
+        let message = SyncMessage::ViewUpdate(ViewUpdatePayload {
+            subscription: SubscriptionKey {
+                shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+                read_view: ReadViewKey::default(),
+            },
+            settled_through: GlobalTime(0),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            peer_payload_inventory: PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: vec![fact.clone()],
+            program_fact_removes: vec![fact],
+        });
+
+        assert!(matches!(
+            message.validate_wire_contract(),
+            Err(WireContractError::OverlappingPeerSourceClosureDelta)
+        ));
+    }
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
