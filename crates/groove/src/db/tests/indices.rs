@@ -1290,6 +1290,122 @@ async fn persisted_indices_can_be_deleted_after_restart() {
 }
 
 #[futures_test::test]
+async fn rejected_live_unique_backfill_preserves_runtime_storage_and_usability() {
+    for records in [
+        [(7_u64, "Blue Train"), (8_u64, "Blue Train")],
+        [(8_u64, "Blue Train"), (7_u64, "Blue Train")],
+    ] {
+        let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+        let mut database = Database::new(albums_schema(), storage).await.unwrap();
+        let mut batch = database.open_batch();
+        for (id, title) in records {
+            batch.insert(
+                "albums",
+                vec![Value::U64(id), Value::String(title.to_owned())],
+            );
+        }
+        database.commit_batch(batch).await.unwrap();
+
+        let schema_before = database.ivm_runtime.schema().clone();
+        let stats_before = database.runtime_stats();
+        let nodes_before = database.ivm_runtime.retained_node_ids();
+        let index_prefix = b"albums\0unique_albums_by_title\0";
+        let index_bytes_before = database
+            .storage
+            .prefix("indices".to_owned(), index_prefix.to_vec())
+            .await
+            .unwrap();
+        let rows_before = database.primary_key_scan("albums", &[]).await.unwrap();
+        control.take_observed();
+
+        let index = IndexSchema::new("unique_albums_by_title", ["title"]).unique();
+        let error = database
+            .register_table_index("albums", index.clone())
+            .await
+            .expect_err("duplicate positive backfill must reject");
+        assert!(matches!(
+            error,
+            Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { index: name })
+                if name == "albums.unique_albums_by_title"
+        ));
+        assert!(
+            !control
+                .take_observed()
+                .contains(&TestStorageOperation::WriteMany),
+            "rejected backfill must not submit registration writes"
+        );
+        assert_eq!(database.ivm_runtime.schema(), &schema_before);
+        assert_eq!(database.runtime_stats(), stats_before);
+        assert_eq!(database.ivm_runtime.retained_node_ids(), nodes_before);
+        assert_eq!(
+            database
+                .storage
+                .prefix("indices".to_owned(), index_prefix.to_vec())
+                .await
+                .unwrap(),
+            index_bytes_before
+        );
+        assert_eq!(
+            database.primary_key_scan("albums", &[]).await.unwrap(),
+            rows_before
+        );
+        assert!(database.ensure_usable().is_ok());
+        assert!(matches!(
+            database
+                .index_get(
+                    "albums",
+                    "unique_albums_by_title",
+                    &[Value::String("Blue Train".to_owned())],
+                )
+                .await,
+            Err(Error::IndexNotFound { table, index })
+                if table == "albums" && index == "unique_albums_by_title"
+        ));
+
+        let mut correction = database.open_batch();
+        correction.delete("albums", PrimaryKeyValue::U64(8));
+        correction.insert(
+            "albums",
+            vec![Value::U64(9), Value::String("Kind of Blue".to_owned())],
+        );
+        database.commit_batch(correction).await.unwrap();
+        database
+            .register_table_index("albums", index)
+            .await
+            .unwrap();
+        assert_eq!(
+            record_values(
+                database
+                    .index_get(
+                        "albums",
+                        "unique_albums_by_title",
+                        &[Value::String("Blue Train".to_owned())],
+                    )
+                    .await
+                    .unwrap()
+            ),
+            [vec![Value::U64(7), Value::String("Blue Train".to_owned())]]
+        );
+        assert_eq!(
+            record_values(
+                database
+                    .index_get(
+                        "albums",
+                        "unique_albums_by_title",
+                        &[Value::String("Kind of Blue".to_owned())],
+                    )
+                    .await
+                    .unwrap()
+            ),
+            [vec![
+                Value::U64(9),
+                Value::String("Kind of Blue".to_owned())
+            ]]
+        );
+    }
+}
+
+#[futures_test::test]
 async fn live_index_registration_rejects_while_a_publication_is_resident() {
     let storage =
         MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
