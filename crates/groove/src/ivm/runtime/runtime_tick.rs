@@ -868,7 +868,13 @@ impl IncrementalEvaluation<'_> {
                         None
                     };
                     if let Some(mut terminal) = terminal {
-                        if let Some(root_ordering_node) = output.root_ordering_node {
+                        // A CollectBy root terminal already owns exact
+                        // occurrence keys and positional edits. Its rendered
+                        // record can omit joined occurrence fields, so the
+                        // generic root-ordering pass would synthesize a
+                        // root-UUID-only Move that cannot address the
+                        // collector's occurrence-keyed output.
+                        if !structured && let Some(root_ordering_node) = output.root_ordering_node {
                             evaluator.apply_root_ordering(
                                 root_ordering_node,
                                 output.output,

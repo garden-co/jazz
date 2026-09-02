@@ -561,8 +561,11 @@ fn update_collect_by_root_terminal_state(
     if !emit {
         state.groups.clear();
         state.roots.clear();
+        state.root_order.clear();
+        state.emitted_root_keys.clear();
     }
     let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
+    let mut before_order = BTreeMap::<Vec<u8>, Option<CollectByOrderKey>>::new();
     for delta in deltas {
         let group_key =
             encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
@@ -576,14 +579,37 @@ fn update_collect_by_root_terminal_state(
             })?;
             before.insert(group_key.clone(), rendered);
         }
+        if !before_order.contains_key(&group_key) {
+            before_order.insert(
+                group_key.clone(),
+                state
+                    .groups
+                    .get(&group_key)
+                    .and_then(collect_by_root_order_key),
+            );
+        }
+        if let Some(order_key) = state
+            .groups
+            .get(&group_key)
+            .and_then(collect_by_root_order_key)
+        {
+            state.root_order.remove(&order_key);
+        }
         let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
         let state_key = (sort_key, delta.record.clone());
-        let group = state.groups.entry(group_key).or_default();
+        let group = state.groups.entry(group_key.clone()).or_default();
         let weight = group.get(&state_key).copied().unwrap_or_default() + delta.weight;
         if weight == 0 {
             group.remove(&state_key);
         } else {
             group.insert(state_key, weight);
+        }
+        if let Some(order_key) = state
+            .groups
+            .get(&group_key)
+            .and_then(collect_by_root_order_key)
+        {
+            state.root_order.insert(order_key, group_key.clone());
         }
     }
     state.groups.retain(|_, group| !group.is_empty());
@@ -592,6 +618,127 @@ fn update_collect_by_root_terminal_state(
     }
 
     let mut operations = Vec::new();
+    // Remove first so the later positional inserts/moves index the final
+    // retained sequence rather than an opaque-key snapshot.
+    for (root_key, before_key) in &before_order {
+        if before_key.is_some() && !state.groups.contains_key(root_key) {
+            operations.push(TerminalOperation {
+                root_descriptor: output_desc,
+                root_key: root_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Remove {
+                    key: root_key.clone(),
+                },
+            });
+            state.emitted_root_keys.remove(root_key);
+        }
+    }
+    let mut inserts = Vec::new();
+    for (root_key, before_key) in &before_order {
+        if before_key.is_some() || !state.groups.contains_key(root_key) {
+            continue;
+        }
+        let order_key = state
+            .groups
+            .get(root_key)
+            .and_then(collect_by_root_order_key)
+            .expect("retained root has an order key");
+        let index = state.root_order.range(..order_key.clone()).count();
+        let record = state
+            .groups
+            .get(root_key)
+            .map(|group| {
+                let records = group
+                    .iter()
+                    .map(|((_, record), weight)| (record.clone(), *weight))
+                    .collect::<Vec<_>>();
+                collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+            })
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| {
+                IvmRuntimeError::InvalidCollectBy(
+                    "new root collector group did not render a terminal row".into(),
+                )
+            })?;
+        inserts.push((
+            index,
+            TerminalOperation {
+                root_descriptor: output_desc,
+                root_key: root_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Insert {
+                    index,
+                    key: root_key.clone(),
+                    value: record.to_vec(),
+                },
+            },
+        ));
+    }
+    inserts.sort_by_key(|(index, _)| *index);
+    for (_, operation) in inserts {
+        let order_key = state
+            .groups
+            .get(&operation.root_key)
+            .and_then(collect_by_root_order_key)
+            .expect("inserted root has an order key");
+        let _ = order_key;
+        state.emitted_root_keys.insert(operation.root_key.clone());
+        operations.push(operation);
+    }
+
+    let mut moves = Vec::new();
+    for (root_key, before_key) in &before_order {
+        let Some(before_key) = before_key else {
+            continue;
+        };
+        // A join-side maintenance delta can touch an internal root grouping
+        // that did not render a public root terminal row. It has no retained
+        // facade occurrence to move.
+        if !before.get(root_key).is_some_and(Option::is_some)
+            || !state.emitted_root_keys.contains(root_key)
+        {
+            continue;
+        }
+        let Some(after_key) = state
+            .groups
+            .get(root_key)
+            .and_then(collect_by_root_order_key)
+        else {
+            continue;
+        };
+        if *before_key == after_key {
+            continue;
+        }
+        let index = state.root_order.range(..after_key.clone()).count();
+        moves.push((
+            index,
+            TerminalOperation {
+                root_descriptor: output_desc,
+                root_key: root_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Move {
+                    key: root_key.clone(),
+                    index,
+                },
+            },
+        ));
+    }
+    moves.sort_by_key(|(index, _)| *index);
+    for (_, operation) in moves {
+        let before_key = before_order
+            .get(&operation.root_key)
+            .and_then(Option::as_ref)
+            .expect("moved root had a prior order key");
+        let after_key = state
+            .groups
+            .get(&operation.root_key)
+            .and_then(collect_by_root_order_key)
+            .expect("moved root has an order key");
+        let _ = (before_key, after_key);
+        operations.push(operation);
+    }
+
     for (root_key, before_record) in before {
         let after_record = state.groups.get(&root_key).map_or(Ok(None), |group| {
             let records = group
@@ -604,22 +751,14 @@ fn update_collect_by_root_terminal_state(
             continue;
         }
         let edit = match (before_record, after_record) {
-            (None, Some(record)) => TerminalEdit::Insert {
-                index: state
-                    .groups
-                    .keys()
-                    .take_while(|key| *key < &root_key)
-                    .count(),
-                key: root_key.clone(),
-                value: record.to_vec(),
-            },
+            // New roots were inserted above in final collector order.
+            (None, Some(_)) => continue,
             (Some(_), Some(record)) => TerminalEdit::Update {
                 key: root_key.clone(),
                 value: record.to_vec(),
             },
-            (Some(_), None) => TerminalEdit::Remove {
-                key: root_key.clone(),
-            },
+            // Removed roots were retracted before inserts/moves above.
+            (Some(_), None) => continue,
             (None, None) => continue,
         };
         operations.push(TerminalOperation {
@@ -630,6 +769,15 @@ fn update_collect_by_root_terminal_state(
         });
     }
     Ok(operations)
+}
+
+fn collect_by_root_order_key(
+    group: &BTreeMap<CollectByOrderKey, i64>,
+) -> Option<CollectByOrderKey> {
+    group
+        .iter()
+        .find(|(_, weight)| **weight > 0)
+        .map(|(order_key, _)| order_key.clone())
 }
 
 pub(super) fn collect_by_root_from_records(

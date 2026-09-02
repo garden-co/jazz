@@ -123,19 +123,19 @@ pub(crate) struct MaintainedSubscriptionView {
     /// this separate from `result_payloads`: the latter records the raw
     /// result-terminal state while a membership waits for its content witness.
     published_result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
-    /// Incrementally maintained collector output. The key is the root row and
-    /// the encoded tree so a -/+ replacement for one root never requires
-    /// touching the rendered trees for other roots.
-    structured_app_rows: BTreeMap<RowUuid, BTreeMap<Vec<u8>, i64>>,
-    /// Collector-owned root sequence from the initial Groove terminal
-    /// snapshot.  This is intentionally a sequence rather than a map: Jazz
-    /// must not reconstruct query order from row values after lowering.
-    structured_app_row_order: Vec<RowUuid>,
-    /// Runtime terminal edits address roots by their opaque Groove key, while
-    /// the retained collector tree is keyed by its public row UUID. Keep the
-    /// compiler-emitted association so reset and incremental terminal edits
-    /// fold through one local reducer without re-running the query.
+    /// Incrementally maintained collector output, keyed by the opaque Groove
+    /// terminal key and then encoded tree. A public root UUID is not a
+    /// sufficient identity: one flat relation can contain several occurrences
+    /// of that root with distinct joined descendants.
+    structured_app_rows: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, i64>>,
+    /// Runtime terminal edits address roots by their opaque Groove key. Keep
+    /// the compiler-emitted association solely to target a root's descendants;
+    /// it must never be used to collapse retained occurrence records.
     structured_root_keys: BTreeMap<Vec<u8>, RowUuid>,
+    /// Exact collector order for root terminal keys. Root UUIDs are not a
+    /// sequence key: one flat relation can validly contain more than one
+    /// occurrence of the same root.
+    structured_root_key_order: Vec<Vec<u8>>,
     structured_app_row_descriptor: Option<RecordDescriptor>,
     /// Whether this maintained subscription retains the recursive app-row
     /// collector. Flat unordered subscriptions release it after their reset;
@@ -167,8 +167,8 @@ impl Default for MaintainedSubscriptionView {
             result_payloads: BTreeMap::new(),
             published_result_payloads: BTreeMap::new(),
             structured_app_rows: BTreeMap::new(),
-            structured_app_row_order: Vec::new(),
             structured_root_keys: BTreeMap::new(),
+            structured_root_key_order: Vec::new(),
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
@@ -504,15 +504,19 @@ impl MaintainedSubscriptionView {
                     deltas.deltas.len(),
                 );
             }
-            let root_collector_schema = match schemas.get(&sink)? {
-                MaintainedTerminalKind::RootCollectorAppRows { schema, .. } => Some(schema.clone()),
-                _ => None,
-            };
+            // The root collector's positional terminal is the sole owner of
+            // retained app-row state. Its ordinary sink delta is the same
+            // fact stream without an occurrence key; applying it here would
+            // either duplicate an occurrence or collapse siblings sharing a
+            // public root UUID.
+            if matches!(
+                schemas.get(&sink)?,
+                MaintainedTerminalKind::RootCollectorAppRows { .. }
+            ) {
+                continue;
+            }
             let delta_transitions =
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
-            if let Some(schema) = root_collector_schema {
-                self.replace_structured_app_row_order_from_snapshot(&schema, &deltas)?;
-            }
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
             for (fact, is_present) in delta_transitions.source_fact_presence_changes {
@@ -703,7 +707,16 @@ impl MaintainedSubscriptionView {
                 }
                 NetEvent::StructuredAppRow(root, record) => {
                     if self.retains_structured_app_rows {
-                        self.apply_structured_app_row_delta(root, record, weight);
+                        // Direct app rows have no Groove positional terminal,
+                        // so their public root remains their only identity.
+                        // Root-collector rows never reach this branch; they
+                        // retain the exact opaque terminal key above.
+                        let terminal_key = root.0.as_bytes().to_vec();
+                        self.structured_root_keys.insert(terminal_key.clone(), root);
+                        self.apply_structured_app_row_delta(terminal_key.clone(), record, weight);
+                        if !self.structured_root_key_order.contains(&terminal_key) {
+                            self.structured_root_key_order.push(terminal_key);
+                        }
                     }
                 }
             }
@@ -864,24 +877,42 @@ impl MaintainedSubscriptionView {
         &self.published_result_members
     }
 
-    /// Returns the collector's current recursive row for one changed root.
-    ///
-    /// The incremental update builder uses this to replace just that root.
-    pub(crate) fn structured_app_row(&self, root: RowUuid) -> Option<OwnedRecord> {
+    /// Returns the collector's current recursive row for one opaque terminal
+    /// key.
+    fn structured_app_row_for_terminal_key(&self, terminal_key: &[u8]) -> Option<OwnedRecord> {
         let descriptor = self.structured_app_row_descriptor?;
         self.structured_app_rows
-            .get(&root)?
+            .get(terminal_key)?
             .iter()
             .filter(|(_, weight)| **weight > 0)
             .map(|(raw, _)| OwnedRecord::new(raw.clone(), descriptor))
             .next()
     }
 
+    /// Returns the collector row for a public root only when it has one
+    /// occurrence. Callers that materialize a flat relation must use the
+    /// opaque-key accessor below: a root UUID cannot select among siblings.
+    #[cfg(test)]
+    pub(crate) fn structured_app_row(&self, root: RowUuid) -> Option<OwnedRecord> {
+        let mut rows = self
+            .structured_root_key_order
+            .iter()
+            .filter(|key| self.structured_root_keys.get(*key) == Some(&root))
+            .filter_map(|key| self.structured_app_row_for_terminal_key(key));
+        let row = rows.next()?;
+        rows.next().is_none().then_some(row)
+    }
+
     #[cfg(test)]
     pub(crate) fn structured_app_rows(&self) -> Vec<(RowUuid, OwnedRecord)> {
-        self.structured_app_rows
-            .keys()
-            .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
+        self.structured_root_key_order
+            .iter()
+            .filter_map(|key| {
+                self.structured_root_keys.get(key).and_then(|root| {
+                    self.structured_app_row_for_terminal_key(key)
+                        .map(|record| (*root, record))
+                })
+            })
             .collect()
     }
 
@@ -892,10 +923,12 @@ impl MaintainedSubscriptionView {
     /// occurrence, so its `RowUuid` is insufficient as a snapshot key; the
     /// collector's opaque key is the only exact association.
     pub(crate) fn structured_app_rows_by_terminal_key(&self) -> Vec<(Vec<u8>, OwnedRecord)> {
-        self.structured_root_keys
+        self.structured_root_key_order
             .iter()
-            .filter_map(|(key, root)| {
-                self.structured_app_row(*root)
+            .filter_map(|key| {
+                self.structured_root_keys
+                    .get(key)
+                    .and_then(|_| self.structured_app_row_for_terminal_key(key))
                     .map(|record| (key.clone(), record))
             })
             .collect()
@@ -907,15 +940,23 @@ impl MaintainedSubscriptionView {
     /// and version witnesses.
     pub(crate) fn discard_structured_app_rows(&mut self) {
         self.structured_app_rows.clear();
-        self.structured_app_row_order.clear();
         self.structured_root_keys.clear();
+        self.structured_root_key_order.clear();
         self.structured_app_row_descriptor = None;
         self.retains_structured_app_rows = false;
     }
 
-    fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
+    fn apply_structured_app_row_delta(
+        &mut self,
+        terminal_key: Vec<u8>,
+        record: OwnedRecord,
+        weight: i64,
+    ) {
         self.structured_app_row_descriptor = Some(*record.descriptor());
-        let records = self.structured_app_rows.entry(root).or_default();
+        let records = self
+            .structured_app_rows
+            .entry(terminal_key.clone())
+            .or_default();
         let new_weight = records.get(record.raw()).copied().unwrap_or(0) + weight;
         if new_weight == 0 {
             records.remove(record.raw());
@@ -923,11 +964,7 @@ impl MaintainedSubscriptionView {
             records.insert(record.into_raw(), new_weight);
         }
         if records.is_empty() {
-            self.structured_app_rows.remove(&root);
-            self.structured_app_row_order
-                .retain(|candidate| candidate != &root);
-        } else if !self.structured_app_row_order.contains(&root) {
-            self.structured_app_row_order.push(root);
+            self.structured_app_rows.remove(&terminal_key);
         }
     }
 
@@ -943,7 +980,7 @@ impl MaintainedSubscriptionView {
         // root before looking at the edit: attempting to decode that element
         // as a root is both invalid and would create a second snapshot path.
         if !operation.path.is_empty() {
-            let root = self
+            let _root = self
                 .structured_root_keys
                 .get(&operation.root_key)
                 .copied()
@@ -961,12 +998,12 @@ impl MaintainedSubscriptionView {
                     "terminal descendant descriptor disagrees with retained collector layout",
                 ));
             }
-            let records =
-                self.structured_app_rows
-                    .get_mut(&root)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "terminal descendant operation addressed an absent retained root",
-                    ))?;
+            let records = self
+                .structured_app_rows
+                .get_mut(&operation.root_key)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "terminal descendant operation addressed an absent retained root",
+                ))?;
             let mut candidates = records
                 .iter()
                 .filter(|(_, weight)| **weight > 0)
@@ -990,7 +1027,7 @@ impl MaintainedSubscriptionView {
             records.insert(updated.into_raw(), weight);
             return Ok(());
         }
-        let root = match &operation.edit {
+        let _root = match &operation.edit {
             TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
                 let index = operation.root_descriptor.field_index("row_uuid").ok_or(
@@ -1015,63 +1052,41 @@ impl MaintainedSubscriptionView {
         match &operation.edit {
             TerminalEdit::Insert { index, value, .. } => {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
-                self.structured_app_rows.remove(&root);
-                self.apply_structured_app_row_delta(root, record, 1);
-                self.structured_app_row_order
-                    .retain(|candidate| candidate != &root);
-                self.structured_app_row_order
-                    .insert((*index).min(self.structured_app_row_order.len()), root);
+                self.structured_app_rows.remove(&operation.root_key);
+                self.apply_structured_app_row_delta(operation.root_key.clone(), record, 1);
+                self.structured_root_key_order
+                    .retain(|key| key != &operation.root_key);
+                self.structured_root_key_order.insert(
+                    (*index).min(self.structured_root_key_order.len()),
+                    operation.root_key.clone(),
+                );
             }
             TerminalEdit::Update { value, .. } => {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
-                self.structured_app_rows.remove(&root);
-                self.apply_structured_app_row_delta(root, record, 1);
+                self.structured_app_rows.remove(&operation.root_key);
+                self.apply_structured_app_row_delta(operation.root_key.clone(), record, 1);
             }
             TerminalEdit::Remove { .. } => {
                 self.structured_root_keys.remove(&operation.root_key);
-                self.structured_app_rows.remove(&root);
-                self.structured_app_row_order
-                    .retain(|candidate| candidate != &root);
+                self.structured_root_key_order
+                    .retain(|key| key != &operation.root_key);
+                self.structured_app_rows.remove(&operation.root_key);
             }
             TerminalEdit::Move { index, .. } => {
-                let previous = self
-                    .structured_app_row_order
+                let key_previous = self
+                    .structured_root_key_order
                     .iter()
-                    .position(|candidate| candidate == &root)
+                    .position(|key| key == &operation.root_key)
                     .ok_or(super::Error::InvalidStoredValue(
-                        "root collector terminal move addresses an absent root",
+                        "root collector terminal move addresses an absent root key",
                     ))?;
-                self.structured_app_row_order.remove(previous);
-                self.structured_app_row_order
-                    .insert((*index).min(self.structured_app_row_order.len()), root);
+                self.structured_root_key_order.remove(key_previous);
+                self.structured_root_key_order.insert(
+                    (*index).min(self.structured_root_key_order.len()),
+                    operation.root_key.clone(),
+                );
             }
         }
-        Ok(())
-    }
-
-    fn replace_structured_app_row_order_from_snapshot(
-        &mut self,
-        schema: &AppRowSchema,
-        deltas: &RecordDeltas,
-    ) -> Result<(), super::Error> {
-        let row_uuid =
-            schema
-                .descriptor
-                .field_index("row_uuid")
-                .ok_or(super::Error::InvalidStoredValue(
-                    "root collector terminal has no row_uuid field",
-                ))?;
-        let mut order = Vec::new();
-        for (record, weight) in deltas.iter() {
-            if weight <= 0 {
-                continue;
-            }
-            let root = RowUuid(record.get_uuid(row_uuid)?);
-            if !order.contains(&root) {
-                order.push(root);
-            }
-        }
-        self.structured_app_row_order = order;
         Ok(())
     }
 
@@ -3206,6 +3221,101 @@ mod tests {
             public_fields: Vec::new(),
             carrier: TerminalRootCarrier::Logical,
         }
+    }
+
+    // This reducer test deliberately works below the public query API. The
+    // runtime hands it opaque terminal keys after CollectBy has already
+    // applied sort/window semantics, and a public root UUID cannot express
+    // two flat occurrences of that root with different joined payloads.
+    #[test]
+    fn collector_terminal_keys_preserve_same_root_payloads_order_and_edits() {
+        let descriptor =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+        let root = row(0x81);
+        let first_key = vec![0x10, 0x01];
+        let second_key = vec![0x10, 0x02];
+        let record = |title: &str| {
+            descriptor
+                .create(&[Value::Uuid(root.0), Value::String(title.to_owned())])
+                .unwrap()
+        };
+        let insert = |key: Vec<u8>, index, value| TerminalOperation {
+            root_descriptor: descriptor,
+            root_key: key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Insert { key, index, value },
+        };
+        let update = |key: Vec<u8>, value| TerminalOperation {
+            root_descriptor: descriptor,
+            root_key: key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Update { key, value },
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        // These indices are the already-lowered CollectBy order (for example
+        // a query's custom sort after offset/limit), not map-key order.
+        maintained
+            .apply_structured_terminal_operation(&insert(second_key.clone(), 0, record("second")))
+            .unwrap();
+        maintained
+            .apply_structured_terminal_operation(&insert(first_key.clone(), 1, record("first")))
+            .unwrap();
+        let titles = |view: &MaintainedSubscriptionView| {
+            view.structured_app_rows_by_terminal_key()
+                .into_iter()
+                .map(|(key, row)| {
+                    let Value::String(title) = row.borrowed().get("title").unwrap() else {
+                        panic!("test record keeps a string title");
+                    };
+                    (key, title)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&maintained),
+            vec![
+                (second_key.clone(), "second".to_owned()),
+                (first_key.clone(), "first".to_owned()),
+            ]
+        );
+
+        // An occurrence-local replacement must leave its same-root sibling
+        // intact, then its move must retain the collector's declared order.
+        maintained
+            .apply_structured_terminal_operation(&update(
+                first_key.clone(),
+                record("first updated"),
+            ))
+            .unwrap();
+        maintained
+            .apply_structured_terminal_operation(&TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: first_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Move {
+                    key: first_key.clone(),
+                    index: 0,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            titles(&maintained),
+            vec![
+                (first_key.clone(), "first updated".to_owned()),
+                (second_key.clone(), "second".to_owned()),
+            ]
+        );
+
+        maintained
+            .apply_structured_terminal_operation(&TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: first_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Remove { key: first_key },
+            })
+            .unwrap();
+        assert_eq!(titles(&maintained), vec![(second_key, "second".to_owned())]);
     }
 
     #[test]
