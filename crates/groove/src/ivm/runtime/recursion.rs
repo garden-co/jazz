@@ -1376,7 +1376,7 @@ impl HydrationEvaluator<'_> {
                     };
                     let left = self.eval_node(*left).await?;
                     let right = self.eval_node(*right).await?;
-                    let join_state = super::join::AntiJoinState;
+                    let mut join_state = super::join::AntiJoinState::default();
                     let left_on = plan_expr_names(&join.left_key);
                     let right_on = plan_expr_names(&join.right_key);
                     let mut left_arrangement = AsOf::new(super::join::ArrangementState::default());

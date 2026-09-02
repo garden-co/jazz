@@ -1834,6 +1834,88 @@ async fn input_source_replacements_are_atomic_idempotent_and_revoke_cleanly() {
     );
 }
 
+/// An input source can feed both a join and a downstream anti-join in the
+/// same maintained graph (the shape required by a required nested include).
+/// Replacing both sources atomically must not make the anti-join retract a
+/// left row merely because the join arranged it earlier in the same tick.
+#[futures_test::test]
+async fn atomic_input_replacements_do_not_retract_unpublished_anti_join_rows() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let left_descriptor =
+        RecordDescriptor::new([("id", ColumnType::U64), ("key", ColumnType::U64)]);
+    let right_descriptor = RecordDescriptor::new([("key", ColumnType::U64)]);
+    let left = database.allocate_input_source(left_descriptor);
+    let right = database.allocate_input_source(right_descriptor);
+    let left_source = GraphBuilder::input_source(left, left_descriptor);
+    let matched = GraphBuilder::join(
+        left_source.clone(),
+        GraphBuilder::input_source(right, right_descriptor),
+        ["key"],
+        ["key"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("left.key", "key"),
+    ]);
+    let visible = GraphBuilder::anti_join(left_source, matched, ["key"], ["key"]);
+    let subscription = database.subscribe_one_sink(visible).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let left_record = left_descriptor
+        .create(&[Value::U64(1), Value::U64(7)])
+        .unwrap();
+    let right_record = right_descriptor.create(&[Value::U64(7)]).unwrap();
+
+    for left_first in [true, false] {
+        let left_replacement = InputSourceReplacement {
+            id: left,
+            descriptor: left_descriptor,
+            records: vec![left_record.clone()],
+        };
+        let right_replacement = InputSourceReplacement {
+            id: right,
+            descriptor: right_descriptor,
+            records: vec![right_record.clone()],
+        };
+        if left_first {
+            database
+                .replace_input_sources([left_replacement, right_replacement])
+                .await
+                .unwrap();
+        } else {
+            database
+                .replace_input_sources([right_replacement, left_replacement])
+                .await
+                .unwrap();
+        }
+        assert!(
+            subscription.try_recv().is_err(),
+            "a matching right row suppresses the left row without a spurious retraction"
+        );
+        database
+            .replace_input_sources([
+                InputSourceReplacement {
+                    id: left,
+                    descriptor: left_descriptor,
+                    records: vec![],
+                },
+                InputSourceReplacement {
+                    id: right,
+                    descriptor: right_descriptor,
+                    records: vec![],
+                },
+            ])
+            .await
+            .unwrap();
+        assert!(subscription.try_recv().is_err());
+    }
+}
+
 /// Incremental runtime input changes share the replacement API's atomic
 /// cross-source frontier, but do not require callers to resend untouched
 /// records. This is the primitive used by receiver-side source closures.
