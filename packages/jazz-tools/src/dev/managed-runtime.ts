@@ -389,7 +389,9 @@ export class ManagedDevRuntime {
   private watcher: { close: () => void } | null = null;
   private shutdownHooksInstalled = false;
   private cleanupHandler: (() => void) | null = null;
-
+  private previousBackendSecret: string | undefined;
+  private hadPreviousBackendSecret = false;
+  private injectedBackendSecret: string | undefined;
   constructor(private envKeys: ManagedRuntimeEnvKeys) {}
 
   prepareEnv(options: InitializeOptions): string | null {
@@ -445,12 +447,24 @@ export class ManagedDevRuntime {
       await this.serverHandle.stop();
       this.serverHandle = null;
     }
+    if (
+      this.injectedBackendSecret !== undefined &&
+      process.env.BACKEND_SECRET === this.injectedBackendSecret
+    ) {
+      if (this.hadPreviousBackendSecret) {
+        process.env.BACKEND_SECRET = this.previousBackendSecret;
+      } else {
+        delete process.env.BACKEND_SECRET;
+      }
+    }
+    this.previousBackendSecret = undefined;
+    this.hadPreviousBackendSecret = false;
+    this.injectedBackendSecret = undefined;
     this.runtime = null;
     this.initPromise = null;
     this.initConfigSignature = null;
     this.runtimeConfigSignature = null;
   }
-
   private installShutdownHooks(): void {
     if (this.shutdownHooksInstalled) return;
 
@@ -633,13 +647,17 @@ export class ManagedDevRuntime {
 
         const backendSecret = this.serverHandle?.backendSecret;
 
+        this.previousBackendSecret = process.env.BACKEND_SECRET;
+        this.hadPreviousBackendSecret = Object.hasOwn(process.env, "BACKEND_SECRET");
+        if (backendSecret) {
+          process.env.BACKEND_SECRET = backendSecret;
+          this.injectedBackendSecret = backendSecret;
+        }
+
         process.env[this.envKeys.appId] = appId;
         process.env[this.envKeys.serverUrl] = serverUrl;
         if (telemetryCollectorUrl) {
           process.env[this.envKeys.telemetryCollectorUrl] = telemetryCollectorUrl;
-        }
-        if (backendSecret) {
-          process.env.BACKEND_SECRET = backendSecret;
         }
 
         this.runtime = { appId, serverUrl, adminSecret, backendSecret, telemetryCollectorUrl };

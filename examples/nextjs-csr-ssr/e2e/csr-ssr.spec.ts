@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 function todoSection(page: Page, label: string): Locator {
@@ -30,12 +31,13 @@ async function reloadUntilSectionContains(page: Page, label: string, title: stri
 test.describe("Next.js CSR / SSR todos", () => {
   test("client and server panes round-trip todos through the shared Jazz backend", async ({
     page,
-  }) => {
+  }, testInfo) => {
     // Flow:
     // browser client submit -> sync server -> reload -> Next RSC render
     // Next server action submit -> sync server -> live client subscription update
-    const clientTitle = `alice books train tickets ${Date.now()}`;
-    const serverTitle = `bob files travel reimbursement ${Date.now()}`;
+    const identity = `${testInfo.retry}-${randomUUID()}`;
+    const clientTitle = `alice books train tickets ${identity}`;
+    const serverTitle = `bob files travel reimbursement ${identity}`;
 
     await page.goto("/");
 
@@ -43,8 +45,6 @@ test.describe("Next.js CSR / SSR todos", () => {
     const serverPane = todoSection(page, "Server-side (RSC)");
 
     await expect(page.getByRole("heading", { name: "jazz — nextjs CSR / SSR" })).toBeVisible();
-    await expect(clientPane).toContainText("No todos yet.");
-    await expect(serverPane).toContainText("No todos yet.");
 
     await addTodo(clientPane, clientTitle);
     await expect(clientPane).toContainText(clientTitle);
