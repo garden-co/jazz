@@ -1401,6 +1401,15 @@ async fn rejected_live_unique_backfill_preserves_runtime_storage_and_usability()
             Err(Error::IndexNotFound { table, index })
                 if table == "albums" && index == "unique_albums_by_title"
         ));
+        let retry_error = database
+            .register_table_index("albums", index.clone())
+            .await
+            .expect_err("the duplicate must continue rejecting before correction");
+        assert!(matches!(
+            retry_error,
+            Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { index: name })
+                if name == "albums.unique_albums_by_title"
+        ));
 
         let mut correction = database.open_batch();
         correction.delete("albums", PrimaryKeyValue::U64(8));
@@ -1443,6 +1452,130 @@ async fn rejected_live_unique_backfill_preserves_runtime_storage_and_usability()
             ]]
         );
     }
+}
+
+#[futures_test::test]
+async fn live_index_backfill_write_failure_remains_poisoning() {
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    control.take_observed();
+    control.fail_next(TestStorageOperation::WriteMany);
+
+    let error = database
+        .register_table_index(
+            "albums",
+            IndexSchema::new("unique_albums_by_title", ["title"]).unique(),
+        )
+        .await
+        .expect_err("registration write failure must be returned");
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::Storage(crate::storage::Error::Backend {
+            backend: "test",
+            ..
+        }))
+    ));
+    assert_eq!(
+        control
+            .take_observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::WriteMany)
+            .count(),
+        1
+    );
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(Error::DatabasePoisoned)
+    ));
+}
+
+#[futures_test::test]
+async fn live_index_hydration_io_failure_remains_poisoning() {
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_column_family("albums");
+    control.take_observed();
+    control.fail_next(TestStorageOperation::ScanOpen);
+
+    let error = database
+        .register_table_index(
+            "albums",
+            IndexSchema::new("unique_albums_by_title", ["title"]).unique(),
+        )
+        .await
+        .expect_err("hydration IO failure must be returned");
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::Storage(crate::storage::Error::Backend {
+            backend: "test",
+            ..
+        }))
+    ));
+    let observed = control.take_observed();
+    assert!(observed.contains(&TestStorageOperation::ScanOpen));
+    assert!(!observed.contains(&TestStorageOperation::WriteMany));
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(Error::DatabasePoisoned)
+    ));
+}
+
+#[futures_test::test]
+async fn live_index_non_unique_runtime_error_remains_poisoning() {
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    database
+        .storage
+        .set(
+            "albums".to_owned(),
+            PrimaryKeyValue::U64(7).into_bytes(),
+            vec![0xff],
+        )
+        .await
+        .unwrap();
+    control.take_observed();
+
+    let error = database
+        .register_table_index(
+            "albums",
+            IndexSchema::new("unique_albums_by_title", ["title"]).unique(),
+        )
+        .await
+        .expect_err("record encoding failure must be returned");
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::RecordEncoding(_))
+    ));
+    assert!(
+        !control
+            .take_observed()
+            .contains(&TestStorageOperation::WriteMany)
+    );
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(Error::DatabasePoisoned)
+    ));
 }
 
 #[futures_test::test]
