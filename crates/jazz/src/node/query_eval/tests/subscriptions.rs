@@ -383,8 +383,36 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
     relay
         .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
         .unwrap();
-
-    let update = |subscription, reset_result_set, opening_pending, defer_settlement| {
+    let update = |subscription, reset_result_set: bool, opening_pending, defer_settlement| {
+        let program_fact_adds = reset_result_set
+            .then(|| {
+                vec![
+                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                        crate::protocol::ProgramSourceCoverageEntry {
+                            source: crate::protocol::ProgramSourceId {
+                                table: "issues".to_owned().into(),
+                                path: vec![crate::protocol::ProgramSourceRole::Root],
+                            },
+                            complete: true,
+                        },
+                    ),
+                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                        crate::protocol::ProgramSourceCoverageEntry {
+                            source: crate::protocol::ProgramSourceId {
+                                table: "users".to_owned().into(),
+                                path: vec![
+                                    crate::protocol::ProgramSourceRole::Root,
+                                    crate::protocol::ProgramSourceRole::Alias(
+                                        "include:18446744073709551615:0".to_owned(),
+                                    ),
+                                ],
+                            },
+                            complete: true,
+                        },
+                    ),
+                ]
+            })
+            .unwrap_or_default();
         crate::node::ViewUpdateParts {
             subscription,
             settled_through: crate::time::GlobalTime(7),
@@ -396,7 +424,7 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
             opening_pending,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds,
             program_fact_removes: Vec::new(),
         }
     };
