@@ -3421,6 +3421,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shared_covered_input_publishes_only_first_add_and_final_remove() {
+        let aliases = aliases();
+        let row = version(row(0x51), 10, "shared source");
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(test_source(), &row, &aliases)
+                .expect("test version has a registered node alias"),
+        );
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        // Two independent terminals can reach the same exact source version.
+        // The peer closure is a set: the second witness is not a second add,
+        // and removing either witness must retain the other.
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1),
+            Some(true)
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), 1),
+            None
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1),
+            None
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), -1),
+            Some(false)
+        );
+        assert!(maintained.source_fact_weights.is_empty());
+    }
+
     fn replacement_content(row: VersionRow) -> DecodedMaintainedEvent {
         DecodedMaintainedEvent::ReplacementContent {
             source: test_source(),
