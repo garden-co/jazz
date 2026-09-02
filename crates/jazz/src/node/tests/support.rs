@@ -1353,8 +1353,22 @@ fn sync_current_rows_to(
 ) {
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(core, "todos").unwrap();
+    register_whole_table_receiver(reader, "todos");
     reader.apply_sync_message_settled(update).unwrap();
 }
+
+/// Installs the exact canonical whole-table source identity before a fixture
+/// receives a `PeerState::current_rows_update`.  Direct receiver tests still
+/// exercise the wire update; they must not rely on an implicit local fallback
+/// for its shape, binding, or default read-view options.
+fn register_whole_table_receiver<S>(node: &mut NodeState<S>, table: &str)
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let (shape, binding) = node.whole_table_shape_binding(table).unwrap();
+    register_shape_binding(node, &shape, &binding);
+}
+
 fn register_shape_binding<S>(
     node: &mut NodeState<S>,
     shape: &ValidatedQuery,

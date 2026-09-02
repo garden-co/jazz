@@ -93,14 +93,24 @@ fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     let update = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
     let mut incremental_update = update.clone();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set, ..
+        reset_result_set,
+        program_fact_adds,
+        ..
     }) = &mut incremental_update
     else {
         panic!("expected view update");
     };
     *reset_result_set = false;
+    // The explicit predecessor reset above already installed this source's
+    // coverage. A live transition carries only the row facts that follow it;
+    // source coverage is reset-only under the receiver contract.
+    program_fact_adds.retain(|fact| {
+        !matches!(fact, crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_))
+    });
 
+    register_whole_table_receiver(&mut bulk_reader, "todos");
     bulk_reader.apply_sync_message_settled(update).unwrap();
+    register_whole_table_receiver(&mut incremental_reader, "todos");
     let subscription = incremental_reader
         .whole_table_subscription_key("todos")
         .unwrap();

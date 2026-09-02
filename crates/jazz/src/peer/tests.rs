@@ -1788,6 +1788,14 @@ fn register_shape_binding_for_receiver_with_opts(
     .unwrap();
 }
 
+/// Register the canonical source identity used by the direct whole-table peer
+/// fixture before accepting its covered-input update.  This deliberately
+/// preserves the ordinary SYSTEM-scoped admission used by these tests.
+fn register_whole_table_receiver(node: &mut NodeState<RocksDbStorage>, table: &str) {
+    let (shape, binding) = node.whole_table_shape_binding(table).unwrap();
+    register_shape_binding_for_receiver(node, &shape, &binding);
+}
+
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -4946,6 +4954,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_one);
     assert!(peer.shipped_complete_tx_payloads().is_empty());
+    register_whole_table_receiver(&mut reader, "docs");
     reader.apply_sync_message_settled(first_update).unwrap();
     assert_eq!(
         reader
@@ -5110,6 +5119,7 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
     let mut peer = PeerState::new();
 
     let initial = peer.current_rows_update(&mut core, "todos").unwrap();
+    register_whole_table_receiver(&mut reader, "todos");
     reader.apply_sync_message_settled(initial).unwrap();
     assert_eq!(
         reader
@@ -5188,6 +5198,7 @@ fn peer_state_sends_result_removes_after_deletes() {
     let mut peer = PeerState::new();
 
     let initial = peer.current_rows_update(&mut core, "todos").unwrap();
+    register_whole_table_receiver(&mut reader, "todos");
     reader.apply_sync_message_settled(initial).unwrap();
     assert_eq!(
         reader
@@ -5232,6 +5243,7 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
     accept_global(&mut core, content_tx, 1);
     let mut peer = PeerState::new();
 
+    register_whole_table_receiver(&mut reader, "todos");
     reader
         .apply_sync_message_settled(peer.current_rows_update(&mut core, "todos").unwrap())
         .unwrap();
