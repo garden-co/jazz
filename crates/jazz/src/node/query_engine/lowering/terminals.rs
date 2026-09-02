@@ -254,6 +254,19 @@ pub(super) fn lowered_terminals(
                 *existing = GraphBuilder::union([existing.clone(), witness.clone()]);
             })
             .or_insert(witness);
+        let (seed_source, seed) = closure::reachable_seed_membership_graph(
+            contribution,
+            &request.input.shape.nodes,
+            resolved_sources,
+            request,
+            &receiver_root_route_fields,
+        )?;
+        covered_source_members
+            .entry(seed_source)
+            .and_modify(|existing| {
+                *existing = GraphBuilder::union([existing.clone(), seed.clone()]);
+            })
+            .or_insert(seed);
     }
     // A correlated collector owns a distinct compiled source occurrence for
     // each child path.  The implicit-reference closure above may happen to

@@ -224,6 +224,55 @@ pub(super) fn reachable_step_witness_membership_graph(
     )
 }
 
+/// Return the exact recursive seed rows that participate in a reachable
+/// contributor. A receiver rebuilds the recursive relation from both its
+/// initial frontier and the evaluated steps, so source coverage must name the
+/// seed occurrence as well as the step witness. Reopening the seed table
+/// locally would turn an authority-scoped closure into an unfiltered source
+/// scan; lower the authority's seed plan and freeze only its admitted rows.
+pub(super) fn reachable_seed_membership_graph(
+    contribution: &ReachableContribution,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<(SourceId, GraphBuilder)> {
+    let receiver_routes = receiver_routing_fields(request).map_err(single_gap_report)?;
+    let route_fields = route_fields
+        .intersection(&receiver_routes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut visited = BTreeSet::new();
+    let plan = analyze_relation_input_node(&contribution.access_input, nodes, &mut visited)
+        .map_err(single_gap_report)?;
+    let recursive =
+        recursive_relation_for_edge(&plan, &contribution.edge_source).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "reachable contribution {} has no recursive seed for edge source {:?}",
+                contribution.id, contribution.edge_source
+            )))
+        })?;
+    let seed_id = recursive.seed_source().ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Operator(
+            "recursive seed witness requires a source root".to_owned(),
+        ))
+    })?;
+    let seed_source = resolved_sources.get(seed_id).ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Runtime(format!(
+            "recursive seed source {seed_id:?} was not resolved"
+        )))
+    })?;
+    let seed = lower_recursive_seed_membership(recursive, seed_source, resolved_sources, request)
+        .map_err(single_gap_report)?;
+    Ok((
+        seed_id.clone(),
+        seed.graph.project_fields(project_source_fields_with_routes(
+            seed_source,
+            &route_fields,
+        )),
+    ))
+}
+
 fn recursive_relation_for_edge<'a>(
     plan: &'a RelationInputPlan,
     edge_source: &SourceId,

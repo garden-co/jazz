@@ -1152,6 +1152,27 @@ pub(super) fn lower_linear_plan_steps(
     )
 }
 
+/// Lower a recursive seed for a covered receiver input. The seed's rendered
+/// relation establishes the initial frontier, while the retained source fields
+/// encode the exact admitted source occurrence for the receiver closure.
+pub(super) fn lower_recursive_seed_membership(
+    relation: &RecursiveRelationPlan,
+    seed_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_linear_plan_steps_cached(
+        seed_source.graph.clone(),
+        &relation.seed,
+        seed_source,
+        resolved_sources,
+        request,
+        None,
+        None,
+        true,
+    )
+}
+
 fn lower_linear_plan_steps_cached(
     graph: GraphBuilder,
     plan: &LinearCurrentRoot,
