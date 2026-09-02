@@ -57,7 +57,7 @@ function parseEnv(content: string): Record<string, string> {
 
 describe("runHostedInit", () => {
   describe("success path", () => {
-    it("writes all four keys and prints credentials + banner", async () => {
+    it("writes all four keys and redacts credentials while preserving guidance", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
         appId: "app-alice",
         adminSecret: "admin-secret-alice",
@@ -79,20 +79,37 @@ describe("runHostedInit", () => {
       expect(values["BACKEND_SECRET"]).toBe("backend-secret-alice");
       expect(content).not.toContain("TODO");
 
-      const logCalls = logSpy.mock.calls.map((c: unknown[]) => c.join(" "));
-      expect(logCalls.some((l: string) => l.includes("app-alice"))).toBe(true);
-      expect(logCalls.some((l: string) => l.includes("https://v2.dashboard.jazz.tools"))).toBe(
-        true,
-      );
-      expect(logCalls.some((l: string) => l.includes("NEXT_PUBLIC_JAZZ_APP_ID=app-alice"))).toBe(
-        true,
-      );
-      expect(logCalls.some((l: string) => l.includes("JAZZ_ADMIN_SECRET=admin-secret-alice"))).toBe(
-        true,
-      );
-      expect(logCalls.some((l: string) => l.includes("BACKEND_SECRET=backend-secret-alice"))).toBe(
-        true,
-      );
+      const output = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+      expect(output).toContain("app-alice");
+      expect(output).toContain(CLOUD_SYNC_URL);
+      expect(output).toContain("https://v2.dashboard.jazz.tools");
+      expect(output).not.toContain("admin-secret-alice");
+      expect(output).not.toContain("backend-secret-alice");
+    });
+
+    it("redacts credentials from the deferred onLog adapter", async () => {
+      vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
+        appId: "app-deferred",
+        adminSecret: "admin-secret-deferred",
+        backendSecret: "backend-secret-deferred",
+      });
+
+      const logs: { kind: string; message: string }[] = [];
+      await runHostedInit({
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+        onLog: (kind, message) => logs.push({ kind, message }),
+      });
+
+      const output = logs.map(({ message }) => message).join("\n");
+      expect(output).toContain("app-deferred");
+      expect(output).toContain(CLOUD_SYNC_URL);
+      expect(output).toContain("https://v2.dashboard.jazz.tools");
+      expect(output).not.toContain("admin-secret-deferred");
+      expect(output).not.toContain("backend-secret-deferred");
+      expect(logSpy).not.toHaveBeenCalled();
     });
 
     it("works with SvelteKit PUBLIC_* keys", async () => {
@@ -245,6 +262,32 @@ describe("runHostedInit", () => {
       });
 
       expect(cloudProvision.provisionHostedApp).toHaveBeenCalledOnce();
+    });
+    it("replaces an empty placeholder after a failed attempt succeeds on retry", async () => {
+      const provisionSpy = vi
+        .spyOn(cloudProvision, "provisionHostedApp")
+        .mockRejectedValueOnce(new cloudProvision.ProvisionHttpError(API_URL, 503))
+        .mockResolvedValueOnce({
+          appId: "retry-app",
+          adminSecret: "retry-admin",
+          backendSecret: "retry-backend",
+        });
+
+      const options = {
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+      };
+      await runHostedInit(options);
+      await runHostedInit(options);
+
+      expect(provisionSpy).toHaveBeenCalledTimes(2);
+      const values = parseEnv(readEnv(dir));
+      expect(values["NEXT_PUBLIC_JAZZ_APP_ID"]).toBe("retry-app");
+      expect(values["NEXT_PUBLIC_JAZZ_SERVER_URL"]).toBe(CLOUD_SYNC_URL);
+      expect(values["JAZZ_ADMIN_SECRET"]).toBe("retry-admin");
+      expect(values["BACKEND_SECRET"]).toBe("retry-backend");
     });
   });
 
