@@ -349,6 +349,11 @@ export interface SubscriptionDeltaEvent {
   tier: 'None' | 'Local' | 'Edge' | 'Global'
 }
 
+export interface SubscriptionInvalidAuthoritySourceClosureReason {
+  type: 'InvalidAuthoritySourceClosure'
+  transition: string
+}
+
 export type SubscriptionEvent =
   SubscriptionDeltaEvent | SubscriptionRejectedEvent | SubscriptionClosedEvent
 
@@ -363,11 +368,6 @@ export type SubscriptionRejectionReason =
 export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
   code: 'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal'
-}
-
-export interface SubscriptionInvalidAuthoritySourceClosureReason {
-  type: 'InvalidAuthoritySourceClosure'
-  transition: string
 }
 
 export interface SubscriptionShapeRegistrationPendingReason {
