@@ -425,6 +425,35 @@ membership decision authoritative while still allowing deterministic local IVM.
 
 ### 8.4.2 Atomic closure installation, transition, and publication
 
+**Live delivery contract (2026-09-02).** Within one active subscription on a
+live connection, `ViewUpdate`s form an ordered, nonduplicated stream. Transport
+backpressure retries only messages that have not been accepted for delivery;
+an internal queue/retry bug must not be normalized into application-level
+at-least-once delivery. Reconnect establishes fresh subscription coverage rather
+than replaying old incremental transitions against a new receiver. This contract
+does not require introducing wire sequence numbers. Commit-unit idempotency
+(§8.2) and resource-idempotent `Subscribe` (§8.5) do not imply idempotent
+`ViewUpdate` deltas.
+
+An incremental update must describe a possible transition from the exact state
+already received for that subscription. Removing an absent fact, removing the
+wrong version, adding an already-present exact fact, or retaining conflicting
+versions of one source row is a protocol error, not a harmless no-op. Facts
+inside one update are an unordered set transition: a valid remove-old/add-new
+replacement is checked against the predecessor and final state, not arbitrary
+vector order. A full reset explicitly replaces the closure and is validated as
+such, including coverage for required sources with no rows. Late frames for a
+detached subscription remain subject to the separate lifecycle/drop rules; they
+must never be applied to a replacement subscription.
+
+Reject an impossible transition atomically, before changing retained facts,
+durable state, settlement, or application output. Surface an actionable protocol
+error to the affected client read/subscription, with safe subscription/source
+identity and the failed transition check, not row contents or private claims.
+Do not silently discard the inconsistency, quietly convert it into a reset, or
+leave the client waiting until a timeout. The error must expose the broken
+producer/transport assumption so it can be fixed at its source.
+
 The receiver stages incoming closure members under an **inactive** manifest id.
 Staging validates identity, class, manifest inventory, catalogue order, and
 residual-program identity, but it does not change an active view, publish a
@@ -475,11 +504,13 @@ terminal delta. This is the manifest form of
 `groove/SPEC/INVARIANTS.md::INV-INC-1`: neither normal updates nor manifest
 bookkeeping permit a full terminal/cache rebuild.
 
-If the predecessor is absent, any count/root/add/remove check fails, or an
-incoming member belongs to another epoch, the receiver stages nothing into the
-active view and requests the exact missing predecessor/member. If exact repair
-cannot restore that predecessor, the authority sends a full reset manifest. It
-is never valid to infer a successor from a projected terminal cache.
+If a live transition contradicts its received predecessor or any
+count/root/add/remove check fails, the receiver leaves the active view unchanged
+and surfaces the protocol error described above. Missing payload bytes during
+an explicitly negotiated initial/reconnect repair can still request the exact
+missing member or a full reset; that repair mechanism must not hide an impossible
+live transition. It is never valid to infer a successor from a projected terminal
+cache.
 
 The required crash-point ladder covers: each inactive class member staged; IVM
 precomputation before the durable swap; after the durable swap but before local
