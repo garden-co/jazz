@@ -676,7 +676,16 @@ where
     let (shape, binding) = node
         .whole_table_shape_binding("notes")
         .expect("native corpus prepares a notes query shape");
-    register_shape_binding(node, &shape, &binding);
+    // The corpus receiver consumes the authority's SYSTEM+claims-scoped
+    // closure below. Register its exact shape/options once, then install that
+    // same policy-scoped binding; a bare synthetic subscription is a distinct
+    // fixture identity and cannot admit this source closure.
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
+        shape_id: shape.shape_id(),
+        ast: crate::protocol::ShapeAst::from_validated(&shape),
+        opts: crate::protocol::RegisterShapeOptions::default(),
+    })
+    .expect("native corpus registers exact notes shape");
     let subscription = node
         .whole_table_subscription_key("notes")
         .expect("native corpus registers its notes subscription");
