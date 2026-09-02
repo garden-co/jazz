@@ -546,18 +546,7 @@ fn maintained_subscription_fast_cursor_skips_covered_members_and_sends_only_newe
         )
         .unwrap()
         .expect("fully covered cursor still publishes its usage-site update");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = covered
-    else {
-        panic!("expected fully covered view update");
-    };
-    assert!(!reset_result_set);
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
+    assert_view_update_rows(covered, vec![], vec![]);
 
     peer.declare_known_state(
         partially_covered,
@@ -575,21 +564,7 @@ fn maintained_subscription_fast_cursor_skips_covered_members_and_sends_only_newe
         )
         .unwrap()
         .expect("partially covered cursor publishes newer members");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = partial
-    else {
-        panic!("expected partial view update");
-    };
-    assert!(!reset_result_set);
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), second_row, second_tx)]
-    );
-    assert!(result_member_removes.is_empty());
+    assert_view_update_rows(partial, vec![("todos", second_row, second_tx)], vec![]);
 }
 
 #[test]
@@ -1927,10 +1902,27 @@ fn row_result_set(
 ) -> Option<BTreeSet<ResultRowEntry>> {
     peer.publication_states.get(&subscription).map(|state| {
         state
-            .result_member_set
+            .program_fact_set
             .iter()
-            .filter_map(ResultMemberEntry::as_row)
+            .filter_map(covered_input_result_row)
             .collect()
+    })
+}
+
+/// Peer wire carries the exact covered source closure rather than the
+/// authority's rendered result members.  The receiver runs the same local
+/// terminal to produce its public rows; these helpers therefore inspect only
+/// content-layer source facts and deliberately ignore deletion witnesses.
+fn covered_input_result_row(fact: &ProgramFactEntry) -> Option<ResultRowEntry> {
+    let ProgramFactEntry::CoveredInput(input) = fact else {
+        return None;
+    };
+    (input.version.layer == crate::protocol::ResultRowLayer::Content).then(|| {
+        (
+            input.version_table.clone(),
+            input.source_row,
+            input.version.tx,
+        )
     })
 }
 
@@ -1950,19 +1942,19 @@ fn aggregate_cells(row: &crate::node::CurrentRow) -> BTreeMap<String, Value> {
 
 fn view_update_added_rows(update: SyncMessage) -> BTreeSet<RowUuid> {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set);
+    assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
-    result_member_adds
+    program_fact_adds
         .into_iter()
-        .filter_map(ResultMemberEntry::into_row)
+        .filter_map(|fact| covered_input_result_row(&fact))
         .map(|(_, row_uuid, _)| row_uuid)
         .collect()
 }
@@ -1975,15 +1967,23 @@ fn assert_view_update_rows(
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    let mut result_member_adds = result_member_adds;
-    let mut result_member_removes = result_member_removes;
-    result_member_adds.sort();
-    result_member_removes.sort();
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    let mut result_member_adds = program_fact_adds
+        .iter()
+        .filter_map(covered_input_result_row)
+        .collect::<Vec<_>>();
+    let mut result_member_removes = program_fact_removes
+        .iter()
+        .filter_map(covered_input_result_row)
+        .collect::<Vec<_>>();
     let mut expected_adds = expected_adds
         .into_iter()
         .map(|(table, row, tx)| (table.to_owned().into(), row, tx))
@@ -1992,6 +1992,8 @@ fn assert_view_update_rows(
         .into_iter()
         .map(|(table, row, tx)| (table.to_owned().into(), row, tx))
         .collect::<Vec<_>>();
+    result_member_adds.sort();
+    result_member_removes.sort();
     expected_adds.sort();
     expected_removes.sort();
     assert_eq!(result_member_adds, expected_adds);
@@ -2006,25 +2008,40 @@ fn assert_view_update_row_order(
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_adds,
-        expected_adds
-            .into_iter()
-            .map(|(table, row, tx)| (table.to_owned().into(), row, tx))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        result_member_removes,
-        expected_removes
-            .into_iter()
-            .map(|(table, row, tx)| (table.to_owned().into(), row, tx))
-            .collect::<Vec<_>>()
-    );
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    // Ordering belongs to the receiver-local root collector. The closure
+    // transports source identities, so its fact order is intentionally not a
+    // public peer-wire ordering contract.
+    let mut adds = program_fact_adds
+        .iter()
+        .filter_map(covered_input_result_row)
+        .collect::<Vec<_>>();
+    let mut removes = program_fact_removes
+        .iter()
+        .filter_map(covered_input_result_row)
+        .collect::<Vec<_>>();
+    let mut expected_adds = expected_adds
+        .into_iter()
+        .map(|(table, row, tx)| (table.to_owned().into(), row, tx))
+        .collect::<Vec<_>>();
+    let mut expected_removes = expected_removes
+        .into_iter()
+        .map(|(table, row, tx)| (table.to_owned().into(), row, tx))
+        .collect::<Vec<_>>();
+    adds.sort();
+    removes.sort();
+    expected_adds.sort();
+    expected_removes.sort();
+    assert_eq!(adds, expected_adds);
+    assert_eq!(removes, expected_removes);
 }
 
 #[test]
@@ -2070,6 +2087,7 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
         BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0x9a; 16])))]);
     let deleted_row = row(0x9b);
     let retained_row = row(0x9c);
+    let mut base_txs = BTreeMap::new();
     for (sequence, row_uuid, title) in [(1, deleted_row, "deleted"), (2, retained_row, "retained")]
     {
         let tx_id = core
@@ -2080,6 +2098,7 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
             )
             .unwrap();
         accept_global(&mut core, tx_id, sequence);
+        base_txs.insert(row_uuid, tx_id);
     }
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -2125,22 +2144,13 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
     let initial = peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        ..
-    }) = initial
-    else {
-        panic!("expected initial BranchView update");
-    };
-    assert!(reset_result_set);
-    assert_eq!(
-        result_member_adds
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, row_uuid, _)| row_uuid)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([deleted_row, retained_row])
+    assert_view_update_rows(
+        initial,
+        vec![
+            ("todos", deleted_row, base_txs[&deleted_row]),
+            ("todos", retained_row, base_txs[&retained_row]),
+        ],
+        vec![],
     );
 
     let deletion_tx = core
@@ -2160,25 +2170,10 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
     let update = peer
         .query_update_for_subscription(&mut core, subscription, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected deletion-witness reconcile update");
-    };
-    assert!(!reset_result_set);
-    assert!(result_member_adds.is_empty());
-    assert_eq!(
-        result_member_removes
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, row_uuid, _)| row_uuid)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([deleted_row]),
-        "authoritative reconcile must not remove the retained BranchView base member"
+    assert_view_update_rows(
+        update,
+        vec![],
+        vec![("todos", deleted_row, base_txs[&deleted_row])],
     );
 
     let fresh_rows = core
@@ -2520,19 +2515,7 @@ fn maintained_subscription_view_limit_one_installs_subscription() {
             .unsupported_skips_out,
         0
     );
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), row_from_u64(10), lower_tx)]
-    );
-    assert!(result_member_removes.is_empty());
+    assert_view_update_rows(update, vec![("todos", row_from_u64(10), lower_tx)], vec![]);
 }
 
 #[test]
@@ -2574,16 +2557,11 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
 
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds, ..
-    }) = &update
-    else {
-        panic!("expected view update");
-    };
     let version_bundles = version_bundles_for_update(&update);
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row_uuid, restored_content_tx)]
+    assert_view_update_rows(
+        update.clone(),
+        vec![("todos", row_uuid, restored_content_tx)],
+        vec![],
     );
     assert!(
         version_bundles.iter().any(|bundle| {
@@ -2665,16 +2643,11 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
 
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds, ..
-    }) = &update
-    else {
-        panic!("expected view update");
-    };
     let version_bundles = version_bundles_for_update(&update);
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row_uuid, restored_content_tx)]
+    assert_view_update_rows(
+        update.clone(),
+        vec![("todos", row_uuid, restored_content_tx)],
+        vec![],
     );
     assert!(version_bundles.iter().any(|bundle| {
         bundle.tx.tx_id == restore_tx
@@ -2744,16 +2717,11 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
 
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds, ..
-    }) = &update
-    else {
-        panic!("expected view update");
-    };
     let version_bundles = version_bundles_for_update(&update);
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row_uuid, restore_tx)]
+    assert_view_update_rows(
+        update.clone(),
+        vec![("todos", row_uuid, restore_tx)],
+        vec![],
     );
     assert!(version_bundles.iter().any(|bundle| {
         bundle.tx.tx_id == restore_tx
@@ -2825,34 +2793,33 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         vec![("todos", first_row, first_tx)],
     );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
         program_fact_adds,
+        program_fact_removes,
         ..
-    }) = update
+    }) = update.clone()
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_removes,
-        vec![("todos".to_owned().into(), first_row, first_tx)]
+    assert_view_update_rows(
+        update,
+        vec![("todos", second_row, second_tx)],
+        vec![("todos", first_row, first_tx)],
     );
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), second_row, second_tx)]
-    );
+    assert!(program_fact_adds.iter().all(|fact| {
+        !matches!(fact, ProgramFactEntry::CoveredInput(input) if input.source_row == first_row)
+    }));
     assert!(
-        program_fact_adds.iter().any(|fact| {
+        program_fact_removes.iter().any(|fact| {
             matches!(
                 fact,
                 ProgramFactEntry::CoveredInput(input)
                     if input.source.table.as_str() == "todos"
                         && input.source_row == first_row
-                        && input.version.tx == delete_first_tx
-                        && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+                        && input.version.tx == first_tx
+                        && input.version.layer == crate::protocol::ResultRowLayer::Content
             )
         }),
-        "a deletion witness is a covered input and must ship even though its visible member retracts"
+        "a complete successor retracts its former covered input without disclosing a deleted body"
     );
 
     let new_first_row = row_from_u64(5);
@@ -2863,21 +2830,10 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         .unwrap();
     accept_global(&mut core, new_first_tx, 4);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    assert_eq!(
-        result_member_removes,
-        vec![("todos".to_owned().into(), second_row, second_tx)]
-    );
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), new_first_row, new_first_tx)]
+    assert_view_update_rows(
+        update,
+        vec![("todos", new_first_row, new_first_tx)],
+        vec![("todos", second_row, second_tx)],
     );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
 }
@@ -4064,19 +4020,7 @@ fn maintained_subscription_view_contains_param_stays_maintained() {
     accept_global(&mut core, added, 3);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), row(0x6c), added)]
-    );
-    assert!(result_member_removes.is_empty());
+    assert_view_update_rows(update, vec![("todos", row(0x6c), added)], vec![]);
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 }
 
@@ -4148,19 +4092,7 @@ fn maintained_subscription_view_ne_param_stays_maintained() {
     accept_global(&mut core, still_excluded, 4);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), row(0x7c), added)]
-    );
-    assert!(result_member_removes.is_empty());
+    assert_view_update_rows(update, vec![("todos", row(0x7c), added)], vec![]);
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 }
 
@@ -4472,24 +4404,18 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let version_bundles = version_bundles_for_update(&update);
+    assert_view_update_rows(update.clone(), vec![("todos", row(0x71), tx_id)], vec![]);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
                 ..
             },
-        result_member_adds,
-        result_member_removes,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), row(0x71), tx_id)]
-    );
-    assert!(result_member_removes.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
     // The matching row is the only rendered member, but both rows are input
     // candidates of its local predicate. The view-scoped bundle therefore
@@ -4538,24 +4464,18 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let version_bundles = version_bundles_for_update(&update);
+    assert_view_update_rows(update.clone(), vec![("todos", row(0x71), tx_id)], vec![]);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
                 ..
             },
-        result_member_adds,
-        result_member_removes,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row(0x71), tx_id)]
-    );
-    assert!(result_member_removes.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
@@ -4636,16 +4556,7 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(&mut core, "orderLines").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds, ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    assert_eq!(
-        result_member_adds,
-        vec![("orderLines".to_owned().into(), line, line_tx)]
-    );
+    assert_view_update_rows(update, vec![("orderLines", line, line_tx)], vec![]);
     // The line's nested relation reads both dimensions. Those current source
     // rows must accompany the output line so the receiving IVM can derive the
     // same relation without an authority terminal patch.
@@ -4710,18 +4621,11 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
                 complete_tx_payloads: complete_tx_payload_refs,
                 ..
             },
-        result_member_adds,
-        result_member_removes,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_adds,
-        vec![("docs".to_owned().into(), doc_a, docs_tx)]
-    );
-    assert!(result_member_removes.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
@@ -5023,23 +4927,23 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     );
     let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&first_update);
+    assert_view_update_rows(
+        first_update.clone(),
+        vec![("docs", doc_one, docs_tx)],
+        vec![],
+    );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
                 ..
             },
-        result_member_adds,
         ..
     }) = &first_update
     else {
         panic!("expected view update");
     };
     assert!(complete_tx_payload_refs.is_empty());
-    assert_eq!(
-        result_member_adds,
-        &vec![("docs".to_owned().into(), doc_one, docs_tx)]
-    );
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
     assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
@@ -5066,25 +4970,23 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
 
     let grant_update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&grant_update);
+    assert_view_update_rows(
+        grant_update.clone(),
+        vec![("docs", doc_two, docs_tx)],
+        vec![],
+    );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
                 ..
             },
-        result_member_adds,
-        result_member_removes,
         ..
     }) = &grant_update
     else {
         panic!("expected view update");
     };
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(result_member_removes.is_empty());
-    assert_eq!(
-        result_member_adds,
-        &vec![("docs".to_owned().into(), doc_two, docs_tx),]
-    );
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
     assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
@@ -5115,13 +5017,7 @@ fn all_exclusive_never_gated_stays_incremental() {
 
     let empty = peer.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&empty);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds, ..
-    }) = empty
-    else {
-        panic!("expected view update");
-    };
-    assert!(result_member_adds.is_empty());
+    assert_view_update_rows(empty, vec![], vec![]);
     assert!(version_bundles.is_empty());
 
     let tx = OpenTransactionId::new();
@@ -5137,29 +5033,24 @@ fn all_exclusive_never_gated_stays_incremental() {
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
+    assert_view_update_rows(
+        update.clone(),
+        vec![("todos", row_one, tx_id), ("todos", row_two, tx_id)],
+        vec![],
+    );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
                 ..
             },
-        result_member_removes,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_adds,
-        vec![
-            ("todos".to_owned().into(), row_one, tx_id),
-            ("todos".to_owned().into(), row_two, tx_id),
-        ]
-    );
     assert_eq!(version_bundles.len(), 1);
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(result_member_removes.is_empty());
 }
 
 #[test]

@@ -682,7 +682,11 @@ impl PeerState {
                     binding: &binding,
                     subscription,
                     previous_member_result_set: &previous_member_result_set,
-                    reset_result_set: false,
+                    // The first receiver closure is a complete successor,
+                    // not a result-member delta.  Its reset bit claims the
+                    // exact ProgramSourceCoverage manifest so a client can
+                    // atomically install and settle its local source graph.
+                    reset_result_set: true,
                     result_table_filter: Some(table),
                     tier,
                     read_view: &read_view,

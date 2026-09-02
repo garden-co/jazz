@@ -364,14 +364,29 @@ where
                 let binding = shape
                     .bind(BTreeMap::new())
                     .map_err(|error| Error::Query(Box::new(error)))?;
-                self.query_rows_with_prepared_plan_for_identity(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Global,
-                    None,
-                    AuthorSubject::SYSTEM,
-                )
-                .await
+                if self.is_history_complete() {
+                    self.query_rows_with_prepared_plan_for_identity(
+                        &shape,
+                        &binding,
+                        DurabilityTier::Global,
+                        None,
+                        AuthorSubject::SYSTEM,
+                    )
+                    .await
+                } else {
+                    // A partial client has no authority to reopen this query
+                    // as SYSTEM. It consumes the exact scoped CoveredInput
+                    // closure installed by the received whole-table
+                    // subscription, through the same receiver-local graph as
+                    // every other client read.
+                    self.query_rows_for_client(
+                        &shape,
+                        &binding,
+                        DurabilityTier::Global,
+                        AuthorSubject::SYSTEM,
+                    )
+                    .await
+                }
             }
         }
     }
