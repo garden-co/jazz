@@ -15,7 +15,8 @@ const PRODUCTION_BUILD_PHASE = "phase-production-build";
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
-
+const originalBackendSecret = process.env.BACKEND_SECRET;
+const originalJazzAdminSecret = process.env.JAZZ_ADMIN_SECRET;
 async function resolveWrappedConfig(
   wrapped: ReturnType<typeof withJazz>,
   phase: string,
@@ -60,6 +61,18 @@ afterEach(async () => {
     delete process.env.NEXT_PUBLIC_JAZZ_APP_ID;
   } else {
     process.env.NEXT_PUBLIC_JAZZ_APP_ID = originalJazzAppId;
+  }
+
+  if (originalBackendSecret === undefined) {
+    delete process.env.BACKEND_SECRET;
+  } else {
+    process.env.BACKEND_SECRET = originalBackendSecret;
+  }
+
+  if (originalJazzAdminSecret === undefined) {
+    delete process.env.JAZZ_ADMIN_SECRET;
+  } else {
+    process.env.JAZZ_ADMIN_SECRET = originalJazzAdminSecret;
   }
 });
 
@@ -149,6 +162,57 @@ describe("withJazz", () => {
         )}&appId=${encodeURIComponent(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID!)}&adminSecret=next-test-admin`,
       ),
     );
+  }, 30_000);
+
+  it("keeps a generated backend secret in the server process and out of returned Next config", async () => {
+    vi.spyOn(devServer, "startLocalJazzServer")
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000181",
+        port: 19881,
+        url: "http://127.0.0.1:19881",
+        dataDir: undefined as unknown as string,
+        adminSecret: "next-secret-policy-admin-1",
+        backendSecret: "generated-backend-canary-1",
+        stop: vi.fn().mockResolvedValue(undefined),
+      })
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000182",
+        port: 19882,
+        url: "http://127.0.0.1:19882",
+        dataDir: undefined as unknown as string,
+        adminSecret: "next-secret-policy-admin-2",
+        backendSecret: "generated-backend-canary-2",
+        stop: vi.fn().mockResolvedValue(undefined),
+      });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const first = await resolveWrappedConfig(
+      withJazz({}, { server: { adminSecret: "next-secret-policy-admin-1" } }),
+      DEVELOPMENT_PHASE,
+    );
+
+    expect(process.env.BACKEND_SECRET).toBe("generated-backend-canary-1");
+    expect(Object.hasOwn(first.env ?? {}, "BACKEND_SECRET")).toBe(false);
+    expect(Object.values(first.env ?? {})).not.toContain("generated-backend-canary-1");
+    expect(first.env?.NEXT_PUBLIC_JAZZ_APP_ID).toBeTruthy();
+    expect(first.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19881");
+
+    await __resetJazzNextPluginForTests();
+    expect(process.env.BACKEND_SECRET).toBeUndefined();
+
+    process.env.BACKEND_SECRET = "caller-owned-backend-secret";
+    const second = await resolveWrappedConfig(
+      withJazz({}, { server: { adminSecret: "next-secret-policy-admin-2" } }),
+      DEVELOPMENT_PHASE,
+    );
+
+    expect(process.env.BACKEND_SECRET).toBe("generated-backend-canary-2");
+    expect(Object.hasOwn(second.env ?? {}, "BACKEND_SECRET")).toBe(false);
+    expect(Object.values(second.env ?? {})).not.toContain("generated-backend-canary-2");
+
+    await __resetJazzNextPluginForTests();
+    expect(process.env.BACKEND_SECRET).toBe("caller-owned-backend-secret");
   }, 30_000);
 
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {
