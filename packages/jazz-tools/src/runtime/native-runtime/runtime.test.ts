@@ -5475,6 +5475,58 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 });
+describe("NativeRuntimeAdapter prepared query retention", () => {
+  it("bounds flat literal preparation while active subscriptions stay pinned", async () => {
+    const preparedQueries: object[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: () => new Uint8Array([0]),
+            subscribe: () => ({ readAll: () => [] }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    const query = (literal: string) =>
+      JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: literal }],
+      });
+
+    const pinnedHandle = runtime.createSubscription(query("pinned"));
+    const pinnedQuery = preparedQueries.at(-1);
+    expect(pinnedQuery).toBeDefined();
+
+    for (let index = 0; index < 256; index += 1) {
+      await runtime.query(query(`literal-${index}`));
+    }
+    await expect(runtime.query(query("pinned"))).resolves.toEqual([]);
+    expect(preparedQueries.at(-1)).toBe(pinnedQuery);
+
+    runtime.unsubscribe(pinnedHandle);
+    for (let index = 256; index < 513; index += 1) {
+      await runtime.query(query(`literal-${index}`));
+    }
+    await expect(runtime.query(query("pinned"))).resolves.toEqual([]);
+    expect(preparedQueries.at(-1)).not.toBe(pinnedQuery);
+  });
+});
+
 
 describe("NativeRuntimeAdapter streaming inserts", () => {
   it("infers the physical kind and applies backpressure to async chunks", async () => {
