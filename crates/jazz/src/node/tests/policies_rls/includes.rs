@@ -422,18 +422,40 @@ fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    let mut adds = result_member_adds
+    // The peer publishes admitted source occurrences, never an authority
+    // result set. These policy fixtures use root-row queries, so content-layer
+    // covered inputs are the exact closure counterpart to their old result
+    // member assertions.
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    let mut adds = program_fact_adds
         .iter()
-        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
+            {
+                Some((input.version_table.clone(), input.source_row, input.version.tx))
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>();
-    let mut removes = result_member_removes
+    let mut removes = program_fact_removes
         .iter()
-        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
+            {
+                Some((input.version_table.clone(), input.source_row, input.version.tx))
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>();
     adds.sort();
     removes.sort();

@@ -747,17 +747,19 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads, ..
             },
-        result_member_adds,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    assert_eq!(result_member_adds, &vec![(
-        groove::Intern::new("announcements".to_owned()),
-        announcement_row,
-        tx_id
-    )]);
+    assert_eq!(
+        canonical_view_update_rows(&update).0,
+        vec![(
+            groove::Intern::new("announcements".to_owned()),
+            announcement_row,
+            tx_id
+        )]
+    );
     assert!(complete_tx_payloads.is_empty());
     assert!(!bob_peer.shipped_complete_tx_payloads().contains(&tx_id));
     let shipped_rows = version_bundles
@@ -817,8 +819,6 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs, ..
             },
-        result_member_adds,
-        result_member_removes,
         ..
     }) = &update
     else {
@@ -826,10 +826,9 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     };
     assert!(version_carriers.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(result_member_adds.is_empty());
     assert_eq!(
-        result_member_removes,
-        &vec![("todos".to_owned().into(), row_uuid, tx_a)]
+        canonical_view_update_rows(&update),
+        (vec![], vec![("todos".to_owned().into(), row_uuid, tx_a)])
     );
     reader_a.apply_sync_message_settled(update).unwrap();
     assert!(
@@ -1026,15 +1025,9 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let revoked_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_removes, ..
-    }) = &revoked_update
-    else {
-        panic!("expected view update");
-    };
     assert_eq!(
-        result_member_removes,
-        &vec![("canvases".to_owned().into(), canvas_row, accepted_id)]
+        canonical_view_update_rows(&revoked_update),
+        (vec![], vec![("canvases".to_owned().into(), canvas_row, accepted_id)])
     );
     invited_reader.apply_sync_message_settled(revoked_update).unwrap();
     assert!(

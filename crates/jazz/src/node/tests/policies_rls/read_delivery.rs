@@ -410,13 +410,12 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     let update = alice_peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
-    assert!(matches!(
-        update,
-            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                result_member_adds: ref adds,
-                ..
-        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
-    ));
+    assert!(
+        canonical_view_update_rows(&update)
+            .0
+            .contains(&("messages".to_owned().into(), bob_message, bob_message_tx)),
+        "the covered closure must include the newly visible message source"
+    );
     let _ = bob_membership_tx;
 }
 
@@ -706,13 +705,12 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     let update = bob_peer
         .query_update_for_subscription(&mut core, subscription, &shape, &binding)
         .unwrap();
-    assert!(matches!(
-        update,
-            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                result_member_adds: ref adds,
-                ..
-        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
-    ));
+    assert!(
+        canonical_view_update_rows(&update)
+            .0
+            .contains(&("messages".to_owned().into(), seed_message, seed_tx)),
+        "the covered closure must include the edge-visible message source"
+    );
 }
 
 #[test]
@@ -777,14 +775,20 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let initial = alice_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
-    assert!(matches!(
-        initial,
-            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                result_member_adds: ref adds,
-                reset_result_set: true,
-                ..
-        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
-    ));
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        ..
+    }) = &initial
+    else {
+        panic!("expected initial view update");
+    };
+    assert!(reset_result_set);
+    assert!(
+        canonical_view_update_rows(&initial)
+            .0
+            .contains(&("messages".to_owned().into(), seed_message, seed_tx)),
+        "the reset closure must include the initially visible message source"
+    );
 
     let bob_membership_tx = core
         .commit_mergeable_many_settled(vec![
@@ -817,18 +821,17 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
         reset_result_set,
         ..
-    }) = rehydrated
+    }) = &rehydrated
     else {
         panic!("expected rehydrate view update");
     };
     assert!(reset_result_set);
     assert_eq!(
-        result_member_adds
+        canonical_view_update_rows(&rehydrated)
+            .0
             .into_iter()
-            .filter_map(crate::protocol::ResultMemberEntry::into_row)
             .filter(|(table, _, _)| table.as_str() == "messages")
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
@@ -975,20 +978,8 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let spy_initial = spy_link
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
-    assert!(matches!(
-        invited_initial,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            result_member_adds: ref adds,
-            ..
-        }) if adds.is_empty()
-    ));
-    assert!(matches!(
-        spy_initial,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            result_member_adds: ref adds,
-            ..
-        }) if adds.is_empty()
-    ));
+    assert!(canonical_view_update_rows(&invited_initial).0.is_empty());
+    assert!(canonical_view_update_rows(&spy_initial).0.is_empty());
     assert_eq!(
         core.query
             .query_shape_cache
@@ -1018,14 +1009,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let grant_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = grant_update
-    else {
-        panic!("expected grant update");
-    };
+    let (result_member_adds, result_member_removes) = canonical_view_update_rows(&grant_update);
     assert_eq!(
         result_member_adds,
         vec![
@@ -1037,14 +1021,8 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     assert_eq!(invited_link.metrics.view_updates_out, 2);
 
     let spy_update = spy_link.query_update(&mut core, &shape, &binding).unwrap();
-    assert!(matches!(
-        spy_update,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            result_member_adds: ref adds,
-            result_member_removes: ref removes,
-            ..
-        }) if adds.is_empty() && removes.is_empty()
-    ));
+    let (spy_adds, spy_removes) = canonical_view_update_rows(&spy_update);
+    assert!(spy_adds.is_empty() && spy_removes.is_empty());
     assert_eq!(spy_link.metrics.result_adds_out, 0);
     assert_eq!(spy_link.metrics.version_bundles_out, 0);
 
@@ -1063,14 +1041,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let revoke_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = revoke_update
-    else {
-        panic!("expected revoke update");
-    };
+    let (result_member_adds, result_member_removes) = canonical_view_update_rows(&revoke_update);
     assert!(result_member_adds.is_empty());
     assert_eq!(
         result_member_removes,
