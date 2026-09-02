@@ -62,7 +62,8 @@ function findNonEmptyPrivilegedLiterals(source: string): string[] {
         (ts.isStringLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value)) &&
         value.text.length > 0
       ) {
-        violations.push(`${name}=${value.text}`);
+        const position = file.getLineAndCharacter(node.getStart(file));
+        violations.push(`${name} at ${position.line + 1}:${position.character + 1}`);
       }
     }
     ts.forEachChild(node, visit);
