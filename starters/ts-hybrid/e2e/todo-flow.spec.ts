@@ -74,6 +74,10 @@ test("production server serves the SPA shell for root and deep links", async ({ 
     expect(response.status(), pathname).toBe(200);
     expect(await response.text()).toContain('<div id="root">');
   }
+  const headResponse = await request.head("http://127.0.0.1:3001/dashboard", {
+    headers: { Accept: "text/html" },
+  });
+  expect(headResponse.status(), "HEAD /dashboard").toBe(404);
 });
 
 test("signin with existing account shows todos", async ({ page }) => {
