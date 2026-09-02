@@ -4954,28 +4954,30 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
       null,
     );
+    // The adapter state is intentionally inspected here to verify that
+    // termination clears deferred buffers on the object that was terminated.
+    const runtimeState = runtime as unknown as {
+      subscriptions: Map<
+        number,
+        {
+          cancelled: boolean;
+          deferredVisiblePublication: boolean;
+          deferredVisibleReset: boolean;
+          deferredTerminalOperations: unknown[];
+          deferredPlaceholderChunks: number;
+          deferredPlaceholderRows: number;
+          deferredPlaceholderBytes: number;
+        }
+      >;
+    };
+    const subscription = runtimeState.subscriptions.get(handle);
+    expect(subscription).toBeDefined();
 
     runtime.executeSubscription(handle, (...args: unknown[]) => callbacks.push(args));
     await Promise.resolve();
     await Promise.resolve();
 
     expect(callbacks).toEqual([]);
-    const subscription = (
-      runtime as unknown as {
-        subscriptions: Map<
-          number,
-          {
-            cancelled: boolean;
-            deferredVisiblePublication: boolean;
-            deferredVisibleReset: boolean;
-            deferredTerminalOperations: unknown[];
-            deferredPlaceholderChunks: number;
-            deferredPlaceholderRows: number;
-            deferredPlaceholderBytes: number;
-          }
-        >;
-      }
-    ).subscriptions.get(handle);
     expect(subscription?.cancelled).toBe(true);
     expect(subscription?.deferredVisiblePublication).toBe(false);
     expect(subscription?.deferredVisibleReset).toBe(false);
