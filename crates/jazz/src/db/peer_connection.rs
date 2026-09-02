@@ -2632,6 +2632,7 @@ where
                                         .or_default()
                                         .push_back(RelaySubscriptionRejection {
                                             coverage: owner.coverage,
+                                            policy_binding: owner.policy_binding,
                                             downstream_subscriptions: owner
                                                 .downstream_subscriptions,
                                             reason,
@@ -3396,9 +3397,27 @@ where
                         // binding handles. Retire both layers: dropping only
                         // the group leaves the individual registrations and
                         // known-state declarations resident after rejection.
+                        // The peer facade may not have created publication
+                        // state yet for an opening group, but registration is
+                        // already policy-scoped in the node. Retire that
+                        // exact group usage first; a bare wire unsubscribe is
+                        // intentionally ambiguous across reader scopes.
+                        node.apply_unsubscribe_with_admitted_policy_binding(
+                            group_subscription,
+                            crate::protocol::PolicyBindingKey::from_canonical_parts(
+                                rejection.policy_binding.0,
+                                rejection.policy_binding.1.clone(),
+                            ),
+                        );
                         peer.forget_subscription_with_node(&mut node, group_subscription);
                         for subscription in group.subscribers {
-                            node.apply_unsubscribe(subscription);
+                            node.apply_unsubscribe_with_admitted_policy_binding(
+                                subscription,
+                                crate::protocol::PolicyBindingKey::from_canonical_parts(
+                                    rejection.policy_binding.0,
+                                    rejection.policy_binding.1.clone(),
+                                ),
+                            );
                             if subscription != group_subscription {
                                 peer.forget_subscription_with_node(&mut node, subscription);
                             }
@@ -4395,7 +4414,23 @@ where
                             }
                         }
                         SyncMessage::Unsubscribe { subscription } => {
-                            self.node.borrow_mut().apply_unsubscribe(subscription);
+                            let admitted_policy_binding = peer
+                                .subscription_policy_binding(subscription)
+                                .map(|(identity, claims)| {
+                                    crate::protocol::PolicyBindingKey::from_canonical_parts(
+                                        identity, claims,
+                                    )
+                                });
+                            let mut node = self.node.borrow_mut();
+                            if let Some(policy_binding) = admitted_policy_binding {
+                                node.apply_unsubscribe_with_admitted_policy_binding(
+                                    subscription,
+                                    policy_binding,
+                                );
+                            } else {
+                                node.apply_unsubscribe(subscription);
+                            }
+                            drop(node);
                             if let Some(purpose) = scope_purposes.remove(&subscription) {
                                 remove_scope_aggregate_member(
                                     scope_aggregates,
@@ -5141,7 +5176,13 @@ where
                                 // its first turn. Retrying that full rehydrate
                                 // would discard the just-opened receiver each
                                 // time, so resume the existing view's initial
-                                // delta and turn it into the authority reset.
+                                // delta. That delta is not an authority
+                                // successor closure: the exact upstream reset
+                                // has already been installed/forwarded. In
+                                // particular, never relabel an empty local
+                                // terminal tick as `reset_result_set`, because
+                                // a receiver would correctly reject its absent
+                                // ProgramSourceCoverage manifest.
                                 peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
@@ -5151,20 +5192,6 @@ where
                                     progress_waker.as_ref(),
                                 )
                                 .await
-                                .map(|update| {
-                                    update.map(|mut update| {
-                                        if let SyncMessage::ViewUpdate(
-                                            crate::protocol::ViewUpdatePayload {
-                                                reset_result_set,
-                                                ..
-                                            },
-                                        ) = &mut update
-                                        {
-                                            *reset_result_set = true;
-                                        }
-                                        update
-                                    })
-                                })
                             } else if settled_handoff {
                                 peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,

@@ -150,6 +150,39 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
     assert!(flat.validate_runtime(&schema).is_ok());
 }
 
+/// Every flat join-side occurrence is an exact receiver source.  A chained
+/// flat join used to exist only in the authority tuple plan, leaving the
+/// second source absent from the CoveredInput closure despite a claimed reset.
+#[test]
+fn chained_flat_joins_register_every_receiver_contributor() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("parents"))
+            .table(PublicTableSchemaBuilder::new("children").fk_column("parent", "parents"))
+            .table(PublicTableSchemaBuilder::new("grandchildren").fk_column("child", "children")),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x23; 16]), schema.clone());
+    let shape = Query::from("parents")
+        .flat_join("children", "parents._id", "children.parent")
+        .flat_join("grandchildren", "children._id", "grandchildren.child")
+        .validate_runtime(&schema)
+        .expect("chained flat join validates");
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .expect("chained flat join normalizes");
+
+    assert_eq!(normalized.join_contributions.len(), 2);
+    assert_eq!(
+        normalized
+            .join_contributions
+            .iter()
+            .map(|contribution| contribution.source.table.as_str())
+            .collect::<Vec<_>>(),
+        vec!["children", "grandchildren"],
+        "each flat join-side scan must be available to terminal lowering as a distinct exact source"
+    );
+}
+
 /// Flat-join filters must route a declared string `id` to authored fields on
 /// both the root and joined source, while `_id` routes to the joined row UUID.
 ///

@@ -40,7 +40,7 @@ use super::query_engine::{
     ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
     ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
-    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection, SettledBindingRows,
+    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
     SourceGraphPreparer, SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath,
     SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
@@ -72,6 +72,7 @@ mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
 
+pub(crate) use prepared_bindings::coerce_prepared_binding_value;
 use prepared_bindings::*;
 use query_read_sets::*;
 use query_result_rows::{
@@ -112,14 +113,13 @@ fn is_public_aggregate_result_member(
     aggregate_query && matches!(member, ResultMemberEntry::Synthetic { .. })
 }
 
-/// A host-settled result membership and the slice offset to apply relative to
-/// that membership.  A non-durable client may retain only a bounded authority
-/// window, so a narrower read inside that window cannot use its absolute
-/// offset against the local cache.
+/// A receiver-owned authority input page and the slice to apply relative to
+/// that page. A non-durable client can retain only a bounded source window,
+/// so a compatible Local query must never apply its absolute offset again.
 #[derive(Clone, Debug)]
 struct ClientSettledBindingView {
     key: BindingViewKey,
-    relative_offset: usize,
+    retained_window: Option<RetainedRootWindowSource>,
 }
 
 fn replace_stale_authoritative_occurrence_member(
@@ -241,7 +241,7 @@ pub(crate) use local_authority_reconciliation::LocalAuthorityReconciliation;
 pub(crate) use maintained_views::LocalMaintainedViewSubscriptionFootprint;
 use maintained_views::SubscriptionPreparedPlan;
 pub(crate) use maintained_views::{
-    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
+    CoveredInputReceiver, LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
 };
 
 impl<S> NodeState<S>
@@ -934,8 +934,24 @@ where
             .iter()
             .find(|table| table.name == shape.query().table)
             .is_some_and(|table| table.read_policy.is_some());
-        let storage_backed_result_materialization =
-            matches!(output, CurrentQueryProgramOutput::MaintainedView)
+        let storage_backed_result_materialization = matches!(output, CurrentQueryProgramOutput::MaintainedView)
+                // A strict receiver obtains its result only by replacing its
+                // descriptor-bound CoveredInput sources from this exact
+                // settled authority view.  Dropping version witnesses here
+                // would leave it with no source registry and tempt the
+                // runtime to reopen local storage for an authority reset.
+                // The storage-backed optimization remains valid for a cold
+                // local-only maintained view, where there is no remote
+                // closure to claim.
+                // Client-local programs use the same mutable source slots
+                // for ordinary propagated Local reads and strict remote
+                // reads.  At opening time the latter has not yet learnt its
+                // settled binding view, so that view cannot safely decide
+                // whether source witnesses are needed.  Keep the registry
+                // for every client-local maintained program; only trusted
+                // serving may take the storage-backed shortcut.
+                && authorization_mode != QueryAuthorizationMode::ClientLocal
+                && settled_binding_view.is_none()
                 && !root_has_read_policy
                 && self.storage_backed_maintained_root_has_identity_table_mapping(
                     shape.schema_version(),
@@ -1061,35 +1077,132 @@ where
         .await
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn query_rows_for_client_read_view(
+    /// Allocate exact receiver input capabilities from compiler-owned source
+    /// requirements, before lowering the receiver graph.  This deliberately
+    /// does not compile a placeholder `SettledBindingView` from result
+    /// members merely to discover its descriptor.
+    fn allocate_client_receiver_input_sources(
         &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
-        read_view: &ReadViewSpec,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let Some(binding_view) =
-            self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view)
-        else {
-            return Ok(Vec::new());
-        };
-        // This direct local preview has no usage subscription from which to
-        // recover a delegated scope. It may therefore read only the explicit
-        // unscoped receipt, never whichever scoped authority result happens
-        // to be unique at this instant.
-        let authority_result_key = AuthorityResultKey::unscoped(binding_view);
-        let Some(snapshot) = self
-            .authoritative_reset_snapshot_for_authority_result(shape, &authority_result_key)
+        request: &QueryProgramRequest,
+        include_local_first_bootstrap: bool,
+    ) -> Result<
+        (
+            BTreeMap<SourceId, InputSourceId>,
+            BTreeMap<SourceId, InputSourceId>,
+            BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
+        ),
+        Error,
+    > {
+        let mut runtime_sources = BTreeMap::new();
+        let mut provisional_local_gates = BTreeMap::new();
+        let mut sources = BTreeMap::new();
+        for source_request in query_program_source_requests(request)
+            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?
+        {
+            if source_request.visibility != RowVisibility::Visible {
+                continue;
+            }
+            let Some(expression) = request.reads.primary.sources.get(&source_request.source) else {
+                continue;
+            };
+            let settled = matches!(expression, SourceExpr::SettledBindingView { .. });
+            let local_first = include_local_first_bootstrap
+                && matches!(
+                    expression,
+                    SourceExpr::VisibleCurrent {
+                        tier: DurabilityTier::Local,
+                        ..
+                    }
+                );
+            if !(settled || local_first) {
+                continue;
+            }
+            let table = self.table_in_schema(
+                &source_request.source.table,
+                request.reads.primary.read_schema,
+            )?;
+            let metadata = read_sources::inline_source_metadata(&source_request.requirements, None);
+            let descriptor =
+                read_sources::current_row_descriptor_with_hidden_source_fields(&table, &metadata);
+            let input = self.database.allocate_input_source(descriptor.clone());
+            let provisional_local_gate = local_first.then(|| {
+                self.database.allocate_input_source(
+                    maintained_views::local_first_bootstrap_gate_descriptor(),
+                )
+            });
+            let source_id = source_request.source.program_source_id();
+            if sources
+                .insert(
+                    source_id,
+                    maintained_views::CoveredInputSource {
+                        id: input,
+                        descriptor,
+                        provisional_local_gate,
+                    },
+                )
+                .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate compiled receiver program source identity",
+                ));
+            }
+            runtime_sources.insert(source_request.source.clone(), input);
+            if let Some(gate) = provisional_local_gate {
+                provisional_local_gates.insert(source_request.source, gate);
+            }
+        }
+        Ok((runtime_sources, provisional_local_gates, sources))
+    }
+
+    /// Recompile one client-side settled read against ephemeral, exact
+    /// CoveredInput sources.  A one-shot is not allowed to materialize an
+    /// authority result set: it uses the same residual source descriptors as
+    /// a maintained receiver, installs the exact closure, evaluates once,
+    /// and retires its runtime-local sources immediately afterwards.
+    ///
+    /// `None` means the named authority result has not yet claimed a complete
+    /// closure.  Callers preserve normal remote pending behavior in that
+    /// case; they must not fall back to retained result members or storage.
+    async fn compile_client_one_shot_with_covered_inputs(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        result_schema_version: SchemaVersionId,
+        authority_result_key: &AuthorityResultKey,
+    ) -> Result<Option<(QueryProgram, maintained_views::CoveredInputReceiver)>, Error> {
+        let (runtime_sources, provisional_local_gates, sources) =
+            self.allocate_client_receiver_input_sources(&request, false)?;
+        if sources.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "client settled read has no covered-input source occurrences",
+            ));
+        }
+        let program = self
+            .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
+                request,
+                BTreeMap::new(),
+                access_paths,
+                runtime_sources,
+                provisional_local_gates,
+            )
+            .await?;
+        let mut receiver = maintained_views::CoveredInputReceiver::new(sources);
+        if !self
+            .replace_covered_input_receiver(
+                &mut receiver,
+                result_schema_version,
+                authority_result_key,
+            )
             .await?
-        else {
-            return Ok(Vec::new());
-        };
-        Ok(snapshot
-            .rows
-            .into_iter()
-            .take(snapshot.root_count)
-            .collect())
+        {
+            let ids = receiver.sources.values().map(|source| source.id);
+            self.database
+                .retire_input_sources(ids)
+                .await
+                .map_err(Error::Groove)?;
+            return Ok(None);
+        }
+        Ok(Some((program, receiver)))
     }
 
     pub(crate) async fn query_rows_local_preview(
@@ -1194,6 +1307,24 @@ where
         {
             return Ok(Vec::new());
         }
+        // A binding-view name is a routing key, not authorization evidence.
+        // Client-side source installation must select the one exact,
+        // policy-scoped receipt that owns that view before it can evaluate a
+        // one-shot graph.
+        let settled_authority_result_key =
+            if authorization_mode == QueryAuthorizationMode::ClientLocal {
+                settled_binding_view.and_then(|binding_view| {
+                    self.unique_authority_result_key_for_binding_view(binding_view)
+                })
+            } else {
+                None
+            };
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && settled_binding_view.is_some()
+            && settled_authority_result_key.is_none()
+        {
+            return Ok(Vec::new());
+        }
         let has_one_shot_access_path = settled_binding_view.is_none()
             && !self.one_shot_access_paths(shape, binding, tier)?.is_empty();
         // A concrete one-shot access path is binding-specific. Inline that
@@ -1216,22 +1347,17 @@ where
         };
         let rebased_window_query = client_settled_binding_view
             .as_ref()
-            .filter(|view| {
-                view.relative_offset != 0 || {
-                    self.query
-                        .registered_shapes
-                        .get(&view.key.shape_id)
-                        .is_some_and(|source| source.query().limit != shape.query().limit)
-                }
-            })
-            .map(|view| {
+            .and_then(|view| view.retained_window.as_ref())
+            .map(|source_window| {
                 let schema = self
                     .catalogue
                     .catalogue_schemas
                     .get(&shape.schema_version())
                     .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
                 let mut rebased_query = shape.query().clone();
-                rebased_query.offset = view.relative_offset;
+                let (relative_offset, relative_limit) = source_window.relative_window_for(shape);
+                rebased_query.offset = relative_offset;
+                rebased_query.limit = relative_limit;
                 let rebased_shape = rebased_query
                     .validate_with_schema_version(&schema.schema, shape.schema_version())?;
                 let rebased_binding = rebased_shape.bind(binding.values().clone())?;
@@ -1248,8 +1374,34 @@ where
             !has_one_shot_access_path
                 && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
         });
+        let mut ephemeral_covered_inputs = None;
         let program = if prepared_plan.is_some() {
             None
+        } else if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
+            let request = self.current_query_program_request(
+                shape,
+                binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+                &ReadViewSpec::default(),
+                settled_binding_view,
+                authorization_mode,
+            )?;
+            let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+            let Some((program, receiver)) = self
+                .compile_client_one_shot_with_covered_inputs(
+                    request,
+                    access_paths,
+                    shape.schema_version(),
+                    authority_result_key,
+                )
+                .await?
+            else {
+                return Ok(Vec::new());
+            };
+            ephemeral_covered_inputs = Some(receiver);
+            Some(program)
         } else {
             Some(
                 self.compile_current_query_program_for_one_shot_read(
@@ -1334,7 +1486,20 @@ where
                 }
             },
         };
+        // Retire transient receiver inputs even if the one-shot graph itself
+        // fails.  These identities are runtime-local capabilities and must
+        // never be re-used by a later receipt.
+        let retire_result = if let Some(receiver) = ephemeral_covered_inputs {
+            self.database
+                .retire_input_sources(receiver.sources.values().map(|source| source.id))
+                .await
+                .map(|_| ())
+                .map_err(Error::Groove)
+        } else {
+            Ok(())
+        };
         let deltas = deltas_result?;
+        retire_result?;
         let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
         } else if shape.query().flat_join.is_some() {
@@ -1590,21 +1755,77 @@ where
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
     ) -> Option<ClientSettledBindingView> {
-        let settled_tier = if tier >= DurabilityTier::Edge {
-            tier
-        } else if self.authored_commit_durability == DurabilityTier::None
-            && shape.query().offset != 0
-        {
-            // The browser main thread keeps received rows only as a
-            // materialized cache. After its worker has supplied an Edge
-            // window, a Local read of that same nonzero-offset shape must
-            // consume the selected membership rather than offsetting the
-            // small cache a second time. Before that receipt, preserve the
-            // ordinary local overlay path.
-            DurabilityTier::Edge
-        } else {
-            return None;
-        };
+        if tier == DurabilityTier::Local {
+            // A non-durable foreground can use an active exact source page,
+            // or reuse a detached page only through its compiler-owned
+            // descriptor. There is deliberately no search through similarly
+            // shaped registrations or authority output.
+            if self.authored_commit_durability != DurabilityTier::None {
+                return None;
+            }
+            let edge_read_view = RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                read_view: read_view.clone(),
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key();
+            let active = self
+                .query
+                .authority_results
+                .iter()
+                .filter_map(|(authority_key, state)| {
+                    if authority_key.binding_view.binding_id != binding.binding_id()
+                        || authority_key.binding_view.read_view != edge_read_view
+                        || !matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
+                    {
+                        return None;
+                    }
+                    let source_shape = self
+                        .query
+                        .registered_shapes
+                        .get(&authority_key.binding_view.shape_id)?;
+                    let descriptor = RetainedRootWindowSource::for_shape(source_shape);
+                    descriptor
+                        .is_bounded()
+                        .then_some(descriptor)
+                        .filter(|descriptor| descriptor.contains_target(shape))
+                        .map(|descriptor| ClientSettledBindingView {
+                            key: authority_key.binding_view,
+                            retained_window: Some(descriptor),
+                        })
+                })
+                .collect::<Vec<_>>();
+            if active.len() == 1 {
+                return active.into_iter().next();
+            }
+            // More than one active policy scope is not a public local-read
+            // capability. The ordinary local overlay remains available, but
+            // cannot impersonate either policy-scoped authority source.
+            if active.len() > 1 {
+                return None;
+            }
+            let matches = self
+                .query
+                .retained_root_window_sources
+                .iter()
+                .filter(|(authority_key, descriptor)| {
+                    authority_key.binding_view.binding_id == binding.binding_id()
+                        && authority_key.binding_view.read_view == edge_read_view
+                        && descriptor.is_bounded()
+                        && descriptor.contains_target(shape)
+                })
+                .map(|(authority_key, descriptor)| ClientSettledBindingView {
+                    key: authority_key.binding_view,
+                    retained_window: Some(descriptor.clone()),
+                })
+                .collect::<Vec<_>>();
+            // A query facade has no caller-controlled policy selector. Never
+            // guess across two scoped receipts; the scope owner must open a
+            // fresh authority usage site instead.
+            return (matches.len() == 1)
+                .then(|| matches.into_iter().next().expect("one retained window"));
+        }
+        let settled_tier = tier;
         let binding_view = BindingViewKey::new(
             shape.shape_id(),
             binding.binding_id(),
@@ -1624,79 +1845,11 @@ where
             }
             .read_view_key(),
         );
-        if tier >= DurabilityTier::Edge
-            && self
-                .query
-                .local_materialized_window_binding_views
-                .contains(&binding_view)
-        {
-            // A detached browser window is only enough to rebase a Local
-            // read over the materialized overlay. It must never stand in for
-            // a fresh Edge/Global authorization receipt.
-            return None;
-        }
-        if tier == DurabilityTier::Local
-            && self
-                .authority_result_state_for_binding_view(binding_view)
-                .is_none()
-        {
-            // A store read may request a narrower window than the one the
-            // browser worker already delivered. It is safe to reuse a source
-            // only when the source query is identical apart from its root
-            // window and fully contains the requested window. The caller
-            // applies the requested slice relative to that source membership.
-            let target = shape.query();
-            let target_end = target
-                .limit
-                .map(|limit| target.offset.saturating_add(limit));
-            let mut target_without_window = target.clone();
-            target_without_window.offset = 0;
-            target_without_window.limit = None;
-            let read_view_key = RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
-                read_view: read_view.clone(),
-                ..RegisterShapeOptions::default()
-            }
-            .read_view_key();
-            return self.query.registered_shapes.values().find_map(|source_shape| {
-                if source_shape.schema_version() != shape.schema_version()
-                    || source_shape.params() != shape.params()
-                {
-                    return None;
-                }
-                let source = source_shape.query();
-                let mut source_without_window = source.clone();
-                source_without_window.offset = 0;
-                source_without_window.limit = None;
-                if source_without_window != target_without_window || source.offset > target.offset {
-                    return None;
-                }
-                let source_end = source
-                    .limit
-                    .map(|limit| source.offset.saturating_add(limit));
-                if matches!((source_end, target_end), (Some(source_end), Some(target_end)) if target_end > source_end)
-                    || matches!((source_end, target_end), (Some(_), None))
-                {
-                    return None;
-                }
-                let key = BindingViewKey::new(
-                    source_shape.shape_id(),
-                    binding.binding_id(),
-                    read_view_key,
-                );
-                self.authority_result_state_for_binding_view(key)
-                    .is_some()
-                    .then_some(
-                    ClientSettledBindingView {
-                        key,
-                        relative_offset: target.offset - source.offset,
-                    },
-                )
-            });
-        }
         Some(ClientSettledBindingView {
             key: binding_view,
-            relative_offset: 0,
+            retained_window: RetainedRootWindowSource::for_shape(shape)
+                .is_bounded()
+                .then(|| RetainedRootWindowSource::for_shape(shape)),
         })
     }
 
@@ -1811,183 +1964,6 @@ where
             }
         }
         Some(())
-    }
-
-    async fn settled_binding_view_source_rows(
-        &mut self,
-        table: &str,
-        read_schema: SchemaVersionId,
-        binding_view: BindingViewKey,
-        authority_result_key: Option<AuthorityResultKey>,
-        rows: SettledBindingRows,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        let authority_result_key = authority_result_key.or_else(|| {
-            // Compatibility source construction has no usage subscription.
-            // It may consume a receipt only when that binding view is
-            // provably unambiguous; scoped relay paths pass the exact key.
-            self.unique_authority_result_key_for_binding_view(binding_view)
-        });
-        let Some(authority_result_key) = authority_result_key else {
-            return Ok(Vec::new());
-        };
-        if authority_result_key.binding_view != binding_view {
-            return Err(Error::InvalidStoredValue(
-                "settled source authority result does not match binding view",
-            ));
-        }
-        let Some(authority_result) = self.query.authority_results.get(&authority_result_key) else {
-            return Ok(Vec::new());
-        };
-        let row_result_set = &authority_result.settled_result_set;
-        let mut row_entries = matches!(rows, SettledBindingRows::ResultMembers)
-            .then(|| {
-                row_result_set
-                    .iter()
-                    .filter_map(ResultMemberEntry::as_row)
-                    .map(|(entry_table, row_uuid, tx_id)| {
-                        ((entry_table.to_string(), row_uuid, tx_id), None)
-                    })
-                    .collect::<BTreeMap<_, Option<RowVersionRefEntry>>>()
-            })
-            .unwrap_or_default();
-        if matches!(rows, SettledBindingRows::ResultMembers) {
-            let program_facts = &authority_result.settled_program_facts;
-            row_entries.extend(program_facts.iter().filter_map(|fact| {
-                let ProgramFactEntry::RelationEdge(edge) = fact else {
-                    return None;
-                };
-                edge.target_version.as_ref().map(|version| {
-                    (
-                        (edge.target_table.to_string(), edge.target_row, version.tx),
-                        Some(version.clone()),
-                    )
-                })
-            }));
-        }
-        if matches!(rows, SettledBindingRows::FlatTupleContributor { .. }) {
-            let program_facts = &authority_result.settled_program_facts;
-            row_entries.extend(program_facts.iter().filter_map(|fact| {
-                let ProgramFactEntry::RelationEdge(edge) = fact else {
-                    return None;
-                };
-                edge.target_version.as_ref().map(|version| {
-                    (
-                        (edge.target_table.to_string(), edge.target_row, version.tx),
-                        Some(version.clone()),
-                    )
-                })
-            }));
-            row_entries.extend(program_facts.iter().filter_map(|fact| {
-                let ProgramFactEntry::ContributingMembers(contribution) = fact else {
-                    return None;
-                };
-                if !matches!(
-                    rows,
-                    SettledBindingRows::FlatTupleContributor { source_index }
-                        if contribution.role.as_deref()
-                            == Some(&format!("flat_tuple_source:{source_index}"))
-                ) || !row_result_set.contains(&contribution.result)
-                {
-                    return None;
-                }
-                contribution
-                    .contributor
-                    .as_real_row()
-                    .and_then(|contributor| {
-                        contributor.row_projection().map(|(table, row, tx)| {
-                            (
-                                (table.to_string(), row, tx),
-                                Some(RowVersionRefEntry {
-                                    tx,
-                                    schema_version: contributor.schema_version,
-                                    layer: contributor.layer,
-                                    batch: contributor.batch,
-                                    branch_or_prefix: contributor.branch_or_prefix.clone(),
-                                    row_digest: contributor.row_digest.clone(),
-                                }),
-                            )
-                        })
-                    })
-            }));
-        }
-        let result_payloads = matches!(rows, SettledBindingRows::ResultMembers)
-            .then(|| {
-                self.query
-                    .authority_results
-                    .get(&authority_result_key)
-                    .into_iter()
-                    .flat_map(|state| state.settled_program_facts.iter())
-                    .filter_map(|fact| {
-                        let ProgramFactEntry::ResultPayload(payload) = fact else {
-                            return None;
-                        };
-                        // Flat joins also retain tuple payloads, but their
-                        // canonical source versions still drive source
-                        // reconstruction (including schema-lens projection).
-                        // Only branch-qualified memberships represent a
-                        // public row that can differ from its supplier
-                        // version and therefore replace source materialization.
-                        payload.member.as_real_row()?.branch_or_prefix.as_ref()?;
-                        payload
-                            .member
-                            .as_row()
-                            .map(|(table, row, tx)| ((table.to_string(), row, tx), payload.clone()))
-                    })
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let mut rows = Vec::with_capacity(row_entries.len());
-        for ((canonical_table, row_uuid, tx_id), relation_version) in row_entries {
-            if let Some(payload) = result_payloads.get(&(canonical_table.clone(), row_uuid, tx_id))
-            {
-                let output_table = self.table_in_schema(table, read_schema)?.clone();
-                let row = self.current_row_from_result_payload(&output_table, payload)?;
-                if row.table() == table {
-                    rows.push(row);
-                }
-                continue;
-            }
-            let version = if let Some(version_ref) = relation_version {
-                self.resolve_relation_edge_version(&canonical_table, row_uuid, &version_ref)
-                    .await?
-            } else {
-                let tx_node_alias = self
-                    .node_aliases
-                    .get(&tx_id.node)
-                    .copied()
-                    .ok_or(Error::MissingTransaction(tx_id))?;
-                let shared = self
-                    .query_version_by_alias(
-                        &canonical_table,
-                        row_uuid,
-                        VersionLayer::Content,
-                        tx_id.time,
-                        tx_node_alias,
-                    )
-                    .await?;
-                if let Some(version) = shared {
-                    version
-                } else {
-                    let versions = self.query_versions_for_tx(tx_id).await?;
-                    self.maintained_witness_for_result_member(
-                        &versions,
-                        read_schema,
-                        &canonical_table,
-                        row_uuid,
-                    )?
-                    .cloned()
-                    .ok_or(Error::MissingTransaction(tx_id))?
-                }
-            };
-            if let Some(row) = self.projected_current_row_from_materialized_version_in_read_schema(
-                read_schema,
-                &version,
-            )? && row.table() == table
-            {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
     }
 
     /// Evaluate a validated query against the globally settled state at
@@ -3247,6 +3223,7 @@ where
             super::maintained_subscription_view::ResultTransitions,
             BTreeMap<String, TableSchema>,
             bool,
+            maintained_views::CoveredInputReceiver,
         ),
         Error,
     > {
@@ -3277,35 +3254,93 @@ where
             super::maintained_subscription_view::ResultTransitions,
             BTreeMap<String, TableSchema>,
             bool,
+            maintained_views::CoveredInputReceiver,
         ),
         Error,
     > {
         let settled_binding_view = Some(authority_result_key.binding_view);
-        self.open_seeded_maintained_subscription_view_in_authorization_mode(
-            shape,
-            binding,
-            identity,
-            DurabilityTier::Edge,
-            read_view,
-            QueryAuthorizationMode::ClientLocal,
-            settled_binding_view,
-            Some(authority_result_key),
-            PreparedClaimBindingMode::Strict,
-            progress_waker,
-        )
-        .await
-        .map(
-            |(subscription, maintained, schemas, transitions, tables, received, _)| {
-                (
-                    subscription,
-                    maintained,
-                    schemas,
-                    transitions,
-                    tables,
-                    received,
+        let (
+            subscription,
+            mut maintained,
+            terminal_schemas,
+            mut transitions,
+            tables,
+            mut initial_received,
+            covered_input_sources,
+        ) = self
+            .open_seeded_maintained_subscription_view_in_authorization_mode(
+                shape,
+                binding,
+                identity,
+                DurabilityTier::Edge,
+                read_view,
+                QueryAuthorizationMode::ClientLocal,
+                settled_binding_view,
+                Some(authority_result_key.clone()),
+                PreparedClaimBindingMode::Strict,
+                progress_waker,
+            )
+            .await?;
+        let mut covered_input_receiver =
+            maintained_views::CoveredInputReceiver::new(covered_input_sources);
+        if !covered_input_receiver.is_empty() {
+            let installed = self
+                .replace_covered_input_receiver(
+                    &mut covered_input_receiver,
+                    shape.schema_version(),
+                    &authority_result_key,
                 )
-            },
-        )
+                .await?;
+            if !installed {
+                initial_received = false;
+            } else {
+                self.drive_ready_query_runtime_with_waker(progress_waker)
+                    .await?;
+                loop {
+                    match subscription.try_recv() {
+                        Ok(deltas) => {
+                            initial_received = true;
+                            let extra = maintained.apply_multisink_deltas(
+                                deltas,
+                                &terminal_schemas,
+                                &tables,
+                                &self.node_aliases,
+                            )?;
+                            transitions.adds.extend(extra.adds);
+                            transitions.removes.extend(extra.removes);
+                            transitions
+                                .result_payload_adds
+                                .extend(extra.result_payload_adds);
+                            transitions
+                                .result_payload_removes
+                                .extend(extra.result_payload_removes);
+                            transitions
+                                .program_fact_adds
+                                .extend(extra.program_fact_adds);
+                            transitions
+                                .program_fact_removes
+                                .extend(extra.program_fact_removes);
+                            transitions
+                                .terminal_operations
+                                .extend(extra.terminal_operations);
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            return Err(Error::SubscriptionClosed);
+                        }
+                    }
+                }
+            }
+        }
+        Ok((
+            subscription,
+            maintained,
+            terminal_schemas,
+            transitions,
+            tables,
+            initial_received,
+            covered_input_receiver,
+        ))
     }
 
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an
@@ -3418,22 +3453,62 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let mut program = self
-            .compile_current_query_program_with_settled_view_and_prepared_claim_mode(
-                &shape,
-                &binding,
-                tier,
-                identity,
-                CurrentQueryProgramOutput::MaintainedView,
-                read_view,
-                settled_binding_view,
-                authorization_mode,
-                prepared_claim_binding_mode,
+        let mut request = self.current_query_program_request_with_prepared_claim_mode(
+            &shape,
+            &binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::MaintainedView,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            prepared_claim_binding_mode,
+            false,
+        )?;
+        if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
+            for source in request.reads.primary.sources.values_mut() {
+                if let SourceExpr::SettledBindingView {
+                    authority_result_key: selected,
+                    ..
+                } = source
+                {
+                    *selected = Some(authority_result_key.clone());
+                }
+            }
+        }
+        let mut access_paths = self.current_query_primary_key_access_paths(&shape, &binding)?;
+        access_paths.extend(
+            self.query_program_access_paths(&request, true)?
+                .into_iter()
+                .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+        );
+        // Receiver inputs are allocated from the compiler's source
+        // requirements before any source is resolved. This keeps the initial
+        // lowering from consulting an authority result just to discover a
+        // descriptor.
+        let (runtime_sources, provisional_local_gates, covered_input_sources) =
+            if authorization_mode == QueryAuthorizationMode::ClientLocal {
+                self.allocate_client_receiver_input_sources(&request, true)?
+            } else {
+                (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
+            };
+        let program = if runtime_sources.is_empty() {
+            self.compile_query_program_request_with_access_paths(request, access_paths)
+                .await?
+        } else {
+            self.compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
+                request,
+                BTreeMap::new(),
+                access_paths,
+                runtime_sources,
+                provisional_local_gates,
             )
-            .await?;
+            .await?
+        };
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=opened_program node={:?} mode={authorization_mode:?} identity={identity:?} tier={tier:?} settled_view={settled_binding_view:?} authority_key={settled_authority_result_key:?} sources={:?} descriptors={:?}",
+                "JAZZ_COVERED_INPUT_TRACE stage=opened_program table={} node={:?} mode={authorization_mode:?} identity={identity:?} tier={tier:?} settled_view={settled_binding_view:?} authority_key={settled_authority_result_key:?} sources={:?} descriptors={:?}",
+                shape.query().table,
                 self.node_uuid,
                 program
                     .request
@@ -3445,99 +3520,13 @@ where
                 program.source_descriptors.keys().collect::<Vec<_>>(),
             );
         }
-        if let Some(authority_result_key) = settled_authority_result_key {
-            for source in program.request.reads.primary.sources.values_mut() {
-                if let crate::node::query_engine::SourceExpr::SettledBindingView {
-                    authority_result_key: selected,
-                    ..
-                } = source
-                {
-                    *selected = Some(authority_result_key.clone());
-                }
-            }
-        }
-        // A settled authority receipt supplies source input, not output.
-        // Allocate receiver-local mutable sources after the bootstrap pass
-        // has established their descriptors, then lower the same request
-        // against those sources. No authority result is evaluated or copied
-        // during this step.
-        let mut covered_input_sources = BTreeMap::new();
+        // Before the first exact authority closure, Local-first preserves its
+        // immediate cached-open behavior through descriptor-bound runtime
+        // inputs.  This is retired wholesale by the first claimed closure;
+        // strict remote sources have no provisional records.
         if authorization_mode == QueryAuthorizationMode::ClientLocal {
-            let mut runtime_sources = BTreeMap::new();
-            for (source, source_expr) in &program.request.reads.primary.sources {
-                let uses_receiver_local_input = matches!(
-                    source_expr,
-                    SourceExpr::SettledBindingView { .. }
-                        | SourceExpr::VisibleCurrent {
-                            tier: DurabilityTier::Local,
-                            ..
-                        }
-                );
-                let uses_settled_covered_input = settled_binding_view.is_some()
-                    && matches!(
-                        source_expr,
-                        // Aggregate plans deliberately retain their raw
-                        // Global source rather than pretending synthetic
-                        // aggregate output is source input. The explicit
-                        // runtime-source map below is the capability that
-                        // lets this one occurrence consume a CoveredInput
-                        // closure instead of storage.
-                        SourceExpr::VisibleCurrent { tier, .. }
-                            if *tier >= DurabilityTier::Edge
-                    );
-                if !(uses_receiver_local_input || uses_settled_covered_input) {
-                    continue;
-                }
-                let source_id = source.program_source_id();
-                let Some(descriptor) = program
-                    .covered_input_source_descriptors
-                    .get(&source_id)
-                    .cloned()
-                else {
-                    // This resolved read is authority-local policy/proof or
-                    // an existence gate, not a receiver residual input. It
-                    // must never be revived as a mutable source merely
-                    // because it shares a table with one that is admitted.
-                    continue;
-                };
-                let input_id = self.database.allocate_input_source(descriptor.clone());
-                if covered_input_sources
-                    .insert(
-                        source_id,
-                        maintained_views::CoveredInputSource {
-                            id: input_id,
-                            descriptor,
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(Error::InvalidStoredValue(
-                        "duplicate compiled settled program source identity",
-                    ));
-                }
-                runtime_sources.insert(source.clone(), input_id);
-            }
-            if !runtime_sources.is_empty() {
-                program = self
-                    .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
-                        program.request.clone(),
-                        BTreeMap::new(),
-                        BTreeMap::new(),
-                        runtime_sources,
-                    )
-                    .await?;
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                    eprintln!(
-                        "JAZZ_COVERED_INPUT_TRACE stage=opened_receiver_program node={:?} mode={authorization_mode:?} identity={identity:?} runtime_sources={:?} descriptors={:?}",
-                        self.node_uuid,
-                        covered_input_sources.keys().collect::<Vec<_>>(),
-                        program
-                            .covered_input_source_descriptors
-                            .keys()
-                            .collect::<Vec<_>>(),
-                    );
-                }
-            }
+            self.start_provisional_local_receiver_inputs(&covered_input_sources)
+                .await?;
         }
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
@@ -3580,6 +3569,9 @@ where
                 progress_waker,
             )
             .await?;
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
+        }
         let mut maintained = MaintainedSubscriptionView::default();
         if storage_backed_result_materialization {
             maintained.enable_storage_backed_result_materialization();
@@ -3594,6 +3586,9 @@ where
         // subscription and gates ViewUpdate on `initial_received`.
         let initial_received = match subscription.try_recv() {
             Ok(snapshot) => {
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_snapshot");
+                }
                 let snapshot_transitions = maintained.apply_multisink_deltas(
                     snapshot,
                     &terminal_schemas,
@@ -3656,6 +3651,9 @@ where
                     }
                 }
             }
+        }
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_applied");
         }
         Ok((
             subscription,

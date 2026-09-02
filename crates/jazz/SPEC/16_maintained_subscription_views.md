@@ -145,6 +145,19 @@ exact authority-covered inputs ----+
 eligible local inputs --------------+
 ```
 
+Before that first exact closure, Local-first has one explicitly bounded
+bootstrap phase. A descriptor-bound gate may admit retained **scope-local local
+knowledge** into the same receiver graph while it separately observes its
+eligible Ahead/pending overlay. This permits an immediate offline/cached open;
+it is neither an authority result nor a second evaluator. The first claimed
+closure atomically replaces every covered source slot and clears every
+bootstrap gate, thereby retiring those provisional cached inputs even if their
+physical copies remain in local storage. A later revocation therefore cannot
+resurrect a cached row. Strict remote has no provisional phase: it publishes
+only after its fresh exact closure is installed. Reconnect starts a new
+bootstrap/receipt lifecycle and cannot reuse a detached receipt as its first
+closure.
+
 The requested tier determines which inputs participate and when the first
 answer may be published; it does not select another evaluator:
 
@@ -182,6 +195,12 @@ Worked examples:
   enters the same local graph and its collector removes every affected root or
   descendant occurrence. The client does not re-evaluate the hidden policy and
   the authority does not send a presentation-level remove.
+- **Cached Local-first open.** Before a new connection has delivered a closure,
+  a client may show its retained same-scope Global A plus a pending local B from
+  the one local receiver graph. When the first closure admits only C, one
+  atomic source replacement retires provisional A, retains or reconciles B by
+  normal version order, and lets that same collector publish C. The server did
+  not send `[C]` as a result snapshot.
 - **Reconnect.** A fresh usage-site subscription cannot reuse its detached
   predecessor's result or terminal sequence. It verifies a fresh exact closure,
   installs it, and lets the local graph publish the corresponding reset.
@@ -503,6 +522,35 @@ whole-window replacements. A row whose rank changes but remains inside the
 window does not affect Jazz result membership unless the future API explicitly
 projects rank metadata. This keeps `ViewUpdate.result_member_adds/removes`
 aligned with the settled typed result-member model.
+
+#### Retained receiver input pages
+
+The same compiler-owned window stage is used by authority closure publication
+and by the receiver's application collector. A closure for a bounded root or
+parent window is proportional to that requested window; it is never an
+authority terminal snapshot. Consequently a non-durable receiver that keeps a
+page after its authority usage site detaches retains a typed **window-source
+capability**, not a boolean saying that some result happened to be
+materialized.
+
+That capability contains the exact normalized source occurrence, full
+validated source shape, root/parent partition, user order keys and directions,
+the compiler's deterministic tie keys, window offset/limit, and the
+policy-scoped receipt that supplied it. A later Local lowering may reuse it
+only when its own compiler-owned descriptor is exactly the same apart from a
+window wholly contained by the retained page. It then treats the retained rows
+as the output of the source window and applies its requested offset relative to
+that page. It MUST NOT apply the original absolute offset a second time, sort
+the page in Jazz, search similar registered shapes, or use authority output
+membership as a fallback.
+
+Different source occurrences, partitions, ordering/tie contracts, schemas,
+bindings, policy scopes, or non-contained windows are incompatible. They must
+open fresh coverage (or use ordinary local-first inputs), even where their
+table names or visible rows happen to match. Detach, revocation, reconnect, and
+new scope admission retire or replace the exact capability atomically with its
+covered source closure. This is the root-level application of the shared
+per-parent window representation established by #1747.
 
 `Aggregate` is the target for grouped summaries. Jazz lowers each group to a
 stable result-row identity derived from the group key and lowers scalar global

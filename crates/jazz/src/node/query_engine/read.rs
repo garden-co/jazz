@@ -97,15 +97,6 @@ pub(crate) type ResolvedSourceExpr = SourceExpr<ResolvedSourceStage>;
 /// Canonical source-expression set at a particular resolution stage.
 pub(crate) type SourceGraph<R> = BTreeMap<SourceId, SourceExpr<R>>;
 
-/// Which admitted rows a settled binding source exposes to one source node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SettledBindingRows {
-    /// Authoritative root/result members for the binding view.
-    ResultMembers,
-    /// Canonical source versions admitted for one flat-join input position.
-    FlatTupleContributor { source_index: usize },
-}
-
 /// Source expression algebra. Branches, snapshots, overlays, transactions, and
 /// schema projections compose here instead of selecting a separate query path.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -148,10 +139,10 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         /// Snapshot frontier.
         snapshot: Snapshot,
     },
-    /// Receiver-side settled result set for one registered binding/view.
+    /// Exact authority receipt selected for one receiver-local source graph.
     ///
-    /// This is how view-complete partial exclusive payloads participate in
-    /// one-shot reads without pretending to be globally current table state.
+    /// Its rows are never reconstructed from a result set. Client lowering
+    /// requires descriptor-bound CoveredInput sources for every occurrence.
     SettledBindingView {
         /// Schema/storage/lens projection used by this source.
         projection: SchemaProjection<R>,
@@ -161,13 +152,6 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
         /// this source. `binding_view` is only cache/routing identity; it is
         /// not sufficient to select policy-scoped authoritative data.
         authority_result_key: Option<crate::protocol::AuthorityResultKey>,
-        /// Partition result members from admitted tuple sources so a
-        /// self-join cannot feed the same table-wide union into both sides.
-        rows: SettledBindingRows,
-        /// The settled rows are view-relative renderings whose public values
-        /// must travel in result payloads rather than being reconstructed
-        /// from the immutable supplier version.
-        requires_result_payload: bool,
     },
     /// Overlay local/branch/transactional writes on top of another source.
     WithOverlays {

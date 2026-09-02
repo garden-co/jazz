@@ -1916,7 +1916,11 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
         core.registered_shape(shape.shape_id()).is_some(),
         "a live outbound publication must retain its shared shape after inbound teardown"
     );
-    assert_eq!(core.registered_query_binding_count_for_test(), 2);
+    assert_eq!(
+        core.registered_query_binding_count_for_test(),
+        3,
+        "the same wire binding/view remains separately registered for each admitted reader"
+    );
 
     first_peer.forget_subscription_with_node(&mut core, subscription);
     assert!(
@@ -1926,7 +1930,7 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     assert_eq!(
         core.registered_query_binding_count_for_test(),
         2,
-        "an identical binding remains live until its second peer retires"
+        "retiring one reader must preserve the sibling policy scope and edge view"
     );
 
     cloned_peer.forget_subscription_with_node(&mut core, subscription);

@@ -991,7 +991,7 @@ fn lower_recursive_relation_cached(
     })
 }
 
-fn lower_linear_plan_steps(
+pub(super) fn lower_linear_plan_steps(
     graph: GraphBuilder,
     plan: &LinearCurrentRoot,
     root_source: &ResolvedSource,
@@ -2121,7 +2121,7 @@ fn key_pair_error(result: Result<String, UnsupportedReason>) -> String {
     }
 }
 
-fn lower_relation_key_ref(
+pub(super) fn lower_relation_key_ref(
     value: &NormalizedValueRef,
     plan: &RelationInputPlan,
     output: &LoweredRelationInput,

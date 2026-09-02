@@ -5,6 +5,7 @@
 //! schemas used to decode those outputs.
 
 use super::*;
+use crate::node::query_eval::coerce_prepared_binding_value;
 
 pub(super) fn lowered_terminals(
     graph: GraphBuilder,
@@ -12,6 +13,7 @@ pub(super) fn lowered_terminals(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    parameter_domain: &ParameterDomain,
     routing_param_fields: &BTreeSet<String>,
     available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<LoweredTerminal>> {
@@ -22,6 +24,7 @@ pub(super) fn lowered_terminals(
             plan,
             source,
             resolved_sources,
+            parameter_domain,
             routing_param_fields,
             available_fields,
         );
@@ -94,7 +97,73 @@ pub(super) fn lowered_terminals(
     // occurrence.  In particular, source.graph may have applied table policy
     // but still lacks residual/reachable constraints from the surrounding
     // program.
-    let covered_source_members = closure.covered_source_members(plan.root_source().clone());
+    let mut covered_source_members = closure.covered_source_members(plan.root_source().clone());
+    // A flat join has no explicit include path, but every join-side row that
+    // contributes to a public root is still receiver input.  Derive each
+    // contributor from the post-policy visible root—not from its raw table
+    // scan—so the authority publishes the exact residual relation the
+    // receiver will join.  Omitting this made a flat receipt look complete
+    // while containing only its root scan, which cannot reproduce the join.
+    for contribution in &request.input.shape.join_contributions {
+        let resolved_source = resolved_sources.get(&contribution.source).ok_or_else(|| {
+            Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Runtime(format!(
+                    "join contribution source {:?} was not resolved",
+                    contribution.source
+                ))],
+                explain: ExplainPlan::default(),
+            })
+        })?;
+        let graph = if contribution.id.starts_with("flat_join:") {
+            flat_join_contribution_membership_graph(
+                closure.visible_root.clone(),
+                contribution,
+                resolved_source,
+                &request.input.shape.nodes,
+                resolved_sources,
+                request,
+            )?
+        } else {
+            join_contribution_membership_graph(
+                closure.visible_root.clone(),
+                contribution,
+                source,
+                resolved_source,
+                &request.input.shape.nodes,
+                resolved_sources,
+                request,
+            )?
+        }
+        .project_fields(project_source_fields_with_routes(
+            resolved_source,
+            &root_route_fields,
+        ));
+        covered_source_members
+            .entry(contribution.source.clone())
+            .and_modify(|existing| {
+                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
+            })
+            .or_insert(graph);
+    }
+    // A correlated collector owns a distinct compiled source occurrence for
+    // each child path.  The implicit-reference closure above may happen to
+    // traverse the same physical table through a separate `Alias` source,
+    // but that is neither the child's identity nor a lawful receiver input
+    // substitute.  Derive every child source from the already admitted root
+    // frontier, then publish it under that child occurrence's own descriptor.
+    // This keeps the source-coverage manifest equal to the receiver program
+    // without reopening a raw child table scan or relying on table equality.
+    if let AnalyzedQueryPlan::CorrelatedPath(path) = plan {
+        collect_correlated_covered_source_members(
+            path,
+            closure.visible_root.clone(),
+            source,
+            resolved_sources,
+            request,
+            &root_route_fields,
+            &mut covered_source_members,
+        )?;
+    }
     // Correlated include paths can preserve routes in the graph while their
     // conservative root field set omits them. Use the graph's declared output
     // after closure lowering when choosing the fields retained by maintained
@@ -467,8 +536,12 @@ pub(super) fn lowered_terminals(
                 let ProgramFactSchema::ProgramSourceCoverage(schema) = &output.schema else {
                     unreachable!("program-source coverage key has matching schema")
                 };
-                let graph =
-                    program_source_coverage_graph(request, schema.complete, &root_route_fields)?;
+                let graph = program_source_coverage_graph(
+                    request,
+                    parameter_domain,
+                    schema.complete,
+                    &root_route_fields,
+                )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
                     graph,
@@ -510,6 +583,82 @@ pub(super) fn lowered_terminals(
     }
 
     Ok(terminals)
+}
+
+/// Add each correlated collector child as an exact post-policy covered input.
+///
+/// The output graph for a correlated path contains the parent on the left and
+/// the admitted child on the right. Projecting the right source from that
+/// graph is the narrow residual frontier: it contains only children reachable
+/// from an already-authorized parent and still carries the child's own source
+/// policy.  It is intentionally not the raw child source graph.
+fn collect_correlated_covered_source_members(
+    path: &CorrelatedPathPlan,
+    parent_graph: GraphBuilder,
+    parent_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
+    members: &mut BTreeMap<SourceId, GraphBuilder>,
+) -> CapabilityResult<()> {
+    let child_source = resolved_sources.get(&path.path.child).ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Runtime(format!(
+            "correlated covered source {:?} was not resolved",
+            path.path.child
+        )))
+    })?;
+    let joined = lower_correlated_path_relation_graph_from_parent(
+        path,
+        parent_graph.clone(),
+        parent_source,
+        resolved_sources,
+        request,
+        false,
+    )
+    .map_err(single_gap_report)?
+    .graph;
+    let child_members =
+        joined
+            .clone()
+            .project_fields(project_source_fields_with_routes_from_prefix(
+                child_source,
+                RIGHT_JOIN_PREFIX,
+                route_fields,
+            ));
+    members
+        .entry(path.path.child.clone())
+        .and_modify(|existing| {
+            *existing = GraphBuilder::union([existing.clone(), child_members.clone()]);
+        })
+        .or_insert(child_members);
+
+    for sibling in &path.siblings {
+        collect_correlated_covered_source_members(
+            sibling,
+            parent_graph.clone(),
+            parent_source,
+            resolved_sources,
+            request,
+            route_fields,
+            members,
+        )?;
+    }
+    let child_parent = joined.project_fields(project_source_fields_from_prefix(
+        child_source,
+        RIGHT_JOIN_PREFIX,
+    ));
+    for nested in &path.nested {
+        collect_correlated_covered_source_members(
+            nested,
+            child_parent.clone(),
+            child_source,
+            resolved_sources,
+            request,
+            route_fields,
+            members,
+        )?;
+    }
+    Ok(())
 }
 
 /// One fully typed flat input field for the association collector.  The
@@ -1220,6 +1369,7 @@ fn lowered_aggregate_terminals(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    parameter_domain: &ParameterDomain,
     routing_param_fields: &BTreeSet<String>,
     available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<LoweredTerminal>> {
@@ -1327,8 +1477,12 @@ fn lowered_aggregate_terminals(
                 let ProgramFactSchema::ProgramSourceCoverage(schema) = &output.schema else {
                     unreachable!("program-source coverage key has matching schema")
                 };
-                let graph =
-                    program_source_coverage_graph(request, schema.complete, &root_route_fields)?;
+                let graph = program_source_coverage_graph(
+                    request,
+                    parameter_domain,
+                    schema.complete,
+                    &root_route_fields,
+                )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
                     graph,
@@ -2003,6 +2157,7 @@ fn fact_terminal_graph(
 /// before the receipt is frozen into a protocol fact.
 fn program_source_coverage_graph(
     request: &QueryProgramRequest,
+    parameter_domain: &ParameterDomain,
     complete: bool,
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
@@ -2027,7 +2182,7 @@ fn program_source_coverage_graph(
     fields.extend(
         routing_param_fields
             .iter()
-            .map(|field| route_literal_project_field(field, request))
+            .map(|field| route_literal_project_field_for_domain(field, request, parameter_domain))
             .collect::<Result<Vec<_>, _>>()
             .map_err(single_gap_report)?,
     );
@@ -2039,12 +2194,31 @@ pub(super) fn route_literal_project_field(
     request: &QueryProgramRequest,
 ) -> Result<ProjectField, UnsupportedReason> {
     let domain = parameter_domain_for_request(request)?;
+    route_literal_project_field_for_domain(route_field, request, &domain)
+}
+
+/// Build a literal route field using the descriptor domain that will bind the
+/// prepared program. The request-derived domain can be less specific before
+/// physical/lens lowering; callers that already have the final domain must
+/// use it so literal-only terminals compare the same representation as the
+/// binding source.
+fn route_literal_project_field_for_domain(
+    route_field: &str,
+    request: &QueryProgramRequest,
+    domain: &ParameterDomain,
+) -> Result<ProjectField, UnsupportedReason> {
     if let Some(path) = claim_path_from_param_field(route_field) {
         let value = claim_value(&path, &request.policy)?;
-        let literal = domain
+        let literal: LiteralValue = domain
             .claim_params
             .get(route_field)
-            .map(|claim| coerce_literal_for_value_type(value.clone().into(), &claim.ty.clone()))
+            // Prepared subscriptions compare routes against the same
+            // descriptor-coerced binding record used at bind time. In
+            // particular, a UUID session claim can be represented as a
+            // string parameter by the schema; use the shared coercion rather
+            // than the raw claim encoding so literal-only terminals (such as
+            // source completeness) have the identical route value.
+            .map(|claim| coerce_prepared_binding_value(value.clone(), &claim.ty).into())
             .unwrap_or_else(|| value.into());
         return Ok(ProjectField::literal(route_field.to_owned(), literal));
     }
@@ -2058,10 +2232,10 @@ pub(super) fn route_literal_project_field(
             "authorization route field '{route_field}' refers to unbound parameter '{param}'"
         )));
     };
-    let literal = domain
+    let literal: LiteralValue = domain
         .user_params
         .get(param)
-        .map(|ty| coerce_literal_for_value_type(value.clone().into(), &ty.clone()))
+        .map(|ty| coerce_prepared_binding_value(value.clone(), ty).into())
         .unwrap_or_else(|| value.clone().into());
     Ok(ProjectField::literal(route_field.to_owned(), literal))
 }

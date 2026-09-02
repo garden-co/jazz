@@ -1,6 +1,59 @@
 // Downstream version delivery, payload inventory, wire records, and dispatch.
 
 #[test]
+fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(0x61));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let member = crate::protocol::ResultMemberEntry::row((
+        groove::Intern::new("todos".to_owned()),
+        row(0x62),
+        TxId::new(TxTime::from(1), node(0x63)),
+    ));
+    let base = || ViewUpdateParts {
+        subscription,
+        settled_through: GlobalTime(0),
+        defer_settlement: false,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        opening_pending: false,
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    let mut member_update = base();
+    member_update.result_member_adds.push(member.clone());
+    assert!(matches!(
+        crate::db::block_on(reader.apply_view_update(member_update)),
+        Err(Error::InvalidStoredValue("peer view update must not carry authority result members"))
+    ));
+
+    let mut payload_update = base();
+    payload_update
+        .program_fact_adds
+        .push(crate::protocol::ProgramFactEntry::ResultPayload(
+            crate::protocol::ResultMemberPayloadEntry {
+                member,
+                // Ingestion must reject this by kind before attempting to
+                // interpret the payload descriptor or bytes.
+                descriptor: Vec::new(),
+                record: Vec::new(),
+            },
+        ));
+    assert!(matches!(
+        crate::db::block_on(reader.apply_view_update(payload_update)),
+        Err(Error::InvalidStoredValue("peer view update must not carry authority result payloads"))
+    ));
+    assert!(reader
+        .subscription_current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn view_updates_ship_current_versions_to_downstream_nodes() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -43,7 +96,10 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         core.whole_table_subscription_key("todos").unwrap()
     );
     assert!(!reset_result_set);
-    assert_eq!(result_member_adds.len(), 1);
+    assert!(
+        result_member_adds.is_empty(),
+        "peer frames carry source/version closure, never authority result membership"
+    );
     assert!(result_member_removes.is_empty());
     assert_eq!(version_bundles.len(), 1);
     assert!(peer_payload_inventory_refs.is_empty());

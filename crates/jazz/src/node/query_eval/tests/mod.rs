@@ -23,9 +23,8 @@ use crate::node::query_engine::{CoverageScope, FieldRequirement, ProgramFactOutp
 use crate::node::{MergeableCommit, NodeState};
 use crate::peer::PeerState;
 use crate::protocol::{
-    CurrentWriteSchema, MigrationLens, ReadViewSpec, RealRowMemberEntry, RegisterShapeOptions,
-    RelationEdgeEntry, ResultRowLayer, RowVersionRefEntry, SchemaVersion, ShapeAst, Subscribe,
-    SyncMessage, TableLens,
+    CurrentWriteSchema, MigrationLens, ReadViewSpec, RegisterShapeOptions, RelationEdgeEntry,
+    ResultRowLayer, RowVersionRefEntry, SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
 };
 use crate::query::{
     Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, eq, gt, in_list,

@@ -1821,6 +1821,14 @@ fn seed_recursive_reachable_read_fixture(
     server: &CoreDb,
     member: AuthorSubject,
 ) -> (RowUuid, RowUuid) {
+    seed_recursive_reachable_read_fixture_with_group_entries(server, member, 42)
+}
+
+fn seed_recursive_reachable_read_fixture_with_group_entries(
+    server: &CoreDb,
+    member: AuthorSubject,
+    group_entry_count: u8,
+) -> (RowUuid, RowUuid) {
     let direct_doc = row(0xd1);
     let inherited_doc = row(0xd2);
     let hidden_doc = row(0xd3);
@@ -1876,7 +1884,7 @@ fn seed_recursive_reachable_read_fixture(
             resource_access_test_cells(hidden_doc, hidden_team, false),
         )
         .unwrap();
-    for i in 0..42 {
+    for i in 0..group_entry_count {
         let member = if i == 0 { member_team } else { parent_team };
         let target = parent_team;
         server
@@ -2003,18 +2011,62 @@ fn served_many_subscription_rows_for_author(
         subscriptions.push(((*table).to_owned(), subscription));
     }
 
-    client.tick().unwrap();
-    server.tick().unwrap();
-    client.tick().unwrap();
-
-    subscriptions
-        .into_iter()
-        .map(|(table, mut subscription)| {
-            let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
-            assert!(updated.is_empty());
-            assert!(removed.is_empty());
-            (table, row_ids(&added))
-        })
+    // A covered-input receipt is installed source-by-source, then its local
+    // receiver graph ticks and emits the terminal reset.  Do not turn a
+    // missing event after one transport round into an unbounded `next_raw`
+    // wait: multiple subscriptions may receive their independent closures in
+    // separate turns.  This bound is deliberately part of the fixture so a
+    // receipt/wake regression fails diagnostically rather than hanging the
+    // whole authorization suite.
+    let mut rows = tables
+        .iter()
+        .map(|table| ((*table).to_owned(), BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut received = BTreeSet::new();
+    for _ in 0..20 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        for (table, subscription) in &mut subscriptions {
+            while let Some(event) = subscription.try_next_event() {
+                let SubscriptionEvent::Delta {
+                    reset,
+                    added,
+                    updated,
+                    removed,
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                received.insert(table.clone());
+                let table_rows = rows.get_mut(table).expect("tracked subscription table");
+                if reset {
+                    table_rows.clear();
+                }
+                for row in removed {
+                    table_rows.remove(&row.row_uuid);
+                }
+                for row in added.into_iter().chain(updated) {
+                    table_rows.insert(row.row_uuid());
+                }
+            }
+        }
+        if received.len() == subscriptions.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        received.len(),
+        subscriptions.len(),
+        "all subscriptions must receive a bounded covered-input terminal receipt; missing={:?}",
+        tables
+            .iter()
+            .filter(|table| !received.contains(**table))
+            .collect::<Vec<_>>()
+    );
+    rows.into_iter()
+        .map(|(table, rows)| (table, rows.into_iter().collect()))
         .collect()
 }
 
@@ -2227,5 +2279,29 @@ fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity(
         served_table_rows_via_ordinary_browser_worker(&schema, &server, member, "group_entry"),
         (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>(),
         "an ordinary browser-worker relay receives its authenticated session's authority view"
+    );
+}
+
+/// Keep the scoped covered-input reset path bounded on the same recursive
+/// policy topology.  The larger fixture above exercises throughput; this
+/// deliberately small variant catches a receipt/reopen feedback cycle without
+/// making the diagnosis depend on forty-two independent history witnesses.
+#[test]
+fn recursive_reachable_scoped_receiver_settles_once_on_small_frontier() {
+    let schema = benchmark_shaped_recursive_reachable_read_schema();
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x12; 16]);
+    let (direct_doc, inherited_doc) =
+        seed_recursive_reachable_read_fixture_with_group_entries(&server, member, 2);
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "res_a"),
+        vec![direct_doc, inherited_doc],
+        "the recursive policy result must settle from its covered closure"
+    );
+    assert_eq!(
+        served_table_rows_via_ordinary_browser_worker(&schema, &server, member, "group_entry"),
+        vec![row(0xc1), row(0xc2)],
+        "a worker relay must forward one scoped closure, not repeatedly reopen it"
     );
 }

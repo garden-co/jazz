@@ -414,8 +414,12 @@ impl MaintainedSubscriptionView {
                 || !transitions.program_fact_removes.is_empty())
         {
             eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=maintained_transition results={:?} fact_adds={:?} fact_removes={:?}",
-                transitions.adds, transitions.program_fact_adds, transitions.program_fact_removes,
+                "JAZZ_COVERED_INPUT_TRACE stage=maintained_transition adds={} removes={} fact_adds={} fact_removes={} terminal_ops={}",
+                transitions.adds.len(),
+                transitions.removes.len(),
+                transitions.program_fact_adds.len(),
+                transitions.program_fact_removes.len(),
+                transitions.terminal_operations.len(),
             );
         }
         Ok(transitions)
@@ -800,48 +804,6 @@ impl MaintainedSubscriptionView {
         }
         self.structured_app_row_order = order;
         Ok(())
-    }
-
-    /// Rebase aggregate terminal state after an authoritative remote reset.
-    /// The local IVM may still emit the matching before/after pair while its
-    /// source catches up; retaining an obsolete synthetic revision here would
-    /// otherwise turn that harmless pair into a later public removal.
-    pub(crate) fn replace_aggregate_result_state(
-        &mut self,
-        members: &BTreeSet<ResultMemberEntry>,
-        facts: &BTreeSet<ProgramFactEntry>,
-    ) {
-        self.result_weights
-            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
-        self.result_payloads
-            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
-        for member in members {
-            if matches!(member, ResultMemberEntry::Synthetic { .. }) {
-                self.result_weights.insert(member.clone(), 1);
-            }
-        }
-        for fact in facts {
-            let ProgramFactEntry::ResultPayload(payload) = fact else {
-                continue;
-            };
-            if matches!(payload.member, ResultMemberEntry::Synthetic { .. }) {
-                self.result_payloads
-                    .insert(payload.member.clone(), payload.clone());
-            }
-        }
-        // An authoritative reset has already published these aggregate
-        // members through its replacement snapshot. Do not re-emit them when
-        // the next unrelated multisink delta is drained.
-        self.published_result_members
-            .retain(|member| !matches!(member, ResultMemberEntry::Synthetic { .. }));
-        self.published_result_members.extend(
-            self.result_weights
-                .iter()
-                .filter(|(member, weight)| {
-                    matches!(member, ResultMemberEntry::Synthetic { .. }) && **weight > 0
-                })
-                .map(|(member, _)| member.clone()),
-        );
     }
 
     fn reconcile_publishable_result_members(

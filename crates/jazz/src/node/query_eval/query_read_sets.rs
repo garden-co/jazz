@@ -11,7 +11,7 @@ pub(super) fn current_query_read_set(
     tier: DurabilityTier,
     settled_binding_view: Option<BindingViewKey>,
     settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
-    settled_requires_result_payload: bool,
+    _settled_requires_result_payload: bool,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
         schema_family: SchemaFamilySelection::Current,
@@ -29,8 +29,6 @@ pub(super) fn current_query_read_set(
                         projection: projection.clone(),
                         binding_view,
                         authority_result_key: settled_authority_result_key.clone(),
-                        rows: SettledBindingRows::ResultMembers,
-                        requires_result_payload: settled_requires_result_payload,
                     }
                 } else {
                     SourceExpr::VisibleCurrent {
@@ -51,18 +49,6 @@ pub(super) fn current_query_read_set(
                     projection: projection.clone(),
                     binding_view,
                     authority_result_key: settled_authority_result_key.clone(),
-                    // Covered inputs are source-occurrence-scoped. The old
-                    // flat-tuple contributor partition existed only because
-                    // result members were (incorrectly) being re-used as
-                    // source data. Keep the enum for durable old state while
-                    // all authority-covered source compilation takes the
-                    // exact source closure instead.
-                    rows: flat_tuple_source_index(source)
-                        .map(|source_index| SettledBindingRows::FlatTupleContributor {
-                            source_index,
-                        })
-                        .unwrap_or(SettledBindingRows::ResultMembers),
-                    requires_result_payload: settled_requires_result_payload,
                 },
             );
             continue;
@@ -81,18 +67,6 @@ pub(super) fn current_query_read_set(
         policy_schema,
         sources,
     })
-}
-
-fn flat_tuple_source_index(source: &SourceId) -> Option<usize> {
-    let [SourceRole::Alias(alias)] = source.path.components.as_slice() else {
-        return None;
-    };
-    alias
-        .strip_prefix("flat_join:")?
-        .split_once(':')?
-        .0
-        .parse()
-        .ok()
 }
 
 pub(super) fn historical_query_read_set(

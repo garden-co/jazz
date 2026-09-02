@@ -15,9 +15,10 @@ use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::CurrentRow;
 use jazz::protocol::{
-    RegisterShapeOptions, RowVersionRef, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionBundleScope, VersionRecord,
-    ViewUpdatePayload,
+    CoveredInputEntry, ProgramFactEntry, ProgramSourceCoverageEntry, ProgramSourceId,
+    ProgramSourceRole, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
+    VersionBundleScope, VersionCarrier, VersionRecord, ViewUpdatePayload,
 };
 use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -465,7 +466,7 @@ fn open_persistent_scope_isolated_browser_worker(
 /// ```
 /// The test-only upstream handle stages through the worker's normal inbound
 /// queue and observes the real outbound Subscribe. This lets the repair E2E
-/// fixture below inject an incomplete authority update without adding a
+/// fixture below injects an incomplete covered-input closure without adding a
 /// production message-application API.
 #[test]
 fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
@@ -538,17 +539,47 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
     )
     .expect("encode authority row version");
     let request = RowVersionRef::new("todos", row, tx_id);
+    // INV-SYNC-36: an authority never sends result membership. It declares a
+    // complete source closure and ships the exact source witness, from which
+    // the receiver derives its own terminal.
+    let source = ProgramSourceId {
+        table: "todos".to_owned().into(),
+        path: vec![ProgramSourceRole::Root],
+    };
     let incomplete = SyncMessage::ViewUpdate(ViewUpdatePayload {
         subscription: subscription_key,
         settled_through: GlobalTime(1),
         reset_result_set: true,
-        // The authority already knows this current membership, but omits its
-        // exact body. The worker must use the ordinary FetchRowVersions path.
-        version_carriers: Vec::new(),
+        version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
+            scope: VersionBundleScope::CompleteTransaction,
+            tx: transaction.clone(),
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: DurabilityTier::Global,
+        })],
         peer_payload_inventory: Default::default(),
-        result_member_adds: vec![("todos".to_owned().into(), row, tx_id).into()],
+        result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
+        program_fact_adds: vec![
+            ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+                source: source.clone(),
+                complete: true,
+            }),
+            ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                source,
+                version_table: "todos".to_owned().into(),
+                source_row: row,
+                version: RowVersionRefEntry {
+                    tx: tx_id,
+                    schema_version: Some(schema.version_id()),
+                    layer: ResultRowLayer::Content,
+                    batch: Some(tx_id),
+                    branch_or_prefix: Some(vec![1, 0, 0, 0, 0]),
+                    row_digest: None,
+                },
+            }),
+        ],
         program_fact_removes: Vec::new(),
     });
     assert!(
@@ -556,37 +587,10 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
             .expect("stage incomplete authority view update"),
         "the selected upstream may mint an authority receipt"
     );
-    worker.tick().expect("discover missing authority version");
-    worker.tick().expect("emit real missing-version fetch");
-    let fetches = upstream.take_outbound_for_test();
-    assert!(
-        fetches.iter().any(|message| matches!(
-            message,
-            SyncMessage::FetchRowVersions { requests, .. } if requests == &vec![request.clone()]
-        )),
-        "incomplete authority state must use the normal FetchRowVersions request"
-    );
-    assert!(
-        block_on(worker.stage_upstream_message_for_test(
-            &upstream,
-            SyncMessage::RowVersionPayloads {
-                version_bundles: vec![VersionBundle {
-                    scope: VersionBundleScope::CompleteTransaction,
-                    tx: transaction.clone(),
-                    versions: vec![version],
-                    fate: Fate::Accepted,
-                    global_time: Some(GlobalTime(1)),
-                    durability: DurabilityTier::Global,
-                }],
-            },
-        ))
-        .expect("stage selected authority repair payload"),
-        "the selected authority payload may mint durable repair authority"
-    );
-    worker
+    worker.tick().expect("apply covered authority closure");
+    foreground
         .tick()
-        .expect("apply authority repair and original view");
-    foreground.tick().expect("deliver repaired foreground view");
+        .expect("deliver locally derived foreground view");
     assert!(
         foreground
             .read(&todos)

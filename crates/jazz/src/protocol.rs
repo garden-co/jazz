@@ -604,6 +604,20 @@ impl SyncMessage {
         let Some(view) = self.carried_view_update() else {
             return Ok(());
         };
+        // Peer view frames carry only the authority-selected source closure.
+        // Result membership and materialized result payloads are authority
+        // output, never receiver input: accepting either would bypass the
+        // receiver-local maintained graph and its exact coverage receipt.
+        if !view.result_member_adds.is_empty()
+            || !view.result_member_removes.is_empty()
+            || view
+                .program_fact_adds
+                .iter()
+                .chain(&view.program_fact_removes)
+                .any(|fact| matches!(fact, ProgramFactEntry::ResultPayload(_)))
+        {
+            return Err(WireContractError::AuthorityResultOutput);
+        }
         if view
             .program_fact_adds
             .iter()
@@ -659,6 +673,9 @@ pub enum WireContractError {
     InvalidCoveredInput,
     /// A program-source closure receipt is incomplete or noncanonical.
     InvalidProgramSourceCoverage,
+    /// A peer frame attempted to carry authority terminal output rather than
+    /// the source closure from which a receiver must derive it.
+    AuthorityResultOutput,
 }
 
 impl std::fmt::Display for WireContractError {
@@ -668,6 +685,9 @@ impl std::fmt::Display for WireContractError {
             Self::InvalidCoveredInput => write!(f, "covered input source identity is invalid"),
             Self::InvalidProgramSourceCoverage => {
                 write!(f, "program-source coverage receipt is invalid")
+            }
+            Self::AuthorityResultOutput => {
+                write!(f, "peer view update carries authority result output")
             }
         }
     }

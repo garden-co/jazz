@@ -43,6 +43,114 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
 }
 
 #[test]
+fn retained_root_window_descriptor_requires_exact_source_order_and_containment() {
+    let (_dir, node) = open_node();
+    let source = Query::from("issues")
+        .order_by("state", OrderDirection::Asc)
+        .offset(8)
+        .limit(16)
+        .validate(&node.catalogue.schema)
+        .expect("validate source window");
+    let descriptor = RetainedRootWindowSource::for_shape(&source);
+
+    let contained = Query::from("issues")
+        .order_by("state", OrderDirection::Asc)
+        .offset(10)
+        .limit(2)
+        .validate(&node.catalogue.schema)
+        .expect("validate contained window");
+    assert!(descriptor.contains_target(&contained));
+    assert_eq!(descriptor.relative_window_for(&contained), (2, Some(2)));
+
+    let same_window = Query::from("issues")
+        .order_by("state", OrderDirection::Asc)
+        .offset(8)
+        .limit(16)
+        .validate(&node.catalogue.schema)
+        .expect("validate same window");
+    assert!(descriptor.contains_target(&same_window));
+    assert_eq!(
+        descriptor.relative_window_for(&same_window),
+        (0, Some(16)),
+        "an exact page is still a post-window source, not a raw table input"
+    );
+
+    let outside = Query::from("issues")
+        .order_by("state", OrderDirection::Asc)
+        .offset(20)
+        .limit(8)
+        .validate(&node.catalogue.schema)
+        .expect("validate outside window");
+    assert!(!descriptor.contains_target(&outside));
+
+    let different_order = Query::from("issues")
+        .order_by("state", OrderDirection::Desc)
+        .offset(10)
+        .limit(2)
+        .validate(&node.catalogue.schema)
+        .expect("validate differently ordered window");
+    assert!(
+        !descriptor.contains_target(&different_order),
+        "matching table and offsets do not erase compiler-owned order/tie semantics"
+    );
+}
+
+#[test]
+fn retained_root_window_sources_do_not_cross_policy_scopes() {
+    let (_dir, mut node) = open_node();
+    node.set_non_durable_client();
+    let source = Query::from("issues")
+        .order_by("state", OrderDirection::Asc)
+        .offset(8)
+        .limit(16)
+        .validate(&node.catalogue.schema)
+        .expect("validate source window");
+    let binding = source.bind(BTreeMap::new()).expect("bind source window");
+    let view = BindingViewKey::new(
+        source.shape_id(),
+        binding.binding_id(),
+        RegisterShapeOptions {
+            tier: DurabilityTier::Edge,
+            ..RegisterShapeOptions::default()
+        }
+        .read_view_key(),
+    );
+    let alice = PolicyBindingKey::from_delegated_session(&DelegatedSessionBinding {
+        identity: author(0x51),
+        claims: BTreeMap::new(),
+    });
+    let bob = PolicyBindingKey::from_delegated_session(&DelegatedSessionBinding {
+        identity: author(0x52),
+        claims: BTreeMap::new(),
+    });
+    let descriptor = RetainedRootWindowSource::for_shape(&source);
+    node.query.retained_root_window_sources.insert(
+        AuthorityResultKey::policy_scoped(view, alice),
+        descriptor.clone(),
+    );
+    node.query
+        .retained_root_window_sources
+        .insert(AuthorityResultKey::policy_scoped(view, bob), descriptor);
+
+    let target = Query::from("issues")
+        .order_by("state", OrderDirection::Asc)
+        .offset(10)
+        .limit(2)
+        .validate(&node.catalogue.schema)
+        .expect("validate contained target");
+    assert!(
+        node.client_settled_binding_view_for_query(
+            &target,
+            &binding,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+        )
+        .is_none(),
+        "a binding-only Local facade must not guess which of two policy-scoped pages it may reuse"
+    );
+}
+
+#[test]
 fn maintained_physical_point_hydration_uses_only_its_current_row_source() {
     let (_dir, mut node) = open_node();
     let alice = author(1);

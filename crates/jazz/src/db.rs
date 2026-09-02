@@ -2165,6 +2165,10 @@ struct RelayUpstreamSubscriptionOwner {
 /// connection before that connection's served coverage is retired.
 struct RelaySubscriptionRejection {
     coverage: CoverageKey,
+    /// Exact authenticated policy scope that admitted the downstream usages.
+    /// Teardown must use this scope rather than a bare wire key, which is
+    /// ambiguous when one relay multiplexes the same shape across readers.
+    policy_binding: (AuthorSubject, BTreeMap<String, Value>),
     downstream_subscriptions: BTreeSet<SubscriptionKey>,
     reason: SubscribeRejectReason,
 }

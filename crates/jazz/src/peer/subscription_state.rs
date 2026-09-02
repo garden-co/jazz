@@ -12,10 +12,13 @@ use groove::ivm::MultisinkSubscription;
 use groove::records::Value;
 
 use super::super::ids::AuthorSubject;
+use super::super::ids::SchemaVersionId;
 use super::super::node::maintained_subscription_view::{
     MaintainedSubscriptionView, MaintainedTerminalSchemas,
 };
-use super::super::node::{LocalAuthorityReconciliation, PreparedQueryPlanHandle};
+use super::super::node::{
+    CoveredInputReceiver, LocalAuthorityReconciliation, PreparedQueryPlanHandle,
+};
 use super::super::protocol::{
     AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry,
     ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
@@ -180,6 +183,10 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
+    /// Exact receiver-owned inputs for a relay Edge child. `None` means this
+    /// is an ordinary trusted-serving maintained view, not a receiver.
+    pub(super) covered_input_receiver: Option<CoveredInputReceiver>,
+    pub(super) result_schema_version: SchemaVersionId,
     /// Exact authoritative source membership for an Edge child of a durable
     /// relay. A canonical binding view alone is not a permission boundary.
     pub(super) source_authority_result: Option<AuthorityResultKey>,

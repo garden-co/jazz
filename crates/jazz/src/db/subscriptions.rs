@@ -566,7 +566,7 @@ where
         // Compiler-owned root collectors, not surface query syntax, own the
         // terminal snapshot and positional edits.
         let terminal_rows = subscription.has_root_collector();
-        let mut maintained_subscription = Some(subscription);
+        let maintained_subscription = Some(subscription);
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
@@ -650,34 +650,6 @@ where
         } else {
             None
         };
-        if authorization_mode == QueryAuthorizationMode::ClientLocal
-            && remote_read_tier.is_some()
-            && state_shape.query().aggregate.is_none()
-        {
-            let binding_view_key = BindingViewKey {
-                shape_id: state_shape.shape_id(),
-                binding_id: state_binding.binding_id(),
-                read_view: RegisterShapeOptions {
-                    tier: settled_tier,
-                    read_view: opts.read_view.clone(),
-                    propagate_upstream: remote_propagate_upstream,
-                    ..RegisterShapeOptions::default()
-                }
-                .read_view_key(),
-            };
-            if let Some(maintained) = maintained_subscription.as_mut() {
-                let node = self.node.node.lock().await;
-                if !maintained.has_covered_input_sources()
-                    && let Some(authority_result_key) = settled_authority_result.as_ref()
-                    && authority_result_key.binding_view == binding_view_key
-                {
-                    node.seed_local_maintained_authoritative_generation(
-                        maintained,
-                        authority_result_key,
-                    );
-                }
-            }
-        }
         let settled = {
             let node = self.node.node.lock().await;
             subscription_is_settled(

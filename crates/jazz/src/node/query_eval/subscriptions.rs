@@ -206,7 +206,7 @@ where
         let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
         self.retain_validated_shape_registration(shape_id, ast, shape)?;
         let subscription = subscribe.subscription;
-        self.apply_subscribe_with_admitted_policy_binding(subscribe, policy_binding)?;
+        self.apply_subscribe_with_admitted_policy_binding(subscribe, policy_binding.clone())?;
         self.query
             .outbound_shape_owners
             .entry(shape_id)
@@ -214,7 +214,7 @@ where
             .insert((publication_owner, subscription));
         self.query
             .outbound_binding_owners
-            .entry(subscription)
+            .entry((subscription, policy_binding))
             .or_default()
             .insert(publication_owner);
         Ok(())
@@ -227,6 +227,28 @@ where
         &mut self,
         publication_owner: u64,
         subscription: SubscriptionKey,
+    ) {
+        let Some(policy_binding) = self
+            .unique_registered_binding_for_subscription(subscription)
+            .and_then(|binding| binding.authority_result_key.policy_binding.clone())
+        else {
+            return;
+        };
+        self.release_query_subscription_for_peer_with_admitted_policy_binding(
+            publication_owner,
+            subscription,
+            policy_binding,
+        );
+    }
+
+    /// Release one served usage under the immutable policy scope that admitted
+    /// it. A peer may share its wire handle with another scope, so this is the
+    /// only valid teardown path for multiplexed serving.
+    pub(crate) fn release_query_subscription_for_peer_with_admitted_policy_binding(
+        &mut self,
+        publication_owner: u64,
+        subscription: SubscriptionKey,
+        policy_binding: crate::protocol::PolicyBindingKey,
     ) {
         let shape_id = subscription.shape_id;
         let Some(shape_owners) = self.query.outbound_shape_owners.get_mut(&shape_id) else {
@@ -242,14 +264,16 @@ where
         let binding_became_unowned = self
             .query
             .outbound_binding_owners
-            .get_mut(&subscription)
+            .get_mut(&(subscription, policy_binding.clone()))
             .is_some_and(|owners| {
                 owners.remove(&publication_owner);
                 owners.is_empty()
             });
         if binding_became_unowned {
-            self.query.outbound_binding_owners.remove(&subscription);
-            self.apply_unsubscribe(subscription);
+            self.query
+                .outbound_binding_owners
+                .remove(&(subscription, policy_binding.clone()));
+            self.apply_unsubscribe_with_admitted_policy_binding(subscription, policy_binding);
         }
         self.reclaim_shape_if_unowned(shape_id);
     }
@@ -314,7 +338,7 @@ where
             .retain(|key| !reclaimed.contains(key.shape_id));
         self.query
             .outbound_binding_owners
-            .retain(|subscription, _| !reclaimed.contains(subscription.shape_id));
+            .retain(|(subscription, _), _| !reclaimed.contains(subscription.shape_id));
     }
 
     #[cfg(test)]
@@ -402,10 +426,7 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Result<AuthorityResultKey, Error> {
-        self.query
-            .registered_bindings
-            .get(&subscription.shape_id)
-            .and_then(|bindings| bindings.get(&(subscription.binding_id, subscription.read_view)))
+        self.unique_registered_binding_for_subscription(subscription)
             .map(|binding| binding.authority_result_key.clone())
             .or_else(|| {
                 self.canonical_whole_table_binding_view_key(subscription)
@@ -528,13 +549,14 @@ where
                 subscribe.delegated_session,
             );
         }
-        // A new wire subscription needs an authority receipt. Discard a
-        // browser-only materialized-window interpretation before any opening
-        // reset can otherwise preserve its old member set.
+        // A new wire subscription needs a fresh authority receipt. It may
+        // retire only its own policy-scoped retained local page; another
+        // scope with the same public binding remains isolated.
         if self
             .query
-            .local_materialized_window_binding_views
-            .remove(&binding_view_key)
+            .retained_root_window_sources
+            .remove(&authority_result_key)
+            .is_some()
         {
             self.clear_settled_result_view(authority_result_key.clone());
         }
@@ -552,27 +574,10 @@ where
             .entry(authority_result_key.clone())
             .or_default()
             .known_state_declared = subscribe.known_state.is_some();
-        let registered_key = (
-            subscribe.subscription.binding_id,
-            subscribe.subscription.read_view,
+        let registered_key = registered_binding_usage_key(
+            subscribe.subscription,
+            authority_result_key.policy_binding.clone(),
         );
-        if let Some(existing) = self
-            .query
-            .registered_bindings
-            .get(&subscribe.shape_id)
-            .and_then(|bindings| bindings.get(&registered_key))
-            && existing.authority_result_key != authority_result_key
-        {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                eprintln!(
-                    "JAZZ_COVERED_INPUT_TRACE stage=subscription_scope_conflict usage={registered_key:?} old={:?} new={authority_result_key:?}",
-                    existing.authority_result_key,
-                );
-            }
-            return Err(Error::InvalidStoredValue(
-                "subscription policy binding changed without retiring its usage",
-            ));
-        }
         self.query
             .registered_bindings
             .entry(subscribe.shape_id)
@@ -590,42 +595,76 @@ where
     }
 
     pub(crate) fn apply_unsubscribe(&mut self, subscription: SubscriptionKey) {
-        let binding_view_key = self.binding_view_key_for_subscription(subscription).ok();
-        let authority_result_key = self
-            .authority_result_key_for_subscription(subscription)
-            .ok();
-        let retain_local_materialized_window = binding_view_key.is_some_and(|binding_view_key| {
-            self.authored_commit_durability == DurabilityTier::None
-                && self
-                    .query
-                    .registered_shapes
-                    .get(&subscription.shape_id)
-                    .is_some_and(|shape| shape.query().offset != 0)
-                && self
-                    .query
+        let Some(registered_key) = self.unique_registered_binding_usage_key(subscription) else {
+            // A bare wire handle is deliberately insufficient to retire an
+            // ambiguous multiplexed policy scope. Authenticated serving paths
+            // call `apply_unsubscribe_with_admitted_policy_binding` instead.
+            return;
+        };
+        self.apply_unsubscribe_registered_binding(subscription, registered_key);
+    }
+
+    /// Retire exactly the policy scope selected by authenticated connection
+    /// admission. This is intentionally internal: a client-controlled
+    /// Subscribe payload must never select the scope later used for teardown.
+    pub(crate) fn apply_unsubscribe_with_admitted_policy_binding(
+        &mut self,
+        subscription: SubscriptionKey,
+        policy_binding: crate::protocol::PolicyBindingKey,
+    ) {
+        self.apply_unsubscribe_registered_binding(
+            subscription,
+            registered_binding_usage_key(subscription, Some(policy_binding)),
+        );
+    }
+
+    fn apply_unsubscribe_registered_binding(
+        &mut self,
+        subscription: SubscriptionKey,
+        registered_key: RegisteredBindingUsageKey,
+    ) {
+        let registered = self
+            .query
+            .registered_bindings
+            .get(&subscription.shape_id)
+            .and_then(|bindings| bindings.get(&registered_key))
+            .cloned();
+        let Some(registered) = registered else {
+            return;
+        };
+        let binding_view_key = registered.binding_view_key;
+        let authority_result_key = registered.authority_result_key;
+        let retained_local_window = self
+            .query
+            .registered_shapes
+            .get(&subscription.shape_id)
+            .filter(|_| self.authored_commit_durability == DurabilityTier::None)
+            .map(RetainedRootWindowSource::for_shape)
+            .filter(RetainedRootWindowSource::is_bounded)
+            .filter(|_| {
+                self.query
                     .authority_results
-                    .get(&AuthorityResultKey::unscoped(binding_view_key))
-                    .is_some_and(|state| !state.settled_result_set.is_empty())
-        });
+                    .get(&authority_result_key)
+                    .is_some_and(|state| {
+                        matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
+                    })
+            });
         if let Some(bindings) = self
             .query
             .registered_bindings
             .get_mut(&subscription.shape_id)
         {
-            bindings.remove(&(subscription.binding_id, subscription.read_view));
+            bindings.remove(&registered_key);
         }
-        if let Some(binding_view_key) = binding_view_key
-            && let Some(authority_result_key) = authority_result_key
-            && !self.registered_binding_resolves_to_authority_result_key(&authority_result_key)
-        {
+        if !self.registered_binding_resolves_to_authority_result_key(&authority_result_key) {
             // Registered bindings are the receipt ownership record. Once the
             // last downstream usage site releases this exact binding view,
             // revoke its authority-selected membership rather than retaining
             // a browser cache after scope teardown.
-            if retain_local_materialized_window {
+            if let Some(window) = retained_local_window {
                 self.query
-                    .local_materialized_window_binding_views
-                    .insert(binding_view_key);
+                    .retained_root_window_sources
+                    .insert(authority_result_key.clone(), window);
             } else {
                 self.retire_authority_result_view(authority_result_key);
             }
@@ -662,10 +701,7 @@ where
                 .authority_results
                 .iter()
                 .filter(|(key, state)| {
-                    !self
-                        .query
-                        .local_materialized_window_binding_views
-                        .contains(&key.binding_view)
+                    !self.query.retained_root_window_sources.contains_key(key)
                         && (state.live_settled
                             || state.settled_through.is_some()
                             || !state.settled_result_set.is_empty()
@@ -674,8 +710,11 @@ where
                 .count(),
             self.query
                 .authority_results
-                .values()
-                .filter(|state| !state.settled_program_facts.is_empty())
+                .iter()
+                .filter(|(key, state)| {
+                    !self.query.retained_root_window_sources.contains_key(*key)
+                        && !state.settled_program_facts.is_empty()
+                })
                 .count(),
         )
     }
@@ -772,8 +811,8 @@ where
             .is_some_and(|state| state.live_settled)
             && !self
                 .query
-                .local_materialized_window_binding_views
-                .contains(&authority_result_key.binding_view)
+                .retained_root_window_sources
+                .contains_key(authority_result_key)
     }
 
     pub(crate) fn applied_authority_result_generation(
@@ -813,50 +852,6 @@ where
         SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(std::cell::Cell::get)
     }
 
-    #[cfg(test)]
-    pub(crate) fn inject_pending_authoritative_reset_for_test(
-        &mut self,
-        binding_view_key: BindingViewKey,
-        members: impl IntoIterator<Item = ResultMemberEntry>,
-        settled_through: GlobalTime,
-    ) {
-        let authority_result_key = AuthorityResultKey::unscoped(binding_view_key);
-        self.clear_settled_result_view(authority_result_key.clone());
-        for member in members {
-            self.insert_settled_result_member_indexed(authority_result_key.clone(), member);
-        }
-        self.query
-            .authority_results
-            .entry(authority_result_key)
-            .or_default()
-            .settled_through = Some(settled_through);
-        self.query
-            .authority_results
-            .entry(AuthorityResultKey::unscoped(binding_view_key))
-            .or_default()
-            .pending_authoritative_reset = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_pending_authoritative_reset_with_program_facts_for_test(
-        &mut self,
-        binding_view_key: BindingViewKey,
-        members: impl IntoIterator<Item = ResultMemberEntry>,
-        program_facts: impl IntoIterator<Item = ProgramFactEntry>,
-        settled_through: GlobalTime,
-    ) {
-        self.inject_pending_authoritative_reset_for_test(
-            binding_view_key,
-            members,
-            settled_through,
-        );
-        self.query
-            .authority_results
-            .entry(AuthorityResultKey::unscoped(binding_view_key))
-            .or_default()
-            .settled_program_facts = program_facts.into_iter().collect();
-    }
-
     /// Drain exact authority receipts whose next publication must be a reset.
     ///
     /// A binding view is merely a local cache address. It cannot represent a
@@ -882,15 +877,6 @@ where
             .pending_authoritative_reset = true;
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_pending_authoritative_reset_for_test(
-        &self,
-        binding_view_key: BindingViewKey,
-    ) -> bool {
-        self.authority_result_state_for_binding_view(binding_view_key)
-            .is_some_and(|state| state.pending_authoritative_reset)
-    }
-
     pub(crate) fn publication_deferred_for_authority_result(
         &self,
         authority_result_key: &AuthorityResultKey,
@@ -909,207 +895,6 @@ where
             .authority_results
             .get(authority_result_key)
             .is_some_and(|state| state.pending_opening)
-    }
-
-    pub(crate) fn settled_result_transitions_for_subscription(
-        &self,
-        subscription: SubscriptionKey,
-        source_authority_result: Option<AuthorityResultKey>,
-        previous_member_result_set: &BTreeSet<ResultMemberEntry>,
-        previous_program_fact_set: &BTreeSet<ProgramFactEntry>,
-        result_table_filter: Option<&str>,
-        output_tables: &BTreeMap<String, TableSchema>,
-    ) -> Result<
-        Option<(
-            super::maintained_subscription_view::ResultTransitions,
-            BTreeSet<ResultMemberEntry>,
-            BTreeSet<ProgramFactEntry>,
-        )>,
-        Error,
-    > {
-        let authority_result_key = source_authority_result
-            .map(Ok)
-            .unwrap_or_else(|| self.authority_result_key_for_subscription(subscription))?;
-        // Settled binding views are shared by canonical query binding, while a
-        // table read policy is identity-scoped. Never relay a synthetic
-        // aggregate from that shared cache across an identity boundary; the
-        // per-peer maintained program remains the authority for policy-shaped
-        // aggregate output.
-        let shared_view_has_read_policy = self
-            .query
-            .registered_shapes
-            .get(&subscription.shape_id)
-            .and_then(|shape| self.table(shape.query().table.as_str()).ok())
-            .is_some_and(TableSchema::has_any_policy);
-        let Some(authority_result) = self.query.authority_results.get(&authority_result_key) else {
-            return Ok(None);
-        };
-        let settled_members = &authority_result.settled_result_set;
-        let settled_facts = self
-            .query
-            .authority_results
-            .get(&authority_result_key)
-            .map(|state| &state.settled_program_facts)
-            .cloned()
-            .unwrap_or_default();
-        let member_is_visible = |member: &ResultMemberEntry| {
-            let Some(table_name) = member.table_name() else {
-                return false;
-            };
-            result_table_filter.is_none_or(|table| table_name == table)
-                && (output_tables.contains_key(table_name)
-                    || (matches!(member, ResultMemberEntry::Synthetic { .. })
-                        && !shared_view_has_read_policy))
-        };
-        let current = settled_members
-            .iter()
-            .filter(|member| member_is_visible(member))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let previous = previous_member_result_set
-            .iter()
-            .filter(|member| member_is_visible(member))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let fact_is_visible = |fact: &ProgramFactEntry| match fact {
-            ProgramFactEntry::ResultPayload(payload) => member_is_visible(&payload.member),
-            _ => true,
-        };
-        let current_facts = settled_facts
-            .into_iter()
-            .filter(fact_is_visible)
-            .collect::<BTreeSet<_>>();
-        let previous_facts = previous_program_fact_set
-            .iter()
-            .filter(|fact| fact_is_visible(fact))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let program_fact_adds = current_facts
-            .difference(&previous_facts)
-            .cloned()
-            .collect::<Vec<_>>();
-        let program_fact_removes = previous_facts
-            .difference(&current_facts)
-            .cloned()
-            .collect::<Vec<_>>();
-        // A synthetic aggregate member is meaningful only together with its
-        // payload fact. In particular, an empty aggregate has a member and a
-        // payload whose aggregate field is `Nullable(None)`; it is not a
-        // member with a missing payload. Carry both representations through
-        // the settled-view handoff so facade materialization can retain that
-        // distinction.
-        let result_payload_adds = program_fact_adds
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => {
-                    Some((payload.member.clone(), payload.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        let result_payload_removes = program_fact_removes
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => Some(payload.member.clone()),
-                _ => None,
-            })
-            .collect();
-        Ok(Some((
-            super::maintained_subscription_view::ResultTransitions {
-                authoritative_membership_changed: false,
-                authoritative_member_adds: BTreeSet::new(),
-                adds: current.difference(&previous).cloned().collect(),
-                removes: previous.difference(&current).cloned().collect(),
-                result_payload_adds,
-                result_payload_removes,
-                program_fact_adds,
-                program_fact_removes,
-                allow_storage_witness_fallback: true,
-                observed_result_delta_batches: 0,
-                requires_authoritative_membership_reconcile: false,
-                terminal_operations: Vec::new(),
-            },
-            current,
-            current_facts,
-        )))
-    }
-
-    pub(crate) async fn authoritative_reset_snapshot_for_authority_result(
-        &mut self,
-        shape: &ValidatedQuery,
-        authority_result_key: &AuthorityResultKey,
-    ) -> Result<Option<RelationSnapshot>, Error> {
-        let Some(authority_result) = self.query.authority_results.get(authority_result_key) else {
-            return Ok(None);
-        };
-        let result_members = authority_result.settled_result_set.clone();
-        let program_facts = authority_result.settled_program_facts.clone();
-        let result_payloads = program_facts
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload) => {
-                    Some((payload.member.clone(), payload.clone()))
-                }
-                _ => None,
-            })
-            .collect::<BTreeMap<_, _>>();
-
-        let result_table = shape.query().table.as_str();
-        let mut rows = Vec::new();
-        let mut row_keys = BTreeSet::new();
-        for member in result_members.iter().filter(|member| {
-            is_public_result_member(member, result_table, shape.query().aggregate.is_some())
-        }) {
-            let Some(row) = self
-                .materialize_authoritative_reset_member(shape.query(), member, &result_payloads)
-                .await?
-            else {
-                continue;
-            };
-            row_keys.insert((row.table().to_owned(), row.row_uuid()));
-            rows.push(row);
-        }
-        // Result-member ordering is for identity and deduplication, not public
-        // query rank. Membership/windowing is already lowered; only restore the
-        // selected roots to their advertised order before sending a reset.
-        self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
-        if shape.query().flat_join.is_none() {
-            self.apply_projection_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
-        }
-        let root_count = rows.len();
-        let mut edges = Vec::new();
-        for fact in program_facts {
-            let ProgramFactEntry::RelationEdge(edge) = fact else {
-                continue;
-            };
-            // Program facts retain canonical authored identity.  The public
-            // relation snapshot, including its removal index, is keyed in the
-            // subscription read schema; project the edge identity alongside
-            // the row it references rather than mixing canonical `users`
-            // with a materialized `people` row.
-            let read_edge = self
-                .project_relation_edge_through_read_schema(&edge, shape.schema_version())
-                .await?;
-            if row_keys.insert((read_edge.target_table.clone(), read_edge.target_row))
-                && let Some(version) = &edge.target_version
-                && let Some(row) = self
-                    .materialize_authoritative_reset_relation_edge_target(
-                        shape.schema_version(),
-                        edge.target_table.as_str(),
-                        edge.target_row,
-                        version,
-                    )
-                    .await?
-            {
-                rows.push(row);
-            }
-            edges.push(read_edge);
-        }
-        Ok(Some(RelationSnapshot {
-            root_count,
-            rows,
-            edges,
-        }))
     }
 
     /// Return the settlement watermark for one exact authority result.
@@ -1247,12 +1032,7 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Result<BindingViewKey, Error> {
-        if let Some(registered) = self
-            .query
-            .registered_bindings
-            .get(&subscription.shape_id)
-            .and_then(|bindings| bindings.get(&(subscription.binding_id, subscription.read_view)))
-        {
+        if let Some(registered) = self.unique_registered_binding_for_subscription(subscription) {
             return Ok(registered.binding_view_key);
         }
         if let Some(binding_view_key) = self.canonical_whole_table_binding_view_key(subscription)? {
@@ -1261,6 +1041,34 @@ where
         Err(Error::InvalidStoredValue(
             "subscription referenced unregistered binding",
         ))
+    }
+
+    /// Resolve a wire handle only when one admitted scope owns it. Callers at
+    /// authenticated ingress use their exact admission binding instead; this
+    /// compatibility lookup must never choose a sibling scope by arrival
+    /// order.
+    fn unique_registered_binding_for_subscription(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<&RegisteredBinding> {
+        let bindings = self.query.registered_bindings.get(&subscription.shape_id)?;
+        let mut matches = bindings.iter().filter_map(|(key, binding)| {
+            (key.0 == subscription.binding_id && key.1 == subscription.read_view).then_some(binding)
+        });
+        let binding = matches.next()?;
+        matches.next().is_none().then_some(binding)
+    }
+
+    fn unique_registered_binding_usage_key(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<RegisteredBindingUsageKey> {
+        let bindings = self.query.registered_bindings.get(&subscription.shape_id)?;
+        let mut matches = bindings
+            .keys()
+            .filter(|key| key.0 == subscription.binding_id && key.1 == subscription.read_view);
+        let key = matches.next()?.clone();
+        matches.next().is_none().then_some(key)
     }
 
     fn canonical_whole_table_binding_view_key(
@@ -1276,4 +1084,15 @@ where
         }
         Ok(None)
     }
+}
+
+fn registered_binding_usage_key(
+    subscription: SubscriptionKey,
+    policy_binding: Option<crate::protocol::PolicyBindingKey>,
+) -> RegisteredBindingUsageKey {
+    (
+        subscription.binding_id,
+        subscription.read_view,
+        policy_binding,
+    )
 }

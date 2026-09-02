@@ -457,6 +457,7 @@ where
             inline_sources,
             access_paths,
             BTreeMap::new(),
+            BTreeMap::new(),
         )
         .await
     }
@@ -472,12 +473,14 @@ where
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
         covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+        provisional_local_gates: BTreeMap<SourceId, groove::ivm::InputSourceId>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
             request,
             inline_sources,
             access_paths,
             covered_input_sources,
+            provisional_local_gates,
             true,
         )
         .await
@@ -493,6 +496,7 @@ where
             BTreeMap::new(),
             access_paths,
             BTreeMap::new(),
+            BTreeMap::new(),
             false,
         )
         .await
@@ -504,8 +508,18 @@ where
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
         covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+        provisional_local_gates: BTreeMap<SourceId, groove::ivm::InputSourceId>,
         count_access_path_metrics: bool,
     ) -> Result<QueryProgram, Error> {
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+            && !covered_input_sources.is_empty()
+        {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=compile_receiver_program requested_sources={:?} runtime_sources={:?}",
+                request.reads.primary.sources.keys().collect::<Vec<_>>(),
+                covered_input_sources.keys().collect::<Vec<_>>(),
+            );
+        }
         let replaced_policy_graphs =
             Box::pin(self.prepare_query_program_policy_dependencies(&request, &access_paths))
                 .await?;
@@ -516,6 +530,7 @@ where
             read_view: &read_view,
             inline_sources,
             covered_input_sources,
+            provisional_local_gates,
             access_paths,
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
@@ -551,6 +566,7 @@ where
                 read_view: &read_view,
                 inline_sources: BTreeMap::new(),
                 covered_input_sources: BTreeMap::new(),
+                provisional_local_gates: BTreeMap::new(),
                 access_paths: BTreeMap::new(),
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
@@ -767,7 +783,14 @@ where
             return self
                 .database
                 .subscribe_with_waker(sinks, progress_waker)
-                .map_err(Error::Groove);
+                .map_err(|error| {
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=subscribe_receiver_error error={error:?}"
+                        );
+                    }
+                    Error::Groove(error)
+                });
         }
         let param_names = params
             .iter()
@@ -808,11 +831,24 @@ where
         let prepared = self
             .database
             .prepare(terminals, binding_source_shape, binding_descriptor)
-            .await?;
+            .await
+            .map_err(|error| {
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    eprintln!(
+                        "JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}"
+                    );
+                }
+                Error::Groove(error)
+            })?;
         self.database
             .bind_shape_with_waker(prepared.id(), &values, progress_waker)
             .await
-            .map_err(Error::Groove)
+            .map_err(|error| {
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
+                }
+                Error::Groove(error)
+            })
     }
 }
 

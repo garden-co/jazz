@@ -19,23 +19,53 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) result_schema_version: SchemaVersionId,
     pub(super) result_select: Option<Vec<String>>,
     pub(super) result_set: BTreeSet<ResultMemberEntry>,
-    pub(super) local_authority: LocalAuthorityReconciliation,
     pub(super) result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     pub(super) program_facts: BTreeSet<ProgramFactEntry>,
     pub(super) root_occurrence_ids: Vec<OutputOccurrenceId>,
     pub(super) initial_received: bool,
-    /// Runtime-local source inputs whose values are the exact closure selected
-    /// by an authority receipt. These IDs have no wire meaning; their keys do.
-    pub(super) covered_input_sources: BTreeMap<ProgramSourceId, CoveredInputSource>,
-    /// The exact authority closure currently installed in `covered_input_sources`.
-    /// `None` is deliberately pending, never an implicit empty closure.
-    pub(super) installed_covered_closure: Option<(AuthorityResultKey, u64)>,
+    /// The one receiver-owned source frontier feeding this local graph.
+    pub(super) covered_input_receiver: CoveredInputReceiver,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct CoveredInputSource {
     pub(super) id: InputSourceId,
     pub(super) descriptor: RecordDescriptor,
+    /// A Local-first source may read retained local state while its gate is
+    /// present. The first claimed closure clears that gate atomically; strict
+    /// remote sources have no gate.
+    pub(super) provisional_local_gate: Option<InputSourceId>,
+}
+
+pub(crate) const LOCAL_FIRST_BOOTSTRAP_GATE_FIELD: &str = "__jazz_local_first_bootstrap";
+
+pub(crate) fn local_first_bootstrap_gate_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([(LOCAL_FIRST_BOOTSTRAP_GATE_FIELD.to_owned(), ValueType::Bool)])
+}
+
+/// Runtime-local state for the exact, policy-scoped source closure installed
+/// into one receiver graph. It deliberately contains no authority output:
+/// the graph derives its own terminal from these inputs.
+#[derive(Debug, Default)]
+pub(crate) struct CoveredInputReceiver {
+    /// These IDs have no wire meaning; full `ProgramSourceId` does.
+    pub(crate) sources: BTreeMap<ProgramSourceId, CoveredInputSource>,
+    local_authority: LocalAuthorityReconciliation,
+    /// `None` is pending, never an implicit empty closure.
+    installed_closure: Option<(AuthorityResultKey, u64)>,
+}
+
+impl CoveredInputReceiver {
+    pub(crate) fn new(sources: BTreeMap<ProgramSourceId, CoveredInputSource>) -> Self {
+        Self {
+            sources,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
 }
 
 impl LocalMaintainedViewSubscription {
@@ -79,7 +109,7 @@ impl LocalMaintainedViewSubscription {
     }
 
     pub(crate) fn has_covered_input_sources(&self) -> bool {
-        !self.covered_input_sources.is_empty()
+        !self.covered_input_receiver.is_empty()
     }
 
     pub(crate) fn has_installed_covered_closure(
@@ -87,7 +117,8 @@ impl LocalMaintainedViewSubscription {
         authority_result_key: &AuthorityResultKey,
         generation: u64,
     ) -> bool {
-        self.installed_covered_closure
+        self.covered_input_receiver
+            .installed_closure
             .as_ref()
             .is_some_and(|(source, installed_generation)| {
                 source == authority_result_key && *installed_generation == generation
@@ -144,13 +175,6 @@ impl LocalMaintainedViewSubscription {
             })
             .sum::<usize>()
             + self.program_facts.len() * 64;
-        let deferred_authoritative_row_keys_bytes = self
-            .local_authority
-            .deferred_row_keys()
-            .iter()
-            .map(|(table, _)| table.len() + std::mem::size_of::<RowUuid>())
-            .sum::<usize>()
-            + self.local_authority.deferred_row_keys().len() * 64;
         let control_state_bytes = terminal_schemas.terminal_schemas_bytes
             + tables_bytes
             + self.result_table.len()
@@ -161,8 +185,7 @@ impl LocalMaintainedViewSubscription {
                 .unwrap_or_default()
             + result_set_bytes
             + result_payloads_bytes
-            + program_facts_bytes
-            + deferred_authoritative_row_keys_bytes;
+            + program_facts_bytes;
         LocalMaintainedViewSubscriptionFootprint {
             maintained,
             terminal_schemas,
@@ -190,26 +213,42 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
     },
 }
 
-fn result_member_matches_row_keys(
-    member: &ResultMemberEntry,
-    row_keys: &BTreeSet<(String, RowUuid)>,
-) -> bool {
-    result_member_matching_row_key(member, row_keys).is_some()
-}
-
-fn result_member_matching_row_key(
-    member: &ResultMemberEntry,
-    row_keys: &BTreeSet<(String, RowUuid)>,
-) -> Option<(String, RowUuid)> {
-    let row = member.as_real_row()?;
-    let row_key = (row.table.to_string(), row.row_uuid);
-    row_keys.contains(&row_key).then_some(row_key)
-}
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Start the bounded Local-first bootstrap phase without synchronously
+    /// scanning storage. The receiving graph's retained-local arm is gated by
+    /// one runtime record, so asynchronous storage loading happens through
+    /// its ordinary Groove source after opening returns.
+    pub(crate) async fn start_provisional_local_receiver_inputs(
+        &mut self,
+        sources: &BTreeMap<ProgramSourceId, CoveredInputSource>,
+    ) -> Result<(), Error> {
+        let gate_descriptor = local_first_bootstrap_gate_descriptor();
+        let gate_record = gate_descriptor.create(&[Value::Bool(true)])?;
+        let replacements = sources
+            .values()
+            .filter_map(|source| {
+                source
+                    .provisional_local_gate
+                    .map(|id| InputSourceReplacement {
+                        id,
+                        descriptor: gate_descriptor.clone(),
+                        records: vec![gate_record.clone()],
+                    })
+            })
+            .collect::<Vec<_>>();
+        if replacements.is_empty() {
+            return Ok(());
+        }
+        self.database
+            .replace_input_sources(replacements)
+            .await
+            .map_err(Error::Groove)?;
+        Ok(())
+    }
+
     #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_maintained_view_subscription_in_authorization_mode(
         &mut self,
@@ -293,19 +332,17 @@ where
             result_schema_version: shape.schema_version(),
             result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
-            local_authority: LocalAuthorityReconciliation::default(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
             root_occurrence_ids: Vec::new(),
             initial_received,
-            covered_input_sources,
-            installed_covered_closure: None,
+            covered_input_receiver: CoveredInputReceiver::new(covered_input_sources),
         };
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=open root_terminal={} sources={} initial_received={}",
                 local.has_root_collector(),
-                local.covered_input_sources.len(),
+                local.covered_input_receiver.sources.len(),
                 local.initial_received,
             );
         }
@@ -436,120 +473,23 @@ where
         Ok(true)
     }
 
-    pub(crate) async fn reset_local_maintained_view_subscription_from_binding_view(
-        &mut self,
-        local: &mut LocalMaintainedViewSubscription,
-        authority_result_key: &AuthorityResultKey,
-    ) -> Result<(), Error> {
-        // Settled result sets can include support members used to maintain relations or
-        // policies. The occurrence sidecar describes only public query roots, matching
-        // the authoritative snapshot's `root_count`, so exclude those support members.
-        local.result_set = self
-            .query
-            .authority_results
-            .get(authority_result_key)
-            .map(|state| &state.settled_result_set)
-            .map(|members| {
-                members
-                    .iter()
-                    .filter(|member| {
-                        is_public_result_member(
-                            member,
-                            local.result_table.as_str(),
-                            local.result_query.aggregate.is_some(),
-                        )
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        local.local_authority.replace_source(
-            authority_result_key.clone(),
-            self.applied_authority_result_generation(authority_result_key),
-        );
-        local.program_facts = self
-            .query
-            .authority_results
-            .get(authority_result_key)
-            .map(|state| state.settled_program_facts.clone())
-            .unwrap_or_default();
-        if local.result_query.aggregate.is_some() {
-            local
-                .maintained
-                .replace_aggregate_result_state(&local.result_set, &local.program_facts);
-        }
-        local.result_payloads = local
-            .program_facts
-            .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::ResultPayload(payload)
-                    if is_public_result_member(
-                        &payload.member,
-                        local.result_table.as_str(),
-                        local.result_query.aggregate.is_some(),
-                    ) =>
-                {
-                    Some((payload.member.clone(), payload.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        // An authoritative reset replaces membership without flowing through
-        // the ordinary local transition reducer. Rebuild the occurrence
-        // sidecar from exactly that new state before the caller pairs it with
-        // the reset snapshot; retaining the opening vector makes a later
-        // reset fail its root-count invariant (or, worse, pair wrong roots).
-        local.root_occurrence_ids = self
-            .materialize_local_maintained_relation_snapshot_with_occurrences(local)
-            .await?
-            .root_occurrence_ids;
-        Ok(())
-    }
-
-    pub(crate) fn seed_local_maintained_authoritative_generation(
-        &self,
-        local: &mut LocalMaintainedViewSubscription,
-        authority_result_key: &AuthorityResultKey,
-    ) {
-        local.local_authority.replace_source(
-            authority_result_key.clone(),
-            self.applied_authority_result_generation(authority_result_key),
-        );
-    }
-
-    pub(crate) fn defer_local_maintained_authority_reconciliation(
-        &self,
-        local: &mut LocalMaintainedViewSubscription,
-    ) {
-        local
-            .local_authority
-            .defer(local.local_authority.deferred_row_keys().clone());
-    }
-
-    pub(crate) fn local_maintained_authority_reconciliation_conflicts(
-        &self,
-        local: &LocalMaintainedViewSubscription,
-        authority_result_key: &AuthorityResultKey,
-        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
-    ) -> bool {
-        let remote_members = self
-            .query
-            .authority_results
-            .get(authority_result_key)
-            .map(|state| state.settled_result_set.clone())
-            .unwrap_or_default();
-        local
-            .result_set
-            .symmetric_difference(&remote_members)
-            .any(|member| result_member_matches_row_keys(member, preserved_row_keys))
-    }
-
     pub(crate) fn local_maintained_authority_reconciliation_due(
         &self,
         local: &LocalMaintainedViewSubscription,
         authority_result_key: &AuthorityResultKey,
     ) -> bool {
-        local.local_authority.is_due(
+        self.covered_input_receiver_reconciliation_due(
+            &local.covered_input_receiver,
+            authority_result_key,
+        )
+    }
+
+    pub(crate) fn covered_input_receiver_reconciliation_due(
+        &self,
+        receiver: &CoveredInputReceiver,
+        authority_result_key: &AuthorityResultKey,
+    ) -> bool {
+        receiver.local_authority.is_due(
             authority_result_key,
             self.applied_authority_result_generation(authority_result_key),
         )
@@ -570,13 +510,29 @@ where
         local: &mut LocalMaintainedViewSubscription,
         authority_result_key: &AuthorityResultKey,
     ) -> Result<bool, Error> {
-        if local.covered_input_sources.is_empty() {
+        self.replace_covered_input_receiver(
+            &mut local.covered_input_receiver,
+            local.result_schema_version,
+            authority_result_key,
+        )
+        .await
+    }
+
+    /// Install one exact authority closure into a receiver-owned source map.
+    /// Both the facade and relay publication use this same source-only path.
+    pub(crate) async fn replace_covered_input_receiver(
+        &mut self,
+        receiver: &mut CoveredInputReceiver,
+        result_schema_version: SchemaVersionId,
+        authority_result_key: &AuthorityResultKey,
+    ) -> Result<bool, Error> {
+        if receiver.sources.is_empty() {
             return Ok(false);
         }
         // A newer authority generation invalidates the old source closure
         // before any validation.  In particular, a reset cannot reuse a
         // detached receipt just because its rows happen to look identical.
-        local.installed_covered_closure = None;
+        receiver.installed_closure = None;
         let authority_result = self
             .query
             .authority_results
@@ -592,7 +548,7 @@ where
                 if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=covered_closure_pending sources={}",
-                        local.covered_input_sources.len(),
+                        receiver.sources.len(),
                     );
                 }
                 return Ok(false);
@@ -600,11 +556,7 @@ where
             crate::node::AuthoritySourceClosure::Claimed { generation } => generation,
         };
         let facts = authority_result.settled_program_facts.clone();
-        let expected_sources = local
-            .covered_input_sources
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let expected_sources = receiver.sources.keys().cloned().collect::<BTreeSet<_>>();
         let mut covered_sources = BTreeSet::new();
         for fact in &facts {
             let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact else {
@@ -629,7 +581,10 @@ where
         if covered_sources != expected_sources {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                 eprintln!(
-                    "JAZZ_COVERED_INPUT_TRACE stage=incomplete_coverage expected={expected_sources:?} actual={covered_sources:?} facts={facts:?}"
+                    "JAZZ_COVERED_INPUT_TRACE stage=incomplete_coverage expected_sources={} actual_sources={} facts={}",
+                    expected_sources.len(),
+                    covered_sources.len(),
+                    facts.len(),
                 );
             }
             return Err(Error::InvalidStoredValue(
@@ -637,18 +592,23 @@ where
             ));
         }
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            let covered_input_count = facts
+                .iter()
+                .filter(|fact| matches!(fact, ProgramFactEntry::CoveredInput(_)))
+                .count();
             eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=replace subscription_sources={} authority_facts={} generation={} facts={facts:?}",
-                local.covered_input_sources.len(),
-                facts.len(),
+                "JAZZ_COVERED_INPUT_TRACE stage=replace subscription_sources={} coverage_sources={} covered_inputs={} generation={}",
+                receiver.sources.len(),
+                covered_sources.len(),
+                covered_input_count,
                 closure_generation,
             );
         }
         let schema_alias = self
-            .ensure_schema_version_alias(local.result_schema_version)
+            .ensure_schema_version_alias(result_schema_version)
             .await?;
-        let mut records = local
-            .covered_input_sources
+        let mut records = receiver
+            .sources
             .keys()
             .cloned()
             .map(|source| (source, Vec::new()))
@@ -658,18 +618,19 @@ where
             let ProgramFactEntry::CoveredInput(input) = fact else {
                 continue;
             };
-            let Some(runtime_source) = local.covered_input_sources.get(&input.source) else {
+            let Some(runtime_source) = receiver.sources.get(&input.source) else {
                 return Err(Error::InvalidStoredValue(
                     "authority covered input names no compiled source occurrence",
                 ));
             };
-            let table =
-                self.table_in_schema(input.source.table.as_str(), local.result_schema_version)?;
-            if input.version_table.as_str() != table.name {
-                return Err(Error::InvalidStoredValue(
-                    "authority covered input version table disagrees with compiled source",
-                ));
-            }
+            // `version_table` is the authored physical table of the witness,
+            // while `source.table` names the compiled receiver occurrence in
+            // its read schema. A lens may legitimately rename either side,
+            // so validate their compatibility by projecting the immutable
+            // witness through that schema below; comparing names here would
+            // reject a sound exact closure before the descriptor boundary.
+            let source_table =
+                self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
             let tx_alias = self
                 .node_aliases
                 .get(&input.version.tx.node)
@@ -713,29 +674,33 @@ where
             }
             let row = self
                 .projected_current_row_from_materialized_version_in_read_schema(
-                    local.result_schema_version,
+                    result_schema_version,
                     &version,
                 )?
                 .ok_or(Error::InvalidStoredValue(
                     "authority covered content version cannot materialize a current row",
                 ))?;
-            if row.table() != table.name {
+            if row.table() != source_table.name {
                 return Err(Error::InvalidStoredValue(
-                    "authority covered input materialized through a different table",
+                    "authority covered input does not project into its compiled source schema",
                 ));
             }
             records
                 .get_mut(&input.source)
                 .expect("source presence was checked above")
                 .push(super::read_sources::covered_input_record(
-                    &table,
+                    &source_table,
                     &runtime_source.descriptor,
                     &row,
                     schema_alias,
                 )?);
         }
-        let replacements = local
-            .covered_input_sources
+        let replacement_record_counts = records
+            .iter()
+            .map(|(source, rows)| (source.clone(), rows.len()))
+            .collect::<Vec<_>>();
+        let mut replacements = receiver
+            .sources
             .iter()
             .map(|(source, runtime_source)| InputSourceReplacement {
                 id: runtime_source.id,
@@ -743,18 +708,39 @@ where
                 records: records.remove(source).unwrap_or_default(),
             })
             .collect::<Vec<_>>();
-        self.database
+        // Retire every Local-first provisional cache gate in this *same*
+        // runtime batch. The receiver graph therefore observes either the
+        // provisional retained-local source or the complete authority closure,
+        // never both frontiers after settlement.
+        let gate_descriptor = local_first_bootstrap_gate_descriptor();
+        replacements.extend(receiver.sources.values().filter_map(|source| {
+            source
+                .provisional_local_gate
+                .map(|id| InputSourceReplacement {
+                    id,
+                    descriptor: gate_descriptor.clone(),
+                    records: Vec::new(),
+                })
+        }));
+        let replacement_metrics = self
+            .database
             .replace_input_sources(replacements)
             .await
             .map_err(Error::Groove)?;
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-            eprintln!("JAZZ_COVERED_INPUT_TRACE stage=replaced");
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=replaced sources={replacement_record_counts:?} tick={} processed={} notifications={} notification_records={}",
+                replacement_metrics.tick,
+                replacement_metrics.records_processed,
+                replacement_metrics.notifications_sent,
+                replacement_metrics.notification_records,
+            );
         }
-        local.local_authority.replace_source(
+        receiver.local_authority.replace_source(
             authority_result_key.clone(),
             self.applied_authority_result_generation(authority_result_key),
         );
-        local.installed_covered_closure = Some((authority_result_key.clone(), closure_generation));
+        receiver.installed_closure = Some((authority_result_key.clone(), closure_generation));
         Ok(true)
     }
 
@@ -762,7 +748,7 @@ where
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_result_key: Option<AuthorityResultKey>,
-        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+        _preserved_row_keys: &BTreeSet<(String, RowUuid)>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
@@ -787,14 +773,6 @@ where
                 // authority reset and try again once the manifest arrives.
                 return Ok((None, false));
             }
-        } else if let Some(authority_result_key) = authoritative_result_key.as_ref()
-            && std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-        {
-            eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=not_due node={:?} sources={} authority={authority_result_key:?}",
-                self.node_uuid,
-                local.covered_input_sources.len(),
-            );
         }
         self.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
@@ -808,160 +786,6 @@ where
         >::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         let mut terminal_operations = Vec::new();
-        let mut authoritative_membership_changed = false;
-        let mut authoritative_member_adds = BTreeSet::new();
-        let mut suppressed_authoritative_change = false;
-        let mut suppressed_authoritative_row_keys = BTreeSet::new();
-        if local.covered_input_sources.is_empty()
-            && let Some(ref authority_result_key) = authoritative_result_key
-        {
-            let authoritative_generation =
-                self.applied_authority_result_generation(authority_result_key);
-            // Local optimistic changes can advance the maintained graph
-            // without any newer serving-peer membership decision. Keep them
-            // visible until an authoritative generation advances.
-            if local
-                .local_authority
-                .is_due(authority_result_key, authoritative_generation)
-            {
-                let mut protected_row_keys = preserved_row_keys.clone();
-                if authoritative_generation == local.local_authority.generation() {
-                    protected_row_keys
-                        .extend(local.local_authority.deferred_row_keys().iter().cloned());
-                }
-                let remote_members = self
-                    .query
-                    .authority_results
-                    .get(&authority_result_key)
-                    .map(|state| state.settled_result_set.clone())
-                    .unwrap_or_default();
-                let remote_payloads = self
-                    .query
-                    .authority_results
-                    .get(&authority_result_key)
-                    .into_iter()
-                    .flat_map(|state| state.settled_program_facts.iter())
-                    .filter_map(|fact| match fact {
-                        ProgramFactEntry::ResultPayload(payload) => {
-                            Some((payload.member.clone(), payload.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                let remote_facts = self
-                    .query
-                    .authority_results
-                    .get(&authority_result_key)
-                    .map(|state| state.settled_program_facts.clone())
-                    .unwrap_or_default();
-                let mut candidate_reconciliation = local.local_authority.clone();
-                if candidate_reconciliation.source() != Some(&authority_result_key) {
-                    candidate_reconciliation
-                        .replace_source(authority_result_key.clone(), authoritative_generation);
-                }
-                let authority_delta = candidate_reconciliation
-                    .reconcile(
-                        &authority_result_key,
-                        authoritative_generation,
-                        &local.result_set,
-                        &local.program_facts,
-                        remote_members,
-                        remote_facts,
-                    )
-                    .expect("the current exact authority source must reconcile");
-                // The local maintained graph may intentionally be behind the
-                // authority frontier (for example, an Edge-tier window over a
-                // client-local database).  An authoritative ViewUpdate is not
-                // merely a revocation signal: it is the current membership
-                // decision for that frontier.  Import members newly admitted
-                // there so a row promoted across a TopBy boundary is delivered
-                // even though none of its locally-visible source facts changed.
-                for entry in authority_delta.member_adds {
-                    if let Some(row_key) =
-                        result_member_matching_row_key(&entry, &protected_row_keys)
-                    {
-                        suppressed_authoritative_change = true;
-                        suppressed_authoritative_row_keys.insert(row_key);
-                        continue;
-                    }
-                    if !local.result_set.contains(&entry) {
-                        let materializable = if remote_payloads.contains_key(&entry) {
-                            true
-                        } else if let Some(row) = self
-                            .materialize_local_maintained_view_result_member(local, &entry)
-                            .await?
-                        {
-                            let table = self.table(row.table())?;
-                            current_row_has_required_subscription_cells(
-                                &row,
-                                table,
-                                local.result_select.as_deref(),
-                            )
-                        } else {
-                            false
-                        };
-                        // Authority membership can arrive before the admitted
-                        // row's readable content bundle. Do not publish a
-                        // synthetic placeholder root: the ordinary maintained
-                        // source transition will add it once that content is
-                        // locally materializable.
-                        if !materializable {
-                            continue;
-                        }
-                        authoritative_membership_changed = true;
-                        authoritative_member_adds.insert(entry.clone());
-                        states.insert(entry.clone(), (false, true));
-                        if let Some(payload) = remote_payloads.get(&entry) {
-                            payload_states.insert(
-                                entry.clone(),
-                                (
-                                    local.result_payloads.get(&entry).cloned(),
-                                    Some(payload.clone()),
-                                ),
-                            );
-                        }
-                    }
-                }
-                for entry in authority_delta.member_removes {
-                    if let Some(row_key) =
-                        result_member_matching_row_key(&entry, &protected_row_keys)
-                    {
-                        suppressed_authoritative_change = true;
-                        suppressed_authoritative_row_keys.insert(row_key);
-                        continue;
-                    }
-                    // Replace the exact prior member even when its output
-                    // occurrence remains visible through a new content
-                    // version. The snapshot reducer coalesces the matching
-                    // occurrence add/remove into one replacement.
-                    if local.result_set.contains(&entry) {
-                        authoritative_membership_changed = true;
-                        states.insert(entry.clone(), (true, false));
-                        if local.result_payloads.contains_key(&entry) {
-                            payload_states.insert(
-                                entry.clone(),
-                                (local.result_payloads.get(&entry).cloned(), None),
-                            );
-                        }
-                    }
-                }
-                for fact in authority_delta.fact_adds {
-                    let before = local.program_facts.contains(&fact);
-                    fact_states.insert(fact, (before, true));
-                }
-                for fact in authority_delta.fact_removes {
-                    let before = local.program_facts.contains(&fact);
-                    fact_states.insert(fact, (before, false));
-                }
-                if suppressed_authoritative_change {
-                    local
-                        .local_authority
-                        .defer(suppressed_authoritative_row_keys);
-                } else {
-                    local.local_authority = candidate_reconciliation;
-                }
-            }
-        }
         loop {
             match local.subscription.try_recv() {
                 Ok(deltas) => {
@@ -1043,11 +867,11 @@ where
             fact_states.is_empty(),
             &terminal_operations,
         ) {
-            return Ok((None, suppressed_authoritative_change));
+            return Ok((None, false));
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
-            authoritative_membership_changed,
-            authoritative_member_adds,
+            authoritative_membership_changed: false,
+            authoritative_member_adds: BTreeSet::new(),
             terminal_operations,
             ..Default::default()
         };
@@ -1100,7 +924,7 @@ where
                 })
                 .collect();
         }
-        Ok((Some(transitions), suppressed_authoritative_change))
+        Ok((Some(transitions), false))
     }
 
     async fn apply_local_maintained_view_transitions(
@@ -1185,8 +1009,8 @@ where
                 {
                     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                         eprintln!(
-                            "JAZZ_COVERED_INPUT_TRACE stage=local_maintained_added member={member:?} occurrence={occurrence_id:?} raw={:?}",
-                            row.record.raw(),
+                            "JAZZ_COVERED_INPUT_TRACE stage=local_maintained_added table={} occurrence={occurrence_id:?}",
+                            row.table(),
                         );
                     }
                     added.push((occurrence_id, row));

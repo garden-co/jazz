@@ -71,6 +71,9 @@ impl PeerState {
             node.release_query_subscription_for_peer(self.publication_owner, subscription);
             return false;
         };
+        let admitted_policy_binding = state.policy_binding.as_ref().map(|(identity, claims)| {
+            crate::protocol::PolicyBindingKey::from_canonical_parts(*identity, claims.clone())
+        });
         self.downstream_known_states.remove(&subscription);
         let unsubscribed = if state.groove_runtime_token == Some(node.groove_runtime_token()) {
             state
@@ -83,7 +86,15 @@ impl PeerState {
             false
         };
         drop(state);
-        node.release_query_subscription_for_peer(self.publication_owner, subscription);
+        if let Some(policy_binding) = admitted_policy_binding {
+            node.release_query_subscription_for_peer_with_admitted_policy_binding(
+                self.publication_owner,
+                subscription,
+                policy_binding,
+            );
+        } else {
+            node.release_query_subscription_for_peer(self.publication_owner, subscription);
+        }
         unsubscribed
     }
 

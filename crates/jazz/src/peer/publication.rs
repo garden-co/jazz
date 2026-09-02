@@ -1232,17 +1232,47 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        // Relay Edge children own a receiver-local graph. Before draining its
+        // terminal, atomically replace every compiled input source from the
+        // exact selected authority closure. Do not let the generic
+        // trusted-serving drain observe an authority output or a stale source
+        // frontier.
+        let receiver_install = self
+            .publication_states
+            .get_mut(&subscription)
+            .and_then(|state| {
+                let maintained = state.maintained_subscription_view.as_mut()?;
+                let source = maintained.source_authority_result.clone()?;
+                let receiver = maintained.covered_input_receiver.take()?;
+                Some((source, receiver, maintained.result_schema_version))
+            });
+        if let Some((source, mut receiver, schema_version)) = receiver_install {
+            let due = node.covered_input_receiver_reconciliation_due(&receiver, &source);
+            let replacement = if due {
+                node.replace_covered_input_receiver(&mut receiver, schema_version, &source)
+                    .await
+            } else {
+                Ok(true)
+            };
+            self.publication_states
+                .get_mut(&subscription)
+                .expect("maintained receiver state survives replacement")
+                .maintained_subscription_view
+                .as_mut()
+                .expect("maintained receiver state survives replacement")
+                .covered_input_receiver = Some(receiver);
+            if !replacement? {
+                // Pending is not an empty strict result. Leave the receiver
+                // attached and wait for the exact claimed source closure.
+                return Ok(ResultTransitions::default());
+            }
+        }
         node.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
         let previous_member_result_set = self
             .publication_states
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
-        let previous_program_fact_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::program_fact_set)
             .unwrap_or_default();
         let output_tables = self
             .publication_states
@@ -1264,8 +1294,6 @@ impl PeerState {
             self.selected_authority_source(subscription)
                 .filter(|source| node.has_settled_authority_result(source))
         });
-        let reconciles_local_overlay = maintained_source_authority_result.is_none()
-            && source_authority_result.is_some();
         let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
             && node
                 .table(shape.query().table.as_str())?
@@ -1274,7 +1302,7 @@ impl PeerState {
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut program_fact_adds = Vec::new();
         let mut program_fact_removes = Vec::new();
-        let mut allow_storage_witness_fallback = false;
+        let allow_storage_witness_fallback = false;
         let mut observed_result_delta_batches = 0_usize;
         let mut requires_authoritative_membership_reconcile = false;
         let mut initial_deletion_witness = false;
@@ -1384,59 +1412,6 @@ impl PeerState {
                 &hydrated_active_members,
                 &hydrated_published_members,
             );
-        }
-        if source_authority_result.is_some()
-            && let Some((mut settled, exact_members, exact_facts)) = node
-                .settled_result_transitions_for_subscription(
-                subscription,
-                source_authority_result.clone(),
-                &previous_member_result_set,
-                &previous_program_fact_set,
-                result_table_filter,
-                &output_tables,
-            )?
-        {
-            if reconciles_local_overlay {
-                let generation = source_authority_result
-                    .as_ref()
-                    .map(|source| node.applied_authority_result_generation(source))
-                    .unwrap_or_default();
-                let state = self.publication_states.entry(subscription).or_default();
-                let source = source_authority_result
-                    .as_ref()
-                    .expect("local authority reconciliation requires an exact source");
-                state.local_authority.replace_source(source.clone(), generation);
-                let delta = state.local_authority.reconcile(
-                    source,
-                    generation,
-                    &previous_member_result_set,
-                    &previous_program_fact_set,
-                    exact_members,
-                    exact_facts,
-                )
-                .expect("the installed exact source and generation must reconcile");
-                settled.adds = delta.member_adds;
-                settled.removes = delta.member_removes;
-                settled.program_fact_adds = delta.fact_adds;
-                settled.program_fact_removes = delta.fact_removes;
-            }
-            allow_storage_witness_fallback |= settled.allow_storage_witness_fallback;
-            for member in settled.adds {
-                let before = previous_member_result_set.contains(&member);
-                states
-                    .entry(member)
-                    .and_modify(|(_, after)| *after = true)
-                    .or_insert((before, true));
-            }
-            for member in settled.removes {
-                let before = previous_member_result_set.contains(&member);
-                states
-                    .entry(member)
-                    .and_modify(|(_, after)| *after = false)
-                    .or_insert((before, false));
-            }
-            program_fact_adds.extend(settled.program_fact_adds);
-            program_fact_removes.extend(settled.program_fact_removes);
         }
         let mut result_member_adds = Vec::new();
         let mut result_member_removes = Vec::new();
@@ -1557,6 +1532,17 @@ impl PeerState {
                     progress_waker,
                 )
                     .await
+                    .map(|(receiver, maintained, schemas, transitions, tables, received, inputs)| {
+                        (
+                            receiver,
+                            maintained,
+                            schemas,
+                            transitions,
+                            tables,
+                            received,
+                            Some(inputs),
+                        )
+                    })
             }
             RehydratePurpose::Query => {
                 scoped.open_seeded_maintained_subscription_view_with_waker(
@@ -1568,6 +1554,17 @@ impl PeerState {
                     progress_waker,
                 )
                 .await
+                .map(|(receiver, maintained, schemas, transitions, tables, received)| {
+                    (
+                        receiver,
+                        maintained,
+                        schemas,
+                        transitions,
+                        tables,
+                        received,
+                        None,
+                    )
+                })
             }
             RehydratePurpose::AuthorizationSupport => scoped
                 .open_seeded_authorization_support_subscription_view_with_waker(
@@ -1578,10 +1575,29 @@ impl PeerState {
                     read_view,
                     progress_waker,
                 )
-                .await,
+                .await
+                .map(|(receiver, maintained, schemas, transitions, tables, received)| {
+                    (
+                        receiver,
+                        maintained,
+                        schemas,
+                        transitions,
+                        tables,
+                        received,
+                        None,
+                    )
+                }),
             }
         };
-        let (receiver, mut maintained, terminal_schemas, transitions, tables, initial_received) =
+        let (
+            receiver,
+            mut maintained,
+            terminal_schemas,
+            mut transitions,
+            tables,
+            mut initial_received,
+            mut covered_input_receiver,
+        ) =
             match opened {
             Ok(opened) => opened,
             Err(Error::AuthorizationSupportMissingClaim(_))
@@ -1607,6 +1623,59 @@ impl PeerState {
             }
             Err(error) => return Err(error),
             };
+        if let (Some(authority_key), Some(receiver_inputs)) = (
+            source_authority_result_key.as_ref(),
+            covered_input_receiver.as_mut(),
+        ) {
+            let installed = node
+                .replace_covered_input_receiver(
+                    receiver_inputs,
+                    shape.schema_version(),
+                    authority_key,
+                )
+                .await?;
+            if !installed {
+                // A strict relay cannot publish the graph's pre-closure empty
+                // opening. Retain the receiver for the next exact receipt.
+                initial_received = false;
+            } else {
+                node.drive_ready_query_runtime_with_waker(progress_waker).await?;
+                loop {
+                    match receiver.try_recv() {
+                        Ok(deltas) => {
+                            initial_received = true;
+                            let extra = maintained.apply_multisink_deltas(
+                                deltas,
+                                &terminal_schemas,
+                                &tables,
+                                &node.node_aliases,
+                            )?;
+                            transitions.adds.extend(extra.adds);
+                            transitions.removes.extend(extra.removes);
+                            transitions
+                                .result_payload_adds
+                                .extend(extra.result_payload_adds);
+                            transitions
+                                .result_payload_removes
+                                .extend(extra.result_payload_removes);
+                            transitions
+                                .program_fact_adds
+                                .extend(extra.program_fact_adds);
+                            transitions
+                                .program_fact_removes
+                                .extend(extra.program_fact_removes);
+                            transitions
+                                .terminal_operations
+                                .extend(extra.terminal_operations);
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            return Err(Error::SubscriptionClosed);
+                        }
+                    }
+                }
+            }
+        }
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=rehydrate_opened owner={} subscription={subscription:?} identity={policy_identity:?} initial={initial_received} adds={:?} facts={:?}",
@@ -1624,6 +1693,8 @@ impl PeerState {
                 maintained,
                 terminal_schemas,
                 tables,
+                covered_input_receiver,
+                result_schema_version: shape.schema_version(),
                 source_authority_result: source_authority_result_key.clone(),
                 initial_received: false,
             };
@@ -1834,6 +1905,8 @@ impl PeerState {
             maintained,
             terminal_schemas,
             tables,
+            covered_input_receiver,
+            result_schema_version: shape.schema_version(),
             source_authority_result: source_authority_result_key,
             initial_received: true,
         };

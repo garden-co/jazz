@@ -1054,8 +1054,6 @@ fn supported_current_storage_projection(
             projection,
             binding_view: _,
             authority_result_key: _,
-            rows: _,
-            requires_result_payload: _,
         } => Some(projection),
         SourceExpr::WithOverlays { input, overlays } => {
             if overlays

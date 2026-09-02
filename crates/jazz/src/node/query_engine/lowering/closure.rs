@@ -188,6 +188,100 @@ pub(super) fn join_contribution_membership_graph(
     )
 }
 
+/// Derive one flat-join source from the already-authorized rendered root.
+///
+/// Flat output projection deliberately gives every public source field a
+/// scope-qualified name (`posts.author_id`, `people.id`, …).  Unlike generic
+/// join contributions, the rendered root has lost its internal source field
+/// names, so map the normalized predicate through that explicit public layout
+/// before joining it to the post-policy right relation.
+pub(super) fn flat_join_contribution_membership_graph(
+    visible_root: GraphBuilder,
+    contribution: &JoinContribution,
+    contribution_source: &ResolvedSource,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<GraphBuilder> {
+    let mut visited = BTreeSet::new();
+    let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
+        .map_err(single_gap_report)?;
+    let lowered =
+        lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
+    let PredicateExpr::Compare {
+        left,
+        op: ComparisonOp::Eq,
+        right,
+    } = &contribution.membership
+    else {
+        return Err(single_gap_report(UnsupportedReason::Operator(
+            "flat join contribution membership must be equality".to_owned(),
+        )));
+    };
+    let (visible_key, relation_key) = match (
+        flat_join_visible_field(left),
+        lower_relation_key_ref(right, &plan, &lowered, request),
+    ) {
+        (Ok(visible), Ok(relation)) => (visible, relation),
+        _ => (
+            flat_join_visible_field(right).map_err(single_gap_report)?,
+            lower_relation_key_ref(left, &plan, &lowered, request).map_err(single_gap_report)?,
+        ),
+    };
+    let mut relation_graph = lowered.graph;
+    if lowered.nullable_fields.contains(&relation_key) {
+        relation_graph = unwrap_nullable_join_key(
+            relation_graph,
+            relation_key.clone(),
+            lowered
+                .nullable_field_depths
+                .get(&relation_key)
+                .copied()
+                .unwrap_or(1),
+        );
+    }
+    Ok(
+        GraphBuilder::join(visible_root, relation_graph, [visible_key], [relation_key])
+            .project_fields(project_source_fields_from_prefix(
+                contribution_source,
+                RIGHT_JOIN_PREFIX,
+            )),
+    )
+}
+
+fn flat_join_visible_field(value: &NormalizedValueRef) -> Result<String, UnsupportedReason> {
+    match value {
+        NormalizedValueRef::SourceField { source, field } => Ok(format!(
+            "{}.{}",
+            flat_join_source_scope(source),
+            logical_user_column(field)
+        )),
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) => {
+            if matches!(source.path.components.as_slice(), [SourceRole::Root]) {
+                Ok("row_uuid".to_owned())
+            } else {
+                Ok(format!("{}.id", flat_join_source_scope(source)))
+            }
+        }
+        _ => Err(UnsupportedReason::Operator(
+            "flat join contribution key must reference a source field".to_owned(),
+        )),
+    }
+}
+
+fn flat_join_source_scope(source: &SourceId) -> &str {
+    source
+        .path
+        .components
+        .last()
+        .and_then(|role| match role {
+            SourceRole::Alias(alias) => alias.rsplit(':').next(),
+            SourceRole::Root => None,
+            _ => None,
+        })
+        .unwrap_or(source.table.as_str())
+}
+
 fn required_closure_parent_graph(
     parent_graph: GraphBuilder,
     segments: &[ClosurePathSegment],

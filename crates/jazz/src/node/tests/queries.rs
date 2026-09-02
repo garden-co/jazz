@@ -1585,7 +1585,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(usage_binding_id, usage_subscription.read_view))
+            .contains_key(&(usage_binding_id, usage_subscription.read_view, None))
     );
     assert!(matches!(
         node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
@@ -1618,13 +1618,13 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(usage_binding_id, usage_subscription.read_view))
+            .contains_key(&(usage_binding_id, usage_subscription.read_view, None))
     );
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
     );
 
     let canonical_subscription = SubscriptionKey {
@@ -1658,13 +1658,13 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         !node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(usage_binding_id, usage_subscription.read_view))
+            .contains_key(&(usage_binding_id, usage_subscription.read_view, None))
     );
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
     );
     assert!(node.query.settled_result_sets.contains_key(&binding_view_key));
     assert!(node.query.settled_program_facts.contains_key(&binding_view_key));
@@ -1677,7 +1677,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         !node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
     );
     assert!(!node.query.settled_result_sets.contains_key(&binding_view_key));
     assert!(!node.query.settled_program_facts.contains_key(&binding_view_key));

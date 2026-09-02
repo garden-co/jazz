@@ -2998,28 +2998,34 @@ where
                     ))
                 })?;
                 let join_node = RowSetNodeId(format!("flat_join:{index}:join"));
+                let membership = NormalizedPredicateExpr::Compare {
+                    left: value_ref(&join.on.left)?,
+                    op: NormalizedComparisonOp::Eq,
+                    right: if right_column == "_id" {
+                        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+                    } else {
+                        source_column_value(schema, &source, right_column, JoinTarget::Column)
+                    },
+                };
                 nodes.insert(
                     join_node.clone(),
                     RowSetExpr::Join {
                         left: current,
-                        right: right_input,
+                        right: right_input.clone(),
                         mode: NormalizedJoinMode::Inner,
-                        on: NormalizedPredicateExpr::Compare {
-                            left: value_ref(&join.on.left)?,
-                            op: NormalizedComparisonOp::Eq,
-                            right: if right_column == "_id" {
-                                NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
-                            } else {
-                                source_column_value(
-                                    schema,
-                                    &source,
-                                    right_column,
-                                    JoinTarget::Column,
-                                )
-                            },
-                        },
+                        on: membership.clone(),
                     },
                 );
+                // Flat tuple sources must cross as exact receiver inputs,
+                // not as fields of an authority-rendered tuple.  Reuse the
+                // contributor representation used by `join_via` so terminal
+                // lowering derives each source from the post-policy root.
+                join_contributions.push(JoinContribution {
+                    id: format!("flat_join:{index}"),
+                    source: source.clone(),
+                    input: right_input,
+                    membership,
+                });
                 current = join_node;
                 sources.insert(name.clone(), source.clone());
                 output_sources.push((name, source.clone()));

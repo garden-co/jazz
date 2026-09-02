@@ -797,11 +797,13 @@ where
         );
         let program_fact_adds = program_fact_adds
             .into_iter()
+            .filter(|fact| !matches!(fact, ProgramFactEntry::ResultPayload(_)))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         let program_fact_removes = program_fact_removes
             .into_iter()
+            .filter(|fact| !matches!(fact, ProgramFactEntry::ResultPayload(_)))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -1271,8 +1273,11 @@ where
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                result_member_adds: result_member_adds.into_iter().collect(),
-                result_member_removes: result_member_removes.into_iter().collect(),
+                // Result members are local maintained-terminal state. Peer
+                // frames carry only the source closure from which another
+                // receiver derives those terminals itself.
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
                 program_fact_adds,
                 program_fact_removes,
             },
@@ -1437,6 +1442,26 @@ where
     /// storage or in-memory receiver state.
     fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
         for update in updates {
+            // INV-SYNC-36 has one peer result model: the authority sends an
+            // exact covered source closure and the receiver derives its own
+            // terminal. Result-member deltas and payload rows are authority
+            // output, not receiver input; accepting either would revive the
+            // retired snapshot/materialization bypass.
+            if !update.result_member_adds.is_empty() || !update.result_member_removes.is_empty() {
+                return Err(Error::InvalidStoredValue(
+                    "peer view update must not carry authority result members",
+                ));
+            }
+            if update
+                .program_fact_adds
+                .iter()
+                .chain(&update.program_fact_removes)
+                .any(|fact| matches!(fact, ProgramFactEntry::ResultPayload(_)))
+            {
+                return Err(Error::InvalidStoredValue(
+                    "peer view update must not carry authority result payloads",
+                ));
+            }
             for bundle in version_bundle_refs_for_carriers(&update.version_carriers)? {
                 // This preflight runs before bulk-reset selection, alias
                 // allocation, clock advancement, or receiver staging. The
@@ -1819,7 +1844,8 @@ where
         }
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=view_update_applied reset={reset_result_set} deferred={defer_settlement} generation={} facts={} closure={:?}",
+                "JAZZ_COVERED_INPUT_TRACE stage=view_update_applied node={:?} reset={reset_result_set} deferred={defer_settlement} generation={} facts={} closure={:?}",
+                self.node_uuid,
                 state.applied_view_update_generation,
                 state.settled_program_facts.len(),
                 state.source_closure,

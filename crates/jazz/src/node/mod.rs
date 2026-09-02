@@ -38,12 +38,14 @@ use crate::ids::{
 use crate::protocol::{
     AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp,
     MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
-    ProgramFactEntry, ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry,
-    RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
-    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
-    expand_version_carriers,
+    PolicyBindingKey, ProgramFactEntry, ProgramSourceId, ProgramSourceRole, ReadViewKey,
+    RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
+    VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
 };
-use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
+use crate::query::{
+    Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
+};
 use crate::schema::{
     AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy,
     SCOPE_RELAY_REPAIR_LEDGER_STORE, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
@@ -329,7 +331,7 @@ pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(test)]
 pub(crate) use query_eval::take_client_physical_row_query_calls_for_test;
 pub(crate) use query_eval::{
-    LocalAuthorityReconciliation, LocalMaintainedViewSubscription,
+    CoveredInputReceiver, LocalAuthorityReconciliation, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate,
 };
 pub(crate) use views::{FlatTupleSourceTables, MaintainedViewBundleInputs};
@@ -838,13 +840,12 @@ struct QueryServing {
     /// Served publications retaining each concrete binding view.  This keeps
     /// one peer's retirement from leaving its binding receipts resident, while
     /// still permitting multiple peer states to share an identical binding.
-    outbound_binding_owners: BTreeMap<SubscriptionKey, BTreeSet<u64>>,
-    /// Registered query binding values keyed by shape and usage-site binding ID.
-    // A wire subscription is identified by its usage binding handle *and* read
-    // view. The same canonical binding id may legitimately be registered at
-    // Local, Edge, and Global views in one relay, so keying by BindingId alone
-    // lets one view silently overwrite another's routing metadata.
-    registered_bindings: BTreeMap<ShapeId, BTreeMap<(BindingId, ReadViewKey), RegisteredBinding>>,
+    outbound_binding_owners: BTreeMap<(SubscriptionKey, PolicyBindingKey), BTreeSet<u64>>,
+    /// Registered query binding values keyed by their complete usage-site
+    /// admission identity. The same wire binding/read-view pair may be served
+    /// to two readers with distinct immutable policy snapshots; neither may
+    /// overwrite nor retire the other.
+    registered_bindings: BTreeMap<ShapeId, BTreeMap<RegisteredBindingUsageKey, RegisteredBinding>>,
     /// Every settled result received from an authority.  This is deliberately
     /// keyed by Jazz's full policy-scoped identity, rather than the ordinary
     /// canonical binding view used by local maintained views.  Two sessions
@@ -858,11 +859,11 @@ struct QueryServing {
     // relay needs an authority source.
     applied_view_update_generations: BTreeMap<BindingViewKey, u64>,
     settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
-    /// Non-durable-client window memberships retained only to interpret its
-    /// materialized row overlay after the matching Edge usage site detached.
-    /// They are deliberately not authority receipts: Edge/Global reads must
-    /// open fresh coverage before they may consume a binding view again.
-    local_materialized_window_binding_views: BTreeSet<BindingViewKey>,
+    /// Bounded, receiver-local source pages retained by a non-durable client
+    /// after the matching authority usage site detached. This is not an
+    /// authority receipt: only an exact compatible Local lowering may use it;
+    /// Edge/Global must open fresh coverage.
+    retained_root_window_sources: BTreeMap<AuthorityResultKey, RetainedRootWindowSource>,
     settled_result_row_index:
         BTreeMap<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>,
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
@@ -873,6 +874,98 @@ struct QueryServing {
     deferred_publication_binding_views: BTreeSet<BindingViewKey>,
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
     pending_opening_binding_views: BTreeSet<BindingViewKey>,
+}
+
+/// Compiler-owned description of the root window stage represented by a
+/// retained receiver input page. The page is *already the output* of this
+/// stage; a compatible local lowering applies only its requested subwindow
+/// relative to this descriptor, never the absolute source offset again.
+///
+/// Root windows have one global partition. Ordering is explicit and the
+/// compiler's deterministic root-occurrence tie break is part of the
+/// capability, so a differently ordered (or unbounded) request cannot reuse
+/// this page accidentally.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RetainedRootWindowSource {
+    /// The exact frozen root source occurrence whose rows this page contains.
+    pub(crate) source: ProgramSourceId,
+    /// The complete validated source shape, including its canonical identity.
+    pub(crate) source_shape: ValidatedQuery,
+    /// Root windows are unpartitioned; keeping this typed makes a future
+    /// parent-partitioned descriptor a different, non-interchangeable shape.
+    pub(crate) partition: RootWindowPartition,
+    /// Ordering keys and directions applied before the window.
+    pub(crate) order_by: Vec<OrderBy>,
+    /// Compiler-owned deterministic tie break after `order_by`.
+    pub(crate) tie_break: RootWindowTieBreak,
+    /// Source window bounds in the ordered root stream.
+    pub(crate) offset: usize,
+    pub(crate) limit: Option<usize>,
+    /// The source query with only the root window stripped. This is the exact
+    /// semantic shape a target must share before its window can be rebased.
+    pub(crate) query_without_window: JazzQuery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RootWindowPartition {
+    Global,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RootWindowTieBreak {
+    RootOccurrence,
+}
+
+impl RetainedRootWindowSource {
+    pub(crate) fn for_shape(shape: &ValidatedQuery) -> Self {
+        let query = shape.query();
+        let mut query_without_window = query.clone();
+        query_without_window.offset = 0;
+        query_without_window.limit = None;
+        Self {
+            source: ProgramSourceId {
+                table: groove::Intern::new(query.table.clone()),
+                path: vec![ProgramSourceRole::Root],
+            },
+            source_shape: shape.clone(),
+            partition: RootWindowPartition::Global,
+            order_by: query.order_by.clone(),
+            tie_break: RootWindowTieBreak::RootOccurrence,
+            offset: query.offset,
+            limit: query.limit,
+            query_without_window,
+        }
+    }
+
+    pub(crate) fn is_bounded(&self) -> bool {
+        self.offset != 0 || self.limit.is_some()
+    }
+
+    pub(crate) fn contains_target(&self, target: &ValidatedQuery) -> bool {
+        let target_window = Self::for_shape(target);
+        if self.source != target_window.source
+            || self.partition != target_window.partition
+            || self.order_by != target_window.order_by
+            || self.tie_break != target_window.tie_break
+            || self.source_shape.schema_version() != target.schema_version()
+            || self.source_shape.params() != target.params()
+            || self.query_without_window != target_window.query_without_window
+            || self.offset > target_window.offset
+        {
+            return false;
+        }
+        let source_end = self.limit.map(|limit| self.offset.saturating_add(limit));
+        let target_end = target_window
+            .limit
+            .map(|limit| target_window.offset.saturating_add(limit));
+        !matches!((source_end, target_end), (Some(source_end), Some(target_end)) if target_end > source_end)
+            && !matches!((source_end, target_end), (Some(_), None))
+    }
+
+    pub(crate) fn relative_window_for(&self, target: &ValidatedQuery) -> (usize, Option<usize>) {
+        debug_assert!(self.contains_target(target));
+        (target.query().offset - self.offset, target.query().limit)
+    }
 }
 
 /// One authority-owned result stream, including every receipt that makes its
@@ -962,6 +1055,11 @@ struct RegisteredBinding {
     /// stays separate from the canonical local binding key.
     authority_result_key: AuthorityResultKey,
 }
+
+/// Wire binding handles are only unique within one admitted policy scope.
+/// Keep the scope in the in-memory ownership key even though the wire
+/// `Unsubscribe` stays compact; authenticated ingress supplies it at teardown.
+type RegisteredBindingUsageKey = (BindingId, ReadViewKey, Option<PolicyBindingKey>);
 
 /// Locally open transactions and local-only permission attribution.
 struct OpenTxState {

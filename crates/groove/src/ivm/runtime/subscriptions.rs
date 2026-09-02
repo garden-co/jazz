@@ -1386,8 +1386,12 @@ fn bound_routed_multisink_graph(
     };
     if let GraphBuilder::CollectBy { input, collect } = &terminal.graph {
         // CollectBy is terminal-only. Route its flat input before rendering and
-        // remove hidden route columns from the collector's own projection,
-        // rather than appending filter/project consumers after the collector.
+        // remove hidden route columns from the collector's own projection and
+        // keys, rather than appending filter/project consumers after the
+        // collector. This graph is now bound to one route: retaining a route
+        // field in a collector key would make that private execution metadata
+        // escape in `TerminalOperation::root_key`, even though it is not an
+        // application-row identity.
         let mut collect = collect.as_ref().clone();
         collect
             .parent_fields
@@ -1395,6 +1399,7 @@ fn bound_routed_multisink_graph(
         collect
             .tuple_fields
             .retain(|field| terminal.public_fields.contains(&field.output_name));
+        strip_bound_route_fields_from_collect(&mut collect, &terminal.route_fields);
         let input = predicate
             .map(|predicate| input.as_ref().clone().filter(predicate))
             .unwrap_or_else(|| input.as_ref().clone());
@@ -1407,6 +1412,37 @@ fn bound_routed_multisink_graph(
         .map(|predicate| terminal.graph.clone().filter(predicate))
         .unwrap_or_else(|| terminal.graph.clone());
     graph.project(terminal.public_fields.clone())
+}
+
+/// A routed terminal is compiled once but a bound subscription executes one
+/// concrete route. Route fields therefore select the input; they are not part
+/// of a public collector's identity. In particular, terminal operations use
+/// collector group keys as their root keys, so retaining a hidden claim route
+/// there would hand Jazz an invalid public root address.
+fn strip_bound_route_fields_from_collect(
+    collect: &mut crate::ivm::CollectByBuilder,
+    route_fields: &[String],
+) {
+    let is_route = |field: &crate::ivm::FieldRef| matches!(field, crate::ivm::FieldRef::Name(name) if route_fields.contains(name));
+    collect.group_cols.retain(|field| !is_route(field));
+    collect.tie_cols.retain(|field| !is_route(field));
+    collect.order_cols.retain(|order| !is_route(&order.field));
+    for slot in &mut collect.slots {
+        strip_bound_route_fields_from_slot(slot, &is_route);
+    }
+}
+
+fn strip_bound_route_fields_from_slot(
+    slot: &mut crate::ivm::CollectBySlotBuilder,
+    is_route: &impl Fn(&crate::ivm::FieldRef) -> bool,
+) {
+    slot.group_cols.retain(|field| !is_route(field));
+    slot.owner_key_cols.retain(|field| !is_route(field));
+    slot.tie_cols.retain(|field| !is_route(field));
+    slot.order_cols.retain(|order| !is_route(&order.field));
+    for child in &mut slot.slots {
+        strip_bound_route_fields_from_slot(child, is_route);
+    }
 }
 
 fn route_predicate(field: &str, value: &Value) -> PredicateExpr {

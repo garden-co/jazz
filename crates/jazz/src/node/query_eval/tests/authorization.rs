@@ -369,6 +369,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             bindings.get(&(
                 binding.binding_id(),
                 RegisterShapeOptions::default().read_view_key(),
+                None,
             ))
         })
         .map(|registered| registered.values.clone())

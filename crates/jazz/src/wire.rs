@@ -867,7 +867,6 @@ pub fn negotiate_wire(
 mod tests {
     use std::collections::BTreeMap;
 
-    use groove::Intern;
     use groove::schema::ColumnType;
     use serde_json::json;
 
@@ -877,7 +876,7 @@ mod tests {
     use crate::protocol::{
         AuthorizationScopePurpose, AuthorizationSupportScopeKey, ChunkRequestBatch,
         ChunkRequestEntry, PermissionAdviceAction, PermissionAdviceRequestId, RegisterShapeOptions,
-        ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
+        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
         VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons, expand_version_carriers,
     };
@@ -1894,39 +1893,29 @@ mod tests {
             binding_id,
             read_view: Default::default(),
         };
-        let node = NodeUuid::from_bytes([0x44; 16]);
-        let schema_version = SchemaVersionId::from_bytes([0x55; 16]);
         let messages = (0..300_u64)
             .map(|i| {
-                let row = crate::ids::RowUuid(uuid::Uuid::from_u128(0x7000_0000_0000 + i as u128));
-                let tx = TxId::new(TxTime(1_000_000 + i), node);
-                let member =
-                    crate::protocol::ResultMemberEntry::Row(crate::protocol::RealRowMemberEntry {
-                        table: groove::Intern::new("res_l_child_3".to_owned()),
-                        row_uuid: row,
-                        occurrence_id: Some(crate::tools::OutputOccurrenceId::single_source(
-                            crate::tools::ObjectId::from_uuid(row.0),
-                        )),
-                        content_tx: Some(tx),
-                        layer: Default::default(),
-                        deletion_tx: None,
-                        source: Default::default(),
-                        read_view: Default::default(),
-                        schema_version: Some(schema_version),
-                        branch_or_prefix: None,
-                        row_digest: Some(vec![0xAB; 8]),
-                        batch: Some(tx),
-                        settle_position: Some(GlobalTime(10_000 + i)),
-                    });
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: GlobalTime(10_000 + i),
                     reset_result_set: false,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    result_member_adds: vec![member],
+                    result_member_adds: Vec::new(),
                     result_member_removes: Vec::new(),
-                    program_fact_adds: Vec::new(),
+                    // Exercise the same sized, independently-delivered
+                    // control-plane payload without smuggling authority
+                    // terminal output across the peer wire.
+                    program_fact_adds: vec![
+                        crate::protocol::ProgramFactEntry::ReadFrontierSettled(
+                            crate::protocol::ReadFrontierSettledEntry {
+                                scope: format!("compression-{i}"),
+                                tier: DurabilityTier::Global,
+                                stream: Some(format!("stream-{i}")),
+                                frontier: vec![0xAB; 8],
+                            },
+                        ),
+                    ],
                     program_fact_removes: Vec::new(),
                 })
             })
@@ -2073,10 +2062,11 @@ mod tests {
     }
 
     #[test]
-    fn view_update_result_entries_round_trip_interned_table_names() {
+    fn view_update_rejects_authority_result_entries() {
         let row = RowUuid::from_bytes([0x22; 16]);
         let tx_id = TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16]));
-        let entry: ResultRowEntry = (Intern::new("todos".to_owned()), row, tx_id);
+        let entry: crate::protocol::ResultMemberEntry =
+            (groove::Intern::new("todos".to_owned()), row, tx_id).into();
         let message = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::from_bytes([0x44; 16])),
@@ -2097,10 +2087,10 @@ mod tests {
             program_fact_removes: Vec::new(),
         });
 
-        let encoded = encode_sync_message(&message).unwrap();
-        let decoded = decode_sync_message(&encoded).unwrap();
-
-        assert_eq!(decoded, message);
+        assert!(
+            encode_sync_message(&message).is_err(),
+            "the wire must reject authority terminal membership before receiver ingestion"
+        );
     }
 
     #[test]

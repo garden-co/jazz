@@ -850,7 +850,7 @@ where
                 store.delete(&key).await?;
             }
         }
-        self.query.local_materialized_window_binding_views.clear();
+        self.query.retained_root_window_sources.clear();
         Ok(())
     }
 
@@ -863,7 +863,7 @@ where
 
     async fn recover_known_state_facts(&mut self) -> Result<(), Error> {
         self.query.authority_results.clear();
-        self.query.local_materialized_window_binding_views.clear();
+        self.query.retained_root_window_sources.clear();
         // Validate the complete durable closure off to the side.  Open/recovery
         // must not leave even a prefix of the recovered state resident when a
         // later store entry is malformed.

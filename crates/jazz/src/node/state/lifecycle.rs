@@ -596,7 +596,7 @@ where
                 authority_results: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
-                local_materialized_window_binding_views: BTreeSet::new(),
+                retained_root_window_sources: BTreeMap::new(),
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
@@ -1562,7 +1562,7 @@ where
         self.query.version_storage_sources_cache.clear();
         self.query.authority_results.clear();
         self.query.settled_result_sets.clear();
-        self.query.local_materialized_window_binding_views.clear();
+        self.query.retained_root_window_sources.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
@@ -1652,8 +1652,8 @@ where
             state.source_closure = crate::node::AuthoritySourceClosure::Pending;
         }
         self.query
-            .local_materialized_window_binding_views
-            .remove(&authority_result_key.binding_view);
+            .retained_root_window_sources
+            .remove(&authority_result_key);
     }
 
     /// Retire a receipt whose exact usage-site ownership has ended.
@@ -1665,8 +1665,8 @@ where
     fn retire_authority_result_view(&mut self, authority_result_key: AuthorityResultKey) {
         self.query.authority_results.remove(&authority_result_key);
         self.query
-            .local_materialized_window_binding_views
-            .remove(&authority_result_key.binding_view);
+            .retained_root_window_sources
+            .remove(&authority_result_key);
     }
 
     async fn open_catalogue_stage<T>(

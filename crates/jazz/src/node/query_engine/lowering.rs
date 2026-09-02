@@ -12,7 +12,8 @@ use groove::records::{ValueType, collect_by_ordered_scalar};
 
 mod closure;
 use closure::{
-    closure_path_segments, join_contribution_membership_graph, lower_closure_membership,
+    closure_path_segments, flat_join_contribution_membership_graph,
+    join_contribution_membership_graph, lower_closure_membership,
 };
 
 // Groove returns RecursiveIterationLimit instead of silently truncating when
@@ -224,6 +225,7 @@ pub(crate) fn lower_resolved_query_program(
         &plan,
         &resolved_root,
         &resolved_sources,
+        &parameters,
         &parameters.routing_params,
         &lowered.fields,
     )?;
