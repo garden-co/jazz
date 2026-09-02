@@ -33,6 +33,48 @@ pub(super) fn route_subscription_refresh_failure(
     delivered
 }
 
+/// Deliver a receiver-side authority-closure rejection only to the public
+/// usage site named by the malformed frame.  The local node has already
+/// rejected the complete batch before this point, so this does not turn a
+/// protocol violation into a partial result or receipt.
+fn route_invalid_authority_source_closure(
+    subscriptions: &SubscriptionList,
+    error: &crate::node::Error,
+) -> usize {
+    let crate::node::Error::InvalidAuthoritySourceClosure {
+        subscription,
+        transition,
+    } = error
+    else {
+        return 0;
+    };
+    let reason = SubscribeRejectReason::InvalidAuthoritySourceClosure {
+        transition: transition.clone(),
+    };
+    let mut delivered = 0;
+    for state in subscriptions.borrow().iter().filter_map(Weak::upgrade) {
+        let state = state.borrow();
+        if state.closed.get()
+            || !state
+                .upstream_subscription_handles
+                .iter()
+                .any(|handle| handle.subscription == *subscription)
+        {
+            continue;
+        }
+        if state
+            .sender
+            .unbounded_send(SubscriptionEvent::Rejected {
+                reason: reason.clone(),
+            })
+            .is_ok()
+        {
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
 /// Namespace for relay-owned usage-site subscription handles.
 ///
 /// A relay may normalize multiple downstream coverage requests to the same
@@ -3833,7 +3875,12 @@ where
                                 .node
                                 .lock()
                                 .await
-                                .register_shape_for_peer(connection_epoch, shape_id, ast);
+                                .register_shape_for_peer_with_options(
+                                    connection_epoch,
+                                    shape_id,
+                                    ast,
+                                    opts.clone(),
+                                );
                             if let Err(error) = register_result {
                                 queue_direct_control(&mut self.pending_control_responses,
                                     server_subscription_failure_rejection_message(
@@ -5662,10 +5709,18 @@ where
     }
     if !updates.is_empty() {
         let mut node_ref = node.lock().await;
-        node_ref.apply_view_updates_in_batch(updates).await?;
-        node_ref
-            .record_scope_relay_authoritative_bundles(&ledger_bundles)
-            .await?;
+        match node_ref.apply_view_updates_in_batch(updates).await {
+            Ok(()) => {
+                node_ref
+                    .record_scope_relay_authoritative_bundles(&ledger_bundles)
+                    .await?;
+            }
+            Err(error @ crate::node::Error::InvalidAuthoritySourceClosure { .. }) => {
+                route_invalid_authority_source_closure(subscriptions, &error);
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
     if relay_authority_session_owner {
         // A relay authority view is input to every locally served browser

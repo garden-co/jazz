@@ -578,6 +578,7 @@ impl PeerState {
         subscription: SubscriptionKey,
         shape: &ValidatedQuery,
         binding: &Binding,
+        opts: RegisterShapeOptions,
         policy_binding: &(AuthorSubject, BTreeMap<String, groove::records::Value>),
     ) -> Result<(), Error>
     where
@@ -587,6 +588,7 @@ impl PeerState {
             self.publication_owner,
             shape.shape_id(),
             ShapeAst::from_validated(shape),
+            opts,
             Subscribe {
                 shape_id: shape.shape_id(),
                 subscription,
@@ -634,6 +636,7 @@ impl PeerState {
             subscription,
             &shape,
             &binding,
+            opts.clone(),
             &policy_binding,
         )?;
         let needs_prepare = self
@@ -903,6 +906,7 @@ impl PeerState {
             subscription,
             shape,
             binding,
+            opts.clone(),
             &policy_binding,
         )?;
         let Some(_) = self.publication_states.get(&subscription) else {
@@ -2085,6 +2089,7 @@ impl PeerState {
             subscription,
             shape,
             binding,
+            opts.clone(),
             &policy_binding,
         )?;
         if let Some(known_state) = known_state {

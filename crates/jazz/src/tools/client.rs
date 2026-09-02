@@ -1867,6 +1867,11 @@ impl ClientDbInner {
                                     },
                                 }
                             }
+                            crate::protocol::SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                                transition,
+                            } => SubscriptionRejectReason::InvalidAuthoritySourceClosure {
+                                transition,
+                            },
                         };
                         let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
                     }

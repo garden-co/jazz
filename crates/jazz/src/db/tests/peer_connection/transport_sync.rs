@@ -20,6 +20,145 @@ fn branch_sync_schema() -> JazzSchema {
     )
 }
 
+/// A malformed authority source-closure frame rejects only its exact public
+/// subscription before any receiver state or output is published.
+///
+/// alice owns the client stream; the authority supplies a real opening, whose
+/// duplicated covered-input witness is injected at the transport boundary.
+/// bob's later, distinct query proves that the peer remains usable.
+///
+/// alice ──subscribe──► authority ──forged duplicate──► alice (error)
+/// bob   ──subscribe──────────────────────────────────► bob   (valid reset)
+#[test]
+fn malformed_authority_closure_reaches_only_its_public_subscription() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0x41; 16]);
+    let bob = AuthorSubject::for_test_bytes([0x42; 16]);
+    let server = open_core(0x43, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x44, alice, &schema);
+    let row_id = row(0x45);
+    server
+        .insert_with_id("todos", row_id, cells("persisted upstream", false, bob))
+        .unwrap();
+
+    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let alice_query = Query::from("todos");
+    let mut alice_subscription =
+        prepared_subscribe(&client, &alice_query, global_subscribe_opts()).unwrap();
+    let local_opening = block_on(alice_subscription.next_raw()).expect("local opening");
+    assert!(!event_settled(&local_opening));
+    assert!(opened_rows(local_opening).is_empty());
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    let subscription = {
+        let mut frames = server_sent.borrow_mut();
+        let update = frames
+            .iter_mut()
+            .find_map(|message| match message {
+                SyncMessage::ViewUpdate(update) => Some(update),
+                _ => None,
+            })
+            .expect("authority must send alice's opening");
+        let subscription = update.subscription;
+        let duplicate = update
+            .program_fact_adds
+            .iter()
+            .find_map(|fact| match fact {
+                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+                _ => None,
+            })
+            .expect("nonempty authority opening has a covered-input witness");
+        update
+            .program_fact_adds
+            .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+        subscription
+    };
+    let authority_result = client
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let receipt_before = client
+        .node
+        .node
+        .borrow()
+        .applied_authority_result_generation(&authority_result);
+
+    client
+        .tick()
+        .expect("malformed closure becomes a subscription error, not a peer-tick failure");
+    assert_eq!(
+        block_on(alice_subscription.next_raw()),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                transition: "duplicate source-closure addition".to_owned(),
+            },
+        }),
+        "the client receives the exact safe closure-transition error without waiting"
+    );
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .applied_authority_result_generation(&authority_result),
+        receipt_before,
+        "the rejected frame cannot advance the authority receipt"
+    );
+    assert!(
+        prepared_read(&client, &alice_query).is_empty(),
+        "the rejected frame cannot publish a partial local result"
+    );
+
+    let bob_query = Query::from("todos").filter(eq(col("title"), lit("persisted upstream")));
+    let mut bob_subscription =
+        prepared_subscribe(&client, &bob_query, global_subscribe_opts()).unwrap();
+    let _ = block_on(bob_subscription.next_raw()).expect("bob local opening");
+    client.tick().unwrap();
+    let mut bob_rows = Vec::new();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = bob_subscription.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta { added, .. } => bob_rows.extend(added),
+                SubscriptionEvent::Rejected { reason } => {
+                    panic!("unrelated subscription was rejected: {reason:?}")
+                }
+                SubscriptionEvent::Closed => panic!("unrelated subscription closed"),
+            }
+        }
+        if bob_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>()
+            == vec![row_id]
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        bob_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![row_id]
+    );
+}
+
 fn branch_sync_selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }

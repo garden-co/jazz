@@ -3081,6 +3081,15 @@ pub enum SubscribeRejectReason {
         /// Stable, client-safe classification of the server-side failure.
         code: SubscribeServerFailureCode,
     },
+    /// The receiver rejected an authority update before it could change its
+    /// maintained source closure.  `transition` is a receiver-generated,
+    /// client-safe description of the impossible predecessor-to-successor
+    /// transition; it deliberately excludes row bodies, version claims, and
+    /// policy data.
+    InvalidAuthoritySourceClosure {
+        /// Client-safe description of the rejected closure transition.
+        transition: String,
+    },
 }
 
 /// Client-safe classes for server-side subscription failures.

@@ -6607,6 +6607,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       reason:
         | { type: "UnsupportedShapeCapability"; detail: string }
         | { type: "ServerFailure"; code: string }
+        | { type: "InvalidAuthoritySourceClosure"; transition: string }
         | { type: "ShapeRegistrationPendingCatalogueAdmission" };
     }
   | { type: "closed" } {
@@ -6659,11 +6660,17 @@ function normalizeSubscriptionRejectionReason(
 ):
   | { type: "UnsupportedShapeCapability"; detail: string }
   | { type: "ServerFailure"; code: string }
+  | { type: "InvalidAuthoritySourceClosure"; transition: string }
   | { type: "ShapeRegistrationPendingCatalogueAdmission" } {
   if (!reason || typeof reason !== "object") {
     throw new Error("expected subscription rejection reason");
   }
-  const record = reason as { type?: unknown; detail?: unknown; code?: unknown };
+  const record = reason as {
+    type?: unknown;
+    detail?: unknown;
+    code?: unknown;
+    transition?: unknown;
+  };
   if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
     return { type: "UnsupportedShapeCapability", detail: record.detail };
   }
@@ -6673,6 +6680,9 @@ function normalizeSubscriptionRejectionReason(
   if (record.type === "ServerFailure" && typeof record.code === "string") {
     return { type: "ServerFailure", code: record.code };
   }
+  if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
+    return { type: "InvalidAuthoritySourceClosure", transition: record.transition };
+  }
   throw new Error("unknown subscription rejection reason");
 }
 
@@ -6680,6 +6690,7 @@ function subscriptionRejectionError(
   reason:
     | { type: "UnsupportedShapeCapability"; detail: string }
     | { type: "ServerFailure"; code: string }
+    | { type: "InvalidAuthoritySourceClosure"; transition: string }
     | { type: "ShapeRegistrationPendingCatalogueAdmission" },
 ): Error {
   const detail =
@@ -6687,7 +6698,9 @@ function subscriptionRejectionError(
       ? reason.detail
       : reason.type === "ServerFailure"
         ? reason.code
-        : "catalogue admission pending";
+        : reason.type === "InvalidAuthoritySourceClosure"
+          ? reason.transition
+          : "catalogue admission pending";
   return new Error(`Subscription rejected: ${reason.type}: ${detail}`);
 }
 

@@ -45,11 +45,15 @@ where
         Ok(())
     }
 
-    pub(crate) fn register_shape_for_peer(
+    /// Retain a peer shape together with the exact read-view/compiler options
+    /// carried by its registration.  A `SubscriptionKey` names this option
+    /// identity, so shape ownership alone cannot reconstruct it later.
+    pub(crate) fn register_shape_for_peer_with_options(
         &mut self,
         peer: u64,
         shape_id: ShapeId,
         ast: ShapeAst,
+        opts: RegisterShapeOptions,
     ) -> Result<(), Error> {
         if let Some(existing) = self.parking.parked_shape_registrations.get(&shape_id)
             && existing != &ast
@@ -86,6 +90,14 @@ where
             }
         }
 
+        self.query
+            .registered_shape_options
+            .insert((shape_id, opts.read_view_key()), opts.clone());
+        if opts == RegisterShapeOptions::default() {
+            self.query
+                .registered_shape_options
+                .insert((shape_id, ReadViewKey::default()), opts);
+        }
         self.retain_validated_shape_registration(shape_id, ast, shape)?;
         self.query
             .peer_shape_owners
@@ -212,10 +224,24 @@ where
         publication_owner: u64,
         shape_id: ShapeId,
         ast: ShapeAst,
+        opts: RegisterShapeOptions,
         subscribe: Subscribe,
         policy_binding: crate::protocol::PolicyBindingKey,
     ) -> Result<(), Error> {
         let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
+        if opts.read_view_key() != subscribe.subscription.read_view {
+            return Err(Error::InvalidStoredValue(
+                "served subscription read-view does not match its registration options",
+            ));
+        }
+        self.query
+            .registered_shape_options
+            .insert((shape_id, opts.read_view_key()), opts.clone());
+        if opts == RegisterShapeOptions::default() {
+            self.query
+                .registered_shape_options
+                .insert((shape_id, ReadViewKey::default()), opts);
+        }
         self.retain_validated_shape_registration(shape_id, ast, shape)?;
         let subscription = subscribe.subscription;
         self.apply_subscribe_with_admitted_policy_binding(subscribe, policy_binding.clone())?;

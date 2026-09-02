@@ -1857,8 +1857,13 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     first_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
-    core.register_shape_for_peer(0xfeed, shape.shape_id(), ShapeAst::from_validated(&shape))
-        .unwrap();
+    core.register_shape_for_peer_with_options(
+        0xfeed,
+        shape.shape_id(),
+        ShapeAst::from_validated(&shape),
+        RegisterShapeOptions::default(),
+    )
+    .unwrap();
     reconnected_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, edge_opts)
         .unwrap();

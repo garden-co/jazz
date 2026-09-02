@@ -362,6 +362,7 @@ fn authority_covered_input_rejects_live_coverage_changes_atomically() {
 fn authority_batch_rejects_later_malformed_closure_without_advancing_receipt() {
     let (_dir, mut receiver, authority_result, _initial, successor) =
         covered_input_receiver_fixture();
+    let subscription = successor.subscription;
     let generation = receiver.applied_authority_result_generation(&authority_result);
     let mut malformed = successor.clone();
     let duplicate = malformed
@@ -382,8 +383,8 @@ fn authority_batch_rejects_later_malformed_closure_without_advancing_receipt() {
     .expect_err("later malformed closure rejects the entire receiver batch");
     assert!(matches!(
         error,
-        Error::InvalidAuthoritySourceClosure { subscription, .. }
-            if subscription == receiver.whole_table_subscription_key("todos").unwrap()
+        Error::InvalidAuthoritySourceClosure { subscription: rejected, .. }
+            if rejected == subscription
     ));
     assert_eq!(
         receiver.applied_authority_result_generation(&authority_result),

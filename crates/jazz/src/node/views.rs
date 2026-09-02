@@ -199,6 +199,22 @@ fn version_bundle_refs_for_carriers(
     Ok(refs)
 }
 
+/// Preserve the usage-site handle while converting a structurally malformed
+/// authority payload into the only client-visible source-closure diagnostic.
+/// Operational storage, transaction, and compiler errors must continue to
+/// fail the peer tick rather than being misreported as a terminal stream
+/// error.
+fn invalid_authority_source_closure_error(subscription: SubscriptionKey, error: Error) -> Error {
+    match error {
+        error @ Error::InvalidAuthoritySourceClosure { .. } => error,
+        Error::MalformedViewUpdate(_) => Error::InvalidAuthoritySourceClosure {
+            subscription,
+            transition: "authority source-closure payload failed validation".to_owned(),
+        },
+        error => error,
+    }
+}
+
 fn version_bundle_record_key(
     version: &VersionRecord,
 ) -> (String, BranchKey, RowUuid, SchemaVersionId, bool) {
@@ -1178,21 +1194,25 @@ where
 
     /// Apply a downstream current-row view update.
     pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
-        self.validate_received_view_update_global_time_durability(&update)?;
-        self.validate_view_update_payloads(std::slice::from_ref(&update))?;
+        self.validate_received_view_update_global_time_durability(&update)
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        self.validate_view_update_payloads(std::slice::from_ref(&update))
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
         let compiled_source_caches = self
             .validate_covered_input_closure_admission(std::slice::from_ref(&update))
-            .map_err(|error| Error::InvalidAuthoritySourceClosure {
-                subscription: update.subscription,
-                transition: error.to_string(),
-            })?;
-        let bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
-        let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        let bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        let preflight = self
+            .preflight_view_bundle_conflicts(&bundle_refs)
+            .await
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
         self.validate_covered_input_body_witnesses(
             std::slice::from_ref(&update),
             &preflight.bundles,
         )
-        .await?;
+        .await
+        .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
         self.apply_view_update_inner(update, None).await?;
         self.install_compiled_covered_input_source_caches(compiled_source_caches);
         Ok(())
@@ -1206,13 +1226,21 @@ where
             return Ok(());
         }
         for update in &updates {
-            self.validate_received_view_update_global_time_durability(update)?;
+            self.validate_received_view_update_global_time_durability(update)
+                .map_err(|error| {
+                    invalid_authority_source_closure_error(update.subscription, error)
+                })?;
         }
         // A receiver tick is one atomic protocol frame. Validate every row
         // descriptor before the first reset can change flush cadence, or a
         // preceding valid bundle can advance clocks, allocate aliases, or
         // stage history before a later malformed bundle rejects the frame.
-        self.validate_view_update_payloads(&updates)?;
+        for update in &updates {
+            self.validate_view_update_payloads(std::slice::from_ref(update))
+                .map_err(|error| {
+                    invalid_authority_source_closure_error(update.subscription, error)
+                })?;
+        }
         let compiled_source_caches = self.validate_covered_input_closure_admission(&updates)?;
         let mut all_bundle_refs = Vec::new();
         let mut bulk_candidates = Vec::new();
@@ -1386,9 +1414,10 @@ where
             // output, not receiver input; accepting either would revive the
             // retired snapshot/materialization bypass.
             if !update.result_member_adds.is_empty() || !update.result_member_removes.is_empty() {
-                return Err(Error::InvalidStoredValue(
-                    "peer view update must not carry authority result members",
-                ));
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "authority view update carries retired result members".to_owned(),
+                });
             }
             if update
                 .program_fact_adds
@@ -1396,9 +1425,11 @@ where
                 .chain(&update.program_fact_removes)
                 .any(|fact| !fact.is_peer_source_closure_fact())
             {
-                return Err(Error::InvalidStoredValue(
-                    "peer view update must carry only covered-input closure facts",
-                ));
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "authority view update carries a non-source closure fact"
+                        .to_owned(),
+                });
             }
             let added_facts = update.program_fact_adds.iter().collect::<BTreeSet<_>>();
             if added_facts.len() != update.program_fact_adds.len() {
@@ -1490,8 +1521,11 @@ where
             } else if let Some(compiled) = compiled_source_caches.get(&authority_result_key) {
                 compiled
             } else {
-                let compiled =
-                    self.compiled_covered_input_sources_for_subscription(update.subscription)?;
+                let compiled = self
+                    .compiled_covered_input_sources_for_subscription(update.subscription)
+                    .map_err(|error| {
+                        invalid_authority_source_closure_error(update.subscription, error)
+                    })?;
                 compiled_source_caches.insert(authority_result_key.clone(), compiled);
                 compiled_source_caches
                     .get(&authority_result_key)
@@ -1676,38 +1710,41 @@ where
             }
         }
 
-        for input in updates
-            .iter()
-            .flat_map(|update| update.program_fact_adds.iter())
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::CoveredInput(input) => Some(input),
-                _ => None,
-            })
-        {
-            let coordinate = (
-                input.version.tx,
-                input.version_table.to_string(),
-                input.source_row,
-                input.version.layer,
-                input.version.branch_or_prefix.clone().unwrap_or_default(),
-            );
-            let staged_body_witness = admitted_versions.contains(&coordinate);
-            // A known-state repair may have admitted this exact immutable
-            // body in its own request/response frame before the later view
-            // frame that consumes it. Use the same physical lookup, concrete
-            // layer, and canonical-branch check as receiver materialization;
-            // a merely matching tx/row name is not evidence.
-            let resident_body_witness = if staged_body_witness {
-                false
-            } else {
-                self.covered_input_has_resident_body(input).await?
-            };
-            if input.version.batch != Some(input.version.tx)
-                || (!staged_body_witness && !resident_body_witness)
+        for update in updates {
+            for input in update
+                .program_fact_adds
+                .iter()
+                .filter_map(|fact| match fact {
+                    ProgramFactEntry::CoveredInput(input) => Some(input),
+                    _ => None,
+                })
             {
-                return Err(Error::MalformedViewUpdate(
-                    "covered input is not witnessed by admitted payload",
-                ));
+                let coordinate = (
+                    input.version.tx,
+                    input.version_table.to_string(),
+                    input.source_row,
+                    input.version.layer,
+                    input.version.branch_or_prefix.clone().unwrap_or_default(),
+                );
+                let staged_body_witness = admitted_versions.contains(&coordinate);
+                // A known-state repair may have admitted this exact immutable
+                // body in its own request/response frame before the later view
+                // frame that consumes it. Use the same physical lookup, concrete
+                // layer, and canonical-branch check as receiver materialization;
+                // a merely matching tx/row name is not evidence.
+                let resident_body_witness = if staged_body_witness {
+                    false
+                } else {
+                    self.covered_input_has_resident_body(input).await?
+                };
+                if input.version.batch != Some(input.version.tx)
+                    || (!staged_body_witness && !resident_body_witness)
+                {
+                    return Err(Error::InvalidAuthoritySourceClosure {
+                        subscription: update.subscription,
+                        transition: "covered input is not witnessed by admitted payload".to_owned(),
+                    });
+                }
             }
         }
         Ok(())

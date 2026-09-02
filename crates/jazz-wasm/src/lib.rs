@@ -4295,6 +4295,16 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
                         JsValue::from_str(&format!("{code:?}")),
                     )?;
                 }
+                jazz::protocol::SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                    transition,
+                } => {
+                    set_prop(
+                        &reason_object,
+                        "type",
+                        JsValue::from_str("InvalidAuthoritySourceClosure"),
+                    )?;
+                    set_prop(&reason_object, "transition", JsValue::from_str(&transition))?;
+                }
             }
             set_prop(&object, "type", JsValue::from_str("rejected"))?;
             set_prop(&object, "reason", reason_object.into())?;

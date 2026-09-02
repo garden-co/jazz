@@ -63,6 +63,10 @@ export type SubscriptionRejectedChunk = {
     | {
         type: "ServerFailure";
         code: string;
+      }
+    | {
+        type: "InvalidAuthoritySourceClosure";
+        transition: string;
       };
 };
 export type SubscriptionStreamChunk =
