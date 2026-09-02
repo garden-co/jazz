@@ -2049,7 +2049,7 @@ fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
         .expect("staged candidate remains physically valid after live source removal");
     let schema = native_corpus_schema();
     let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
-    verify_historical_native_corpus(schema.clone(), current_producer_native_corpus_pack, move || {
+    verify_historical_native_corpus(schema.clone(), epoch_1_native_corpus_pack, move || {
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         YieldingStorage::wrap(
