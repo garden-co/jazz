@@ -167,6 +167,25 @@ fn assert_covered_input_rejected_atomically(
     );
 }
 
+fn payload_view_update_parts(
+    payload: crate::protocol::ViewUpdatePayload,
+) -> crate::node::ViewUpdateParts {
+    crate::node::ViewUpdateParts {
+        subscription: payload.subscription,
+        settled_through: payload.settled_through,
+        defer_settlement: false,
+        reset_result_set: payload.reset_result_set,
+        version_carriers: payload.version_carriers,
+        peer_complete_tx_payload_refs: payload.peer_payload_inventory.complete_tx_payloads,
+        authorization_progress: payload.peer_payload_inventory.authorization_progress,
+        opening_pending: payload.peer_payload_inventory.opening_pending,
+        result_member_adds: payload.result_member_adds,
+        result_member_removes: payload.result_member_removes,
+        program_fact_adds: payload.program_fact_adds,
+        program_fact_removes: payload.program_fact_removes,
+    }
+}
+
 fn covered_input_tx_for_row(message: &SyncMessage, row_uuid: RowUuid) -> TxId {
     let SyncMessage::ViewUpdate(update) = message else {
         panic!("expected authority view update");
@@ -337,6 +356,40 @@ fn authority_covered_input_rejects_live_coverage_changes_atomically() {
         ),
     );
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+#[test]
+fn authority_batch_rejects_later_malformed_closure_without_advancing_receipt() {
+    let (_dir, mut receiver, authority_result, _initial, successor) =
+        covered_input_receiver_fixture();
+    let generation = receiver.applied_authority_result_generation(&authority_result);
+    let mut malformed = successor.clone();
+    let duplicate = malformed
+        .program_fact_adds
+        .iter()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+            _ => None,
+        })
+        .expect("successor has covered input");
+    malformed
+        .program_fact_adds
+        .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+    let error = crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
+        payload_view_update_parts(successor),
+        payload_view_update_parts(malformed),
+    ]))
+    .expect_err("later malformed closure rejects the entire receiver batch");
+    assert!(matches!(
+        error,
+        Error::InvalidAuthoritySourceClosure { subscription, .. }
+            if subscription == receiver.whole_table_subscription_key("todos").unwrap()
+    ));
+    assert_eq!(
+        receiver.applied_authority_result_generation(&authority_result),
+        generation,
+        "the preceding valid frame must not advance before the batch validates"
+    );
 }
 
 #[test]

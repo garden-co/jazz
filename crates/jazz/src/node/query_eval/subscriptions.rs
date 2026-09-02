@@ -29,10 +29,18 @@ where
         opts: RegisterShapeOptions,
     ) -> Result<(), Error> {
         let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
-        self.retain_validated_shape_registration(shape_id, ast, shape)?;
         self.query
             .registered_shape_options
-            .insert((shape_id, opts.read_view_key()), opts);
+            .insert((shape_id, opts.read_view_key()), opts.clone());
+        // Legacy/default subscriptions carry `ReadViewKey::default()` rather
+        // than recomputing the options key. Preserve the received options at
+        // that wire identity as well; this is an alias, not reconstruction.
+        if opts.has_default_read_view() {
+            self.query
+                .registered_shape_options
+                .insert((shape_id, ReadViewKey::default()), opts.clone());
+        }
+        self.retain_validated_shape_registration(shape_id, ast, shape)?;
         self.query.locally_registered_shapes.insert(shape_id);
         Ok(())
     }
