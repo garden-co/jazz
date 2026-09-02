@@ -97,7 +97,31 @@ pub(super) fn lowered_terminals(
     // occurrence.  In particular, source.graph may have applied table policy
     // but still lacks residual/reachable constraints from the surrounding
     // program.
-    let mut covered_source_members = closure.covered_source_members(plan.root_source().clone());
+    // The root itself is a receiver input source.  Like every closure child,
+    // its frozen CoveredInput and version-witness terminals must retain the
+    // compiler-owned route carriers selected by the authority residual graph.
+    // `closure.visible_root` is intentionally a general graph and its
+    // conservative declaration may omit those carriers; publishing it raw
+    // made routed join receipts fail only when the covered-input terminal
+    // later joined it to a version witness.
+    let visible_root_with_routes = if root_route_fields.is_empty() {
+        closure.visible_root.clone()
+    } else {
+        closure
+            .visible_root
+            .clone()
+            .project_fields(project_source_fields_with_routes(
+                source,
+                &root_route_fields,
+            ))
+    };
+    let mut covered_source_members = closure.result_members.clone();
+    covered_source_members
+        .entry(plan.root_source().clone())
+        .and_modify(|existing| {
+            *existing = GraphBuilder::union([existing.clone(), visible_root_with_routes.clone()]);
+        })
+        .or_insert_with(|| visible_root_with_routes.clone());
     // A flat join has no explicit include path, but every join-side row that
     // contributes to a public root is still receiver input.  Derive each
     // contributor from the post-policy visible root—not from its raw table
@@ -122,6 +146,7 @@ pub(super) fn lowered_terminals(
                 &request.input.shape.nodes,
                 resolved_sources,
                 request,
+                &root_route_fields,
             )?
         } else {
             join_contribution_membership_graph(
@@ -132,12 +157,9 @@ pub(super) fn lowered_terminals(
                 &request.input.shape.nodes,
                 resolved_sources,
                 request,
+                &root_route_fields,
             )?
-        }
-        .project_fields(project_source_fields_with_routes(
-            resolved_source,
-            &root_route_fields,
-        ));
+        };
         covered_source_members
             .entry(contribution.source.clone())
             .and_modify(|existing| {
@@ -168,17 +190,6 @@ pub(super) fn lowered_terminals(
     // conservative root field set omits them. Use the graph's declared output
     // after closure lowering when choosing the fields retained by maintained
     // result-membership facts.
-    let visible_root_with_routes = if root_route_fields.is_empty() {
-        closure.visible_root.clone()
-    } else {
-        closure
-            .visible_root
-            .clone()
-            .project_fields(project_source_fields_with_routes(
-                source,
-                &root_route_fields,
-            ))
-    };
     // Correlated path lowering can carry a route field while reporting a
     // conservative `available_fields` set for the root.  Use the parameter
     // domain rather than only `root_route_fields` to keep routed maintained
@@ -189,14 +200,14 @@ pub(super) fn lowered_terminals(
         let (
             graph,
             descriptor,
-            hidden_fields,
+            mut hidden_fields,
             carrier,
             field_carriers,
             public_field_names,
             terminal,
         ) = match app_rows.projection.clone() {
             _ if !app_rows.public_terminal => (
-                closure.visible_root.clone(),
+                visible_root_with_routes.clone(),
                 source.row_shape.descriptor.clone(),
                 hidden_source_fields(&source.row_shape),
                 AppRowCarrier::CurrentRow,
@@ -301,6 +312,11 @@ pub(super) fn lowered_terminals(
                 )
             }
         };
+        // Prepared multisinks bind route parameters at every terminal. Keep
+        // the same compiler-owned route carriers in the app-row schema as in
+        // the source-closure terminals so the public collector is partitioned
+        // by the exact authority scope without exposing those fields.
+        hidden_fields.extend(root_route_fields.iter().cloned());
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
             graph,
@@ -430,6 +446,7 @@ pub(super) fn lowered_terminals(
                         &request.input.shape.nodes,
                         resolved_sources,
                         request,
+                        &claim_route_fields,
                     )?;
                     let graph = fact_terminal_graph(
                         fact,

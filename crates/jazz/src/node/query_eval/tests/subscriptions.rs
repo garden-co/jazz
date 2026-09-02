@@ -5,6 +5,71 @@ use crate::legacy_test_future::FutureResolveExt as _;
 use crate::peer::PeerState;
 use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey};
 
+/// A receiver has only the exact policy-scoped source closure delivered by its
+/// authority.  Test reads from that node must therefore use the client-local
+/// execution path, never the trusted-serving path that expects complete
+/// current-table capabilities.
+fn receiver_rows(
+    node: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    tier: DurabilityTier,
+) -> Vec<CurrentRow> {
+    node.query_rows_for_client(shape, binding, tier, AuthorSubject::SYSTEM)
+        .resolve()
+        .expect("read receiver-local covered-input result")
+}
+
+fn receiver_rows_in_read_view(
+    node: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    tier: DurabilityTier,
+    read_view: &ReadViewSpec,
+) -> Vec<CurrentRow> {
+    node.query_relation_snapshot_for_client(shape, binding, tier, AuthorSubject::SYSTEM, read_view)
+        .resolve()
+        .expect("read receiver-local covered-input relation")
+        .rows
+}
+
+/// Direct test peers terminate SYSTEM themselves. Their counterpart's
+/// subscription must record that same immutable reader scope; an unscoped
+/// `Subscribe` models neither a direct peer nor a multiplexed relay.
+fn subscribe_query_binding_as_system_with_opts(
+    node: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    opts: RegisterShapeOptions,
+) {
+    let values = shape
+        .params()
+        .keys()
+        .map(|name| {
+            binding
+                .values()
+                .get(name)
+                .cloned()
+                .expect("bound parameter")
+        })
+        .collect();
+    node.apply_sync_message_settled(SyncMessage::Subscribe(Subscribe {
+        shape_id: shape.shape_id(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        },
+        values,
+        known_state: None,
+        delegated_session: Some(DelegatedSessionBinding {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+        }),
+    }))
+    .expect("register SYSTEM-scoped test subscription");
+}
+
 fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
     match graph {
         GraphBuilder::Table {
@@ -227,7 +292,7 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         .validate(&relay.catalogue.schema)
         .unwrap();
     register_query_shape(&mut relay, &shape, RegisterShapeOptions::default());
-    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let _binding = shape.bind(BTreeMap::new()).unwrap();
 
     let subscription = |byte, identity| Subscribe {
         shape_id: shape.shape_id(),
@@ -254,62 +319,6 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
         .unwrap();
 
-    let member = |row_byte| crate::protocol::ResultMemberEntry::PathTuple {
-        path: "membership".to_owned(),
-        source_table: groove::Intern::from("issues".to_owned()),
-        source_row: row(row_byte),
-        target_table: groove::Intern::from("users".to_owned()),
-        target_row: row(row_byte),
-        edge_id: None,
-        revision: vec![row_byte as u8],
-    };
-    let update = |subscription, settled_through, reset_result_set, adds, removes| {
-        crate::node::ViewUpdateParts {
-            subscription,
-            settled_through: crate::time::GlobalTime(settled_through),
-            defer_settlement: false,
-            reset_result_set,
-            version_carriers: Vec::new(),
-            peer_complete_tx_payload_refs: Vec::new(),
-            authorization_progress: Some(3),
-            opening_pending: false,
-            result_member_adds: adds,
-            result_member_removes: removes,
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        }
-    };
-    relay
-        .apply_view_update(update(
-            alice_subscribe.subscription,
-            11,
-            true,
-            vec![member(1)],
-            Vec::new(),
-        ))
-        .resolve()
-        .unwrap();
-    relay
-        .apply_view_update(update(
-            bob_subscribe.subscription,
-            29,
-            true,
-            vec![member(2)],
-            Vec::new(),
-        ))
-        .resolve()
-        .unwrap();
-    relay
-        .apply_view_update(update(
-            alice_subscribe.subscription,
-            37,
-            false,
-            Vec::new(),
-            vec![member(1)],
-        ))
-        .resolve()
-        .unwrap();
-
     let alice_key = relay
         .authority_result_key_for_subscription(alice_subscribe.subscription)
         .unwrap();
@@ -323,142 +332,8 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
     peer.set_subscription_authority_result_source(bob_subscribe.subscription, bob_key.clone());
     assert_eq!(
         peer.canonical_subscription_settlement_time(&relay, alice_subscribe.subscription),
-        crate::time::GlobalTime(37),
-        "Alice must not inherit Bob's independently settled policy receipt"
-    );
-    assert_eq!(
-        peer.canonical_subscription_settlement_time(&relay, bob_subscribe.subscription),
-        crate::time::GlobalTime(29),
-        "Bob retains his own authority watermark"
-    );
-    assert_eq!(
-        relay
-            .known_state_declaration_for_subscription(
-                &shape,
-                &binding,
-                alice_subscribe.subscription,
-                &[],
-                alice,
-                Some(&(alice, BTreeMap::new())),
-            )
-            .resolve()
-            .unwrap(),
-        Some(
-            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
-                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-                position: crate::time::GlobalTime(37),
-                authorization_progress: 3,
-            }
-        ),
-        "Alice's known state must use her exact receipt, not Bob's watermark"
-    );
-    assert_eq!(
-        relay
-            .known_state_declaration_for_subscription(
-                &shape,
-                &binding,
-                bob_subscribe.subscription,
-                &[],
-                bob,
-                Some(&(bob, BTreeMap::new())),
-            )
-            .resolve()
-            .unwrap(),
-        Some(
-            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
-                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-                position: crate::time::GlobalTime(29),
-                authorization_progress: 3,
-            }
-        ),
-        "Bob's known state remains independent from Alice's later receipt"
-    );
-    // A deferred reset supersedes Alice's earlier live receipt until the
-    // authority completes it. Bob shares the binding view but must retain his
-    // own independent live receipt throughout that gap.
-    let mut alice_deferred = update(
-        alice_subscribe.subscription,
-        41,
-        true,
-        Vec::new(),
-        Vec::new(),
-    );
-    alice_deferred.defer_settlement = true;
-    relay.apply_view_update(alice_deferred).resolve().unwrap();
-    assert_eq!(
-        relay
-            .known_state_declaration_for_subscription(
-                &shape,
-                &binding,
-                alice_subscribe.subscription,
-                &[],
-                alice,
-                Some(&(alice, BTreeMap::new())),
-            )
-            .resolve()
-            .unwrap(),
-        None,
-        "Alice's deferred reset must revoke her previous live handoff"
-    );
-    assert_eq!(
-        relay
-            .known_state_declaration_for_subscription(
-                &shape,
-                &binding,
-                bob_subscribe.subscription,
-                &[],
-                bob,
-                Some(&(bob, BTreeMap::new())),
-            )
-            .resolve()
-            .unwrap(),
-        Some(
-            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
-                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-                position: crate::time::GlobalTime(29),
-                authorization_progress: 3,
-            }
-        ),
-        "Alice's deferred lifecycle must not revoke Bob's sibling scope"
-    );
-    relay
-        .apply_view_update(update(
-            alice_subscribe.subscription,
-            43,
-            true,
-            Vec::new(),
-            Vec::new(),
-        ))
-        .resolve()
-        .unwrap();
-    assert_eq!(
-        relay
-            .known_state_declaration_for_subscription(
-                &shape,
-                &binding,
-                alice_subscribe.subscription,
-                &[],
-                alice,
-                Some(&(alice, BTreeMap::new())),
-            )
-            .resolve()
-            .unwrap(),
-        Some(
-            crate::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
-                completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-                position: crate::time::GlobalTime(43),
-                authorization_progress: 3,
-            }
-        ),
-        "only Alice's subsequent non-deferred completion restores her receipt"
-    );
-    assert_eq!(
-        relay.query.authority_results[&alice_key].settled_result_set,
-        BTreeSet::new()
-    );
-    assert_eq!(
-        relay.query.authority_results[&bob_key].settled_result_set,
-        BTreeSet::from([member(2)])
+        crate::time::GlobalTime::default(),
+        "an unclaimed source closure must not borrow Bob's receipt"
     );
     assert!(
         relay
@@ -467,113 +342,10 @@ fn policy_scoped_authority_results_do_not_collide_on_one_binding_view() {
         "a BindingViewKey-only reader must refuse an ambiguous multiplexed receipt"
     );
 
-    // The settled-member key is exactly the five-field authority identity
-    // followed by the member handle. The policy handle remains bounded in the
-    // ordered key; the exact subject + claims live in the typed directory.
-    let member_store = relay
-        .database
-        .direct_record_store(crate::schema::SETTLED_RESULT_MEMBERS_STORE)
-        .unwrap();
-    let members = futures::executor::block_on(member_store.prefix_entries(&[])).unwrap();
-    assert_eq!(members.len(), 1, "only bob's unretracted member persists");
-    let member_key = &members[0].key;
-    assert_eq!(
-        member_key.len(),
-        6,
-        "member key extends the 5-field receipt key"
-    );
-    assert_eq!(member_key[3], Value::U8(1));
-    assert!(matches!(&member_key[4], Value::Bytes(handle) if handle.len() == 32));
-    assert!(matches!(&member_key[5], Value::Bytes(handle) if handle.len() == 32));
-
-    let directory = relay
-        .database
-        .direct_record_store(crate::schema::AUTHORITY_POLICY_BINDINGS_STORE)
-        .unwrap();
-    let entries = futures::executor::block_on(directory.prefix_entries(&[])).unwrap();
-    assert_eq!(
-        entries.len(),
-        2,
-        "each exact delegated identity has one directory entry"
-    );
-    for entry in &entries {
-        let [Value::Bytes(handle)] = entry.key.as_slice() else {
-            panic!("directory key must be exactly one binary handle");
-        };
-        assert_eq!(handle.len(), 32, "directory handle is fixed-width");
-        let Value::String(subject) = entry.value.get_idx(0).unwrap() else {
-            panic!("directory subject must stay an ordinary typed string");
-        };
-        let claims = crate::protocol::policy_binding_directory_claims_from_value(
-            entry.value.get_idx(1).unwrap(),
-        )
-        .expect("directory claims must be normal typed Groove values");
-        let policy = PolicyBindingKey::from_canonical_parts(
-            AuthorSubject::from_canonical(&subject).unwrap(),
-            claims,
-        );
-        assert_eq!(policy.directory_digest().as_slice(), handle.as_slice());
-    }
-
-    // Plant the only possible digest collision shape: the valid fixed handle
-    // names a different valid typed subject/claims record. A later update must
-    // reject it rather than overwrite, merge, or silently use the wrong scope.
-    let alice_policy = alice_key.policy_binding.as_ref().unwrap();
-    futures::executor::block_on(directory.set(
-        &[Value::Bytes(alice_policy.directory_digest().to_vec())],
-        &[
-            Value::String(bob.canonical().to_owned()),
-            crate::protocol::policy_binding_directory_claims_value(&BTreeMap::new()).unwrap(),
-        ],
-    ))
-    .unwrap();
-    drop(directory);
-    assert!(matches!(
-        relay
-            .apply_view_update(update(
-                alice_subscribe.subscription,
-                41,
-                false,
-                vec![member(3)],
-                Vec::new(),
-            ))
-            .resolve(),
-        Err(crate::node::Error::InvalidStoredValue(
-            "policy binding digest aliases a distinct exact policy identity"
-        ))
-    ));
-    let directory = relay
-        .database
-        .direct_record_store(crate::schema::AUTHORITY_POLICY_BINDINGS_STORE)
-        .unwrap();
-    futures::executor::block_on(directory.set(
-        &[Value::Bytes(alice_policy.directory_digest().to_vec())],
-        &[
-            Value::String(alice_policy.identity.canonical().to_owned()),
-            crate::protocol::policy_binding_directory_claims_value(alice_policy.claims()).unwrap(),
-        ],
-    ))
-    .unwrap();
-
-    let schema = relay.catalogue.schema.clone();
-    relay.close().resolve().unwrap();
-    drop(relay);
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync)
-        .expect("reopen authority-result store");
-    let reopened = NodeState::new(NodeUuid::from_bytes([9; 16]), schema, storage)
-        .expect("recover authority-result store");
-    assert_eq!(
-        reopened.query.authority_results[&alice_key].settled_result_set,
-        BTreeSet::new(),
-        "reopen retains alice's independent retraction"
-    );
-    assert_eq!(
-        reopened.query.authority_results[&bob_key].settled_result_set,
-        BTreeSet::from([member(2)]),
-        "reopen retains bob's independent admission"
-    );
+    // Opening a subscription establishes an in-memory, policy-scoped usage
+    // key. Persisted receiver state begins only once the authority supplies a
+    // complete CoveredInput closure, not from a synthetic result-member set.
+    drop(dir);
 }
 
 /// Lifecycle bookkeeping follows the exact delegated receipt, rather than
@@ -802,9 +574,7 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
         .apply_sync_message_settled(delta)
         .expect("separate reader applies scalar incremental update");
     assert_eq!(
-        reader
-            .query_rows(&shape, &binding, DurabilityTier::Global)
-            .expect("read separately materialized scalar rows")
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
@@ -822,9 +592,7 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
         .apply_sync_message_settled(removal)
         .expect("separate reader applies scalar removal update");
     assert_eq!(
-        reader
-            .query_rows(&shape, &binding, DurabilityTier::Global)
-            .expect("read scalar rows after deletion")
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
@@ -870,9 +638,7 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
         .apply_sync_message_settled(restore)
         .expect("separate reader applies scalar restoration update");
     assert_eq!(
-        reader
-            .query_rows(&shape, &binding, DurabilityTier::Global)
-            .expect("read scalar rows after restoration")
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
@@ -893,9 +659,7 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
         .apply_sync_message_settled(second_removal)
         .expect("separate reader applies scalar second removal update");
     assert!(
-        reader
-            .query_rows(&shape, &binding, DurabilityTier::Global)
-            .expect("read scalar rows after second deletion")
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .iter()
             .all(|current| current.row_uuid() != row(0)),
         "the reader must observe the precondition deletion"
@@ -970,9 +734,7 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
         .apply_sync_message_settled(same_tx_update)
         .expect("separate reader applies same-transaction restoration");
     assert!(
-        reader
-            .query_rows(&shape, &binding, DurabilityTier::Global)
-            .expect("ordinary reader lookup after same-transaction restoration")
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .iter()
             .any(|current| current.row_uuid() == row(0)),
         "ordinary reader lookup must expose the row restored alongside content"
@@ -998,6 +760,13 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
         );
         let (_reader_dir, mut reader) =
             open_node_with_uuid(NodeUuid::from_bytes([0x60 + tier as u8; 16]), scalar_schema);
+        // Edge is the foreground/relay handoff frontier. A durable node
+        // consumes its upstream Global frontier instead, so model the client
+        // receiver explicitly rather than accidentally asserting that a
+        // durable authority reads an Edge-only receipt.
+        if tier == DurabilityTier::Edge {
+            reader.set_non_durable_client();
+        }
         let shape = Query::from("notes")
             .validate(&server.catalogue.schema)
             .expect("validate scalar tier query");
@@ -1032,6 +801,7 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
             tier,
             ..RegisterShapeOptions::default()
         };
+        let read_view = opts.read_view.clone();
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
@@ -1039,7 +809,7 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
         };
         for node in [&mut server, &mut reader] {
             register_query_shape(node, &shape, opts.clone());
-            subscribe_query_binding_with_opts(node, &shape, &binding, opts.clone());
+            subscribe_query_binding_as_system_with_opts(node, &shape, &binding, opts.clone());
         }
 
         let commit = |node: &mut NodeState<RocksDbStorage>, now_ms, deletion| {
@@ -1085,10 +855,7 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
             .apply_sync_message_settled(deletion)
             .expect("reader applies tiered deletion update");
         assert!(
-            reader
-                .query_rows(&shape, &binding, tier)
-                .expect("read tiered deletion")
-                .is_empty(),
+            receiver_rows_in_read_view(&mut reader, &shape, &binding, tier, &read_view).is_empty(),
             "{tier:?} deletion hides the scalar row"
         );
 
@@ -1124,9 +891,7 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
             .apply_sync_message_settled(restored)
             .expect("reader applies tiered restore update");
         assert_eq!(
-            reader
-                .query_rows(&shape, &binding, tier)
-                .expect("read restored tiered row")
+            receiver_rows_in_read_view(&mut reader, &shape, &binding, tier, &read_view)
                 .into_iter()
                 .map(|row| row.row_uuid())
                 .collect::<BTreeSet<_>>(),
@@ -1176,12 +941,16 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
                     .expect("reader applies no-op Edge update");
             }
             assert_eq!(
-                reader
-                    .query_rows(&shape, &binding, DurabilityTier::Edge)
-                    .expect("read Edge after Local-only register write")
-                    .into_iter()
-                    .map(|row| row.row_uuid())
-                    .collect::<BTreeSet<_>>(),
+                receiver_rows_in_read_view(
+                    &mut reader,
+                    &shape,
+                    &binding,
+                    DurabilityTier::Edge,
+                    &read_view,
+                )
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>(),
                 BTreeSet::from([row(0)]),
                 "Edge remains at its prior visible register frontier"
             );
@@ -1214,7 +983,7 @@ fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
         ..RegisterShapeOptions::default()
     };
     register_query_shape(&mut server, &shape, edge_opts.clone());
-    subscribe_query_binding_with_opts(&mut server, &shape, &binding, edge_opts.clone());
+    subscribe_query_binding_as_system_with_opts(&mut server, &shape, &binding, edge_opts.clone());
 
     let content_tx = server
         .commit_mergeable_settled(
@@ -1282,10 +1051,11 @@ fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
 
     let (_reader_dir, mut reader) =
         open_node_with_uuid(NodeUuid::from_bytes([0x74; 16]), scalar_schema);
+    reader.set_non_durable_client();
     register_query_shape(&mut reader, &shape, edge_opts.clone());
-    subscribe_query_binding_with_opts(&mut reader, &shape, &binding, edge_opts.clone());
+    subscribe_query_binding_as_system_with_opts(&mut reader, &shape, &binding, edge_opts.clone());
     let update = PeerState::new()
-        .rehydrate_query_with_opts(&mut server, &shape, &binding, edge_opts)
+        .rehydrate_query_with_opts(&mut server, &shape, &binding, edge_opts.clone())
         .expect("serve fresh Edge hydration");
     let bundles = match &update {
         SyncMessage::ViewUpdate(payload) => {
@@ -1308,12 +1078,16 @@ fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
         .apply_sync_message_settled(update)
         .expect("fresh reader applies Edge hydration");
     assert_eq!(
-        reader
-            .query_rows(&shape, &binding, DurabilityTier::Edge)
-            .expect("fresh reader Edge lookup")
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
+        receiver_rows_in_read_view(
+            &mut reader,
+            &shape,
+            &binding,
+            DurabilityTier::Edge,
+            &edge_opts.read_view,
+        )
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0)]),
         "fresh reader matches the source's filter-before-argmax Edge view"
     );
@@ -1521,8 +1295,12 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let initial = peer.rehydrate_query(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         initial,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. })
-            if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == initial_tx)
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { program_fact_adds, .. })
+            if program_fact_adds.iter().any(|fact| matches!(
+                fact,
+                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source_row == target && input.version.tx == initial_tx
+            ))
     ));
     commit_global_cells(
         &mut node,
@@ -1539,8 +1317,12 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let transfer_update = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         transfer_update,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. })
-            if result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == initial_tx)
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { program_fact_removes, .. })
+            if program_fact_removes.iter().any(|fact| matches!(
+                fact,
+                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source_row == target && input.version.tx == initial_tx
+            ))
     ));
 
     let restored_tx = commit_global_cells(
@@ -1558,15 +1340,23 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let regrant = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         regrant,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. })
-            if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == restored_tx)
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { program_fact_adds, .. })
+            if program_fact_adds.iter().any(|fact| matches!(
+                fact,
+                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source_row == target && input.version.tx == restored_tx
+            ))
     ));
     delete_global(&mut node, "issues", target, 4, 4);
     let delete_update = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         delete_update,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. })
-            if result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == restored_tx)
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { program_fact_removes, .. })
+            if program_fact_removes.iter().any(|fact| matches!(
+                fact,
+                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source_row == target && input.version.tx == restored_tx
+            ))
     ));
 }
 
@@ -1613,18 +1403,14 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     reader.apply_sync_message_settled(bob_initial).unwrap();
 
     assert_eq!(
-        reader
-            .query_rows(&shape, &alice_binding, DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &alice_binding, DurabilityTier::Global)
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0)])
     );
     assert_eq!(
-        reader
-            .query_rows(&shape, &bob_binding, DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &bob_binding, DurabilityTier::Global)
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
@@ -1641,9 +1427,7 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
         .unwrap();
     reader.apply_sync_message_settled(bob_delta).unwrap();
     assert_eq!(
-        reader
-            .query_rows(&shape, &alice_binding, DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &alice_binding, DurabilityTier::Global)
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
@@ -1661,17 +1445,6 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
         .unwrap();
     peer.forget_query_binding(&shape, &alice_binding);
     commit_global_issue(&mut server, 3, "open", alice, 4);
-    let removed_delta = peer
-        .query_update(&mut server, &shape, &alice_binding)
-        .unwrap();
-    assert!(matches!(
-        removed_delta,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            result_member_adds,
-            result_member_removes,
-            ..
-        }) if result_member_adds.is_empty() && result_member_removes.is_empty()
-    ));
 
     let reset = peer
         .rehydrate_query(&mut server, &shape, &alice_binding)
@@ -1685,16 +1458,13 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     assert!(reset_result_set);
     reader.apply_sync_message_settled(reset).unwrap();
     assert_eq!(
-        reader
-            .query_rows(&shape, &alice_binding, DurabilityTier::Global)
-            .unwrap()
-            .len(),
+        receiver_rows(&mut reader, &shape, &alice_binding, DurabilityTier::Global).len(),
         3
     );
 }
 
 #[test]
-fn settled_binding_view_sources_provide_source_coverage_metadata() {
+fn settled_binding_view_sources_reject_trusted_source_coverage_reopening() {
     let (_server_dir, mut server) = open_node();
     let (_reader_dir, mut reader) = open_node();
     let alice = author(1);
@@ -1764,31 +1534,20 @@ fn settled_binding_view_sources_provide_source_coverage_metadata() {
             CoverageScope::Program,
         ));
 
-    let program = reader
+    let error = reader
         .compile_query_program_request(request)
-        .expect("settled binding-view source should lower source coverage facts");
+        .expect_err("a partial receiver must not reopen trusted source coverage");
     assert!(
-        matches!(
-            &program.lowered.output,
-            ProgramOutputSchemas::RowSet(terminals)
-                if terminals.iter().any(|terminal| matches!(
-                    terminal,
-                    OutputTerminalSchema::Fact(ProgramFactOutput {
-                    key: ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
-                        ..
-                    })
-                ))
-        ),
-        "compiled program should include a source coverage terminal"
+        matches!(error, crate::node::Error::QueryCapability(_)),
+        "only an authority can create a coverage closure; the receiver consumes it"
     );
 }
 
 #[test]
-fn settled_binding_view_root_with_reference_include_sources_lowers() {
-    // A settled binding view contains root result membership only. Shapes
-    // with implicit reference closures need auxiliary source coverage too,
-    // so the mixed settled-root/current-auxiliary read set must still be
-    // able to lower coverage facts.
+fn settled_binding_view_root_with_reference_include_sources_rejects_trusted_reopening() {
+    // A receiver's retained view is derived from CoveredInput. It is not a
+    // trusted source relation, so a mixed settled-root/current-auxiliary
+    // request must fail rather than recreate authority source coverage.
     let (_server_dir, mut server) = open_node();
     let (_reader_dir, mut reader) = open_node();
     let alice = author(1);
@@ -1849,10 +1608,17 @@ fn settled_binding_view_root_with_reference_include_sources_lowers() {
 
     let sources = format!("{:?}", request.reads);
     assert!(sources.contains("SettledBindingView"), "{sources}");
-    assert!(sources.contains("VisibleCurrent"), "{sources}");
-    reader
-        .compile_query_program_request(request)
-        .expect("settled binding-view root with current include sources should lower");
+    assert!(
+        !sources.contains("VisibleCurrent"),
+        "all receiver sources are covered-input derived: {sources}"
+    );
+    assert!(
+        matches!(
+            reader.compile_query_program_request(request).resolve(),
+            Err(crate::node::Error::QueryCapability(_))
+        ),
+        "a partial root plus include must not reopen current tables on a receiver"
+    );
 }
 
 #[test]
@@ -1883,18 +1649,28 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds, ..
+        result_member_adds,
+        program_fact_adds,
+        ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    let result_set_tables = result_member_adds
+    assert!(
+        result_member_adds.is_empty(),
+        "peer receipts must not carry authority-rendered result members"
+    );
+    let covered_source_tables = program_fact_adds
         .iter()
-        .filter_map(crate::protocol::ResultMemberEntry::as_row)
-        .map(|(table, _, _)| table.to_string())
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
+                Some(input.version_table.to_string())
+            }
+            _ => None,
+        })
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        result_set_tables,
+        covered_source_tables,
         BTreeSet::from([
             "issues".to_owned(),
             "issue_members".to_owned(),
@@ -1903,16 +1679,12 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
     );
     reader.apply_sync_message_settled(update).unwrap();
 
-    let local_rows = reader
-        .query_rows(&shape, &binding, DurabilityTier::Local)
-        .unwrap()
+    let local_rows = receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Local)
         .into_iter()
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>();
     assert_eq!(local_rows, BTreeSet::from([row(0)]));
-    let settled_rows = reader
-        .query_rows(&shape, &binding, DurabilityTier::Global)
-        .unwrap()
+    let settled_rows = receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
         .into_iter()
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>();

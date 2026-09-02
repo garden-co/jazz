@@ -141,6 +141,7 @@ pub(super) fn join_contribution_membership_graph(
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
@@ -183,7 +184,7 @@ pub(super) fn join_contribution_membership_graph(
     }
     Ok(
         GraphBuilder::join(visible_root, contribution_graph, root_keys, join_keys).project_fields(
-            project_source_fields_from_prefix(contribution_source, RIGHT_JOIN_PREFIX),
+            project_join_contribution_fields_with_root_routes(contribution_source, route_fields),
         ),
     )
 }
@@ -202,6 +203,7 @@ pub(super) fn flat_join_contribution_membership_graph(
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
@@ -242,11 +244,28 @@ pub(super) fn flat_join_contribution_membership_graph(
     }
     Ok(
         GraphBuilder::join(visible_root, relation_graph, [visible_key], [relation_key])
-            .project_fields(project_source_fields_from_prefix(
+            .project_fields(project_join_contribution_fields_with_root_routes(
                 contribution_source,
-                RIGHT_JOIN_PREFIX,
+                route_fields,
             )),
     )
+}
+
+/// A contributor is selected by joining its relation to the authority's
+/// admitted root. Row fields are produced by the right input, while routing
+/// fields are produced by the left root. Preserve both explicitly before the
+/// source is frozen as a receiver input.
+fn project_join_contribution_fields_with_root_routes(
+    source: &ResolvedSource,
+    route_fields: &BTreeSet<String>,
+) -> Vec<ProjectField> {
+    let mut fields = project_source_fields_from_prefix(source, RIGHT_JOIN_PREFIX);
+    fields.extend(
+        route_fields.iter().map(|field| {
+            ProjectField::renamed(format!("{LEFT_JOIN_PREFIX}{field}"), field.clone())
+        }),
+    );
+    fields
 }
 
 fn flat_join_visible_field(

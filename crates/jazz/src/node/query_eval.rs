@@ -1792,6 +1792,45 @@ where
             return None;
         }
         if tier == DurabilityTier::Local {
+            // A Local subscription still propagates. Once its own exact
+            // authority closure has arrived, an identical Local read must
+            // consume that receiver-local source graph rather than reopening
+            // the raw overlay. This direct receipt is distinct from the
+            // bounded Edge-page reuse below: the latter is a compiler-owned
+            // containment optimization for a *different* Local query shape.
+            let local_read_view = RegisterShapeOptions {
+                tier: DurabilityTier::Local,
+                read_view: read_view.clone(),
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key();
+            let direct = self
+                .query
+                .authority_results
+                .iter()
+                .filter_map(|(authority_key, state)| {
+                    (authority_key.binding_view
+                        == BindingViewKey::new(
+                            shape.shape_id(),
+                            binding.binding_id(),
+                            local_read_view,
+                        )
+                        && matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. }))
+                    .then_some(ClientSettledBindingView {
+                        key: authority_key.binding_view,
+                        retained_window: RetainedRootWindowSource::for_shape(shape)
+                            .is_bounded()
+                            .then(|| RetainedRootWindowSource::for_shape(shape)),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if direct.len() == 1 {
+                return direct.into_iter().next();
+            }
+            if direct.len() > 1 {
+                // A public local facade may not guess across policy scopes.
+                return None;
+            }
             // A non-durable foreground can use an active exact source page,
             // or reuse a detached page only through its compiler-owned
             // descriptor. There is deliberately no search through similarly
@@ -2359,22 +2398,94 @@ where
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
-        let program = self
-            .compile_current_query_program_for_read_view_in_authorization_mode(
+        // Structured reads are not an exception to receiver-local authority
+        // evaluation.  Use the exact same selected receipt and ephemeral
+        // descriptor-bound inputs as scalar one-shots; otherwise a tree read
+        // could silently reopen local storage while a scalar read correctly
+        // consumes CoveredInput.
+        let client_settled_view = (authorization_mode == QueryAuthorizationMode::ClientLocal)
+            .then(|| self.client_settled_binding_view_for_query(shape, binding, tier, read_view))
+            .flatten();
+        let settled_binding_view = client_settled_view.as_ref().map(|view| view.key);
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && tier >= DurabilityTier::Edge
+            && settled_binding_view.is_none()
+        {
+            return Ok(RelationSnapshot {
+                root_count: 0,
+                rows: Vec::new(),
+                edges: Vec::new(),
+            });
+        }
+        let authority_result_key = settled_binding_view.and_then(|binding_view| {
+            self.unique_authority_result_key_for_binding_view(binding_view)
+        });
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && settled_binding_view.is_some()
+            && authority_result_key.is_none()
+        {
+            return Ok(RelationSnapshot {
+                root_count: 0,
+                rows: Vec::new(),
+                edges: Vec::new(),
+            });
+        }
+        let (program, receiver) = if let Some(authority_result_key) = authority_result_key.as_ref()
+        {
+            let request = self.current_query_program_request(
                 shape,
                 binding,
                 tier,
                 identity,
                 CurrentQueryProgramOutput::RelationSnapshot,
                 read_view,
+                settled_binding_view,
                 authorization_mode,
+            )?;
+            let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+            let Some((program, receiver)) = self
+                .compile_client_one_shot_with_covered_inputs(
+                    request,
+                    access_paths,
+                    shape.schema_version(),
+                    authority_result_key,
+                )
+                .await?
+            else {
+                return Ok(RelationSnapshot {
+                    root_count: 0,
+                    rows: Vec::new(),
+                    edges: Vec::new(),
+                });
+            };
+            (program, Some(receiver))
+        } else {
+            (
+                self.compile_current_query_program_for_read_view_in_authorization_mode(
+                    shape,
+                    binding,
+                    tier,
+                    identity,
+                    CurrentQueryProgramOutput::RelationSnapshot,
+                    read_view,
+                    authorization_mode,
+                )
+                .await?,
+                None,
             )
-            .await?;
-        let snapshots = self
+        };
+        let snapshots_result = self
             .database
             .query_graphs(lowered_program_sinks(&program))
             .await
-            .map_err(Error::Groove)?;
+            .map_err(Error::Groove);
+        let retire_result = if let Some(receiver) = receiver {
+            self.retire_covered_input_sources(&receiver.sources).await
+        } else {
+            Ok(())
+        };
+        let snapshots = snapshots_result?;
+        retire_result?;
         self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots)
             .await
     }

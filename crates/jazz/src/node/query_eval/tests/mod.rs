@@ -19,7 +19,7 @@ use groove::schema::{ColumnSchema, ColumnType};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
-use crate::node::query_engine::{CoverageScope, FieldRequirement, ProgramFactOutput};
+use crate::node::query_engine::{CoverageScope, FieldRequirement};
 use crate::node::{MergeableCommit, NodeState};
 use crate::peer::PeerState;
 use crate::protocol::{
