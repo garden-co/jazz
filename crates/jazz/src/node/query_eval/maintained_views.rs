@@ -375,6 +375,24 @@ where
         let _initial_delta = self
             .apply_local_maintained_view_transitions(&mut local, transitions)
             .await?;
+        if let Some(authority_result_key) = settled_authority_result_key.clone() {
+            let installed = self
+                .replace_local_maintained_covered_inputs(&mut local, &authority_result_key)
+                .await?;
+            if installed {
+                self.drive_ready_query_runtime_with_waker(progress_waker)
+                    .await?;
+                let _ = self
+                    .drain_local_maintained_view_subscription_with_waker(
+                        &mut local,
+                        Some(authority_result_key),
+                        progress_waker,
+                    )
+                    .await?;
+            } else {
+                local.initial_received = false;
+            }
+        }
         let initial = self
             .materialize_local_maintained_relation_snapshot_with_occurrences(&local)
             .await?;

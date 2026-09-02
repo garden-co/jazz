@@ -82,6 +82,11 @@ pub(crate) struct MaintainedSubscriptionView {
     /// snapshot.  This is intentionally a sequence rather than a map: Jazz
     /// must not reconstruct query order from row values after lowering.
     structured_app_row_order: Vec<RowUuid>,
+    /// Runtime terminal edits address roots by their opaque Groove key, while
+    /// the retained collector tree is keyed by its public row UUID. Keep the
+    /// compiler-emitted association so reset and incremental terminal edits
+    /// fold through one local reducer without re-running the query.
+    structured_root_keys: BTreeMap<Vec<u8>, RowUuid>,
     structured_app_row_descriptor: Option<RecordDescriptor>,
     /// Whether this maintained subscription retains the recursive app-row
     /// collector. Flat unordered subscriptions release it after their reset;
@@ -114,6 +119,7 @@ impl Default for MaintainedSubscriptionView {
             published_result_payloads: BTreeMap::new(),
             structured_app_rows: BTreeMap::new(),
             structured_app_row_order: Vec::new(),
+            structured_root_keys: BTreeMap::new(),
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
@@ -302,6 +308,17 @@ enum NetEvent {
     StructuredAppRow(RowUuid, OwnedRecord),
 }
 
+/// Root collector keys begin with the root source occurrence. For the common
+/// single-root shape that occurrence is one ordered UUID scalar. Retained
+/// snapshots predate an in-memory key map, so this lets a later remove/move
+/// address that already-materialized root without reopening the query.
+fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
+    (key.first() == Some(&10))
+        .then(|| uuid::Uuid::from_slice(key.get(1..17)?).ok())
+        .flatten()
+        .map(RowUuid)
+}
+
 impl MaintainedSubscriptionView {
     pub(crate) fn uses_storage_backed_result_materialization(&self) -> bool {
         self.storage_backed_result_materialization
@@ -383,9 +400,9 @@ impl MaintainedSubscriptionView {
                 schemas.get(sink)?
             {
                 for operation in &terminal.operations {
-                    transitions
-                        .terminal_operations
-                        .push(rebind_terminal_operation_to_layout(operation, layout)?);
+                    let operation = rebind_terminal_operation_to_layout(operation, layout)?;
+                    self.apply_structured_terminal_operation(&operation)?;
+                    transitions.terminal_operations.push(operation);
                 }
             }
         }
@@ -783,6 +800,7 @@ impl MaintainedSubscriptionView {
     pub(crate) fn discard_structured_app_rows(&mut self) {
         self.structured_app_rows.clear();
         self.structured_app_row_order.clear();
+        self.structured_root_keys.clear();
         self.structured_app_row_descriptor = None;
         self.retains_structured_app_rows = false;
     }
@@ -803,6 +821,75 @@ impl MaintainedSubscriptionView {
         } else if !self.structured_app_row_order.contains(&root) {
             self.structured_app_row_order.push(root);
         }
+    }
+
+    /// Fold root terminal edits into the same retained collector tree used by
+    /// an initial/reset snapshot. This is deliberately receiver-local: it
+    /// never re-runs the query or reads authority output.
+    fn apply_structured_terminal_operation(
+        &mut self,
+        operation: &TerminalOperation,
+    ) -> Result<(), super::Error> {
+        if !operation.path.is_empty() {
+            return Ok(());
+        }
+        let root = match &operation.edit {
+            TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
+                let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
+                let index = operation.root_descriptor.field_index("row_uuid").ok_or(
+                    super::Error::InvalidStoredValue(
+                        "root collector terminal operation has no row_uuid",
+                    ),
+                )?;
+                let root = RowUuid(record.borrowed().get_uuid(index)?);
+                self.structured_root_keys
+                    .insert(operation.root_key.clone(), root);
+                root
+            }
+            TerminalEdit::Remove { .. } | TerminalEdit::Move { .. } => self
+                .structured_root_keys
+                .get(&operation.root_key)
+                .copied()
+                .or_else(|| terminal_root_uuid_from_key(&operation.root_key))
+                .ok_or(super::Error::InvalidStoredValue(
+                    "root collector terminal edit addresses an unknown root key",
+                ))?,
+        };
+        match &operation.edit {
+            TerminalEdit::Insert { index, value, .. } => {
+                let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
+                self.structured_app_rows.remove(&root);
+                self.apply_structured_app_row_delta(root, record, 1);
+                self.structured_app_row_order
+                    .retain(|candidate| candidate != &root);
+                self.structured_app_row_order
+                    .insert((*index).min(self.structured_app_row_order.len()), root);
+            }
+            TerminalEdit::Update { value, .. } => {
+                let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
+                self.structured_app_rows.remove(&root);
+                self.apply_structured_app_row_delta(root, record, 1);
+            }
+            TerminalEdit::Remove { .. } => {
+                self.structured_root_keys.remove(&operation.root_key);
+                self.structured_app_rows.remove(&root);
+                self.structured_app_row_order
+                    .retain(|candidate| candidate != &root);
+            }
+            TerminalEdit::Move { index, .. } => {
+                let previous = self
+                    .structured_app_row_order
+                    .iter()
+                    .position(|candidate| candidate == &root)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "root collector terminal move addresses an absent root",
+                    ))?;
+                self.structured_app_row_order.remove(previous);
+                self.structured_app_row_order
+                    .insert((*index).min(self.structured_app_row_order.len()), root);
+            }
+        }
+        Ok(())
     }
 
     fn replace_structured_app_row_order_from_snapshot(
