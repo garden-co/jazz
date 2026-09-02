@@ -2131,6 +2131,10 @@ struct CoverageGroup {
     policy_binding_origin: CoveragePolicyBindingOrigin,
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
+    /// Claim revision whose replacement opening reset is currently being
+    /// delivered. A retry of that same revision resumes this per-subscriber
+    /// cursor; a newer admission revision starts every live usage over.
+    pending_claim_refresh_revision: Option<u64>,
     initialized: bool,
     /// The usage-site subscription whose authority result supplies this
     /// group's membership. An authoritative server evaluates the incoming

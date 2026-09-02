@@ -1325,14 +1325,17 @@ where
                 let group = coverage_groups
                     .get_mut(&coverage)
                     .expect("claim-refresh coverage group remains registered");
-                if group.initialized {
-                    // A rebind is a new opening transition for every live
-                    // usage. Reuse the existing pending-initial ownership as
-                    // its per-subscriber send cursor so a later bounded
-                    // transport cannot replay a frame already accepted for a
-                    // sibling.
+                if group.pending_claim_refresh_revision != Some(current_revision) {
+                    // A new admitted claim revision is a new opening
+                    // transition for every live usage. Reuse the existing
+                    // pending-initial ownership as its per-subscriber send
+                    // cursor so a later bounded transport cannot replay a
+                    // frame already accepted for a sibling. A retry of this
+                    // *same* revision leaves the accepted members consumed;
+                    // a newer revision must re-open them all.
                     group.initialized = false;
                     group.pending_initial_subscribers = group.subscribers.clone();
+                    group.pending_claim_refresh_revision = Some(current_revision);
                 }
                 group
                     .pending_initial_subscribers
@@ -4318,6 +4321,7 @@ where
                                         },
                                         subscribers: BTreeSet::new(),
                                         pending_initial_subscribers: BTreeSet::new(),
+                                        pending_claim_refresh_revision: None,
                                         initialized: false,
                                         authority_result_subscription,
                                         upstream_subscription,

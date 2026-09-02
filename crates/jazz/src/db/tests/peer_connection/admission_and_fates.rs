@@ -1830,6 +1830,7 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
     let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
     let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
     let denied_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let later_denied_owner = AuthorSubject::for_test_bytes([0xb3; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     server
         .insert("todos", cells("A only", false, allowed_owner))
@@ -1838,6 +1839,10 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
     let allowed_claims =
         BTreeMap::from([("sub".to_owned(), Value::Uuid(allowed_owner.test_uuid()))]);
     let denied_claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(denied_owner.test_uuid()))]);
+    let later_denied_claims = BTreeMap::from([(
+        "sub".to_owned(),
+        Value::Uuid(later_denied_owner.test_uuid()),
+    )]);
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
     let (client_transport, server_transport, _client_sent, _server_sent) = duplex_with_taps();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1886,8 +1891,11 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
     assert_eq!(error.code, ErrorCode::Backpressure);
     subscriber
         .borrow_mut()
+        .update_authenticated_session_claims(later_denied_claims.clone());
+    subscriber
+        .borrow_mut()
         .tick()
-        .expect("only the unsent reset retries after capacity returns");
+        .expect("a newer claim revision reopens every group member after capacity returns");
 
     let outbound = outbound.borrow();
     let refreshed = outbound
@@ -1897,14 +1905,37 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(refreshed.len(), 2);
+    assert_eq!(refreshed.len(), 3);
+    let progress_by_subscription = refreshed.iter().fold(
+        BTreeMap::<SubscriptionKey, Vec<u64>>::new(),
+        |mut progress, update| {
+            progress.entry(update.subscription).or_default().push(
+                update
+                    .peer_payload_inventory
+                    .authorization_progress
+                    .expect("claim-refresh reset carries authorization progress"),
+            );
+            progress
+        },
+    );
     assert_eq!(
-        refreshed
-            .iter()
-            .map(|update| update.subscription)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([attachment.subscription(), second_subscription]),
-        "each member receives its replacement reset exactly once"
+        progress_by_subscription[&attachment.subscription()].len(),
+        2,
+        "the accepted A reset is followed by exactly one newer B reset"
+    );
+    assert_eq!(
+        progress_by_subscription[&second_subscription].len(),
+        1,
+        "the rejected A reset never reaches the second member"
+    );
+    assert!(
+        progress_by_subscription[&attachment.subscription()][0]
+            < progress_by_subscription[&attachment.subscription()][1]
+    );
+    assert_eq!(
+        progress_by_subscription[&attachment.subscription()][1],
+        progress_by_subscription[&second_subscription][0],
+        "the newer claim revision reaches every current member"
     );
     assert!(refreshed.iter().all(|update| {
         update.reset_result_set
@@ -1922,7 +1953,7 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
     let group = &state.coverage_groups[coverage];
     assert!(group.pending_initial_subscribers.is_empty());
     assert!(group.initialized);
-    assert_eq!(group.policy_binding.1, denied_claims);
+    assert_eq!(group.policy_binding.1, later_denied_claims);
     drop(outbound);
 }
 
