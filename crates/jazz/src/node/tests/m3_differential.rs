@@ -383,6 +383,90 @@ fn m3_differential_plain_body_cells_match_one_shot() {
     oracle.tick_and_assert(&mut core, 0, "after-visible-doc");
 }
 
+/// The authority publishes only Alice's exact recursive seed closure: the
+/// allowed group seed reaches visible docs, while Bob's otherwise valid group
+/// seed must neither appear as a covered source nor arrive in the receiver.
+#[test]
+fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x77), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let alice = user(0xa1);
+    let excluded_seed = row(0x43);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("group_access_edges", excluded_seed, 4).cells(BTreeMap::from([
+            ("user_id".to_owned(), Value::String(user(0xb2).canonical().to_owned())),
+            ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
+        ])),
+    );
+    let shape = m3_differential_shapes(&schema)
+        .into_iter()
+        .find(|shape| shape.name == "docs_edge_seeded_reachable")
+        .expect("M3 matrix includes recursive seed shape");
+    let mut peer = PeerState::client_link(alice);
+    let update = peer
+        .rehydrate_query(&mut core, &shape.shape, &shape.binding)
+        .expect("authority evaluates exact recursive seed closure");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        program_fact_adds,
+        ..
+    }) = &update
+    else {
+        panic!("expected recursive seed view update");
+    };
+    let seed_inputs = program_fact_adds
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source.table.as_str() == "group_access_edges" =>
+            {
+                Some(input)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(seed_inputs.len(), 1, "one allowed recursive seed source");
+    assert_eq!(seed_inputs[0].source_row, row(0x42));
+    assert_eq!(
+        seed_inputs[0].source.path,
+        vec![
+            crate::protocol::ProgramSourceRole::Root,
+            crate::protocol::ProgramSourceRole::RecursiveSeed(
+                "reachable:0:group_access_edges".to_owned()
+            ),
+        ],
+        "allowed seed retains its exact normalized source occurrence"
+    );
+    let shipped_seed_rows = version_bundles_for_update(&update)
+        .into_iter()
+        .flat_map(|bundle| bundle.versions)
+        .filter(|version| version.table() == "group_access_edges")
+        .map(|version| version.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(shipped_seed_rows, BTreeSet::from([row(0x42)]));
+
+    let mut receiver = maintained_receiver(&schema, 0xb9);
+    register_maintained_receiver(&mut receiver, &shape.shape, &shape.binding, alice);
+    receiver
+        .apply_sync_message_settled(update)
+        .expect("receiver accepts only exact recursive seed inputs");
+    let received_seed_rows = receiver
+        .current_rows("group_access_edges", DurabilityTier::Global)
+        .expect("read received recursive seed bodies")
+        .into_iter()
+        .map(|row| (row.row_uuid(), selected_body_cells(&row)))
+        .collect::<BTreeMap<_, _>>();
+    let expected_seed_body = core
+        .current_rows("group_access_edges", DurabilityTier::Global)
+        .expect("read authority seed body")
+        .into_iter()
+        .find(|current| current.row_uuid() == row(0x42))
+        .map(|current| selected_body_cells(&current))
+        .expect("allowed seed exists on authority");
+    assert_eq!(received_seed_rows, BTreeMap::from([(row(0x42), expected_seed_body)]));
+}
+
 fn run_m3_aggregate_churn_curve() {
     let schema = m3_differential_schema();
     let column_families = schema.column_families();
