@@ -121,6 +121,13 @@ pub struct StreamingValueUpload {
     emitted: Rc<RefCell<Vec<groove::large_values::StagedChunk>>>,
 }
 
+impl StreamingValueUpload {
+    pub(crate) fn cleanup_id(mut self) -> groove::large_values::StagedLargeValueId {
+        self.preparation.take();
+        self.id
+    }
+}
+
 fn large_value_cell_type_error(table: &str, column: &str) -> Error {
     Error::new(
         ErrorCode::Schema,

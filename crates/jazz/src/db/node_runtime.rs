@@ -536,6 +536,14 @@ where
     }
 
     pub(super) fn enqueue_transaction_cleanup(&self, future: QueuedMutationFuture) {
+        self.enqueue_transaction_cleanup_with_completion(future, None);
+    }
+
+    pub(super) fn enqueue_transaction_cleanup_with_completion(
+        &self,
+        future: QueuedMutationFuture,
+        completion: Option<QueuedMutationCompletion>,
+    ) {
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
@@ -543,7 +551,7 @@ where
                 open_tx_id: None,
                 future,
                 status: None,
-                completion: None,
+                completion,
             });
         self.schedule_tick(TickUrgency::Immediate);
     }
