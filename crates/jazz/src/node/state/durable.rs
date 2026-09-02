@@ -577,6 +577,15 @@ where
         authority_result_key: AuthorityResultKey,
         settled_through: GlobalTime,
     ) -> Result<(), Error> {
+        let closure_generation = self
+            .query
+            .authority_results
+            .get(&authority_result_key)
+            .and_then(|state| match state.source_closure {
+                crate::node::AuthoritySourceClosure::Claimed { generation } => Some(generation),
+                crate::node::AuthoritySourceClosure::Pending => None,
+            })
+            .unwrap_or(0);
         self.database
             .direct_record_store(KNOWN_STATE_FACTS_STORE)?
             .set(
@@ -590,6 +599,12 @@ where
                             .and_then(|state| state.authorization_progress)
                             .unwrap_or(u64::MAX),
                     ),
+                    // This is an exact-closure receipt, not `live_settled`.
+                    // It permits a reopened receiver to rebuild its own
+                    // descriptor-bound graph from the persisted CoveredInput
+                    // frontier, while a fresh remote read still waits for a
+                    // live authority handoff.
+                    Value::U64(closure_generation),
                 ],
             )
             .await?;
@@ -626,6 +641,23 @@ where
                 .entry(AuthorityResultKey::unscoped(binding_view_key))
                 .or_default()
                 .authorization_progress = Some(progress);
+        }
+        let closure_generation = match record.get_idx(2)? {
+            Value::U64(generation) => generation,
+            _ => {
+                return Err(Error::InvalidStoredValue(
+                    "known-state source-closure generation must be u64",
+                ));
+            }
+        };
+        if closure_generation != 0 {
+            self.query
+                .authority_results
+                .entry(AuthorityResultKey::unscoped(binding_view_key))
+                .or_default()
+                .source_closure = crate::node::AuthoritySourceClosure::Claimed {
+                generation: closure_generation,
+            };
         }
         Ok(Some(settled_through))
     }
@@ -926,6 +958,19 @@ where
                 _ => {
                     return Err(Error::InvalidStoredValue(
                         "known-state authorization progress must be u64",
+                    ));
+                }
+            }
+            match entry.value.get_idx(2)? {
+                Value::U64(generation) if generation != 0 => {
+                    state.source_closure = crate::node::AuthoritySourceClosure::Claimed {
+                        generation,
+                    };
+                }
+                Value::U64(_) => {}
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "known-state source-closure generation must be u64",
                     ));
                 }
             }

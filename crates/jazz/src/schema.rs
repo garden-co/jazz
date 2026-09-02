@@ -621,6 +621,10 @@ impl RuntimeSchema {
                 RecordDescriptor::new([
                     ("settled_through", ValueType::U64),
                     ("authorization_progress", ValueType::U64),
+                    // A nonzero generation proves the persisted program
+                    // facts are an exact CoveredInput closure. It is
+                    // deliberately distinct from the live authority receipt.
+                    ("source_closure_generation", ValueType::U64),
                 ]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(

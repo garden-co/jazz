@@ -717,17 +717,19 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let mut update = core.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
-        result_member_adds,
+        program_fact_adds,
         ..
     }) = &mut update
     else {
         panic!("expected view update");
     };
     version_carriers.clear();
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row_uuid, tx_id)]
-    );
+    assert!(program_fact_adds.iter().any(|fact| {
+        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(input)
+            if input.version_table.as_str() == "todos"
+                && input.source_row == row_uuid
+                && input.version.tx == tx_id)
+    }));
 
     let missing = reader
         .missing_known_state_row_version_refs(&update)

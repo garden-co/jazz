@@ -484,15 +484,24 @@ where
         table: &str,
     ) -> Result<SyncMessage, Error> {
         let subscription = self.whole_table_subscription_key(table)?;
-        self.view_update_for_current_rows_with_peer_payload_inventory(
-            table,
-            subscription,
-            [],
-            [],
-            [],
-            AuthorSubject::SYSTEM,
-        )
-        .await
+        let mut update = self
+            .view_update_for_current_rows_with_peer_payload_inventory(
+                table,
+                subscription,
+                [],
+                [],
+                [],
+                AuthorSubject::SYSTEM,
+            )
+            .await?;
+        let SyncMessage::ViewUpdate(payload) = &mut update else {
+            unreachable!("current-row view builder always returns ViewUpdate");
+        };
+        // The direct cold helper represents a receiver's first receipt.  It
+        // must therefore establish a replacement closure; the reusable
+        // peer-rehydrate builder below deliberately remains incremental.
+        payload.reset_result_set = true;
+        Ok(update)
     }
 
     /// Build a current-row view update using the peer's payload inventory.
@@ -1665,11 +1674,6 @@ where
                 fact_rewrite.as_ref(),
             )
             .await?;
-            self.persist_known_state_fact_for_authority_result(
-                authority_result_key.clone(),
-                settled_through,
-            )
-            .await?;
         }
         if self
             .query
@@ -1760,6 +1764,17 @@ where
                 state.settled_program_facts.len(),
                 state.source_closure,
             );
+        }
+        // Persist the closure receipt only after this frame has established
+        // whether it is an exact reset or a successor delta. Persisting
+        // earlier would leave a reopened receiver with facts but no claimed
+        // generation, forcing it to treat a durable exact closure as pending.
+        if !defer_settlement {
+            self.persist_known_state_fact_for_authority_result(
+                authority_result_key,
+                settled_through,
+            )
+            .await?;
         }
         Ok(())
     }

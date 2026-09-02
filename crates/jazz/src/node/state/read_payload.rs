@@ -481,24 +481,13 @@ where
         &mut self,
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
-        let (
-            subscription,
-            result_member_adds,
-            version_carriers,
-            program_fact_adds,
-        ) = match message {
+        let (subscription, version_carriers, program_fact_adds) = match message {
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
-                result_member_adds,
                 version_carriers,
                 program_fact_adds,
                 ..
-            }) => (
-                *subscription,
-                result_member_adds,
-                version_carriers,
-                program_fact_adds,
-            ),
+            }) => (*subscription, version_carriers, program_fact_adds),
             _ => return Ok(Vec::new()),
         };
         let normalized_bundles = expand_version_carriers(version_carriers)
@@ -531,59 +520,20 @@ where
                 )?;
             }
         }
-        // Only additions require repair. Removals are self-sufficient because
-        // the removed version may now be policy-invisible to this receiver, in
-        // which case fetching the body is both unnecessary and allowed to
-        // return no payload.
-        for (table, row_uuid, tx_id) in result_member_adds
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-        {
-            let version_ref = RowVersionRef::new(table.to_string(), row_uuid, tx_id);
-            if self.inline_version_bundle_covers(
-                &version_ref,
-                result_schema_version,
-                &incoming_versions,
-            )? {
-                continue;
-            }
-            let has_body = self.local_version_row_for_ref(&version_ref).await?.is_some()
-                && self.query_transaction(tx_id).await?.is_some();
-            if !has_body {
-                missing.insert(version_ref);
-            } else if let Some(version) = self.local_version_record_for_ref(&version_ref).await? {
-                self.collect_missing_text_ancestor_refs(
-                    &version,
-                    &mut missing,
-                    &mut visited_text_ancestors,
-                )?;
-            }
-        }
+        // Only an added CoveredInput may require a body repair.  A removed
+        // input is self-sufficient: its successor closure retracts the old
+        // receiver record, and its body may now be policy-invisible.  Result
+        // members and relation/contribution facts are authority output or
+        // proof and are intentionally never a repair source under
+        // INV-SYNC-36.
         for (table, row_uuid, tx_id) in program_fact_adds
             .iter()
             .flat_map(|fact| match fact {
-                ProgramFactEntry::RelationEdge(edge) => vec![
-                    edge.source_version.as_ref().map(|version| {
-                        (edge.source_table.to_string(), edge.source_row, version.tx)
-                    }),
-                    edge.target_version.as_ref().map(|version| {
-                        (edge.target_table.to_string(), edge.target_row, version.tx)
-                    }),
-                ],
-                ProgramFactEntry::ContributingMembers(contribution)
-                    if contribution
-                        .role
-                        .as_deref()
-                        .is_some_and(|role| role.starts_with("flat_tuple_source:")) =>
-                {
-                    vec![
-                        contribution
-                            .contributor
-                            .as_real_row()
-                            .and_then(RealRowMemberEntry::row_projection)
-                            .map(|(table, row, tx)| (table.to_string(), row, tx)),
-                    ]
-                }
+                ProgramFactEntry::CoveredInput(input) => vec![Some((
+                    input.version_table.to_string(),
+                    input.source_row,
+                    input.version.tx,
+                ))],
                 _ => Vec::new(),
             })
             .flatten()
