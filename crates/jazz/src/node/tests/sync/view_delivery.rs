@@ -3,6 +3,7 @@
 #[test]
 fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x61));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let member = crate::protocol::ResultMemberEntry::row((
         groove::Intern::new("todos".to_owned()),
@@ -28,7 +29,8 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
     member_update.result_member_adds.push(member.clone());
     assert!(matches!(
         crate::db::block_on(reader.apply_view_update(member_update)),
-        Err(Error::InvalidStoredValue("peer view update must not carry authority result members"))
+        Err(Error::InvalidAuthoritySourceClosure { transition, .. })
+            if transition == "authority view update carries retired result members"
     ));
 
     let mut payload_update = base();
@@ -45,9 +47,8 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
         ));
     assert!(matches!(
         crate::db::block_on(reader.apply_view_update(payload_update)),
-        Err(Error::InvalidStoredValue(
-            "peer view update must carry only covered-input closure facts"
-        ))
+        Err(Error::InvalidAuthoritySourceClosure { transition, .. })
+            if transition == "authority view update carries a non-source closure fact"
     ));
     assert!(reader
         .subscription_current_rows("todos", DurabilityTier::Local)
