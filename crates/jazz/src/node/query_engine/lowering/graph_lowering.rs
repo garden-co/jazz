@@ -1597,9 +1597,22 @@ fn lower_linear_plan_steps_cached(
                     }
                 }
                 if let Some(retained_fields) = &retained_contributor_fields {
+                    // A final relation projection follows a joined graph, so
+                    // every retained root descriptor field—including magic
+                    // provenance and version metadata—still lives on the
+                    // left side. Keeping user fields qualified but appending
+                    // metadata unqualified made nested covered-input joins
+                    // fail while preparing their receiver-local terminal.
+                    let retained_prefix = last_join_right
+                        .as_ref()
+                        .map(|_| LEFT_JOIN_PREFIX)
+                        .unwrap_or("");
                     for field in retained_fields {
                         if projected_outputs.insert(field.clone()) {
-                            project_fields.push(ProjectField::named(field.clone()));
+                            project_fields.push(ProjectField::renamed(
+                                format!("{retained_prefix}{field}"),
+                                field.clone(),
+                            ));
                         }
                     }
                 }
