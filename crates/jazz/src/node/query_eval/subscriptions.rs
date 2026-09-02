@@ -462,6 +462,7 @@ where
     /// authority scope. Binding-only client helpers must fail closed in a
     /// multiplexed relay rather than selecting whichever session arrived
     /// last. Relay serving paths carry `AuthorityResultKey` explicitly.
+    #[cfg(test)]
     pub(crate) fn authority_result_state_for_binding_view(
         &self,
         binding_view: BindingViewKey,

@@ -50,13 +50,14 @@ use super::query_engine::{
     claim_path_from_param_field, left_field, prepare_and_lower_query_program,
     query_program_source_requests, right_field, route_param_field, user_column_field,
 };
+#[cfg(test)]
+use crate::protocol::ReadViewKey;
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
-    ProgramFactEntry, ProgramSourceId, ReadViewKey, ReadViewSourceSpec, ReadViewSpec,
-    RegisterShapeOptions, RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry,
-    ResultRowLayer, RowVersionRef, RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe,
-    SubscriptionKey, SyntheticReplacementToken,
+    ProgramFactEntry, ProgramSourceId, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef,
+    RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -1322,10 +1323,10 @@ where
             QueryAuthorizationMode::ClientLocal => {
                 client_settled_binding_view.as_ref().map(|view| view.key)
             }
-            QueryAuthorizationMode::TrustedServing => (tier == DurabilityTier::Global)
-                .then(|| self.settled_binding_view_key_for_query(shape, binding))
-                .transpose()?
-                .flatten(),
+            // A serving node evaluates its complete authority program. A
+            // `SettledBindingView` is a receiver-local CoveredInput source,
+            // not a server-side cache or an alternate trusted read path.
+            QueryAuthorizationMode::TrustedServing => None,
         };
         // Ordinary Edge/Global reads are allowed to consume only a source
         // binding view registered by upstream coverage. A client-local plan
@@ -1585,10 +1586,10 @@ where
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
         let total_started = Instant::now();
         let phase_started = Instant::now();
-        let settled_binding_view = (tier == DurabilityTier::Global)
-            .then(|| self.settled_binding_view_key_for_query(shape, binding))
-            .transpose()?
-            .flatten();
+        // Profiled reads are trusted-serving only, so they evaluate the
+        // complete authority program rather than attempting to resolve a
+        // receiver-local CoveredInput receipt.
+        let settled_binding_view = None;
         // A concrete one-shot access path is binding-specific. Inline that
         // binding so execution keeps the selected graph instead of replacing it
         // with the generic cached parameterized plan.
@@ -1738,6 +1739,7 @@ where
         Ok((rows, profile))
     }
 
+    #[cfg(test)]
     fn settled_binding_view_key_for_query(
         &self,
         shape: &ValidatedQuery,
@@ -1958,6 +1960,7 @@ where
         false
     }
 
+    #[cfg(test)]
     fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
         let Some(tables) = self.query_storage_read_tables(shape) else {
             return true;

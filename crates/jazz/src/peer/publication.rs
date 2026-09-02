@@ -1026,6 +1026,16 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
+        // The first terminal drain after a cold open is the authority's
+        // complete successor closure, even when opening itself had to return
+        // before Groove produced that terminal batch.  Preserve that fact at
+        // publication: a receiver cannot infer a reset from an incremental
+        // CoveredInput delta and must never install one before its manifest.
+        let initial_received_before_drain = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .is_some_and(|maintained| maintained.initial_received);
         let transitions = self.drain_maintained_subscription_view_changes(
             node,
             shape,
@@ -1041,6 +1051,7 @@ impl PeerState {
         if !initial_state.is_some_and(|maintained| maintained.initial_received) {
             return Ok(None);
         }
+        let initial_snapshot_completed = !initial_received_before_drain;
         let drain_elapsed = trace_start.elapsed();
         let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let ResultTransitions {
@@ -1148,7 +1159,7 @@ impl PeerState {
                 update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: self.binding_settlement_time(node, subscription, shape, binding),
-                    reset_result_set: false,
+                    reset_result_set: initial_snapshot_completed,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     result_member_adds: Vec::new(),
@@ -1208,7 +1219,10 @@ impl PeerState {
                 },
             ).await
         };
-        let update = update?;
+        let mut update = update?;
+        if initial_snapshot_completed {
+            view_update_reset_result_set(&mut update);
+        }
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {

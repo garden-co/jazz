@@ -983,10 +983,14 @@ impl PerNodeKnowledge {
         if *reset_result_set && !preserve_existing_shared_state {
             self.subscription_entries.clear();
         }
-        let result_add_keys = result_member_adds
+        let result_add_keys = program_fact_adds
             .iter()
-            .filter_map(crate::protocol::ResultMemberEntry::as_row)
-            .map(|(_, row_uuid, tx_id)| (tx_id, row_uuid))
+            .filter_map(|fact| match fact {
+                crate::protocol::ProgramFactEntry::CoveredInput(input) => {
+                    Some((input.version.tx, input.source_row))
+                }
+                _ => None,
+            })
             .collect::<BTreeSet<_>>();
         let table_schema = owner_policy_schema().tables[0].clone();
         for bundle in &normalized_bundles {
@@ -1000,17 +1004,17 @@ impl PerNodeKnowledge {
                 }
             }
         }
-        for (_, row_uuid, tx_id) in result_member_adds
-            .iter()
-            .filter_map(crate::protocol::ResultMemberEntry::as_row)
-        {
-            self.subscription_entries.insert((tx_id, row_uuid));
+        for fact in program_fact_adds {
+            if let crate::protocol::ProgramFactEntry::CoveredInput(input) = fact {
+                self.subscription_entries
+                    .insert((input.version.tx, input.source_row));
+            }
         }
-        for (_, row_uuid, tx_id) in result_member_removes
-            .iter()
-            .filter_map(crate::protocol::ResultMemberEntry::as_row)
-        {
-            self.subscription_entries.remove(&(tx_id, row_uuid));
+        for fact in program_fact_removes {
+            if let crate::protocol::ProgramFactEntry::CoveredInput(input) = fact {
+                self.subscription_entries
+                    .remove(&(input.version.tx, input.source_row));
+            }
         }
         for bundle in &normalized_bundles {
             if usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len()) {
@@ -1076,6 +1080,7 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
     let update = node.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        program_fact_adds,
         result_member_adds,
         result_member_removes,
         ..
@@ -1087,11 +1092,16 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
         complete_tx_payload_refs.is_empty(),
         "full view recomputation should carry bundles for every visible member"
     );
-    assert!(result_member_removes.is_empty());
-    let result_rows = result_member_adds
+    assert!(
+        result_member_adds.is_empty() && result_member_removes.is_empty(),
+        "peer current-row updates carry receiver source closure, never authority result members"
+    );
+    let result_rows = program_fact_adds
         .iter()
-        .filter_map(crate::protocol::ResultMemberEntry::as_row)
-        .map(|(_, row_uuid, _)| row_uuid)
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            _ => None,
+        })
         .collect::<BTreeSet<_>>();
     let groove_rows = node
         .current_rows("todos", DurabilityTier::Local)
@@ -1433,24 +1443,30 @@ fn commit_core_owner_fixture(
 }
 fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
+        program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
     let version_bundles = version_bundles_for_update(update);
-    let result_txs = result_member_adds
+    // Peer publication no longer carries authority output membership.  The
+    // disclosure boundary is the exact receiver input closure: every body
+    // named here must have a matching CoveredInput and no policy/proof-only
+    // row may escape merely because it contributed to an authorized result.
+    let covered_rows = program_fact_adds
         .iter()
-        .filter_map(crate::protocol::ResultMemberEntry::as_row)
-        .map(|(_, _, tx_id)| tx_id)
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            _ => None,
+        })
         .collect::<BTreeSet<_>>();
-    let referenced_rows = version_bundles
+    assert_eq!(covered_rows, expected_rows, "covered closure rows differ");
+    let shipped_rows = version_bundles
         .iter()
-        .filter(|bundle| result_txs.contains(&bundle.tx.tx_id))
         .flat_map(|bundle| bundle.versions.iter().map(|version| version.row_uuid()))
         .collect::<BTreeSet<_>>();
-    assert_eq!(referenced_rows, expected_rows);
+    assert_eq!(shipped_rows, expected_rows, "covered source bodies differ");
 }
 fn assert_view_update_only_ships_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
     if !matches!(update, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })) {
