@@ -33,6 +33,7 @@ struct DifferentialShape {
 
 struct DifferentialOracle {
     peers: Vec<PeerState>,
+    receivers: Vec<NodeState<MemoryStorage>>,
     shapes: Vec<DifferentialShape>,
     rows: Vec<BTreeSet<(String, RowUuid)>>,
     aggregates: Vec<AggregateDifferential>,
@@ -87,8 +88,9 @@ impl DifferentialOracle {
         seed: u64,
     ) -> Self {
         let mut peers = Vec::new();
+        let mut receivers = Vec::new();
         let mut rows = Vec::new();
-        for shape in &shapes {
+        for (receiver_offset, shape) in shapes.iter().enumerate() {
             let mut peer = PeerState::client_link(shape.identity);
             let update = peer
                 .rehydrate_query(core, &shape.shape, &shape.binding)
@@ -98,10 +100,23 @@ impl DifferentialOracle {
                         shape.name
                     )
                 });
-            let mut shape_rows = BTreeSet::new();
-            apply_result_members(&mut shape_rows, &update, &shape.shape.query().table);
+            let mut receiver = maintained_receiver(schema, 0xb0 + receiver_offset as u8);
+            register_maintained_receiver(&mut receiver, &shape.shape, &shape.binding, shape.identity);
+            receiver.apply_sync_message_settled(update).unwrap_or_else(|err| {
+                panic!(
+                    "seed {seed}: receiver rejected initial source closure for {}: {err:?}",
+                    shape.name
+                )
+            });
+            let shape_rows = m3_receiver_rows(
+                &mut receiver,
+                &shape.shape,
+                &shape.binding,
+                shape.identity,
+            );
             rows.push(shape_rows);
             peers.push(peer);
+            receivers.push(receiver);
         }
         let mut aggregates = Vec::new();
         for (receiver_offset, (name, aggregate, output, agreement)) in
@@ -125,8 +140,8 @@ impl DifferentialOracle {
                     panic!("seed {seed}: initial maintained open failed for {name}: {err:?}")
                 });
             let identity = user(0xa1);
-            let mut receiver = aggregate_receiver(schema, 0xc0 + receiver_offset as u8);
-            register_aggregate_receiver(&mut receiver, &shape, &binding, identity);
+            let mut receiver = maintained_receiver(schema, 0xc0 + receiver_offset as u8);
+            register_maintained_receiver(&mut receiver, &shape, &binding, identity);
             receiver
                 .apply_sync_message_settled(initial)
                 .unwrap_or_else(|err| {
@@ -150,6 +165,7 @@ impl DifferentialOracle {
 
         let mut oracle = Self {
             peers,
+            receivers,
             shapes,
             rows,
             aggregates,
@@ -174,9 +190,10 @@ impl DifferentialOracle {
         seed: u64,
         checkpoint: &str,
     ) {
-        for ((peer, shape), rows) in self
+        for (((peer, receiver), shape), rows) in self
             .peers
             .iter_mut()
+            .zip(self.receivers.iter_mut())
             .zip(self.shapes.iter())
             .zip(self.rows.iter_mut())
         {
@@ -193,7 +210,13 @@ impl DifferentialOracle {
                         shape.name
                     )
                 });
-            apply_result_members(rows, &update, &shape.shape.query().table);
+            receiver.apply_sync_message_settled(update).unwrap_or_else(|err| {
+                panic!(
+                    "seed {seed}: receiver rejected source closure for {} at {checkpoint}: {err:?}",
+                    shape.name
+                )
+            });
+            *rows = m3_receiver_rows(receiver, &shape.shape, &shape.binding, shape.identity);
         }
         for aggregate in &mut self.aggregates {
             let aggregate_update = aggregate
@@ -634,8 +657,8 @@ fn m3_maintained_one_shot_differential_oracle_null_semantics() {
     };
     let mut peer = PeerState::client_link(user(0xa1));
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let mut receiver = aggregate_receiver(&schema, 0xd1);
-    register_aggregate_receiver(&mut receiver, &shape, &binding, user(0xa1));
+    let mut receiver = maintained_receiver(&schema, 0xd1);
+    register_maintained_receiver(&mut receiver, &shape, &binding, user(0xa1));
     receiver
         .apply_sync_message_settled(initial)
         .expect("apply exact initial aggregate source closure");
@@ -820,11 +843,11 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let identity = user(0xa1);
     let mut peer = PeerState::client_link(identity);
+    register_maintained_receiver(&mut reader, &shape, &binding, identity);
 
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let mut maintained_rows = BTreeSet::new();
-    apply_result_members(&mut maintained_rows, &initial, shape.query().table.as_str());
     reader.apply_sync_message_settled(initial).unwrap();
+    let mut maintained_rows = m3_receiver_rows(&mut reader, &shape, &binding, identity);
     assert!(!maintained_rows.is_empty());
 
     for row_uuid in [row(0x11), row(0x12), row(0x14)] {
@@ -841,8 +864,8 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
         }
     }
     let reset = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    apply_result_members(&mut maintained_rows, &reset, shape.query().table.as_str());
     reader.apply_sync_message_settled(reset).unwrap();
+    maintained_rows = m3_receiver_rows(&mut reader, &shape, &binding, identity);
     assert!(
         one_shot_rows(&mut core, &shape, &binding, identity).is_empty(),
         "fixture must make the serving node one-shot result genuinely empty"
@@ -1680,39 +1703,6 @@ fn one_shot_rows<S: OrderedKvStorage>(
         .collect()
 }
 
-fn apply_result_members(
-    rows: &mut BTreeSet<(String, RowUuid)>,
-    update: &SyncMessage,
-    root_table: &str,
-) {
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    if *reset_result_set {
-        rows.clear();
-    }
-    for entry in result_member_removes {
-        if let Some((table, row_uuid, _tx_id)) = entry.as_row()
-            && table.as_str() == root_table
-        {
-            rows.remove(&(table.to_string(), row_uuid));
-        }
-    }
-    for entry in result_member_adds {
-        if let Some((table, row_uuid, _tx_id)) = entry.as_row()
-            && table.as_str() == root_table
-        {
-            rows.insert((table.to_string(), row_uuid));
-        }
-    }
-}
-
 fn one_shot_aggregate_values<S: OrderedKvStorage>(
     core: &mut NodeState<S>,
     shape: &ValidatedQuery,
@@ -1733,11 +1723,10 @@ fn one_shot_aggregate_values<S: OrderedKvStorage>(
         .collect()
 }
 
-/// The authority ships only the exact, policy-scoped source closure.  Aggregate
-/// output is deliberately computed by this separately registered client
-/// receiver; it must never be read back from `ResultPayload` facts on the
-/// authority update.
-fn aggregate_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemoryStorage> {
+/// The authority ships only the exact, policy-scoped source closure. Output is
+/// deliberately computed by a separately registered client receiver; it must
+/// never be read back from authority result facts on the update.
+fn maintained_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemoryStorage> {
     let column_families = schema.column_families();
     let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
     let mut receiver = NodeState::new(
@@ -1750,8 +1739,8 @@ fn aggregate_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemoryS
     receiver
 }
 
-fn register_aggregate_receiver(
-    receiver: &mut NodeState<MemoryStorage>,
+fn register_maintained_receiver<S: OrderedKvStorage + ReopenableStorage>(
+    receiver: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorSubject,
@@ -1762,7 +1751,7 @@ fn register_aggregate_receiver(
             ast: crate::protocol::ShapeAst::from_validated(shape),
             opts: crate::protocol::RegisterShapeOptions::default(),
         })
-        .expect("register aggregate receiver shape");
+        .expect("register maintained receiver shape");
     let values = shape
         .params()
         .keys()
@@ -1783,7 +1772,42 @@ fn register_aggregate_receiver(
                 claims: BTreeMap::new(),
             }),
         }))
-        .expect("register policy-scoped aggregate receiver subscription");
+        .expect("register policy-scoped maintained receiver subscription");
+}
+
+fn m3_receiver_rows<S: OrderedKvStorage>(
+    receiver: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+) -> BTreeSet<(String, RowUuid)> {
+    let (shape, binding, plan) = receiver
+        .prepare_query_binding_for_link_in_authorization_mode(
+            shape,
+            binding,
+            DurabilityTier::Global,
+            identity,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .resolve()
+        .expect("prepare maintained receiver from covered inputs");
+    let (_subscription, snapshot) = receiver
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            identity,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .resolve()
+        .expect("evaluate maintained receiver from covered inputs");
+    snapshot
+        .rows
+        .into_iter()
+        .map(|row| (row.table().to_owned(), row.row_uuid()))
+        .collect()
 }
 
 fn receiver_aggregate_values(
