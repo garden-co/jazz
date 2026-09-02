@@ -1066,6 +1066,8 @@ fn system_identity_read_policy_sees_everything() {
     let mut peer = PeerState::new();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row(1), row(2)]));

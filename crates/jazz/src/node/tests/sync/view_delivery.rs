@@ -211,6 +211,8 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
         panic!("expected view update");
     };
     assert_eq!(*settled_through, authoritative_seq);
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
     reader.apply_sync_message_settled(update).unwrap();
 
     assert_eq!(
