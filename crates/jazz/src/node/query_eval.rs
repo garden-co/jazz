@@ -3411,11 +3411,11 @@ where
         let settled_binding_view = Some(authority_result_key.binding_view);
         let (
             subscription,
-            mut maintained,
+            maintained,
             terminal_schemas,
-            mut transitions,
+            transitions,
             tables,
-            mut initial_received,
+            initial_received,
             covered_input_sources,
         ) = self
             .open_seeded_maintained_subscription_view_in_authorization_mode(
@@ -3431,65 +3431,72 @@ where
                 progress_waker,
             )
             .await?;
-        let mut covered_input_receiver =
-            maintained_views::CoveredInputReceiver::new(covered_input_sources);
-        if !covered_input_receiver.is_empty() {
-            let installed = self
-                .replace_covered_input_receiver(
-                    &mut covered_input_receiver,
-                    shape.schema_version(),
+        // Seeded relay children are ordinary receiver-local maintained views.
+        // Construct their retained local state before installing the exact
+        // closure so their first reset and later terminal transitions share
+        // the same install → drive → drain reducer as a late client opener.
+        let mut local = maintained_views::LocalMaintainedViewSubscription {
+            subscription,
+            _retained_prepared_plan: None,
+            maintained,
+            terminal_schemas,
+            tables,
+            result_query: shape.query().clone(),
+            result_table: shape.query().table.clone(),
+            result_schema_version: shape.schema_version(),
+            result_select: shape.query().select.clone(),
+            result_set: BTreeSet::new(),
+            result_payloads: BTreeMap::new(),
+            program_facts: BTreeSet::new(),
+            root_occurrence_ids: Vec::new(),
+            initial_received,
+            covered_input_receiver: maintained_views::CoveredInputReceiver::new(
+                covered_input_sources,
+            ),
+        };
+        let _ = self
+            .apply_local_maintained_view_transitions_inner(&mut local, transitions.clone(), false)
+            .await?;
+        let mut transitions = transitions;
+        if !local.covered_input_receiver.is_empty() {
+            match self
+                .install_opened_local_covered_receiver(
+                    &mut local,
                     &authority_result_key,
+                    progress_waker,
                 )
-                .await?;
-            if !installed {
-                initial_received = false;
-            } else {
-                self.drive_ready_query_runtime_with_waker(progress_waker)
-                    .await?;
-                loop {
-                    match subscription.try_recv() {
-                        Ok(deltas) => {
-                            initial_received = true;
-                            let extra = maintained.apply_multisink_deltas(
-                                deltas,
-                                &terminal_schemas,
-                                &tables,
-                                &self.node_aliases,
-                            )?;
-                            transitions.adds.extend(extra.adds);
-                            transitions.removes.extend(extra.removes);
-                            transitions
-                                .result_payload_adds
-                                .extend(extra.result_payload_adds);
-                            transitions
-                                .result_payload_removes
-                                .extend(extra.result_payload_removes);
-                            transitions
-                                .program_fact_adds
-                                .extend(extra.program_fact_adds);
-                            transitions
-                                .program_fact_removes
-                                .extend(extra.program_fact_removes);
-                            transitions
-                                .terminal_operations
-                                .extend(extra.terminal_operations);
-                        }
-                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                            return Err(Error::SubscriptionClosed);
-                        }
-                    }
+                .await?
+            {
+                Some(extra) => {
+                    transitions.adds.extend(extra.adds);
+                    transitions.removes.extend(extra.removes);
+                    transitions
+                        .result_payload_adds
+                        .extend(extra.result_payload_adds);
+                    transitions
+                        .result_payload_removes
+                        .extend(extra.result_payload_removes);
+                    transitions
+                        .program_fact_adds
+                        .extend(extra.program_fact_adds);
+                    transitions
+                        .program_fact_removes
+                        .extend(extra.program_fact_removes);
+                    transitions
+                        .terminal_operations
+                        .extend(extra.terminal_operations);
                 }
+                None => local.initial_received = false,
             }
         }
         Ok((
-            subscription,
-            maintained,
-            terminal_schemas,
+            local.subscription,
+            local.maintained,
+            local.terminal_schemas,
             transitions,
-            tables,
-            initial_received,
-            covered_input_receiver,
+            local.tables,
+            local.initial_received,
+            local.covered_input_receiver,
         ))
     }
 

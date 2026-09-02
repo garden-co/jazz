@@ -376,20 +376,15 @@ where
             .apply_local_maintained_view_transitions(&mut local, transitions)
             .await?;
         if let Some(authority_result_key) = settled_authority_result_key.clone() {
-            let installed = self
-                .replace_local_maintained_covered_inputs(&mut local, &authority_result_key)
-                .await?;
-            if installed {
-                self.drive_ready_query_runtime_with_waker(progress_waker)
-                    .await?;
-                let _ = self
-                    .drain_local_maintained_view_subscription_with_waker(
-                        &mut local,
-                        Some(authority_result_key),
-                        progress_waker,
-                    )
-                    .await?;
-            } else {
+            if self
+                .install_opened_local_covered_receiver(
+                    &mut local,
+                    &authority_result_key,
+                    progress_waker,
+                )
+                .await?
+                .is_none()
+            {
                 local.initial_received = false;
             }
         }
@@ -505,6 +500,47 @@ where
             .apply_local_maintained_view_transitions_inner(local, transitions, false)
             .await?;
         Ok(true)
+    }
+
+    /// Install an already-claimed exact authority closure into a newly opened
+    /// receiver, drive the one shared Groove graph to quiescence, and fold the
+    /// resulting local terminal into its retained state.  Both ordinary late
+    /// client opening and seeded relay-edge opening use this sequence: neither
+    /// may read an authority result/output cache to synthesize its reset.
+    ///
+    /// `None` means the receipt has not claimed a complete closure yet.  A
+    /// present empty transition is a valid empty exact closure and remains
+    /// distinct from that pending state.
+    pub(crate) async fn install_opened_local_covered_receiver(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+        authority_result_key: &AuthorityResultKey,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
+        if !self
+            .replace_local_maintained_covered_inputs(local, authority_result_key)
+            .await?
+        {
+            return Ok(None);
+        }
+        self.drive_ready_query_runtime_with_waker(progress_waker)
+            .await?;
+        let (transitions, _) = self
+            .drain_local_maintained_view_subscription_transitions(
+                local,
+                Some(authority_result_key.clone()),
+                &BTreeSet::new(),
+                progress_waker,
+            )
+            .await?;
+        let transitions = transitions.unwrap_or_default();
+        // Keep the retained receiver snapshot in lockstep with the exact same
+        // terminal batch the caller publishes.  `false` avoids a second
+        // facade materialization; state still folds terminal ordering/moves.
+        let _ = self
+            .apply_local_maintained_view_transitions_inner(local, transitions.clone(), false)
+            .await?;
+        Ok(Some(transitions))
     }
 
     pub(crate) fn local_maintained_authority_reconciliation_due(
@@ -1226,7 +1262,7 @@ where
             .await
     }
 
-    async fn apply_local_maintained_view_transitions_inner(
+    pub(super) async fn apply_local_maintained_view_transitions_inner(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,

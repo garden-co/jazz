@@ -1633,10 +1633,10 @@ impl PeerState {
             receiver,
             mut maintained,
             terminal_schemas,
-            mut transitions,
+            transitions,
             tables,
-            mut initial_received,
-            mut covered_input_receiver,
+            initial_received,
+            covered_input_receiver,
         ) =
             match opened {
             Ok(opened) => opened,
@@ -1663,59 +1663,11 @@ impl PeerState {
             }
             Err(error) => return Err(error),
             };
-        if let (Some(authority_key), Some(receiver_inputs)) = (
-            source_authority_result_key.as_ref(),
-            covered_input_receiver.as_mut(),
-        ) {
-            let installed = node
-                .replace_covered_input_receiver(
-                    receiver_inputs,
-                    shape.schema_version(),
-                    authority_key,
-                )
-                .await?;
-            if !installed {
-                // A strict relay cannot publish the graph's pre-closure empty
-                // opening. Retain the receiver for the next exact receipt.
-                initial_received = false;
-            } else {
-                node.drive_ready_query_runtime_with_waker(progress_waker).await?;
-                loop {
-                    match receiver.try_recv() {
-                        Ok(deltas) => {
-                            initial_received = true;
-                            let extra = maintained.apply_multisink_deltas(
-                                deltas,
-                                &terminal_schemas,
-                                &tables,
-                                &node.node_aliases,
-                            )?;
-                            transitions.adds.extend(extra.adds);
-                            transitions.removes.extend(extra.removes);
-                            transitions
-                                .result_payload_adds
-                                .extend(extra.result_payload_adds);
-                            transitions
-                                .result_payload_removes
-                                .extend(extra.result_payload_removes);
-                            transitions
-                                .program_fact_adds
-                                .extend(extra.program_fact_adds);
-                            transitions
-                                .program_fact_removes
-                                .extend(extra.program_fact_removes);
-                            transitions
-                                .terminal_operations
-                                .extend(extra.terminal_operations);
-                        }
-                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                            return Err(Error::SubscriptionClosed);
-                        }
-                    }
-                }
-            }
-        }
+        // `open_seeded_relay_edge_subscription_view_with_waker` has already
+        // installed the exact source closure, driven the receiver graph, and
+        // folded the same terminal batch it returns here. Repeating that work
+        // used to create a second opening path that could publish a different
+        // reset from the generic late-opener path.
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=rehydrate_opened owner={} subscription={subscription:?} identity={policy_identity:?} initial={initial_received} adds={:?} facts={:?}",
