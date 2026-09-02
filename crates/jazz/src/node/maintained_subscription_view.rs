@@ -519,16 +519,12 @@ impl MaintainedSubscriptionView {
                 record_peer_source_fact_change(&mut peer_source_fact_changes, fact, is_present);
             }
             for fact in delta_transitions.program_fact_adds {
-                if fact.is_peer_source_closure_fact() {
-                    record_peer_source_fact_change(&mut peer_source_fact_changes, fact, true);
-                } else {
+                if !fact.is_peer_source_closure_fact() {
                     transitions.program_fact_adds.push(fact);
                 }
             }
             for fact in delta_transitions.program_fact_removes {
-                if fact.is_peer_source_closure_fact() {
-                    record_peer_source_fact_change(&mut peer_source_fact_changes, fact, false);
-                } else {
+                if !fact.is_peer_source_closure_fact() {
                     transitions.program_fact_removes.push(fact);
                 }
             }
