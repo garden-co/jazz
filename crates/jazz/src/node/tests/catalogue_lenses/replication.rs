@@ -468,9 +468,24 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
         &mut core,
         MergeableCommit::new("todos", row(0x6c), 1_005).cells(title_cells("view payload")),
     );
-    let update = PeerState::new()
-        .current_rows_update(&mut core, "todos")
-        .unwrap();
+    // The first covered-input closure is a reset by contract. Advance the
+    // same publication once so this test exercises the intended incremental
+    // receiver-batch path rather than relying on the retired first-frame
+    // behavior.
+    let mut peer = PeerState::new();
+    let initial = peer.current_rows_update(&mut core, "todos").unwrap();
+    assert!(matches!(
+        initial,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            reset_result_set: true,
+            ..
+        })
+    ));
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x6d), 1_006).cells(title_cells("later payload")),
+    );
+    let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let mut bundles = version_bundles_for_update(&update);
     assert_eq!(bundles.len(), 1);
     let version = bundles[0].versions[0].clone();
