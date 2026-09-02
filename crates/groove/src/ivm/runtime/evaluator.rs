@@ -1440,14 +1440,6 @@ impl TickEvaluator<'_> {
         right_delta: &[RecordDelta],
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let operator_key = self.operator_key(node)?;
-        let operator = self
-            .operator_states
-            .entry(operator_key.clone())
-            .or_insert_with(|| operator_state_for(&OpType::AntiJoin(join.clone())));
-        let OperatorState::AntiJoin(join_state) = operator else {
-            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
-        };
-        let mut join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
             self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
@@ -1457,6 +1449,18 @@ impl TickEvaluator<'_> {
             &right_on,
             join.comparison,
         )?;
+        // Anti-join publication is operator-local state. Take it while the
+        // evaluator mutates arrangements, then restore it even if evaluation
+        // rejects a malformed delta. Cloning would copy every published row
+        // for each small incremental update.
+        let mut join_state = match self.operator_states.remove(&operator_key) {
+            None => AntiJoinState::default(),
+            Some(OperatorState::AntiJoin(state)) => state,
+            Some(operator) => {
+                self.operator_states.insert(operator_key, operator);
+                return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+            }
+        };
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -1468,41 +1472,44 @@ impl TickEvaluator<'_> {
                 .remove(&right_key)
                 .unwrap_or_default()
         };
-        let deltas = join_state.apply(
-            &mut left_arrangement,
-            &mut right_arrangement,
-            &join.left_descriptor,
-            &join.right_descriptor,
-            &output_desc,
-            left_on.as_ref(),
-            right_on.as_ref(),
-            join.comparison,
-            left_delta,
-            right_delta,
-            self.arrangement_sub_tick(&left_key),
-            self.arrangement_sub_tick(&right_key),
-            self.context.arrangement_update_mode,
-        )?;
-        if left_key == right_key {
-            left_arrangement = right_arrangement;
-        } else {
-            self.insert_arrangement(right_key, right_arrangement);
-        }
-        self.insert_arrangement(left_key, left_arrangement);
+        let result = (|| {
+            let deltas = join_state.apply(
+                &mut left_arrangement,
+                &mut right_arrangement,
+                &join.left_descriptor,
+                &join.right_descriptor,
+                &output_desc,
+                left_on.as_ref(),
+                right_on.as_ref(),
+                join.comparison,
+                left_delta,
+                right_delta,
+                self.arrangement_sub_tick(&left_key),
+                self.arrangement_sub_tick(&right_key),
+                self.context.arrangement_update_mode,
+            )?;
+            if left_key == right_key {
+                left_arrangement = right_arrangement;
+            } else {
+                self.insert_arrangement(right_key, right_arrangement);
+            }
+            self.insert_arrangement(left_key, left_arrangement);
+            #[cfg(feature = "cold-settle-attribution")]
+            crate::cold_settle_attribution::record_join(
+                self.context.eval_mode == EvalMode::Hydrate,
+                self.depends_on_dominant_child(node)?,
+                left_delta.len(),
+                right_delta.len(),
+                deltas.len(),
+            );
+            Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas,
+            })
+        })();
         self.operator_states
             .insert(operator_key, OperatorState::AntiJoin(join_state));
-        #[cfg(feature = "cold-settle-attribution")]
-        crate::cold_settle_attribution::record_join(
-            self.context.eval_mode == EvalMode::Hydrate,
-            self.depends_on_dominant_child(node)?,
-            left_delta.len(),
-            right_delta.len(),
-            deltas.len(),
-        );
-        Ok(RecordDeltas {
-            descriptor: output_desc,
-            deltas,
-        })
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
