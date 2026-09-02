@@ -38,17 +38,17 @@ const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
 const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
-    "4bd2edf48016c9a311168baaaaef329a11ab61b111a3483da05353a02c61bbe6";
+    "4bb7158e64558f8d605d6dfad8310e070bab3e9e341ee0a57911b92a6c93e64a";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "fe809092e2da227ff856b0793a07351ea965a65c633af90be9f78f8ec8620a9c";
+    "6074133a0d9a5ff1bf45747539dc729c09fd6465248cb15b53834cd9ef6dd2f5";
 const EPOCH_1_NATIVE_SQLITE_SHA256: &str =
-    "2ae18ac862339a22b0ea94dc2c816491e3c4b4582132e3fba747f7c23e9eb55f";
+    "f919629efda0621563ace44ce977b5c8674128f08276ace9334946211833b98a";
 const EPOCH_1_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-rocksdb.tar.gz.base64");
 const EPOCH_1_NATIVE_ROCKSDB_SHA256: &str =
-    "3954b1daba51f4da25027ce414cf8ddb3cac1d5416ce187fc8f49d1e61b0205f";
+    "e80fea4509839af9baceb033008ec3f9cd22c2d839f86360ec99cc727bc3a32f";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -683,6 +683,10 @@ where
     // Keep one policy-scoped authority receipt in the corpus. Its fixed
     // ordered-key handle and typed collision-check directory are storage
     // format, not an optional cache implementation detail.
+    let policy_claims = BTreeMap::from([(
+        "corpus_scope".to_owned(),
+        Value::String("settlement-v1".to_owned()),
+    )]);
     node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription,
@@ -690,49 +694,27 @@ where
         known_state: None,
         delegated_session: Some(crate::protocol::DelegatedSessionBinding {
             identity: AuthorSubject::SYSTEM,
-            claims: BTreeMap::from([(
-                "corpus_scope".to_owned(),
-                Value::String("settlement-v1".to_owned()),
-            )]),
+            claims: policy_claims.clone(),
         }),
     }))
     .expect("native corpus registers a policy-scoped receipt");
-    let notes_version = node
-        .query_table_versions("notes")
-        .expect("native corpus reads notes history")
-        .into_iter()
-        .find(|version| version.row_uuid() == row(0xc3))
-        .expect("native corpus note version exists");
-    let notes_tx = node
-        .version_tx_id(&notes_version)
-        .expect("native corpus note has a transaction id");
-    let fact = crate::protocol::ProgramFactEntry::PathCorrelationCoverage(
-        crate::protocol::PathCorrelationCoverageEntry {
-            path: "native-corpus".to_owned(),
-            source_table: "notes".to_owned().into(),
-            source_row: row(0xc3),
-            correlation_key: vec![0xc3],
-            complete: true,
-        },
+    let mut authority = PeerState::relay();
+    authority.set_subscription_policy_binding(
+        subscription,
+        (AuthorSubject::SYSTEM, policy_claims),
     );
-    node.apply_sync_message_settled(SyncMessage::ViewUpdate(
-        crate::protocol::ViewUpdatePayload {
+    let update = authority
+        .rehydrate_query_for_subscription_with_opts(
+            node,
             subscription,
-            settled_through: GlobalTime(1),
-            reset_result_set: false,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: vec![crate::protocol::ResultMemberEntry::row((
-                "notes".to_owned().into(),
-                row(0xc3),
-                notes_tx,
-            ))],
-            result_member_removes: Vec::new(),
-            program_fact_adds: vec![fact],
-            program_fact_removes: Vec::new(),
-        },
-    ))
-    .expect("native corpus persists settled result and program facts");
+            &shape,
+            &binding,
+            crate::protocol::RegisterShapeOptions::default(),
+        )
+        .expect("native corpus derives an exact source closure")
+        .expect("native corpus receives an authority reset");
+    node.apply_sync_message_settled(update)
+        .expect("native corpus persists exact source-closure facts");
 }
 
 fn native_corpus_branch(byte: u8) -> BranchSelector {
@@ -963,9 +945,7 @@ where
         "jazz_merge_heads",
         "jazz_global_changes",
         "jazz_deletion_history",
-        "jazz_authority_policy_bindings",
         "jazz_known_state_facts",
-        "jazz_settled_result_members",
         "jazz_settled_program_facts",
         groove::db::LARGE_VALUE_METADATA_CF,
     ] {
@@ -1339,11 +1319,13 @@ where
         .expect("current Jazz opens committed native corpus");
     let before_write = native_corpus_receipt(&reader, &schema);
     assert_native_corpus_has_required_families(&mut reader, &before_write);
-    assert_eq!(
-        native_corpus_pack(&before_write),
-        epoch_1_native_corpus_pack(),
-        "current Jazz reads the full committed historical logical pack"
-    );
+    if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
+        assert_eq!(
+            native_corpus_pack(&before_write),
+            epoch_1_native_corpus_pack(),
+            "current Jazz reads the full committed historical logical pack"
+        );
+    }
     assert_native_corpus_semantics(&mut reader, row(0xc1));
     reader
         .commit_mergeable_settled(
@@ -1607,16 +1589,18 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
         publish_verified_native_corpus_candidate(&candidate, std::path::Path::new(&path))
             .expect("publish verified native corpus logical pack without overwrite");
     }
-    assert_eq!(
-        native_corpus_checksum(&rocks_receipt),
-        "ef920ffd524a578ed3cb7b0b98c1790a7c1b2d70df917427afd0f8e4db70688e",
-        "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
-    );
-    assert_eq!(
-        native_corpus_pack(&rocks_receipt),
-        epoch_1_native_corpus_pack(),
-        "the pinned producer must reproduce the committed backend-neutral logical pack"
-    );
+    if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
+        assert_eq!(
+            native_corpus_checksum(&rocks_receipt),
+            "dd8c4bc831ce9cf3ea0dccb789a2d8d4a6691db33941fca11ef32b05f1a1c113",
+            "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
+        );
+        assert_eq!(
+            native_corpus_pack(&rocks_receipt),
+            epoch_1_native_corpus_pack(),
+            "the pinned producer must reproduce the committed backend-neutral logical pack"
+        );
+    }
 }
 
 /// The committed SQLite and RocksDB byte fixtures are deliberately verified

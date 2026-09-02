@@ -6311,7 +6311,7 @@ pub(super) fn version_layer_string(layer: VersionLayer) -> String {
 }
 
 #[cfg(test)]
-mod result_member_storage_codec_tests {
+mod authority_storage_codec_tests {
     use super::*;
 
     fn tx(time: u64, node: u8) -> TxId {
@@ -6333,15 +6333,6 @@ mod result_member_storage_codec_tests {
 
     fn settled_value(value: Value, value_type: records::ValueType) -> Vec<u8> {
         settled_result_value_storage_bytes(&value, &value_type).unwrap()
-    }
-
-    fn result_payload(value: Value, value_type: records::ValueType) -> ResultMemberPayloadEntry {
-        let descriptor = records::RecordDescriptor::new([("value", value_type)]);
-        ResultMemberPayloadEntry {
-            member: fixture_member(),
-            descriptor: records::encode_record_descriptor(&descriptor).unwrap(),
-            record: descriptor.create(&[value]).unwrap(),
-        }
     }
 
     fn fixture_member() -> ResultMemberEntry {
@@ -6381,74 +6372,16 @@ mod result_member_storage_codec_tests {
     }
 
     // This is necessarily an internal test: raw durable keys are an engine
-    // boundary.  It locks every permanent fact/source/value tag to a fixture;
-    // restart behavior exercises those keys through the public node lifecycle.
+    // boundary. Peer authority receipts persist only exact source-closure
+    // facts; lock those surviving tags and bytes without preserving retired
+    // authority-output fixtures as a compatibility contract.
     #[test]
-    fn program_fact_storage_codec_has_permanent_tags_and_exact_fixtures() {
-        let member = fixture_member();
+    fn peer_source_closure_storage_codec_has_permanent_tags_and_exact_fixtures() {
         let version = fixture_version();
         let facts = vec![
-            ProgramFactEntry::ResultPayload(ResultMemberPayloadEntry {
-                member: member.clone(),
-                ..result_payload(Value::U8(2), records::ValueType::U8)
-            }),
-            ProgramFactEntry::RelationEdge(RelationEdgeEntry {
-                path: "p".into(),
-                source_table: "a".to_owned().into(),
-                source_row: RowUuid::from_bytes([3; 16]),
-                target_table: "b".to_owned().into(),
-                target_row: RowUuid::from_bytes([4; 16]),
-                kind: Some(RelationEdgeKind::Policy),
-                source_version: Some(version.clone()),
-                target_version: Some(version.clone()),
-                depth: Some(5),
-                edge_id: Some(vec![6]),
-                branch: Some(vec![7]),
-                role: Some(RelationEdgeRole::Terminal),
-                order: Some(vec![8]),
-                hole_state: Some(PathHoleState::Hole),
-            }),
-            ProgramFactEntry::PathCorrelationCoverage(PathCorrelationCoverageEntry {
-                path: "p".into(),
-                source_table: "a".to_owned().into(),
-                source_row: RowUuid::from_bytes([9; 16]),
-                correlation_key: vec![10],
-                complete: true,
-            }),
             ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
                 source: fixture_source_with_all_roles(),
                 complete: true,
-            }),
-            ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
-                scope: "s".into(),
-                tier: DurabilityTier::Global,
-                stream: Some("t".into()),
-                frontier: vec![13],
-            }),
-            ProgramFactEntry::CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry {
-                tx: tx(33, 14),
-                tier: DurabilityTier::Edge,
-                payload_digest: vec![15],
-            }),
-            ProgramFactEntry::ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry {
-                tx: tx(34, 16),
-                scope: "s".into(),
-                result: Some(member.clone()),
-                tier: DurabilityTier::Local,
-                covered_members_digest: vec![17],
-            }),
-            ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
-                decision: vec![18],
-                outcome: PolicyDecisionOutcomeEntry::RequiresCoverage {
-                    scope: "s".into(),
-                    frontier: vec![19],
-                },
-                reason: Some("r".into()),
-            }),
-            ProgramFactEntry::VersionWitness(VersionWitnessEntry {
-                role: "r".into(),
-                version: version.clone(),
-                member: Some(member.clone()),
             }),
             ProgramFactEntry::CoveredInput(CoveredInputEntry {
                 source: fixture_source_with_all_roles(),
@@ -6456,50 +6389,12 @@ mod result_member_storage_codec_tests {
                 source_row: RowUuid::from_bytes([38; 16]),
                 version: version.clone(),
             }),
-            ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
-                protected: member.clone(),
-                policy_path: "p".into(),
-                witness: version.clone(),
-                edge_kind: Some(RelationEdgeKind::Recursive),
-            }),
-            ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
-                result: member.clone(),
-                contributor: member.clone(),
-                batch: Some(tx(35, 20)),
-                role: Some("r".into()),
-            }),
-            ProgramFactEntry::PredicateRead(PredicateReadEntry {
-                role: PredicateOutputSetRoleEntry::Now,
-                shape_id: ShapeId(uuid::Uuid::from_bytes([21; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([22; 16])),
-                predicate: vec![23],
-                frontier: vec![24],
-            }),
-            ProgramFactEntry::PredicateOutputSet(PredicateOutputSetEntry {
-                role: PredicateOutputSetRoleEntry::Base,
-                table: "a".to_owned().into(),
-                row: RowUuid::from_bytes([25; 16]),
-                version: version.clone(),
-                shape_id: ShapeId(uuid::Uuid::from_bytes([26; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([27; 16])),
-            }),
-            ProgramFactEntry::PointRead(PointReadEntry {
-                present: true,
-                table: "a".to_owned().into(),
-                row: RowUuid::from_bytes([28; 16]),
-                version: Some(version),
-                shape_id: ShapeId(uuid::Uuid::from_bytes([29; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([30; 16])),
-            }),
         ];
         let encoded = facts
             .iter()
             .map(|fact| program_fact_storage_bytes(fact).unwrap())
             .collect::<Vec<_>>();
-        for (expected_tag, (fact, bytes)) in [0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 9, 10, 11, 12, 13]
-            .into_iter()
-            .zip(facts.iter().zip(&encoded))
-        {
+        for (expected_tag, (fact, bytes)) in [3, 14].into_iter().zip(facts.iter().zip(&encoded)) {
             assert_eq!(&bytes[..4], PROGRAM_FACT_STORAGE_MAGIC);
             assert_eq!(bytes[4], PROGRAM_FACT_STORAGE_VERSION);
             assert_eq!(usize::from(bytes[5]), expected_tag);
@@ -6511,21 +6406,8 @@ mod result_member_storage_codec_tests {
                 .map(|bytes| blake3::hash(bytes).to_hex().to_string())
                 .collect::<Vec<_>>(),
             [
-                "fb01d1bbceee0c2e0ad7e77005cb9b73bb2d9203e4951ea8e045b9614a8c4051",
-                "fd88aa550022a04bc6775b5e997d15b8f4e75f9cb26f62b7cb6d9d9aac6c4212",
-                "cc05966da0ecfb3ddbbeb437c3f0466c9757211b4718e005ed98109d0d9e24b0",
-                "090b02e75b1028e4b732d2a1eb56da8d22cac67015ca4b223c3914b62338c753",
-                "85f2bab0a0f503066f669f9482b887b177e3a68cc1e6f7af69343d31795135c2",
-                "cbdf98c6f111efb8b9ffaae39160150cddd7f4ca4b10d7e211e8d23d59104584",
-                "90b3bda57c07eeda03fc389e0287f93627085ab0dfc2db66ea30eea9d7352a44",
-                "2d1ae58110da67261105647b85d16b2cd0eed8e0ad602a2393a49dcd20e1e307",
-                "f19b832022c7623e85f35a321908882ac8d54d685ecdd7b892c041c217b467b9",
+                "cf2f01f026edaec1097ee2d1463f1719561eeda83e671a3ff07af13c0f861d34",
                 "6f3af744b862a1da729a60506be303af633493fa0ba9987b759cbd33b46fe812",
-                "0e3395f68049bf529f1e5014170d4aa5f55ac6d45daf6998e9f3376fefce4a47",
-                "67e1ab722ba171d14ab66f5fc31bc948344a75f936865330aebb222c10161be6",
-                "cd7baa59c57b431ceb32580a74541393890e69af5c6587d4a16dfacf4ff10482",
-                "ceca71b78f841cf8ca9387c9cc0c616fd043a5ce5698fb7098c9c5d6a148ad8e",
-                "73b584cebffb48801a204b0c1e5d57e7b1dddc1c40180ffa5497d8981ad5d1b1",
             ]
         );
     }
