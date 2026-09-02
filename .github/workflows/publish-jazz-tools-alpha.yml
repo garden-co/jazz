@@ -767,4 +767,6 @@ jobs:
       needs.publish-npm.result == 'success' &&
       (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
     uses: ./.github/workflows/promote-inspector-production.yml
+    with:
+      deploy-sha: ${{ github.sha }}
     secrets: inherit

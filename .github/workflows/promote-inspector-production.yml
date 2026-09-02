@@ -14,11 +14,15 @@ on:
         required: false
         default: "main"
         type: string
-
+      deploy-sha:
+        description: "GitHub source commit SHA to promote"
+        required: true
+        type: string
 jobs:
   promote-inspector-production:
     name: Promote inspector production
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
     concurrency:
       group: inspector-production
       cancel-in-progress: false
@@ -29,6 +33,7 @@ jobs:
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
       VERCEL_DEPLOY_BRANCH: ${{ inputs.deploy-branch }}
+      DEPLOY_SHA: ${{ inputs.deploy-sha || github.sha }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -52,7 +57,7 @@ jobs:
 
       - name: Resolve staged inspector deployment
         id: inspector-deployment
-        run: node dev/scripts/resolve-inspector-deployment.mjs
+        run: GITHUB_SHA="${DEPLOY_SHA}" node dev/scripts/resolve-inspector-deployment.mjs
 
       - name: Promote staged inspector deployment
         if: steps.inspector-deployment.outputs.already_promoted != 'true'
