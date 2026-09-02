@@ -34,6 +34,38 @@ use crate::tx::TxId;
 type TableSchemas = BTreeMap<String, TableSchema>;
 type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan>;
 
+/// Coalesce source-closure changes emitted by independently drained terminals.
+///
+/// The first observation supplies the state before this drain, and each later
+/// observation replaces only the final state. This keeps peer output a set
+/// delta even when one drain removes and re-adds the same covered input.
+fn record_peer_source_fact_change(
+    changes: &mut BTreeMap<ProgramFactEntry, (bool, bool)>,
+    fact: ProgramFactEntry,
+    is_present: bool,
+) {
+    changes
+        .entry(fact)
+        .and_modify(|(_, final_state)| *final_state = is_present)
+        .or_insert((!is_present, is_present));
+}
+
+fn append_net_peer_source_fact_changes(
+    transitions: &mut ResultTransitions,
+    changes: BTreeMap<ProgramFactEntry, (bool, bool)>,
+) {
+    for (fact, (was_present, is_present)) in changes {
+        if was_present == is_present {
+            continue;
+        }
+        if is_present {
+            transitions.program_fact_adds.push(fact);
+        } else {
+            transitions.program_fact_removes.push(fact);
+        }
+    }
+}
+
 /// Distinguishes independent maintained terminals that can witness the same
 /// peer source fact. Their union, rather than a summed terminal refcount, is
 /// the exact receiver closure: a replacement witness disappearing must not
@@ -386,6 +418,13 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
+        // A single IVM drain may touch the same source fact through more than
+        // one terminal. Record only the first pre-state and final post-state
+        // for each touched peer fact, then publish the net closure change.
+        // This is deliberately proportional to changed facts: cloning the
+        // whole active closure here would turn every incremental tick into a
+        // snapshot-sized operation.
+        let mut peer_source_fact_changes = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         for (sink, terminal) in &deltas.terminal_sinks {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
                 && !terminal.operations.is_empty()
@@ -455,12 +494,20 @@ impl MaintainedSubscriptionView {
             }
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
-            transitions
-                .program_fact_adds
-                .extend(delta_transitions.program_fact_adds);
-            transitions
-                .program_fact_removes
-                .extend(delta_transitions.program_fact_removes);
+            for fact in delta_transitions.program_fact_adds {
+                if fact.is_peer_source_closure_fact() {
+                    record_peer_source_fact_change(&mut peer_source_fact_changes, fact, true);
+                } else {
+                    transitions.program_fact_adds.push(fact);
+                }
+            }
+            for fact in delta_transitions.program_fact_removes {
+                if fact.is_peer_source_closure_fact() {
+                    record_peer_source_fact_change(&mut peer_source_fact_changes, fact, false);
+                } else {
+                    transitions.program_fact_removes.push(fact);
+                }
+            }
             transitions
                 .result_payload_adds
                 .extend(delta_transitions.result_payload_adds);
@@ -472,6 +519,7 @@ impl MaintainedSubscriptionView {
             transitions.requires_authoritative_membership_reconcile |=
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
+        append_net_peer_source_fact_changes(&mut transitions, peer_source_fact_changes);
         self.finalize_multisink_transitions(&mut transitions, node_aliases);
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
             && (!transitions.adds.is_empty()
@@ -3443,14 +3491,54 @@ mod tests {
             None
         );
         assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), 1),
+            None
+        );
+        assert_eq!(
             maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1),
             None
         );
         assert_eq!(
             maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), -1),
+            None
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), -1),
             Some(false)
         );
         assert!(maintained.source_fact_weights.is_empty());
+    }
+
+    #[test]
+    fn source_fact_changes_coalesce_remove_readd_within_one_drain() {
+        let aliases = aliases();
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(
+                test_source(),
+                &version(row(0x52), 11, "coalesced"),
+                &aliases,
+            )
+            .expect("test version has a registered node alias"),
+        );
+        let mut changes = BTreeMap::new();
+
+        // A sink can retract a source while another sink in the same drain
+        // re-establishes it. Neither ordering leaks an overlapping wire
+        // remove/add pair because the peer sees only the drain's net closure.
+        record_peer_source_fact_change(&mut changes, fact.clone(), false);
+        record_peer_source_fact_change(&mut changes, fact.clone(), true);
+        let mut transitions = ResultTransitions::default();
+        append_net_peer_source_fact_changes(&mut transitions, changes);
+        assert!(transitions.program_fact_adds.is_empty());
+        assert!(transitions.program_fact_removes.is_empty());
+
+        let mut changes = BTreeMap::new();
+        record_peer_source_fact_change(&mut changes, fact.clone(), true);
+        record_peer_source_fact_change(&mut changes, fact.clone(), false);
+        let mut transitions = ResultTransitions::default();
+        append_net_peer_source_fact_changes(&mut transitions, changes);
+        assert!(transitions.program_fact_adds.is_empty());
+        assert!(transitions.program_fact_removes.is_empty());
     }
 
     fn replacement_content(row: VersionRow) -> DecodedMaintainedEvent {
