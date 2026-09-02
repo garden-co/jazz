@@ -2646,6 +2646,16 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// A live authority source-closure delta could not transition from the
+    /// receiver's installed predecessor.  The usage handle is safe to expose
+    /// to the subscription owner; row bodies and claims are deliberately not.
+    #[error("invalid authority source closure for subscription {subscription:?}: {transition}")]
+    InvalidAuthoritySourceClosure {
+        /// Usage-site subscription whose ordered live transition was rejected.
+        subscription: SubscriptionKey,
+        /// Safe transition diagnosis, never containing row bodies or claims.
+        transition: String,
+    },
     /// Transaction was not known locally.
     #[error("missing transaction: {0:?}")]
     MissingTransaction(TxId),

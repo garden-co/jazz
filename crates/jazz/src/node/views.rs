@@ -1180,8 +1180,12 @@ where
     pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         self.validate_received_view_update_global_time_durability(&update)?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))?;
-        let compiled_source_caches =
-            self.validate_covered_input_closure_admission(std::slice::from_ref(&update))?;
+        let compiled_source_caches = self
+            .validate_covered_input_closure_admission(std::slice::from_ref(&update))
+            .map_err(|error| Error::InvalidAuthoritySourceClosure {
+                subscription: update.subscription,
+                transition: error.to_string(),
+            })?;
         let bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
         let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
         self.validate_covered_input_body_witnesses(
