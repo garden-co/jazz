@@ -563,6 +563,7 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
     let (client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema.clone());
+    register_whole_table_receiver(&mut reader, "todos");
     let mut peer = PeerState::new();
 
     let (lost_a, _lost_a_unit) = client

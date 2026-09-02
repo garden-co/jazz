@@ -342,6 +342,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
 #[test]
 fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let missing = TxId {
         node: node(1),
         time: TxTime::from(99),
