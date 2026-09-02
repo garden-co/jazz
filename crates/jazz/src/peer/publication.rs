@@ -1090,9 +1090,7 @@ impl PeerState {
         if public_result_is_silent
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
-            && (requires_authoritative_membership_reconcile
-                || (observed_result_delta_batches > 0
-                    ))
+            && (requires_authoritative_membership_reconcile || observed_result_delta_batches > 0)
         {
             let (tier, read_view) = self
                 .publication_states

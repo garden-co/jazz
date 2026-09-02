@@ -137,6 +137,18 @@ relation fact whose referenced row version has not been admitted as part of the
 same exact authority closure is incomplete and cannot advance settlement or
 enter the graph.
 
+A deletion-register witness is not authorization by itself. Its source
+occurrence MUST also be admitted by the same current policy-filtered
+`IncludeDeleted` preimage, matched to the exact deleted row and deletion
+version identity before the witness enters the covered closure. The register
+supplies the deletion transaction, branch, schema, and layer carrier; the
+preimage supplies the permission to disclose that this row is deleted. A
+coverage withdrawal, a later deletion after revocation, a cold tombstone, or a
+different deletion winner for the same row therefore cannot be reinterpreted
+as an authorized deletion. This does not create a historical entitlement: the
+authority evaluates the current policy for the exact source occurrence and
+uses the ordinary current-row/branch winner selection.
+
 Every input change then enters the same receiver-local lowered Groove program:
 
 ```text
