@@ -150,6 +150,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
 
     commit_mergeable_global(
         &mut writer,
@@ -179,6 +180,12 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
     };
     assert_eq!(version_bundles.len(), 2);
     version_bundles.reverse();
+    // The first batch member is the reset that admits the source coverage.
+    // Its following live transition must carry only row facts.
+    let program_fact_adds = program_fact_adds
+        .into_iter()
+        .filter(|fact| !matches!(fact, crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)))
+        .collect();
 
     reader
         .apply_view_updates_in_batch(vec![
@@ -292,6 +299,7 @@ fn initial_reset_preflights_accepted_partial_child_parent_constraints_atomically
         (0x92, row(0x93), false),
     ] {
         let (_dir, mut reader) = open_node_with_uuid(node(case));
+        register_whole_table_receiver(&mut reader, "todos");
         let parent = TxId::new(TxTime::from(70), node(case + 1));
         let child = TxId::new(TxTime::from(80), node(case + 2));
         let child_row = if succeeds { parent_row } else { row(0x94) };
@@ -360,6 +368,7 @@ fn receiver_batch_settles_pending_parent_constraints_and_survives_reopen() {
         let schema = schema();
         let dir = tempfile::tempdir().unwrap();
         let mut reader = open_node_at(&dir, schema.clone());
+        register_whole_table_receiver(&mut reader, "todos");
         let parent = TxId::new(TxTime::from(70), node(case + 1));
         let child_row = row(case + 2);
         let child = reader
@@ -425,6 +434,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
 
     let row_uuid = row(1);
     let (tx_id, unit) = writer
@@ -512,6 +522,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
 #[test]
 fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -639,6 +650,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
 #[test]
 fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -791,6 +803,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), projection_schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(2), projection_schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(3), projection_schema.clone());
+    register_whole_table_receiver(&mut reader, "todos");
     let row_uuid = row(1);
     let (tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -971,6 +984,7 @@ fn reset_conflicts_with_member_removals_are_atomic() {
 fn reset_accepts_identical_annotated_duplicates() {
     for path in [ResetConflictPath::Batch, ResetConflictPath::Single] {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let tx = Transaction {
@@ -1114,6 +1128,7 @@ fn reset_scope_merge_is_order_independent_and_complete_dominates() {
 fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
     for path in [ResetConflictPath::Batch, ResetConflictPath::Single] {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let view_tx = reset_scope_tx(tx_id, 1);
@@ -1623,6 +1638,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let row_uuid = row(1);
 
     let (_old_tx, old_unit) = writer
@@ -1740,6 +1756,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
 #[test]
 fn receiver_tracks_partial_mergeable_payload_coverage() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
