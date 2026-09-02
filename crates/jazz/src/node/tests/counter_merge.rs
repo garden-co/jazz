@@ -169,6 +169,7 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
 
         for (_, writer) in &mut writers {
             let mut peer = PeerState::new();
+            register_whole_table_receiver(writer, "counters");
             writer
                 .apply_sync_message_settled(peer.current_rows_update(&mut core, "counters").unwrap())
                 .unwrap();

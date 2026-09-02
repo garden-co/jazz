@@ -1641,6 +1641,7 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
     );
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
+    register_whole_table_receiver(&mut client, "todos");
     client.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         client

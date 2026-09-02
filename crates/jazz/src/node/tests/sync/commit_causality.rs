@@ -415,6 +415,9 @@ fn m2_writer_core_reader_converges_against_oracle() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    // This receiver consumes the whole-table covered-input stream throughout
+    // the sequence, so register that exact source identity once up front.
+    register_whole_table_receiver(&mut reader, "todos");
     let mut peer = PeerState::new();
     let mut oracle = Oracle::new();
     let row_a = row(1);

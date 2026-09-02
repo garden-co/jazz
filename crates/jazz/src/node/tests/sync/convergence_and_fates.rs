@@ -699,6 +699,7 @@ fn reopened_core_continues_sync_after_restart() {
     let update = peer
         .current_rows_update(&mut reopened_core, "todos")
         .unwrap();
+    register_whole_table_receiver(&mut reader, "todos");
     reader.apply_sync_message_settled(update).unwrap();
 
     assert_eq!(
