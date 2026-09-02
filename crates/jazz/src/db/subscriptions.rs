@@ -691,7 +691,7 @@ where
         }
         let covered_closure_installed = {
             let node = self.node.node.lock().await;
-            settled_authority_result.as_ref().is_some_and(|key| {
+            settled_authority_result.as_ref().is_none_or(|key| {
                 subscription.has_installed_covered_closure(
                     key,
                     node.applied_authority_result_generation(key),
