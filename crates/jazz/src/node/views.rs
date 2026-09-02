@@ -1141,6 +1141,13 @@ where
     pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         self.validate_received_view_update_global_time_durability(&update)?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))?;
+        let bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
+        let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
+        self.validate_covered_input_body_witnesses(
+            std::slice::from_ref(&update),
+            &preflight.bundles,
+        )
+        .await?;
         self.apply_view_update_inner(update, None).await
     }
 
@@ -1195,6 +1202,15 @@ where
         }
         let preflight = self
             .preflight_view_bundle_conflicts(&all_bundle_refs)
+            .await?;
+        // A CoveredInput is not merely a selection hint: it names immutable
+        // bytes the receiver will later install into a local runtime source.
+        // Validate that each added coordinate is backed by either a body in
+        // this atomic receiver frame or a previously admitted complete
+        // payload explicitly referenced by its sender inventory. This closes
+        // the old ResultMember witness boundary without accepting a new
+        // source-input bypass.
+        self.validate_covered_input_body_witnesses(&updates, &preflight.bundles)
             .await?;
         let bulk_candidate_tx_ids = bulk_candidates
             .iter()
@@ -1352,6 +1368,80 @@ where
                 // a durable-ingress bypass for operation provenance.
                 self.admit_contribution_merge_for_storage(bundle.tx)?;
                 self.validate_view_payload_versions(bundle.versions)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_covered_input_body_witnesses(
+        &mut self,
+        updates: &[ViewUpdateParts],
+        staged_bundles: &BTreeMap<TxId, VersionBundle>,
+    ) -> Result<(), Error> {
+        let referenced_complete_payloads = updates
+            .iter()
+            .flat_map(|update| update.peer_complete_tx_payload_refs.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let mut admitted_versions = staged_bundles
+            .values()
+            .flat_map(|bundle| {
+                bundle.versions.iter().map(move |version| {
+                    (
+                        bundle.tx.tx_id,
+                        version.table().to_owned(),
+                        version.row_uuid(),
+                        if version.deletion().is_some() {
+                            crate::protocol::ResultRowLayer::Deletion
+                        } else {
+                            crate::protocol::ResultRowLayer::Content
+                        },
+                        version.branch_key().canonical_bytes(),
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+
+        // Complete-payload inventory references are the only valid exception
+        // to a same-frame body: the receiver already admitted that complete
+        // immutable transaction on this link. Re-read its stored bodies before
+        // accepting a source coordinate, rather than trusting the sender's
+        // declaration alone.
+        for tx_id in &referenced_complete_payloads {
+            for version in self.query_versions_for_tx(*tx_id).await? {
+                admitted_versions.insert((
+                    *tx_id,
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                    match version.layer() {
+                        VersionLayer::Content => crate::protocol::ResultRowLayer::Content,
+                        VersionLayer::Deletion => crate::protocol::ResultRowLayer::Deletion,
+                    },
+                    version.branch_key().canonical_bytes(),
+                ));
+            }
+        }
+
+        for input in updates
+            .iter()
+            .flat_map(|update| update.program_fact_adds.iter())
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::CoveredInput(input) => Some(input),
+                _ => None,
+            })
+        {
+            let coordinate = (
+                input.version.tx,
+                input.version_table.to_string(),
+                input.source_row,
+                input.version.layer,
+                input.version.branch_or_prefix.clone().unwrap_or_default(),
+            );
+            if input.version.batch != Some(input.version.tx)
+                || !admitted_versions.contains(&coordinate)
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "covered input is not witnessed by admitted payload",
+                ));
             }
         }
         Ok(())
