@@ -441,29 +441,52 @@ export class ManagedDevRuntime {
   }
 
   async dispose(): Promise<void> {
-    this.watcher?.close();
-    this.watcher = null;
-    if (this.serverHandle) {
-      await this.serverHandle.stop();
+    let cleanupError: unknown;
+    let stopError: unknown;
+
+    try {
+      this.watcher?.close();
+    } catch (error) {
+      cleanupError = error;
+    } finally {
+      this.watcher = null;
+    }
+
+    try {
+      if (this.serverHandle) {
+        await this.serverHandle.stop();
+      }
+    } catch (error) {
+      stopError = error;
+    } finally {
       this.serverHandle = null;
     }
-    if (
-      this.injectedBackendSecret !== undefined &&
-      process.env.BACKEND_SECRET === this.injectedBackendSecret
-    ) {
-      if (this.hadPreviousBackendSecret) {
-        process.env.BACKEND_SECRET = this.previousBackendSecret;
-      } else {
-        delete process.env.BACKEND_SECRET;
+
+    try {
+      if (
+        this.injectedBackendSecret !== undefined &&
+        process.env.BACKEND_SECRET === this.injectedBackendSecret
+      ) {
+        if (this.hadPreviousBackendSecret) {
+          process.env.BACKEND_SECRET = this.previousBackendSecret;
+        } else {
+          delete process.env.BACKEND_SECRET;
+        }
       }
+    } catch (error) {
+      cleanupError ??= error;
+    } finally {
+      this.previousBackendSecret = undefined;
+      this.hadPreviousBackendSecret = false;
+      this.injectedBackendSecret = undefined;
+      this.runtime = null;
+      this.initPromise = null;
+      this.initConfigSignature = null;
+      this.runtimeConfigSignature = null;
     }
-    this.previousBackendSecret = undefined;
-    this.hadPreviousBackendSecret = false;
-    this.injectedBackendSecret = undefined;
-    this.runtime = null;
-    this.initPromise = null;
-    this.initConfigSignature = null;
-    this.runtimeConfigSignature = null;
+
+    if (stopError !== undefined) throw stopError;
+    if (cleanupError !== undefined) throw cleanupError;
   }
   private installShutdownHooks(): void {
     if (this.shutdownHooksInstalled) return;
