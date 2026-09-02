@@ -34,6 +34,7 @@ import type {
 } from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
+import { PreparedQueryCache, type PreparedQueryLease } from "./prepared-query-cache.js";
 import {
   LOCAL_FIRST_JWT_ISSUER,
   SYSTEM_SESSION_ISSUER,
@@ -517,7 +518,7 @@ type SubscriptionState = {
   terminalErrorDelivered?: boolean;
   sources: SubscriptionSourceState[];
   queryJson: string;
-  query: PreparedQuery | null;
+  preparedQueryLease: PreparedQueryLease<PreparedQuery> | null;
   identity?: Uint8Array;
   rows: RowState[];
   rowIndexByKey: Map<string, number>;
@@ -535,6 +536,7 @@ type SubscriptionState = {
   deferredPlaceholderBytes: number;
   callback?: (result: RuntimeSubscriptionDelta | Error) => void;
   cancelled: boolean;
+  terminal: boolean;
 };
 
 type SubscriptionOutputColumns = {
@@ -654,7 +656,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly scopeIsolatedRelay: boolean;
   private readonly schemaHash: string;
   private readonly trustedBackend: boolean;
-  private readonly preparedQueries = new Map<string, PreparedQuery>();
+  private readonly preparedQueryCache: PreparedQueryCache<PreparedQuery>;
   private readonly transactionOwner: TransactionOwnerState;
   private readonly pendingTxs: Map<string, PendingTx>;
   private readonly completedTxs: Map<string, CompletedTx>;
@@ -806,6 +808,7 @@ export class NativeRuntimeAdapter implements Runtime {
       opts?.selfSignedClientProof,
     );
     this.peerIdentity = author;
+    this.preparedQueryCache = new PreparedQueryCache();
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;
@@ -1162,17 +1165,12 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed && !alreadyMarkedClosed) return false;
     this.closed = true;
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
-    for (const subscription of this.subscriptions.values()) {
-      subscription.openingAbort?.abort();
-      for (const source of subscription.sources) {
-        closeSubscriptionSource(source.source);
-      }
+    for (const [handle, subscription] of this.subscriptions) {
+      this.terminateSubscription(handle, subscription);
     }
-    // Prepared plans and coverage receipts are valid only while this runtime
-    // is live. Release them before closing the native owner so long-lived JS
-    // Db wrappers cannot retain stale native graph/storage state through a
-    // cache after their context has shut down.
-    this.preparedQueries.clear();
+    // Leases keep in-flight users alive, but no prepared handle remains
+    // available for reuse after this runtime has shut down.
+    this.preparedQueryCache.clear();
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
       // Query and subscription futures may still be unwinding through this
@@ -1878,38 +1876,43 @@ export class NativeRuntimeAdapter implements Runtime {
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
-    const query = await this.prepareQueryForRead(coreQueryJson, requestSession);
-    await this.waitForStrictRemoteQueryTransport(tier);
-    await this.processPendingPeerActivityBeforeRead();
-    if (this.closed) return [];
-    if (!pendingTx) {
-      this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
-    }
-    this.emitQueryCoverageTrace("attach");
-    if (usesNativeRelationApi || queryHasArraySubqueries(coreQueryJson)) {
-      if (pendingTx) {
-        const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
+    const queryLease = await this.prepareQueryForRead(coreQueryJson, requestSession);
+    try {
+      const query = queryLease.query;
+      await this.waitForStrictRemoteQueryTransport(tier);
+      await this.processPendingPeerActivityBeforeRead();
+      if (this.closed) return [];
+      if (!pendingTx) {
+        this.attachLocalReadCoverageInBackground(tier, optionsJson, queryLease, session);
+      }
+      this.emitQueryCoverageTrace("attach");
+      if (usesNativeRelationApi || queryHasArraySubqueries(coreQueryJson)) {
+        if (pendingTx) {
+          const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
+          this.emitQueryCoverageTrace("covered");
+          return rowsFromRelationSnapshot(
+            readRelationSnapshot(payload),
+            this.schema,
+            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+          );
+        }
+        const payload = await this.readRowsForContextAsync(query, opts, readContext);
         this.emitQueryCoverageTrace("covered");
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
-          subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+          usesNativeRelationApi
+            ? undefined
+            : subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
-      const payload = await this.readRowsForContextAsync(query, opts, readContext);
+      const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
+      const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
       this.emitQueryCoverageTrace("covered");
-      return rowsFromRelationSnapshot(
-        readRelationSnapshot(payload),
-        this.schema,
-        usesNativeRelationApi
-          ? undefined
-          : subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
-      );
+      return rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
+    } finally {
+      queryLease.release();
     }
-    const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
-    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-    this.emitQueryCoverageTrace("covered");
-    return rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
   }
 
   createSubscription(
@@ -1933,7 +1936,7 @@ export class NativeRuntimeAdapter implements Runtime {
       sources: [],
       openingAbort: new AbortController(),
       queryJson,
-      query: null,
+      preparedQueryLease: null,
       identity,
       rows: [],
       rowIndexByKey: new Map(),
@@ -1952,27 +1955,43 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredPlaceholderRows: 0,
       deferredPlaceholderBytes: 0,
       cancelled: false,
+      terminal: false,
     });
     const subscription = this.subscriptions.get(handle)!;
+    // Until source installation, the opener owns the lease even if cancellation
+    // has already removed the subscription from the public handle map.
+    let openingLease: PreparedQueryLease<PreparedQuery> | null = null;
+    const releaseOpeningLease = () => {
+      openingLease?.release();
+      openingLease = null;
+    };
     const install = (native: ReadableStream<unknown> | Subscription) => {
-      subscription.sources = [{ source: subscriptionSource(native), reading: false }];
+      const source = subscriptionSource(native);
       if (subscription.cancelled || this.closed) {
-        closeSubscriptionSourceState(subscription);
+        try {
+          closeSubscriptionSource(source);
+        } finally {
+          releaseOpeningLease();
+        }
         return;
       }
+      subscription.sources = [{ source, reading: false }];
+      subscription.preparedQueryLease = openingLease;
+      openingLease = null;
       if (subscription.callback) this.startSubscriptionReader(handle, subscription);
     };
     const fail = (error: unknown) => {
-      if (!subscription.cancelled && !this.closed)
+      releaseOpeningLease();
+      if (!subscription.cancelled)
         this.failSubscription(
           subscription,
           error instanceof Error ? error : new Error(String(error)),
         );
     };
-    const open = (query: PreparedQuery) => {
+    const open = (lease: PreparedQueryLease<PreparedQuery>) => {
+      openingLease = lease;
       if (subscription.cancelled || this.closed) throw new Error("native operation was cancelled");
-      subscription.query = query;
-      const native = this.subscribeForContext(query, opts, readContext);
+      const native = this.subscribeForContext(lease.query, opts, readContext);
       return isPendingNativeOperation<ReadableStream<unknown> | Subscription>(native)
         ? this.awaitNativeOperation(native, subscription.openingAbort!.signal)
         : native;
@@ -2016,11 +2035,7 @@ export class NativeRuntimeAdapter implements Runtime {
   unsubscribe(handle: number): void {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
-    subscription.cancelled = true;
-    subscription.openingAbort?.abort();
-    clearDeferredPlaceholderBuffer(subscription);
-    closeSubscriptionSourceState(subscription);
-    this.subscriptions.delete(handle);
+    this.terminateSubscription(handle, subscription);
   }
 
   connect(url: string, authJson: string): void {
@@ -2411,15 +2426,19 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
-    const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.readRowsForContext(
-      query,
-      readOptions(),
-      this.nativeReadContext({ identity } as RuntimeSession),
-    );
-    return rowsFromBatches(readRowBatches(rows), this.schema).find(
-      (row) => row.table === table && row.id === formatUuid(rowId),
-    );
+    const queryLease = this.acquirePreparedQuery(JSON.stringify({ table }));
+    try {
+      const rows = this.readRowsForContext(
+        queryLease.query,
+        readOptions(),
+        this.nativeReadContext({ identity } as RuntimeSession),
+      );
+      return rowsFromBatches(readRowBatches(rows), this.schema).find(
+        (row) => row.table === table && row.id === formatUuid(rowId),
+      );
+    } finally {
+      queryLease.release();
+    }
   }
 
   private readRowForWriteMerge(table: string, rowId: Uint8Array): RowState | undefined {
@@ -2433,22 +2452,26 @@ export class NativeRuntimeAdapter implements Runtime {
       );
       return rows[0];
     }
-    const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.db.all(query, {
-      ...(readOptions() as Record<string, unknown>),
-      sync: true,
-    });
-    if (typeof (rows as Promise<unknown>).then === "function") {
-      throw new Error("write merge requires the synchronous native read boundary");
-    }
-    if (isPendingNativeRead(rows)) {
-      throw new Error(
-        "write merge cannot synchronously hydrate a large value; use the exact local row reader",
+    const queryLease = this.acquirePreparedQuery(JSON.stringify({ table }));
+    try {
+      const rows = this.db.all(queryLease.query, {
+        ...(readOptions() as Record<string, unknown>),
+        sync: true,
+      });
+      if (typeof (rows as Promise<unknown>).then === "function") {
+        throw new Error("write merge requires the synchronous native read boundary");
+      }
+      if (isPendingNativeRead(rows)) {
+        throw new Error(
+          "write merge cannot synchronously hydrate a large value; use the exact local row reader",
+        );
+      }
+      return rowsFromBatches(readRowBatches(rows as Uint8Array), this.schema).find(
+        (row) => row.table === table && row.id === formatUuid(rowId),
       );
+    } finally {
+      queryLease.release();
     }
-    return rowsFromBatches(readRowBatches(rows as Uint8Array), this.schema).find(
-      (row) => row.table === table && row.id === formatUuid(rowId),
-    );
   }
 
   private rowStateFromValues(
@@ -2746,7 +2769,9 @@ export class NativeRuntimeAdapter implements Runtime {
     queryJson: string,
     session: RuntimeSession | null,
     signal?: AbortSignal,
-  ): PreparedQuery | Promise<PreparedQuery> {
+  ): PreparedQueryLease<PreparedQuery> | Promise<PreparedQueryLease<PreparedQuery>> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    if (signal?.aborted) throw new Error("native operation was cancelled");
     if (session && !session.backendAuthority && this.readAuthorizationHost !== "trusted-serving") {
       const key = canonicalJson(session.claims);
       if (key !== this.clientSessionClaimsKey) {
@@ -2770,51 +2795,49 @@ export class NativeRuntimeAdapter implements Runtime {
     queryJson: string,
     session: RuntimeSession | null,
     signal?: AbortSignal,
-  ): PreparedQuery | Promise<PreparedQuery> {
+  ): PreparedQueryLease<PreparedQuery> | Promise<PreparedQueryLease<PreparedQuery>> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    if (signal?.aborted) throw new Error("native operation was cancelled");
     const contextual =
       session && !session.backendAuthority && this.readAuthorizationHost === "trusted-serving";
     const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
     const queryBytes =
       kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
-    const key = `${kind}:${bytesKey(queryBytes)}`;
-    const cached = contextual ? undefined : this.preparedQueries.get(key);
-    if (cached) return cached;
-    const started = this.db.prepareQuery(
+    return this.preparedQueryCache.acquire(
       queryBytes,
+      (encoded) => {
+        const started = this.db.prepareQuery(
+          encoded,
+          kind,
+          contextual ? session.identity : undefined,
+          contextual ? session.claims : undefined,
+        );
+        return isPendingNativeOperation<PreparedQuery>(started)
+          ? this.awaitNativeOperation(started, signal)
+          : started;
+      },
       kind,
-      contextual ? session.identity : undefined,
-      contextual ? session.claims : undefined,
+      !contextual,
     );
-    const remember = (query: PreparedQuery) => {
-      if (!contextual) this.preparedQueries.set(key, query);
-      return query;
-    };
-    const query = isPendingNativeOperation<PreparedQuery>(started)
-      ? this.awaitNativeOperation(started, signal)
-      : started;
-    return query instanceof Promise ? query.then(remember) : remember(query);
   }
 
-  private prepareQuery(queryJson: string): PreparedQuery {
+  private acquirePreparedQuery(queryJson: string): PreparedQueryLease<PreparedQuery> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
     const queryBytes =
       kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
-    const key = `${kind}:${bytesKey(queryBytes)}`;
-    let query = this.preparedQueries.get(key);
-    if (!query) {
+    return this.preparedQueryCache.acquire(queryBytes, (encoded) => {
       try {
-        const started = this.db.prepareQuery(queryBytes, kind);
+        const started = this.db.prepareQuery(encoded, kind);
         if (isPendingNativeOperation<PreparedQuery>(started)) {
           started.cancel();
           throw new Error("native query preparation requires the asynchronous read boundary");
         }
-        query = started;
+        return started;
       } catch (error) {
         throw new Error(`Core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
       }
-      this.preparedQueries.set(key, query);
-    }
-    return query;
+    }, kind);
   }
   /**
    * A strict remote query cannot materialize its local snapshot before an
@@ -2874,29 +2897,34 @@ export class NativeRuntimeAdapter implements Runtime {
     ) {
       await this.progressPeerTransport();
     }
+
   }
 
   private attachLocalReadCoverageInBackground(
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
-    query: PreparedQuery,
+    queryLease: PreparedQueryLease<PreparedQuery>,
     session: RuntimeSession | null,
   ): void {
     if (tier != null && tier !== "local") return;
     if (!readPropagationIsFull(optionsJson)) return;
     if (this.nonDurableClient || !this.serverTransport) return;
-
+    const childLease = queryLease.retain();
     const refresh = async () => {
-      await this.serverCarrierPromise;
-      if (this.closed) return;
-      const edgeOptionsJson = JSON.stringify({ propagation: "full" });
-      await this.waitForStrictRemoteQueryTransport("edge");
-      if (this.closed) return;
-      await this.readRowsForContextAsync(
-        query,
-        readOptions("edge", false, edgeOptionsJson),
-        this.nativeReadContext(session),
-      );
+      try {
+        await this.serverCarrierPromise;
+        if (this.closed || !childLease.isCurrent()) return;
+        const edgeOptionsJson = JSON.stringify({ propagation: "full" });
+        await this.waitForStrictRemoteQueryTransport("edge");
+        if (this.closed || !childLease.isCurrent()) return;
+        await this.readRowsForContextAsync(
+          childLease.query,
+          readOptions("edge", false, edgeOptionsJson),
+          this.nativeReadContext(session),
+        );
+      } finally {
+        childLease.release();
+      }
     };
 
     void refresh().catch((error: unknown) => {
@@ -3204,9 +3232,12 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
         const next = await source.source.read();
-        if (next.done || subscription.cancelled) return;
+        if (next.done || subscription.cancelled) {
+          if (next.done) this.terminateSubscription(handle, subscription);
+          return;
+        }
         try {
-          this.applySubscriptionChunk(subscription, next.value);
+          this.applySubscriptionChunk(handle, subscription, next.value);
         } catch (error) {
           this.failSubscription(
             subscription,
@@ -3248,7 +3279,7 @@ export class NativeRuntimeAdapter implements Runtime {
         for (const event of batch) {
           if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
           try {
-            this.applySubscriptionChunk(subscription, event);
+            this.applySubscriptionChunk(handle, subscription, event);
           } catch (error) {
             this.failSubscription(
               subscription,
@@ -3274,12 +3305,14 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private applySubscriptionChunk(subscription: SubscriptionState, value: unknown): void {
+  private applySubscriptionChunk(
+    handle: number,
+    subscription: SubscriptionState,
+    value: unknown,
+  ): void {
     const chunk = normalizeSubscriptionChunk(value);
     if (chunk.type === "closed") {
-      clearDeferredPlaceholderBuffer(subscription);
-      closeSubscriptionSourceState(subscription);
-      subscription.cancelled = true;
+      this.terminateSubscription(handle, subscription);
       return;
     }
     if (chunk.type === "rejected") {
@@ -3815,22 +3848,43 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  private terminateSubscription(handle: number, subscription: SubscriptionState): void {
+    if (this.subscriptions.get(handle) === subscription) this.subscriptions.delete(handle);
+    this.retireSubscriptionResources(subscription);
+  }
+
   private failSubscription(subscription: SubscriptionState, error: Error): void {
     if (subscription.cancelled) return;
+    subscription.terminalError = error;
+    this.retireSubscriptionResources(subscription);
+    // Keep the terminal state addressable until unsubscribe: an asynchronous
+    // opener may fail before executeSubscription installs the callback.
+    this.deliverSubscriptionFailure(subscription);
+  }
+
+  private retireSubscriptionResources(subscription: SubscriptionState): void {
+    if (subscription.terminal) return;
+    subscription.terminal = true;
     subscription.cancelled = true;
     subscription.openingAbort?.abort();
-    subscription.terminalError = error;
     clearDeferredPlaceholderBuffer(subscription);
-    for (const source of subscription.sources) {
-      try {
-        closeSubscriptionSource(source.source);
-      } catch (cleanupError) {
-        // Resource retirement must not replace the causal subscription error
-        // or prevent its once-only delivery to the application.
-        console.error("Jazz subscription source cleanup failed", cleanupError);
+    const lease = subscription.preparedQueryLease;
+    subscription.preparedQueryLease = null;
+    const sources = subscription.sources;
+    subscription.sources = [];
+    try {
+      for (const source of sources) {
+        try {
+          closeSubscriptionSource(source.source);
+        } catch (cleanupError) {
+          // Resource retirement must not replace the causal subscription error
+          // or prevent its once-only delivery to the application.
+          console.error("Jazz subscription source cleanup failed", cleanupError);
+        }
       }
+    } finally {
+      lease?.release();
     }
-    this.deliverSubscriptionFailure(subscription);
   }
 
   private deliverSubscriptionFailure(subscription: SubscriptionState): void {
@@ -3942,11 +3996,6 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 }
 
-function closeSubscriptionSourceState(subscription: SubscriptionState): void {
-  for (const source of subscription.sources) {
-    closeSubscriptionSource(source.source);
-  }
-}
 
 function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
   subscription.deferredVisiblePublication = false;
