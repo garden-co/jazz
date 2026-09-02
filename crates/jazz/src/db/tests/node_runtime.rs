@@ -2048,16 +2048,19 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     // A resumed ordinary subscription instead publishes the exact CoveredInput
     // closure, so compare it with a fresh ordinary subscription at the same
     // three-row frontier rather than the incomparable legacy frame.
-    let full_client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
-    let full_client = open_db(0xc2, full_client_author, &schema);
+    let full_server = open_core(0x6e, AuthorSubject::SYSTEM, &schema);
+    seed(&full_server, "todos", cells("first", false, owner));
+    seed(&full_server, "todos", cells("second", false, owner));
+    seed(&full_server, "todos", cells("third", true, owner));
+    let full_client = open_db(0xc2, client_author, &schema);
     let (full_client_transport, full_server_transport) = duplex();
     let _full_upstream = crate::db::block_on(full_client.connect_upstream(full_client_transport));
-    let full_subscriber = server.accept_subscriber(full_server_transport, full_client_author);
+    let full_subscriber = full_server.accept_subscriber(full_server_transport, client_author);
     let mut full_subscription =
         prepared_subscribe(&full_client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(full_subscription.next_raw()).unwrap()).is_empty());
     full_client.tick().unwrap();
-    server.tick().unwrap();
+    full_server.tick().unwrap();
     full_client.tick().unwrap();
     assert_eq!(
         delta_rows(block_on(full_subscription.next_raw()).unwrap())
@@ -2066,6 +2069,16 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
         3
     );
     let covered_full_bytes = full_subscriber.borrow().last_resume_bytes().unwrap();
+    let full_policy = match &full_subscriber.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .coverage_groups
+            .values()
+            .next()
+            .expect("fresh control owns one coverage group")
+            .policy_binding
+            .clone(),
+        ConnectionLink::Upstream(_) => unreachable!("fresh authority link is a subscriber"),
+    };
 
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = duplex();
@@ -2077,6 +2090,20 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     client.tick().unwrap();
 
     let resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    let resume_policy = match &resumed.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .coverage_groups
+            .values()
+            .next()
+            .expect("resumed connection owns one coverage group")
+            .policy_binding
+            .clone(),
+        ConnectionLink::Upstream(_) => unreachable!("resumed authority link is a subscriber"),
+    };
+    assert_eq!(
+        resume_policy, full_policy,
+        "resume and the full-response control must use the same authenticated policy scope"
+    );
     assert!(
         resume_bytes > 0,
         "resume catch-up should send a bounded non-empty response after cursor resume"
@@ -2172,17 +2199,19 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     // The byte transport follows the same semantic distinction as the in-memory
     // transport above: bound resume against the corresponding CoveredInput
     // full response, not against the legacy current-row snapshot.
-    let full_client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
-    let full_client = open_db(0xc2, full_client_author, &schema);
-    let (full_client_transport, full_server_transport) =
-        byte_duplex_with_session(full_client_author, 3);
+    let full_server = open_core(0x6e, AuthorSubject::SYSTEM, &schema);
+    seed(&full_server, "todos", cells("first", false, owner));
+    seed(&full_server, "todos", cells("second", false, owner));
+    seed(&full_server, "todos", cells("third", true, owner));
+    let full_client = open_db(0xc2, client_author, &schema);
+    let (full_client_transport, full_server_transport) = byte_duplex_with_session(client_author, 3);
     let _full_upstream = crate::db::block_on(full_client.connect_upstream(full_client_transport));
-    let full_subscriber = server.accept_subscriber(full_server_transport, full_client_author);
+    let full_subscriber = full_server.accept_subscriber(full_server_transport, client_author);
     let mut full_subscription =
         prepared_subscribe(&full_client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(full_subscription.next_raw()).unwrap()).is_empty());
     full_client.tick().unwrap();
-    server.tick().unwrap();
+    full_server.tick().unwrap();
     full_client.tick().unwrap();
     assert_eq!(
         delta_rows(block_on(full_subscription.next_raw()).unwrap())
@@ -2191,6 +2220,16 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
         3
     );
     let covered_full_bytes = full_subscriber.borrow().last_resume_bytes().unwrap();
+    let full_policy = match &full_subscriber.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .coverage_groups
+            .values()
+            .next()
+            .expect("fresh control owns one coverage group")
+            .policy_binding
+            .clone(),
+        ConnectionLink::Upstream(_) => unreachable!("fresh authority link is a subscriber"),
+    };
 
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = byte_duplex_with_session(client_author, 2);
@@ -2202,6 +2241,20 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     client.tick().unwrap();
 
     let resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    let resume_policy = match &resumed.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .coverage_groups
+            .values()
+            .next()
+            .expect("resumed connection owns one coverage group")
+            .policy_binding
+            .clone(),
+        ConnectionLink::Upstream(_) => unreachable!("resumed authority link is a subscriber"),
+    };
+    assert_eq!(
+        resume_policy, full_policy,
+        "byte-wire resume and its full-response control must use the same authenticated policy scope"
+    );
     assert!(
         resume_bytes > 0,
         "byte-wire resume catch-up should send a bounded non-empty response after cursor resume"
