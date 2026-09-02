@@ -298,3 +298,73 @@ fn arrangement_key_parts(value: crate::records::Value) -> Vec<crate::records::Va
         value => vec![value],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ivm::RecordDelta;
+    use crate::storage::{TestStorage, TestStorageOperation};
+
+    #[futures_test::test]
+    async fn unique_index_positive_conflict_is_pre_submit_in_both_orders() {
+        for records in [
+            vec![
+                (b"same-key".to_vec(), b"record-a".to_vec()),
+                (b"same-key".to_vec(), b"record-b".to_vec()),
+            ],
+            vec![
+                (b"same-key".to_vec(), b"record-b".to_vec()),
+                (b"same-key".to_vec(), b"record-a".to_vec()),
+            ],
+        ] {
+            let (storage, control) = TestStorage::controlled(&["indices"]);
+            let durable_storage = DurableStorage {
+                column_family: "indices".to_owned(),
+                key_prefix: b"albums\0unique_albums_by_title\0".to_vec(),
+            };
+            let descriptor = index_record_descriptor();
+            let delta = RecordDeltas {
+                descriptor,
+                deltas: records
+                    .into_iter()
+                    .map(|(key, value)| RecordDelta {
+                        record: descriptor
+                            .create(&[
+                                crate::records::Value::Bytes(key),
+                                crate::records::Value::Bytes(value),
+                            ])
+                            .unwrap()
+                            .into(),
+                        weight: 1,
+                    })
+                    .collect(),
+            };
+            let before = storage
+                .prefix("indices".to_owned(), Vec::new())
+                .await
+                .unwrap();
+            control.take_observed();
+
+            let error = apply_index_persist_delta(&storage, &durable_storage, true, &delta)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                IvmRuntimeError::UniqueIndexViolation { index }
+                    if index == "albums.unique_albums_by_title"
+            ));
+            assert!(
+                !control
+                    .take_observed()
+                    .contains(&TestStorageOperation::WriteMany)
+            );
+            assert_eq!(
+                storage
+                    .prefix("indices".to_owned(), Vec::new())
+                    .await
+                    .unwrap(),
+                before
+            );
+        }
+    }
+}
