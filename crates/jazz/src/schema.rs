@@ -2441,7 +2441,13 @@ mod tests {
                 .iter()
                 .map(|field| field.name.as_deref().unwrap())
                 .collect::<Vec<_>>(),
-            ["source", "target", "substitutions"]
+            [
+                "source",
+                "target",
+                "substitutions",
+                "branch_view_copy_v1",
+                "branch_write_intent_v1",
+            ]
         );
 
         let GrooveColumnType::Array(substitution) = &provenance.fields()[2].value_type else {
