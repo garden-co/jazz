@@ -3467,7 +3467,12 @@ where
                     }
                     self.auxiliary_pump.acknowledge_outbound(&message);
                 }
-                while let Some(message) = self.transport.try_recv() {
+                // `SyncMessage` contains several large wire payload variants.
+                // Keep an inbound message heap-owned while this async serving
+                // turn awaits policy and storage work; matching it by value
+                // below moves only the selected payload out of the box instead
+                // of reserving every variant in the tick future's stack frame.
+                while let Some(message) = self.transport.try_recv().map(Box::new) {
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
@@ -3487,7 +3492,7 @@ where
                         "subscriber recv {}",
                         summarize_sync_message(&message)
                     ));
-                    match message {
+                    match *message {
                         SyncMessage::ChunkRequestBatch(batch) => {
                             let mut responses = Vec::new();
                             for request in batch.requests {
@@ -3593,6 +3598,10 @@ where
                             opts,
                             ast,
                         } => {
+                            // Shape admission carries the parsed AST and may
+                            // compile policy dependencies. Keep that inactive
+                            // state out of ordinary commit-serving turns.
+                            let should_continue = Box::pin(async {
                             if let Err(message) =
                                 validate_shape_registration_size(&ast, &opts)
                             {
@@ -3674,7 +3683,7 @@ where
                                     } else {
                                         drop_peer_request(&self.node);
                                     }
-                                    continue;
+                                    return Ok::<bool, Error>(true);
                                 }
                             };
                             if let Some(shape) = &shape {
@@ -3692,7 +3701,7 @@ where
                                         Ok(binding) => binding,
                                         Err(_) => {
                                             drop_peer_request(&self.node);
-                                            continue;
+                                            return Ok::<bool, Error>(true);
                                         }
                                     };
                                     let supported = {
@@ -3759,7 +3768,7 @@ where
                                         existing_opts,
                                     ) if existing_opts != &opts => {
                                         drop_peer_request(&self.node);
-                                        continue;
+                                        return Ok::<bool, Error>(true);
                                     }
                                     SubscriberShapeRegistration::RejectedUnsupportedCapability(
                                         detail,
@@ -3804,6 +3813,12 @@ where
                                 SubscriberShapeRegistration::Registered(opts)
                             };
                             shape_registrations.insert(registration_key, registration);
+                            Ok::<bool, Error>(false)
+                            })
+                            .await?;
+                            if should_continue {
+                                continue;
+                            }
                         }
                         SyncMessage::Subscribe(subscribe) => {
                             // Subscription admission has a substantially larger async state
@@ -4599,6 +4614,12 @@ where
                             }
                         }
                         other => {
+                            // Upload admission has its own policy/persistence
+                            // awaits. Keep it as a separately boxed future so
+                            // the subscriber owner-loop does not retain those
+                            // compiler states while serving unrelated control
+                            // messages or maintained-view updates.
+                            let should_continue = Box::pin(async {
                             if matches!(other, SyncMessage::SessionClaims { .. })
                                 && matches!(
                                     ingest_context.trust,
@@ -4610,7 +4631,7 @@ where
                                 // the node-wide claim cache; delegated bindings are
                                 // request-local and topology-admitted instead.
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             let edge_client_upload = matches!(
                                 &other,
@@ -4644,7 +4665,7 @@ where
                                     durability: None,
                                 };
                                 self.downstream_fates.borrow_mut().push(response);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             let write_state_tx_id = write_state_update_tx_id(&other);
                             // RegisterShape (registers the shape ahead of its
@@ -4723,9 +4744,19 @@ where
                             {
                                 schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                             }
+                            Ok::<bool, Error>(false)
+                            })
+                            .await?;
+                            if should_continue {
+                                continue;
+                            }
                         }
                     }
                 }
+                // Keep post-ingress publication/refresh work in its own heap
+                // future. It contains the maintained-view serving graph and
+                // does not need to inflate the inbound message dispatcher.
+                return Box::pin(async {
                 // A client upload arriving before its action-specific support
                 // view settles is retained by `PeerState`, not optimistically
                 // inserted into edge history.  Drive that state on every
@@ -5331,6 +5362,8 @@ where
                     }
                 }
                     Ok::<bool, Error>(false)
+                })
+                .await;
                 })
                 .await?;
                 if stop {
