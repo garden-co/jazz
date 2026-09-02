@@ -2044,6 +2044,29 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     client.tick().unwrap();
     assert_eq!(prepared_read(&client, &query).len(), 3);
 
+    // `serve_current_rows` uses the legacy current-row snapshot representation.
+    // A resumed ordinary subscription instead publishes the exact CoveredInput
+    // closure, so compare it with a fresh ordinary subscription at the same
+    // three-row frontier rather than the incomparable legacy frame.
+    let full_client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let full_client = open_db(0xc2, full_client_author, &schema);
+    let (full_client_transport, full_server_transport) = duplex();
+    let _full_upstream = crate::db::block_on(full_client.connect_upstream(full_client_transport));
+    let full_subscriber = server.accept_subscriber(full_server_transport, full_client_author);
+    let mut full_subscription =
+        prepared_subscribe(&full_client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(full_subscription.next_raw()).unwrap()).is_empty());
+    full_client.tick().unwrap();
+    server.tick().unwrap();
+    full_client.tick().unwrap();
+    assert_eq!(
+        delta_rows(block_on(full_subscription.next_raw()).unwrap())
+            .0
+            .len(),
+        3
+    );
+    let covered_full_bytes = full_subscriber.borrow().last_resume_bytes().unwrap();
+
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = duplex();
     let _resumed_upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -2059,8 +2082,8 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
         "resume catch-up should send a bounded non-empty response after cursor resume"
     );
     assert!(
-        resume_bytes <= full_bytes,
-        "resume catch-up should stay bounded by the initial full response: full={full_bytes}, resume={resume_bytes}"
+        resume_bytes <= covered_full_bytes,
+        "resume must not exceed the equivalent fresh CoveredInput response: legacy_current_rows={full_bytes}, covered_full={covered_full_bytes}, resume={resume_bytes}"
     );
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
@@ -2146,6 +2169,29 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     client.tick().unwrap();
     assert_eq!(prepared_read(&client, &query).len(), 3);
 
+    // The byte transport follows the same semantic distinction as the in-memory
+    // transport above: bound resume against the corresponding CoveredInput
+    // full response, not against the legacy current-row snapshot.
+    let full_client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let full_client = open_db(0xc2, full_client_author, &schema);
+    let (full_client_transport, full_server_transport) =
+        byte_duplex_with_session(full_client_author, 3);
+    let _full_upstream = crate::db::block_on(full_client.connect_upstream(full_client_transport));
+    let full_subscriber = server.accept_subscriber(full_server_transport, full_client_author);
+    let mut full_subscription =
+        prepared_subscribe(&full_client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(full_subscription.next_raw()).unwrap()).is_empty());
+    full_client.tick().unwrap();
+    server.tick().unwrap();
+    full_client.tick().unwrap();
+    assert_eq!(
+        delta_rows(block_on(full_subscription.next_raw()).unwrap())
+            .0
+            .len(),
+        3
+    );
+    let covered_full_bytes = full_subscriber.borrow().last_resume_bytes().unwrap();
+
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = byte_duplex_with_session(client_author, 2);
     let _resumed_upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -2161,8 +2207,8 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
         "byte-wire resume catch-up should send a bounded non-empty response after cursor resume"
     );
     assert!(
-        resume_bytes <= full_bytes,
-        "byte-wire resume catch-up should stay bounded by the initial full response: full={full_bytes}, resume={resume_bytes}"
+        resume_bytes <= covered_full_bytes,
+        "byte-wire resume must not exceed the equivalent fresh CoveredInput response: legacy_current_rows={full_bytes}, covered_full={covered_full_bytes}, resume={resume_bytes}"
     );
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
