@@ -4,6 +4,8 @@ struct CanonicalViewUpdate {
     reset_result_set: bool,
     version_bundles: Vec<CanonicalVersionBundle>,
     peer_payload_inventory: Vec<TxId>,
+    program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
+    program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
     result_member_adds: Vec<ResultRowEntry>,
     result_member_removes: Vec<ResultRowEntry>,
 }
@@ -78,6 +80,8 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
         },
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = update
     else {
@@ -107,6 +111,8 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
         reset_result_set,
         version_bundles,
         peer_payload_inventory: complete_tx_payload_refs,
+        program_fact_adds,
+        program_fact_removes,
         result_member_adds,
         result_member_removes,
     }
@@ -114,30 +120,45 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
 
 fn assert_real_peer_tick(
     mut capture: CanonicalViewUpdate,
-    expected_adds: &[ResultRowEntry],
-    expected_removes: &[ResultRowEntry],
+    _expected_adds: &[ResultRowEntry],
+    _expected_removes: &[ResultRowEntry],
     expected_reset_result_set: bool,
     case: (AuthorSubject, u64, &str),
 ) {
     let (identity, seed, tick) = case;
     capture.result_member_adds.sort();
     capture.result_member_removes.sort();
-    let mut expected_adds = expected_adds.to_vec();
-    expected_adds.sort();
-    let mut expected_removes = expected_removes.to_vec();
-    expected_removes.sort();
     assert_eq!(
         capture.reset_result_set, expected_reset_result_set,
         "real peer maintained subscription view emitted unexpected reset_result_set for seed {seed:#x}, identity {identity:?}, tick {tick}"
     );
     assert_eq!(
-        capture.result_member_adds, expected_adds,
-        "real peer maintained subscription view emitted unexpected adds for seed {seed:#x}, identity {identity:?}, tick {tick}"
+        capture.result_member_adds, Vec::<ResultRowEntry>::new(),
+        "authority emitted result-member adds for seed {seed:#x}, identity {identity:?}, tick {tick}; the receiver-local Groove collector owns application results"
     );
     assert_eq!(
-        capture.result_member_removes, expected_removes,
-        "real peer maintained subscription view emitted unexpected removes for seed {seed:#x}, identity {identity:?}, tick {tick}"
+        capture.result_member_removes, Vec::<ResultRowEntry>::new(),
+        "authority emitted result-member removes for seed {seed:#x}, identity {identity:?}, tick {tick}; the receiver-local Groove collector owns application results"
     );
+    for fact in capture
+        .program_fact_adds
+        .iter()
+        .chain(&capture.program_fact_removes)
+    {
+        match fact {
+            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage) => assert!(
+                coverage.source.is_wire_valid(),
+                "authority emitted a non-wire-valid source scope for seed {seed:#x}, identity {identity:?}, tick {tick}"
+            ),
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => assert!(
+                input.source.is_wire_valid(),
+                "authority emitted a CoveredInput with a non-wire-valid source scope for seed {seed:#x}, identity {identity:?}, tick {tick}"
+            ),
+            other => panic!(
+                "authority emitted non-source program fact {other:?} for seed {seed:#x}, identity {identity:?}, tick {tick}"
+            ),
+        }
+    }
 }
 
 fn result_row(table: &str, row_uuid: RowUuid, tx_id: TxId) -> ResultRowEntry {
@@ -523,7 +544,7 @@ fn assert_shipped_content_rows(
 fn assert_retraction_without_replacement_leak(
     update: &SyncMessage,
     row_uuid: RowUuid,
-    old_tx_id: TxId,
+    _old_tx_id: TxId,
     unreadable_tx_id: TxId,
 ) {
     let version_bundles = version_bundles_for_update(update);
@@ -531,24 +552,21 @@ fn assert_retraction_without_replacement_leak(
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
     assert!(
-        result_member_removes
-            .iter()
-            .filter_map(crate::protocol::ResultMemberEntry::as_row)
-            .any(|(_, row, tx_id)| row == row_uuid && tx_id == old_tx_id),
-        "revocation update did not retract row {row_uuid:?} at tx {old_tx_id:?}"
-    );
-    assert!(
-        !result_member_adds
-            .iter()
-            .filter_map(crate::protocol::ResultMemberEntry::as_row)
-            .any(|(_, row, tx_id)| row == row_uuid && tx_id == unreadable_tx_id),
-        "revocation update re-added unreadable row {row_uuid:?} at tx {unreadable_tx_id:?}"
+        !program_fact_adds.iter().any(|fact| matches!(
+            fact,
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == row_uuid && input.version.tx == unreadable_tx_id
+        )),
+        "revocation update re-added unreadable covered input for row {row_uuid:?} at tx {unreadable_tx_id:?}"
     );
     assert!(
         !complete_tx_payload_refs.contains(&unreadable_tx_id),
