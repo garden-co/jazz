@@ -6078,10 +6078,10 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
       await runtime.query(JSON.stringify({
         table: "todos",
         conditions: [{ column: "title", op: "eq", value: `background-${index}` }],
-      }), null, "local", JSON.stringify({ propagation: "localOnly" }));
+      }), null, "local", JSON.stringify({ propagation: "local-only" }));
     }
     await expect(runtime.query(
-      queryJson, null, "local", JSON.stringify({ propagation: "localOnly" }),
+      queryJson, null, "local", JSON.stringify({ propagation: "local-only" }),
     )).resolves.toEqual([]);
     expect(preparedQueries.at(-1)).not.toBe(failedQuery);
   });

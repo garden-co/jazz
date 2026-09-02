@@ -1967,7 +1967,7 @@ export class NativeRuntimeAdapter implements Runtime {
     };
     const install = (native: ReadableStream<unknown> | Subscription) => {
       const source = subscriptionSource(native);
-      if (subscription.cancelled || this.closed) {
+      if (subscription.cancelled || this.closed || this.ownerRuntime.closed) {
         try {
           closeSubscriptionSource(source);
         } finally {
@@ -1990,7 +1990,8 @@ export class NativeRuntimeAdapter implements Runtime {
     };
     const open = (lease: PreparedQueryLease<PreparedQuery>) => {
       openingLease = lease;
-      if (subscription.cancelled || this.closed) throw new Error("native operation was cancelled");
+      if (subscription.cancelled || this.closed || this.ownerRuntime.closed)
+        throw new Error("native operation was cancelled");
       const native = this.subscribeForContext(lease.query, opts, readContext);
       return isPendingNativeOperation<ReadableStream<unknown> | Subscription>(native)
         ? this.awaitNativeOperation(native, subscription.openingAbort!.signal)
