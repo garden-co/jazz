@@ -22,13 +22,17 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(in crate::node) fn register_shape(
+    pub(in crate::node) fn register_shape_with_options(
         &mut self,
         shape_id: ShapeId,
         ast: ShapeAst,
+        opts: RegisterShapeOptions,
     ) -> Result<(), Error> {
         let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
         self.retain_validated_shape_registration(shape_id, ast, shape)?;
+        self.query
+            .registered_shape_options
+            .insert((shape_id, opts.read_view_key()), opts);
         self.query.locally_registered_shapes.insert(shape_id);
         Ok(())
     }
@@ -294,6 +298,9 @@ where
                 self.parking.parked_shape_registrations.remove(&shape_id);
                 self.parking.parked_binding_deltas.remove(&shape_id);
                 self.query.registered_shapes.remove(&shape_id);
+                self.query
+                    .registered_shape_options
+                    .retain(|(registered_shape, _), _| *registered_shape != shape_id);
                 self.query.registered_bindings.remove(&shape_id);
             }
         }
@@ -539,6 +546,14 @@ where
             binding_id: binding.binding_id(),
             read_view: subscribe.subscription.read_view,
         };
+        let options = self
+            .query
+            .registered_shape_options
+            .get(&(subscribe.shape_id, subscribe.subscription.read_view))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "subscription referenced unregistered read-view options",
+            ))?;
         if authority_result_key.binding_view != binding_view_key {
             return Err(Error::InvalidStoredValue(
                 "subscription authority result binding view disagrees with usage",
@@ -590,6 +605,12 @@ where
                     read_view: subscribe.subscription.read_view,
                     binding_view_key,
                     authority_result_key,
+                    options,
+                    compiler_identity: subscribe
+                        .delegated_session
+                        .as_ref()
+                        .map(|session| session.identity.clone())
+                        .unwrap_or(AuthorSubject::SYSTEM),
                 },
             );
         Ok(())

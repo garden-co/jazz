@@ -1180,7 +1180,8 @@ where
     pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         self.validate_received_view_update_global_time_durability(&update)?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))?;
-        self.validate_covered_input_closure_admission(std::slice::from_ref(&update))?;
+        let compiled_source_caches =
+            self.validate_covered_input_closure_admission(std::slice::from_ref(&update))?;
         let bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
         let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
         self.validate_covered_input_body_witnesses(
@@ -1188,7 +1189,9 @@ where
             &preflight.bundles,
         )
         .await?;
-        self.apply_view_update_inner(update, None).await
+        self.apply_view_update_inner(update, None).await?;
+        self.install_compiled_covered_input_source_caches(compiled_source_caches);
+        Ok(())
     }
 
     pub(crate) async fn apply_view_updates_in_batch(
@@ -1206,7 +1209,7 @@ where
         // preceding valid bundle can advance clocks, allocate aliases, or
         // stage history before a later malformed bundle rejects the frame.
         self.validate_view_update_payloads(&updates)?;
-        self.validate_covered_input_closure_admission(&updates)?;
+        let compiled_source_caches = self.validate_covered_input_closure_admission(&updates)?;
         let mut all_bundle_refs = Vec::new();
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_authority_results = self
@@ -1336,6 +1339,7 @@ where
             self.apply_view_update_inner(update, Some(&preloaded_tx_ids))
                 .await?;
         }
+        self.install_compiled_covered_input_source_caches(compiled_source_caches);
         if self.initial_sync_flush_active
             && self
                 .query
@@ -1398,6 +1402,12 @@ where
                     "peer view update duplicates a source-closure addition",
                 ));
             }
+            let removed_facts = update.program_fact_removes.iter().collect::<BTreeSet<_>>();
+            if removed_facts.len() != update.program_fact_removes.len() {
+                return Err(Error::InvalidStoredValue(
+                    "peer view update duplicates a source-closure removal",
+                ));
+            }
             if update
                 .program_fact_removes
                 .iter()
@@ -1442,7 +1452,8 @@ where
     fn validate_covered_input_closure_admission(
         &mut self,
         updates: &[ViewUpdateParts],
-    ) -> Result<(), Error> {
+    ) -> Result<BTreeMap<AuthorityResultKey, BTreeSet<ProgramSourceId>>, Error> {
+        let mut compiled_source_caches = BTreeMap::new();
         let mut overlays = BTreeMap::<
             AuthorityResultKey,
             (
@@ -1462,27 +1473,23 @@ where
                 // normal admission path records that metric below.
                 continue;
             };
-            if self
+            let compiled_sources = if let Some(compiled) = self
                 .query
                 .authority_results
                 .get(&authority_result_key)
                 .and_then(|state| state.compiled_covered_input_sources.as_ref())
-                .is_none()
             {
+                compiled
+            } else if let Some(compiled) = compiled_source_caches.get(&authority_result_key) {
+                compiled
+            } else {
                 let compiled =
                     self.compiled_covered_input_sources_for_subscription(update.subscription)?;
-                self.query
-                    .authority_results
-                    .entry(authority_result_key.clone())
-                    .or_default()
-                    .compiled_covered_input_sources = Some(compiled);
-            }
-            let compiled_sources = self
-                .query
-                .authority_results
-                .get(&authority_result_key)
-                .and_then(|state| state.compiled_covered_input_sources.as_ref())
-                .expect("compiled source cache was installed");
+                compiled_source_caches.insert(authority_result_key.clone(), compiled);
+                compiled_source_caches
+                    .get(&authority_result_key)
+                    .expect("staged compiler source cache was installed")
+            };
             let overlay = overlays.entry(authority_result_key.clone()).or_default();
             let state = self.query.authority_results.get(&authority_result_key);
             let reset_replaces = Self::reset_replaces_authority_source_closure(
@@ -1498,19 +1505,10 @@ where
             for fact in &update.program_fact_removes {
                 match fact {
                     ProgramFactEntry::ProgramSourceCoverage(coverage) => {
-                        let present =
-                            overlay.1.get(&coverage.source).copied().unwrap_or_else(|| {
-                                !overlay.0
-                                    && state.is_some_and(|state| {
-                                        state.covered_input_sources.contains(&coverage.source)
-                                    })
-                            });
-                        if !present {
-                            return Err(Error::InvalidStoredValue(
-                                "authority source coverage removal is absent from predecessor closure",
-                            ));
-                        }
-                        overlay.1.insert(coverage.source.clone(), false);
+                        let _ = coverage;
+                        return Err(Error::InvalidStoredValue(
+                            "authority source coverage changes are reset-only",
+                        ));
                     }
                     ProgramFactEntry::CoveredInput(input) => {
                         let key = (input.source.clone(), input.source_row);
@@ -1534,6 +1532,11 @@ where
             // coverage additions before validating the added content members.
             for fact in &update.program_fact_adds {
                 if let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact {
+                    if !reset_replaces {
+                        return Err(Error::InvalidStoredValue(
+                            "authority source coverage changes are reset-only",
+                        ));
+                    }
                     if !coverage.complete {
                         return Err(Error::InvalidStoredValue(
                             "authority source coverage must be complete",
@@ -1587,16 +1590,29 @@ where
                             state.and_then(|state| state.covered_input_versions.get(&key).cloned())
                         }
                     };
-                    if current.as_ref().is_some_and(|existing| existing != input) {
+                    if current.is_some() {
                         return Err(Error::InvalidStoredValue(
-                            "authority covered input retains conflicting versions for one source row",
+                            "authority covered input addition already has a predecessor member",
                         ));
                     }
                     overlay.2.insert(key, Some(input.clone()));
                 }
             }
         }
-        Ok(())
+        Ok(compiled_source_caches)
+    }
+
+    fn install_compiled_covered_input_source_caches(
+        &mut self,
+        caches: BTreeMap<AuthorityResultKey, BTreeSet<ProgramSourceId>>,
+    ) {
+        for (key, compiled) in caches {
+            self.query
+                .authority_results
+                .entry(key)
+                .or_default()
+                .compiled_covered_input_sources = Some(compiled);
+        }
     }
 
     async fn validate_covered_input_body_witnesses(

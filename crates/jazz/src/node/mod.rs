@@ -820,6 +820,11 @@ struct QueryServing {
     version_storage_sources_cache: BTreeMap<(String, VersionLayer), Vec<String>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
+    /// Exact semantic registration options keyed by the read-view identity
+    /// carried by a subscription.  A shape AST alone cannot reconstruct the
+    /// compiler sources for a non-default read view.
+    registered_shape_options:
+        BTreeMap<(ShapeId, ReadViewKey), crate::protocol::RegisterShapeOptions>,
     /// Connection epochs retaining each peer-installed or peer-parked shape.
     ///
     /// One owner is recorded per peer regardless of repeated registration or
@@ -1163,6 +1168,12 @@ struct RegisteredBinding {
     /// Exact, Jazz-owned namespace for authority-selected membership.  This
     /// stays separate from the canonical local binding key.
     authority_result_key: AuthorityResultKey,
+    /// Immutable compiler context selected at RegisterShape ingress.
+    options: crate::protocol::RegisterShapeOptions,
+    /// The admitted identity associated with this usage, when a trusted relay
+    /// supplied one.  Receiver source discovery preserves it even though the
+    /// client-local compiler does not evaluate policy branches.
+    compiler_identity: AuthorSubject,
 }
 
 /// Wire binding handles are only unique within one admitted policy scope.

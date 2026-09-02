@@ -588,6 +588,7 @@ where
                 tx_version_tables_cache_order_set: BTreeSet::new(),
                 version_storage_sources_cache: BTreeMap::new(),
                 registered_shapes: BTreeMap::new(),
+                registered_shape_options: BTreeMap::new(),
                 peer_shape_owners: BTreeMap::new(),
                 locally_registered_shapes: BTreeSet::new(),
                 outbound_shape_owners: BTreeMap::new(),

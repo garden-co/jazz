@@ -306,7 +306,7 @@ where
                     validate_shape_registration_size(&ast, &opts).map_err(|_| {
                         Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
                     })?;
-                    self.register_shape(shape_id, ast)?;
+                    self.register_shape_with_options(shape_id, ast, opts)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
                 SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(

@@ -318,10 +318,10 @@ where
         let request = self.current_query_program_request(
             shape,
             &binding,
-            DurabilityTier::Global,
-            AuthorSubject::SYSTEM,
+            registered.options.tier,
+            registered.compiler_identity.clone(),
             CurrentQueryProgramOutput::MaintainedView,
-            &ReadViewSpec::default(),
+            &registered.options.read_view,
             Some(registered.binding_view_key),
             QueryAuthorizationMode::ClientLocal,
         )?;
