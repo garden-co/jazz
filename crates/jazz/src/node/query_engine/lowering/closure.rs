@@ -88,7 +88,7 @@ pub(super) fn lower_closure_membership(
     })
 }
 
-fn reachable_contribution_membership_graph(
+pub(super) fn reachable_contribution_membership_graph(
     visible_root: GraphBuilder,
     contribution: &ReachableContribution,
     root_source: &ResolvedSource,
@@ -96,6 +96,7 @@ fn reachable_contribution_membership_graph(
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.access_input, nodes, &mut visited)
@@ -127,9 +128,9 @@ fn reachable_contribution_membership_graph(
         [root_source.row_shape.row_uuid_field.clone()],
         [join_field],
     )
-    .project_fields(project_source_fields_from_prefix(
+    .project_fields(project_join_contribution_fields_with_root_routes(
         contribution_source,
-        RIGHT_JOIN_PREFIX,
+        route_fields,
     )))
 }
 

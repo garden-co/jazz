@@ -167,6 +167,35 @@ pub(super) fn lowered_terminals(
             })
             .or_insert(graph);
     }
+    // Recursive reachability is receiver-local semantics too. Its admitted
+    // access rows are exact source inputs, not authority-only proof, so emit
+    // them under their own source occurrence just like join contributors.
+    for contribution in &request.input.shape.reachable_contributions {
+        let access_source = resolved_sources
+            .get(&contribution.access_source)
+            .ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Runtime(format!(
+                    "reachable contribution source {:?} was not resolved",
+                    contribution.access_source
+                )))
+            })?;
+        let graph = closure::reachable_contribution_membership_graph(
+            visible_root_with_routes.clone(),
+            contribution,
+            source,
+            access_source,
+            &request.input.shape.nodes,
+            resolved_sources,
+            request,
+            &root_route_fields,
+        )?;
+        covered_source_members
+            .entry(contribution.access_source.clone())
+            .and_modify(|existing| {
+                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
+            })
+            .or_insert(graph);
+    }
     // A correlated collector owns a distinct compiled source occurrence for
     // each child path.  The implicit-reference closure above may happen to
     // traverse the same physical table through a separate `Alias` source,
