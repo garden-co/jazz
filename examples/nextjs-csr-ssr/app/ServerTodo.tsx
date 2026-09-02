@@ -1,6 +1,6 @@
 import { revalidatePath } from "next/cache";
 import { app } from "../schema";
-import { db } from "@/lib/jazz-server";
+import { getBackendDb } from "@/lib/jazz-server";
 
 export default function ServerTodo() {
   return (
@@ -12,8 +12,7 @@ export default function ServerTodo() {
 }
 
 async function TodoList() {
-  const todos = await db.all(app.todos);
-
+  const todos = await getBackendDb().all(app.todos);
   return (
     <ul className="mt-4 space-y-1">
       {todos.length === 0 && <li className="text-sm text-foreground/30 italic">No todos yet.</li>}
@@ -31,7 +30,7 @@ function TodoForm() {
     "use server";
     const title = formData.get("titleField");
     if (typeof title !== "string" || !title.trim()) return;
-    db.insert(app.todos, { title: title.trim(), done: false });
+    getBackendDb().insert(app.todos, { title: title.trim(), done: false });
     revalidatePath("/");
   }
 
