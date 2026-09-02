@@ -347,8 +347,8 @@ struct MaintainedSubscriptionViewSubscription {
     previous_result_set: BTreeSet<ResultRowEntry>,
     peer_complete_tx_payloads: BTreeSet<TxId>,
     receiver: NodeState<MemoryStorage>,
-    receiver_result_set: BTreeSet<(String, RowUuid)>,
-    receiver_previous_result_set: BTreeSet<(String, RowUuid)>,
+    receiver_result_set: BTreeSet<ResultRowEntry>,
+    receiver_previous_result_set: BTreeSet<ResultRowEntry>,
     receiver_shape: ValidatedQuery,
     receiver_binding: Binding,
     last_update: Option<SyncMessage>,
@@ -535,7 +535,6 @@ impl MaintainedSubscriptionViewSubscription {
         assert!(received, "registered receiver did not install its settled exact source closure");
         self.receiver_result_set = maintained.active_result_members().iter()
             .filter_map(crate::protocol::ResultMemberEntry::as_row)
-            .map(|(table, row, _)| (table.to_string(), row))
             .collect();
     }
 
@@ -559,8 +558,10 @@ impl MaintainedSubscriptionViewSubscription {
             identity,
         );
         let mut expected = self.receiver_previous_result_set.clone();
-        for (table, row, _) in expected_removes { expected.remove(&(table.to_string(), *row)); }
-        for (table, row, _) in expected_adds { expected.insert((table.to_string(), *row)); }
+        for entry in expected_removes {
+            expected.remove(entry);
+        }
+        expected.extend(expected_adds.iter().cloned());
         assert_eq!(self.receiver_result_set, expected, "receiver collector mismatch seed {seed:#x}, identity {identity:?}, tick {tick}");
         self.receiver_previous_result_set = self.receiver_result_set.clone();
     }
