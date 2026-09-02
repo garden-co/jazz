@@ -2615,6 +2615,8 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
         }),
         "rehydrate must ship the restored content version, not the pre-delete content"
     );
+    // A covered closure is consumed by the registered receiver graph, not by
+    // a later authority-output materialization path.
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
@@ -4439,7 +4441,13 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
     peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
     peer.set_ship_complete_exclusive_payloads(true);
 
-    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    // The following incremental source closure is only meaningful relative to
+    // this exact reset receipt. Register and ingest it before advancing the
+    // authority: a receiver must not infer a predecessor from the payload
+    // bodies of a later exclusive transaction.
+    register_shape_binding_for_receiver(&mut reader, &shape, &binding);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    reader.apply_sync_message_settled(initial).unwrap();
     let tx = OpenTransactionId::new();
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
@@ -4479,7 +4487,6 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
         BTreeSet::from([row(0x71), row(0x72)])
     );
 
-    register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
