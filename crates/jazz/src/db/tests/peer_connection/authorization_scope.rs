@@ -14,6 +14,19 @@ fn schema_with_explicit_public_read() -> JazzSchema {
     )
 }
 
+/// Peer updates disclose the exact authority-approved source closure. A client
+/// derives result membership locally, so protocol-facing tests inspect source
+/// inputs rather than the retired authority-rendered member payload.
+fn covered_input_rows(facts: &[crate::protocol::ProgramFactEntry]) -> Vec<RowUuid> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            _ => None,
+        })
+        .collect()
+}
+
 // Wire inspection is required because coverage-group keys and server-stamped
 // authorization generations are intentionally absent from the public API.
 // Final convergence is still asserted through the receiver's public read.
@@ -140,8 +153,8 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = &second_update
     else {
@@ -149,10 +162,13 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
     };
     assert!(*reset_result_set);
     assert_eq!(peer_payload_inventory.authorization_progress, Some(2));
-    assert_eq!(result_member_adds.len(), usize::from(replacement_row));
-    assert!(result_member_removes.is_empty());
+    assert_eq!(
+        covered_input_rows(program_fact_adds).len(),
+        usize::from(replacement_row)
+    );
+    assert!(covered_input_rows(program_fact_removes).is_empty());
     if let Some(fresh) = fresh {
-        assert_eq!(result_member_adds[0].as_real_row().unwrap().row_uuid, fresh);
+        assert_eq!(covered_input_rows(program_fact_adds), vec![fresh]);
     }
 
     upstream.borrow_mut().tick().unwrap();
@@ -1321,21 +1337,13 @@ fn duplicate_usage_delivers_drained_canonical_delta_to_every_established_sibling
             "every canonical sibling delta must precede completion of the new clone"
         );
         assert!(!sibling_update.reset_result_set);
-        assert_eq!(sibling_update.result_member_adds.len(), 1);
         assert_eq!(
-            sibling_update.result_member_adds[0]
-                .as_real_row()
-                .unwrap()
-                .row_uuid,
-            fresh
+            covered_input_rows(&sibling_update.program_fact_adds),
+            vec![fresh]
         );
-        assert_eq!(sibling_update.result_member_removes.len(), 1);
         assert_eq!(
-            sibling_update.result_member_removes[0]
-                .as_real_row()
-                .unwrap()
-                .row_uuid,
-            stale
+            covered_input_rows(&sibling_update.program_fact_removes),
+            vec![stale]
         );
         assert_eq!(
             sibling_update.peer_payload_inventory.authorization_progress,
@@ -1356,24 +1364,16 @@ fn duplicate_usage_delivers_drained_canonical_delta_to_every_established_sibling
         "ordinary query usages must not acquire unpaired authorization-scope receipts"
     );
     if clone_update.reset_result_set {
-        assert!(clone_update.result_member_removes.is_empty());
+        assert!(covered_input_rows(&clone_update.program_fact_removes).is_empty());
     } else {
-        assert_eq!(clone_update.result_member_removes.len(), 1);
         assert_eq!(
-            clone_update.result_member_removes[0]
-                .as_real_row()
-                .unwrap()
-                .row_uuid,
-            stale
+            covered_input_rows(&clone_update.program_fact_removes),
+            vec![stale]
         );
     }
-    assert_eq!(clone_update.result_member_adds.len(), 1);
     assert_eq!(
-        clone_update.result_member_adds[0]
-            .as_real_row()
-            .unwrap()
-            .row_uuid,
-        fresh
+        covered_input_rows(&clone_update.program_fact_adds),
+        vec![fresh]
     );
     drop(messages);
 
@@ -1533,18 +1533,10 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         );
         let (update_index, update) = updates[0];
         assert!(update_index < rejection_index);
-        assert_eq!(update.result_member_adds.len(), 1);
+        assert_eq!(covered_input_rows(&update.program_fact_adds), vec![fresh]);
         assert_eq!(
-            update.result_member_adds[0].as_real_row().unwrap().row_uuid,
-            fresh
-        );
-        assert_eq!(update.result_member_removes.len(), 1);
-        assert_eq!(
-            update.result_member_removes[0]
-                .as_real_row()
-                .unwrap()
-                .row_uuid,
-            stale
+            covered_input_rows(&update.program_fact_removes),
+            vec![stale]
         );
         sibling_authorization_progress.push(update.peer_payload_inventory.authorization_progress);
     }
