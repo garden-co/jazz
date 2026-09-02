@@ -594,12 +594,7 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
         block_on(client.subscribe(&prepared, ReadOpts::default())).expect("db subscribe");
 
     client.tick().await.expect("client fresh subscribe tick");
-    subscriber
-        .lock()
-        .await
-        .serve_current_rows(STREAM_DOCS)
-        .await
-        .expect("serve fresh rows");
+    server.tick().await.expect("server fresh subscribe tick");
     client.tick().await.expect("client fresh apply tick");
     let mut rows = Vec::new();
     drain_subscription_events(&mut watch, &mut rows);
@@ -658,12 +653,6 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
         server.accept_subscriber_with_resume(server_transport, AuthorSubject::SYSTEM, cursor);
 
     client.tick().await.expect("client resumed subscribe tick");
-    resumed
-        .lock()
-        .await
-        .serve_current_rows(STREAM_DOCS)
-        .await
-        .expect("serve resumed stream rows");
     server.tick().await.expect("server resumed tick");
     client.tick().await.expect("client resumed apply tick");
 

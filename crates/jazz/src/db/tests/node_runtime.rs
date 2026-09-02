@@ -2023,10 +2023,9 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    // The subscriber registers the whole-table query shape; explicit
-    // current-row serving then sends the facade-level initial snapshot.
+    // The ordinary whole-table subscription owns its initial snapshot.
     client.tick().unwrap();
-    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+    server.tick().unwrap();
     client.tick().unwrap();
 
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -2044,10 +2043,8 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     client.tick().unwrap();
     assert_eq!(prepared_read(&client, &query).len(), 3);
 
-    // `serve_current_rows` uses the legacy current-row snapshot representation.
-    // A resumed ordinary subscription instead publishes the exact CoveredInput
-    // closure, so compare it with a fresh ordinary subscription at the same
-    // three-row frontier rather than the incomparable legacy frame.
+    // Resume and a fresh ordinary subscription publish the same exact
+    // CoveredInput closure at the three-row frontier.
     let full_server = open_core(0x6e, AuthorSubject::SYSTEM, &schema);
     seed(&full_server, "todos", cells("first", false, owner));
     seed(&full_server, "todos", cells("second", false, owner));
@@ -2133,28 +2130,37 @@ fn current_rows_uses_its_connection_claim_snapshot_not_the_author_cache() {
         crate::query::provider_claim_key("session"),
         Value::String("stale sibling".to_owned()),
     )]);
-    let (_client_transport, server_transport) = duplex();
+    let client = open_db(0xc1, author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber =
         server.accept_subscriber_with_claims(server_transport, author, admitted.clone());
+    let query = Query::from("todos");
+    let attachment = client
+        .attach_query_with_opts(&prepared(&client, &query), global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
 
     // Simulate another connection for the same subject updating the legacy
     // identity-keyed compatibility cache after this link was authenticated.
     server.node().borrow_mut().set_session_claims(author, stale);
-    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
-
-    let subscription = server
-        .node()
-        .borrow()
-        .whole_table_subscription_key("todos")
-        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
     let connection = subscriber.borrow();
     let ConnectionLink::Subscriber(state) = &connection.link else {
-        panic!("current-rows server connection must remain a subscriber link");
+        panic!("ordinary server connection must remain a subscriber link");
     };
+    let coverage = state
+        .served
+        .get(&attachment.subscription())
+        .expect("ordinary usage must be admitted");
+    let group = state
+        .coverage_groups
+        .get(coverage)
+        .expect("ordinary usage must retain a coverage group");
     assert_eq!(
-        state.peer.subscription_policy_binding(subscription),
-        Some((author, admitted)),
-        "whole-table serving must use the exact session claims admitted on this connection"
+        group.policy_binding,
+        (author, admitted),
+        "ordinary whole-table serving must use the exact session claims admitted on this connection"
     );
 }
 
@@ -2178,7 +2184,7 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
-    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+    server.tick().unwrap();
     client.tick().unwrap();
 
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());

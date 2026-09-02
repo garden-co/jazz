@@ -834,7 +834,6 @@ pub(super) struct SubscriberConnectionState {
     pub(super) coverage_groups: BTreeMap<CoverageKey, CoverageGroup>,
     pub(super) shape_registrations: BTreeMap<ShapeRegistrationKey, SubscriberShapeRegistration>,
     pub(super) deferred_subscribe_rejections: VecDeque<PendingSubscriberControlResponse>,
-    pub(super) served_current_rows: BTreeMap<SubscriptionKey, ServedCurrentRows>,
     pub(super) scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
     pub(super) scope_aggregates:
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, AuthorityScopeAggregate>,
@@ -842,16 +841,6 @@ pub(super) struct SubscriberConnectionState {
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ServedAuthorizationScopeHydration>,
     pub(super) authority_scope_hydration_count: u64,
     pub(super) serve_dirty: bool,
-}
-
-/// A whole-table current-row view has the same immutable admission binding as
-/// an ordinary subscription. Keep its provenance explicit: a delegated
-/// current-row view must not be rewritten when the outer connection refreshes.
-#[derive(Debug)]
-pub(super) struct ServedCurrentRows {
-    pub(super) table: String,
-    pub(super) policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
-    pub(super) policy_binding_origin: CoveragePolicyBindingOrigin,
 }
 
 pub(super) struct PendingRowVersionRepair {
@@ -1019,7 +1008,6 @@ where
             served,
             coverage_groups,
             upstream_subscriptions,
-            served_current_rows,
             scope_purposes,
             scope_aggregates,
             serve_dirty,
@@ -1429,111 +1417,12 @@ where
                 }
             }
         }
-        for served_current_rows in served_current_rows.values_mut() {
-            if served_current_rows.policy_binding_origin
-                != CoveragePolicyBindingOrigin::DirectAdmitted
-            {
-                continue;
-            }
-            served_current_rows.policy_binding = refreshed_direct_binding.clone();
-            let subscription = self
-                .node
-                .borrow()
-                .whole_table_subscription_key(&served_current_rows.table)?;
-            peer.set_subscription_policy_binding(subscription, refreshed_direct_binding.clone());
-            let update = {
-                let mut node = self.node.lock().await;
-                let mut node = node.scoped_active_session_claims(
-                    refreshed_direct_binding.0,
-                    refreshed_direct_binding.1.clone(),
-                );
-                // `current_rows_update` deliberately retains its maintained
-                // receiver for ordinary deltas. A claim refresh changes its
-                // immutable policy input, so drop it and send a full reset
-                // under the newly admitted snapshot instead.
-                peer.forget_subscription_with_node(&mut node, subscription);
-                peer.reset_current_rows(&mut node, &served_current_rows.table)
-                    .await?
-            };
-            send_subscriber_with_sync_context(
-                &self.node,
-                peer,
-                self.transport.as_mut(),
-                &self.local_fate_routes,
-                &self.downstream_fates,
-                update,
-            )?;
-        }
-
         if rebind_pending {
             schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
             return Ok(true);
         }
         self.observed_session_claim_revision.set(current_revision);
         Ok(true)
-    }
-
-    /// Serve a whole-table current-row view to this subscriber immediately and
-    /// refresh it on later ticks.
-    pub async fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
-        self.tick().await?;
-        // This is an owner-loop admission path, not a standalone peer helper.
-        // Capture the exact claims accepted for this connection before opening
-        // its maintained view; the author-keyed NodeState cache is only a
-        // compatibility input and may already contain a sibling session's
-        // claims for the same subject.
-        let policy_binding = self
-            .subscriber_session_claim_binding()
-            .expect("subscriber claims");
-        let ConnectionLink::Subscriber(SubscriberConnectionState {
-            peer,
-            served,
-            served_current_rows,
-            ..
-        }) = &mut self.link
-        else {
-            return Ok(());
-        };
-        let subscription = self.node.borrow().whole_table_subscription_key(table)?;
-        if let Some(existing) = served_current_rows.get(&subscription) {
-            if existing.table == table {
-                return Ok(());
-            }
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "whole-table subscription key is already owned by another current-row view",
-            ));
-        }
-        if served.contains_key(&subscription) {
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "whole-table subscription key is already owned by an ordinary subscription",
-            ));
-        }
-        peer.set_subscription_policy_binding(subscription, policy_binding.clone());
-        let update = {
-            let mut node = self.node.lock().await;
-            let mut node =
-                node.scoped_active_session_claims(policy_binding.0, policy_binding.1.clone());
-            peer.current_rows_update(&mut node, table).await?
-        };
-        self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-        debug_assert_eq!(view_update_subscription(&update), Some(subscription));
-        send_sync_message_chunked(self.transport.as_mut(), update)?;
-        served_current_rows.insert(
-            subscription,
-            ServedCurrentRows {
-                table: table.to_owned(),
-                policy_binding,
-                policy_binding_origin: CoveragePolicyBindingOrigin::DirectAdmitted,
-            },
-        );
-        if let ConnectionLink::Subscriber(SubscriberConnectionState { serve_dirty, .. }) =
-            &mut self.link
-        {
-            *serve_dirty = true;
-        }
-        Ok(())
     }
 
     /// Return the serialized byte size of the latest resume/catch-up response
@@ -3419,7 +3308,6 @@ where
                 coverage_groups,
                 shape_registrations,
                 deferred_subscribe_rejections,
-                served_current_rows,
                 scope_purposes,
                 scope_aggregates,
                 authority_scope_hydrations,
@@ -4043,10 +3931,6 @@ where
                                     subscription_policy_binding.1.clone(),
                                 ),
                             );
-                            if served_current_rows.contains_key(&subscription) {
-                                drop_peer_request(&self.node);
-                                return Ok::<bool, Error>(true);
-                            }
                             if let Some(existing_coverage) = served.get(&subscription)
                                 && existing_coverage != &coverage
                             {
@@ -5412,24 +5296,6 @@ where
                                 }
                                 sent_view_update = true;
                             }
-                        }
-                    }
-                    for served_current_rows in served_current_rows.values() {
-                        let update = {
-                            let mut node = self.node.lock().await;
-                            peer.current_rows_update(&mut node, &served_current_rows.table)
-                                .await?
-                        };
-                        if !view_update_is_empty(&update) {
-                            send_subscriber_with_sync_context(
-                                &self.node,
-                                peer,
-                                self.transport.as_mut(),
-                                &self.local_fate_routes,
-                                &self.downstream_fates,
-                                update,
-                            )?;
-                            sent_view_update = true;
                         }
                     }
                     *serve_dirty = serve_again;
@@ -6823,15 +6689,6 @@ where
         summarize_sync_message(&message)
     ));
     transport.send(message).map_err(transport_error)
-}
-
-fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
-    match message {
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. }) => {
-            Some(*subscription)
-        }
-        _ => None,
-    }
 }
 
 fn stamp_view_update_authorization_progress_from(

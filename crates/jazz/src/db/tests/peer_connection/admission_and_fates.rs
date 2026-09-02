@@ -1718,11 +1718,11 @@ fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    let _attachment = client
+    let attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
-    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+    subscriber.borrow_mut().tick().unwrap();
     client.tick().unwrap();
 
     client.set_test_provider_claims(session_subject, denied_claims.clone());
@@ -1741,23 +1741,22 @@ fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
                         && update.result_member_removes.is_empty()
             )
         }),
-        "claim refresh must publish an empty current-row reset"
+        "claim refresh must publish an empty ordinary-subscription reset"
     );
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
         unreachable!("accepted client is served by a subscriber link")
     };
-    let subscription = server
-        .node()
-        .borrow()
-        .whole_table_subscription_key("todos")
-        .unwrap();
-    let served = state
-        .served_current_rows
-        .get(&subscription)
-        .expect("current-row usage stays registered");
-    assert_eq!(served.policy_binding.1, expected_denied_claims);
+    let coverage = state
+        .served
+        .get(&attachment.subscription())
+        .expect("ordinary usage stays registered");
+    let group = state
+        .coverage_groups
+        .get(coverage)
+        .expect("ordinary usage retains its coverage group");
+    assert_eq!(group.policy_binding.1, expected_denied_claims);
     assert_eq!(
-        served.policy_binding_origin,
+        group.policy_binding_origin,
         CoveragePolicyBindingOrigin::DirectAdmitted
     );
 }
