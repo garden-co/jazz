@@ -1414,6 +1414,30 @@ async fn rejected_live_unique_backfill_preserves_runtime_storage_and_usability()
     }
 }
 
+async fn assert_poisoned_registration_lifecycle(database: &mut Database) {
+    assert!(matches!(
+        database.primary_key_scan("albums", &[]).await,
+        Err(Error::DatabasePoisoned)
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(9), Value::String("Kind of Blue".to_owned())],
+    );
+    assert!(matches!(
+        database.commit_batch(batch).await,
+        Err(Error::DatabasePoisoned)
+    ));
+    assert!(matches!(
+        database
+            .register_table_index("albums", IndexSchema::new("other", ["title"]))
+            .await,
+        Err(Error::DatabasePoisoned)
+    ));
+    database.close().await.unwrap();
+}
+
 #[futures_test::test]
 async fn live_index_backfill_write_failure_remains_poisoning() {
     let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
@@ -1424,6 +1448,17 @@ async fn live_index_backfill_write_failure_remains_poisoning() {
         vec![Value::U64(7), Value::String("Blue Train".to_owned())],
     );
     database.commit_batch(batch).await.unwrap();
+    let schema_before = database.ivm_runtime.schema().clone();
+    let stats_before = database.runtime_stats();
+    let nodes_before = database.ivm_runtime.retained_node_ids();
+    let index_bytes_before = database
+        .storage
+        .prefix(
+            "indices".to_owned(),
+            b"albums\0unique_albums_by_title\0".to_vec(),
+        )
+        .await
+        .unwrap();
     control.take_observed();
     control.fail_next(TestStorageOperation::WriteMany);
 
@@ -1449,10 +1484,21 @@ async fn live_index_backfill_write_failure_remains_poisoning() {
             .count(),
         1
     );
-    assert!(matches!(
-        database.ensure_usable(),
-        Err(Error::DatabasePoisoned)
-    ));
+    assert_eq!(database.ivm_runtime.schema(), &schema_before);
+    assert_eq!(database.runtime_stats(), stats_before);
+    assert_eq!(database.ivm_runtime.retained_node_ids(), nodes_before);
+    assert_eq!(
+        database
+            .storage
+            .prefix(
+                "indices".to_owned(),
+                b"albums\0unique_albums_by_title\0".to_vec(),
+            )
+            .await
+            .unwrap(),
+        index_bytes_before
+    );
+    assert_poisoned_registration_lifecycle(&mut database).await;
 }
 
 #[futures_test::test]
@@ -1468,6 +1514,17 @@ async fn live_index_hydration_io_failure_remains_poisoning() {
     );
     database.commit_batch(batch).await.unwrap();
     storage.evict_column_family("albums");
+    let schema_before = database.ivm_runtime.schema().clone();
+    let stats_before = database.runtime_stats();
+    let nodes_before = database.ivm_runtime.retained_node_ids();
+    let index_bytes_before = database
+        .storage
+        .prefix(
+            "indices".to_owned(),
+            b"albums\0unique_albums_by_title\0".to_vec(),
+        )
+        .await
+        .unwrap();
     control.take_observed();
     control.fail_next(TestStorageOperation::ScanOpen);
 
@@ -1488,10 +1545,21 @@ async fn live_index_hydration_io_failure_remains_poisoning() {
     let observed = control.take_observed();
     assert!(observed.contains(&TestStorageOperation::ScanOpen));
     assert!(!observed.contains(&TestStorageOperation::WriteMany));
-    assert!(matches!(
-        database.ensure_usable(),
-        Err(Error::DatabasePoisoned)
-    ));
+    assert_eq!(database.ivm_runtime.schema(), &schema_before);
+    assert_eq!(database.runtime_stats(), stats_before);
+    assert_eq!(database.ivm_runtime.retained_node_ids(), nodes_before);
+    assert_eq!(
+        database
+            .storage
+            .prefix(
+                "indices".to_owned(),
+                b"albums\0unique_albums_by_title\0".to_vec(),
+            )
+            .await
+            .unwrap(),
+        index_bytes_before
+    );
+    assert_poisoned_registration_lifecycle(&mut database).await;
 }
 
 #[futures_test::test]
@@ -1514,6 +1582,22 @@ async fn live_index_non_unique_runtime_error_remains_poisoning() {
         )
         .await
         .unwrap();
+    let schema_before = database.ivm_runtime.schema().clone();
+    let stats_before = database.runtime_stats();
+    let nodes_before = database.ivm_runtime.retained_node_ids();
+    let index_bytes_before = database
+        .storage
+        .prefix(
+            "indices".to_owned(),
+            b"albums\0unique_albums_by_title\0".to_vec(),
+        )
+        .await
+        .unwrap();
+    let table_bytes_before = database
+        .storage
+        .prefix("albums".to_owned(), Vec::new())
+        .await
+        .unwrap();
     control.take_observed();
 
     let error = database
@@ -1532,10 +1616,29 @@ async fn live_index_non_unique_runtime_error_remains_poisoning() {
             .take_observed()
             .contains(&TestStorageOperation::WriteMany)
     );
-    assert!(matches!(
-        database.ensure_usable(),
-        Err(Error::DatabasePoisoned)
-    ));
+    assert_eq!(database.ivm_runtime.schema(), &schema_before);
+    assert_eq!(database.runtime_stats(), stats_before);
+    assert_eq!(database.ivm_runtime.retained_node_ids(), nodes_before);
+    assert_eq!(
+        database
+            .storage
+            .prefix(
+                "indices".to_owned(),
+                b"albums\0unique_albums_by_title\0".to_vec(),
+            )
+            .await
+            .unwrap(),
+        index_bytes_before
+    );
+    assert_eq!(
+        database
+            .storage
+            .prefix("albums".to_owned(), Vec::new())
+            .await
+            .unwrap(),
+        table_bytes_before
+    );
+    assert_poisoned_registration_lifecycle(&mut database).await;
 }
 
 #[futures_test::test]
