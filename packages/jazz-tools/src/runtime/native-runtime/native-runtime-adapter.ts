@@ -2110,6 +2110,7 @@ export class NativeRuntimeAdapter implements Runtime {
             : this.db.subscribeRelationQuery!(queryJson, opts);
       } else {
         preparedQueryLease = this.acquirePreparedQuery(queryJson);
+        if (this.closed) throw new Error("Native runtime is closed");
         const query = preparedQueryLease.query;
         nativeSubscription =
           this.readAuthorizationHost === "trusted-serving"
