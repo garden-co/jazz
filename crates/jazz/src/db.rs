@@ -1534,6 +1534,23 @@ enum QueuedMutationStatus {
     Failed(Error),
 }
 
+/// Completion state for a binding-owned streaming-upload cleanup.
+///
+/// This is intentionally opaque to bindings: they can observe completion and
+/// the exact error, but cannot inspect the staged-value identity.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct StreamingValueUploadCleanupTicket {
+    result: Rc<RefCell<Option<Result<(), Error>>>>,
+}
+
+impl StreamingValueUploadCleanupTicket {
+    #[doc(hidden)]
+    pub fn result(&self) -> Option<Result<(), Error>> {
+        self.result.borrow().clone()
+    }
+}
+
 /// Authenticated logical destination for an upstream upload retry.
 ///
 /// A transport epoch may change during reconnect, but replaying a receiver's
