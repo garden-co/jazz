@@ -1402,24 +1402,27 @@ where
             }
             let added_facts = update.program_fact_adds.iter().collect::<BTreeSet<_>>();
             if added_facts.len() != update.program_fact_adds.len() {
-                return Err(Error::InvalidStoredValue(
-                    "peer view update duplicates a source-closure addition",
-                ));
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "duplicate source-closure addition".to_owned(),
+                });
             }
             let removed_facts = update.program_fact_removes.iter().collect::<BTreeSet<_>>();
             if removed_facts.len() != update.program_fact_removes.len() {
-                return Err(Error::InvalidStoredValue(
-                    "peer view update duplicates a source-closure removal",
-                ));
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "duplicate source-closure removal".to_owned(),
+                });
             }
             if update
                 .program_fact_removes
                 .iter()
                 .any(|fact| added_facts.contains(fact))
             {
-                return Err(Error::InvalidStoredValue(
-                    "peer view update overlaps source-closure adds and removes",
-                ));
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "overlapping source-closure add and remove".to_owned(),
+                });
             }
             for bundle in version_bundle_refs_for_carriers(&update.version_carriers)? {
                 // This preflight runs before bulk-reset selection, alias
@@ -1496,6 +1499,10 @@ where
             };
             let overlay = overlays.entry(authority_result_key.clone()).or_default();
             let state = self.query.authority_results.get(&authority_result_key);
+            let invalid = |transition| Error::InvalidAuthoritySourceClosure {
+                subscription: update.subscription,
+                transition,
+            };
             let reset_replaces = Self::reset_replaces_authority_source_closure(
                 update.reset_result_set,
                 !update.program_fact_adds.is_empty() || !update.program_fact_removes.is_empty(),
@@ -1510,9 +1517,10 @@ where
                 match fact {
                     ProgramFactEntry::ProgramSourceCoverage(coverage) => {
                         let _ = coverage;
-                        return Err(Error::InvalidStoredValue(
-                            "authority source coverage changes are reset-only",
-                        ));
+                        return Err(invalid(format!(
+                            "source coverage removal is reset-only: {:?}",
+                            coverage.source
+                        )));
                     }
                     ProgramFactEntry::CoveredInput(input) => {
                         let key = (input.source.clone(), input.source_row);
@@ -1523,9 +1531,10 @@ where
                                 .and_then(|state| state.covered_input_versions.get(&key).cloned()),
                         };
                         if current.as_ref() != Some(input) {
-                            return Err(Error::InvalidStoredValue(
-                                "authority covered input removal is absent from predecessor closure",
-                            ));
+                            return Err(invalid(format!(
+                                "covered input removal is absent from predecessor closure: {:?}",
+                                input.source
+                            )));
                         }
                         overlay.2.insert(key, None);
                     }
@@ -1537,19 +1546,16 @@ where
             for fact in &update.program_fact_adds {
                 if let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact {
                     if !reset_replaces {
-                        return Err(Error::InvalidStoredValue(
-                            "authority source coverage changes are reset-only",
-                        ));
+                        return Err(invalid("source coverage addition is reset-only".to_owned()));
                     }
                     if !coverage.complete {
-                        return Err(Error::InvalidStoredValue(
-                            "authority source coverage must be complete",
-                        ));
+                        return Err(invalid("source coverage is incomplete".to_owned()));
                     }
                     if !compiled_sources.contains(&coverage.source) {
-                        return Err(Error::InvalidStoredValue(
-                            "authority source coverage names no compiled source occurrence",
-                        ));
+                        return Err(invalid(format!(
+                            "source coverage names no compiled source occurrence: {:?}",
+                            coverage.source
+                        )));
                     }
                     overlay.1.insert(coverage.source.clone(), true);
                 }
@@ -1563,16 +1569,17 @@ where
                         .iter()
                         .all(|source| overlay.1.get(source).copied() == Some(true)))
             {
-                return Err(Error::InvalidStoredValue(
-                    "authority reset source coverage does not exactly match compiled source set",
+                return Err(invalid(
+                    "reset source coverage does not exactly match compiled source set".to_owned(),
                 ));
             }
             for fact in &update.program_fact_adds {
                 if let ProgramFactEntry::CoveredInput(input) = fact {
                     if !compiled_sources.contains(&input.source) {
-                        return Err(Error::InvalidStoredValue(
-                            "authority covered input names no compiled source occurrence",
-                        ));
+                        return Err(invalid(format!(
+                            "covered input names no compiled source occurrence: {:?}",
+                            input.source
+                        )));
                     }
                     let source_is_covered =
                         overlay.1.get(&input.source).copied().unwrap_or_else(|| {
@@ -1582,9 +1589,10 @@ where
                                 })
                         });
                     if !source_is_covered {
-                        return Err(Error::InvalidStoredValue(
-                            "authority covered input names a source absent from its coverage manifest",
-                        ));
+                        return Err(invalid(format!(
+                            "covered input names a source absent from its coverage manifest: {:?}",
+                            input.source
+                        )));
                     }
                     let key = (input.source.clone(), input.source_row);
                     let current = match overlay.2.get(&key) {
@@ -1595,9 +1603,10 @@ where
                         }
                     };
                     if current.is_some() {
-                        return Err(Error::InvalidStoredValue(
-                            "authority covered input addition already has a predecessor member",
-                        ));
+                        return Err(invalid(format!(
+                            "covered input addition already has a predecessor member: {:?}",
+                            input.source
+                        )));
                     }
                     overlay.2.insert(key, Some(input.clone()));
                 }

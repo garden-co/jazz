@@ -209,6 +209,65 @@ fn authority_covered_input_rejects_unknown_same_table_source_role() {
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
+fn forged_source_reset(order_coverage_first: bool) -> (
+    NodeState<RocksDbStorage>,
+    crate::protocol::AuthorityResultKey,
+    crate::protocol::ViewUpdatePayload,
+) {
+    let (_dir, receiver, authority_result, _initial, mut successor) =
+        covered_input_receiver_fixture();
+    successor.reset_result_set = true;
+    successor.program_fact_removes.clear();
+    let input = successor
+        .program_fact_adds
+        .iter_mut()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+            _ => None,
+        })
+        .expect("successor has input");
+    let original_source = input.source.clone();
+    input.source.path.push(crate::protocol::ProgramSourceRole::Alias(
+        "forged-source-role".to_owned(),
+    ));
+    let forged = input.source.clone();
+    let sources = receiver.query.authority_results[&authority_result]
+        .covered_input_sources
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let coverage = sources.into_iter().map(|source| {
+        crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+            crate::protocol::ProgramSourceCoverageEntry {
+                source: if source == original_source {
+                    forged.clone()
+                } else {
+                    source
+                },
+                complete: true,
+            },
+        )
+    });
+    if order_coverage_first {
+        successor.program_fact_adds.splice(0..0, coverage);
+    } else {
+        successor.program_fact_adds.extend(coverage);
+    }
+    (receiver, authority_result, successor)
+}
+
+#[test]
+fn authority_rejects_forged_source_coverage_before_matching_input() {
+    let (mut receiver, authority_result, update) = forged_source_reset(true);
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, update);
+}
+
+#[test]
+fn authority_rejects_forged_source_coverage_after_matching_input() {
+    let (mut receiver, authority_result, update) = forged_source_reset(false);
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, update);
+}
+
 #[test]
 fn authority_covered_input_rejects_missing_carrier_before_settlement() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
