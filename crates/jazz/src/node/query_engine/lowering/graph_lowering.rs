@@ -1047,15 +1047,9 @@ pub(super) fn lower_recursive_relation_cached(
         ));
     };
     witness_step_plan.steps.pop();
-    // The recursion-owned side output observes the same evaluated step as
-    // the public recursion, but it is later frozen as a receiver input.  A
-    // policy compiler may carry trusted claim fields through a source graph
-    // while it establishes the authority residual; those fields are not part
-    // of the receiver descriptor and must not become recursive frontier
-    // columns.  Keep only routes that the typed query binding identifies as
-    // user-provided routing parameters.  This is deliberately derived from
-    // the parameter domain and each source descriptor, not from a spelling
-    // convention for hidden fields.
+    // The recursion-owned side output is frozen as a receiver input. Keep
+    // only receiver-owned routes; policy claims scope the authority proof but
+    // must not become recursive frontier fields.
     let public_routes = receiver_routing_fields(request)?;
     let mut witness_sources = resolved_sources.clone();
     for source in witness_sources.values_mut() {

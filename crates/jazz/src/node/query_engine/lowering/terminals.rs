@@ -104,7 +104,8 @@ pub(super) fn lowered_terminals(
     // conservative declaration may omit those carriers; publishing it raw
     // made routed join receipts fail only when the covered-input terminal
     // later joined it to a version witness.
-    let visible_root_with_routes = if root_route_fields.is_empty() {
+    let root_source_route_fields = source_terminal_route_fields(source, &root_route_fields);
+    let visible_root_with_routes = if root_source_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
         closure
@@ -112,7 +113,7 @@ pub(super) fn lowered_terminals(
             .clone()
             .project_fields(project_source_fields_with_routes(
                 source,
-                &root_route_fields,
+                &root_source_route_fields,
             ))
     };
     // Source facts remain partitioned by every authority route, including
@@ -135,7 +136,7 @@ pub(super) fn lowered_terminals(
                     .clone()
                     .project_fields(project_source_fields_with_routes(
                         resolved_source,
-                        &root_route_fields,
+                        &source_terminal_route_fields(resolved_source, &root_route_fields),
                     )),
             ))
         })
@@ -162,6 +163,8 @@ pub(super) fn lowered_terminals(
                 explain: ExplainPlan::default(),
             })
         })?;
+        let contribution_route_fields =
+            source_terminal_route_fields(resolved_source, &root_route_fields);
         let graph = if contribution.id.starts_with("flat_join:") {
             flat_join_contribution_membership_graph(
                 closure.visible_root.clone(),
@@ -170,7 +173,7 @@ pub(super) fn lowered_terminals(
                 &request.input.shape.nodes,
                 resolved_sources,
                 request,
-                &root_route_fields,
+                &contribution_route_fields,
             )?
         } else {
             join_contribution_membership_graph(
@@ -181,7 +184,7 @@ pub(super) fn lowered_terminals(
                 &request.input.shape.nodes,
                 resolved_sources,
                 request,
-                &root_route_fields,
+                &contribution_route_fields,
             )?
         };
         covered_source_members
@@ -202,6 +205,7 @@ pub(super) fn lowered_terminals(
                 contribution.source
             )))
         })?;
+        let parent_route_fields = source_terminal_route_fields(parent_source, &root_route_fields);
         let graph = closure::inherited_contribution_membership_graph(
             visible_root_with_routes.clone(),
             contribution,
@@ -210,7 +214,7 @@ pub(super) fn lowered_terminals(
             &request.input.shape.nodes,
             resolved_sources,
             request,
-            &root_route_fields,
+            &parent_route_fields,
         )?;
         covered_source_members
             .entry(contribution.source.clone())
@@ -222,6 +226,7 @@ pub(super) fn lowered_terminals(
     // Recursive reachability is receiver-local semantics too. Its admitted
     // access rows are exact source inputs, not authority-only proof, so emit
     // them under their own source occurrence just like join contributors.
+    let receiver_route_fields = receiver_routing_fields(request).map_err(single_gap_report)?;
     for contribution in &request.input.shape.reachable_contributions {
         let access_source = resolved_sources
             .get(&contribution.access_source)
@@ -231,6 +236,8 @@ pub(super) fn lowered_terminals(
                     contribution.access_source
                 )))
             })?;
+        let access_route_fields =
+            source_terminal_route_fields(access_source, &receiver_route_fields);
         let graph = closure::reachable_contribution_membership_graph(
             visible_root_with_routes.clone(),
             contribution,
@@ -239,7 +246,7 @@ pub(super) fn lowered_terminals(
             &request.input.shape.nodes,
             resolved_sources,
             request,
-            &root_route_fields,
+            &access_route_fields,
         )?;
         covered_source_members
             .entry(contribution.access_source.clone())
@@ -252,7 +259,7 @@ pub(super) fn lowered_terminals(
             &request.input.shape.nodes,
             resolved_sources,
             request,
-            &root_route_fields,
+            &receiver_route_fields,
         )?;
         covered_source_members
             .entry(contribution.edge_source.clone())
@@ -260,19 +267,21 @@ pub(super) fn lowered_terminals(
                 *existing = GraphBuilder::union([existing.clone(), witness.clone()]);
             })
             .or_insert(witness);
-        let (seed_source, seed) = closure::reachable_seed_membership_graph(
+        let seed = closure::reachable_seed_membership_graph(
             contribution,
             &request.input.shape.nodes,
             resolved_sources,
             request,
-            &root_route_fields,
+            &receiver_route_fields,
         )?;
-        covered_source_members
-            .entry(seed_source)
-            .and_modify(|existing| {
-                *existing = GraphBuilder::union([existing.clone(), seed.clone()]);
-            })
-            .or_insert(seed);
+        if let Some((seed_source, seed)) = seed {
+            covered_source_members
+                .entry(seed_source)
+                .and_modify(|existing| {
+                    *existing = GraphBuilder::union([existing.clone(), seed.clone()]);
+                })
+                .or_insert(seed);
+        }
     }
     // A correlated collector owns a distinct compiled source occurrence for
     // each child path.  The implicit-reference closure above may happen to
@@ -585,6 +594,8 @@ pub(super) fn lowered_terminals(
                     // relation for version facts.
                     continue;
                 };
+                let source_route_fields =
+                    source_terminal_route_fields(resolved_source, &root_route_fields);
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::VersionWitnessContent,
@@ -593,7 +604,7 @@ pub(super) fn lowered_terminals(
                     resolved_source,
                     resolved_sources,
                     request,
-                    root_route_fields.clone(),
+                    source_route_fields.clone(),
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
@@ -601,7 +612,7 @@ pub(super) fn lowered_terminals(
                         resolved_source,
                         covered_source.clone(),
                         "version_content",
-                        &root_route_fields,
+                        &source_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
@@ -617,6 +628,8 @@ pub(super) fn lowered_terminals(
                 let Some(covered_source) = covered_source_members.get(source_id) else {
                     continue;
                 };
+                let source_route_fields =
+                    source_terminal_route_fields(resolved_source, &root_route_fields);
                 let content_output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::ReplacementWitnessContent,
@@ -625,7 +638,7 @@ pub(super) fn lowered_terminals(
                     resolved_source,
                     resolved_sources,
                     request,
-                    root_route_fields.clone(),
+                    source_route_fields.clone(),
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
@@ -633,7 +646,7 @@ pub(super) fn lowered_terminals(
                         resolved_source,
                         covered_source.clone(),
                         "replacement_content",
-                        &root_route_fields,
+                        &source_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
@@ -652,6 +665,8 @@ pub(super) fn lowered_terminals(
                         "covered source has no resolved descriptor".to_owned(),
                     ))
                 })?;
+                let source_route_fields =
+                    source_terminal_route_fields(resolved_source, &root_route_fields);
                 let output = fact_output_with_terminal(
                     fact,
                     ProgramFactTerminal::Primary,
@@ -660,7 +675,7 @@ pub(super) fn lowered_terminals(
                     resolved_source,
                     resolved_sources,
                     request,
-                    root_route_fields.clone(),
+                    source_route_fields.clone(),
                 )?;
                 let ProgramFactSchema::ProgramSourceCoverage(schema) = &output.schema else {
                     unreachable!("program-source coverage key has matching schema")
@@ -669,7 +684,7 @@ pub(super) fn lowered_terminals(
                     request,
                     parameter_domain,
                     schema.complete,
-                    &root_route_fields,
+                    &source_route_fields,
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
@@ -1842,6 +1857,17 @@ pub(super) fn project_source_fields_with_routes(
     route_fields: &BTreeSet<String>,
 ) -> Vec<ProjectField> {
     project_source_fields_with_routes_from_prefix(source, "", route_fields)
+}
+
+fn source_terminal_route_fields(
+    source: &ResolvedSource,
+    root_route_fields: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    source
+        .routing_fields
+        .intersection(root_route_fields)
+        .cloned()
+        .collect()
 }
 
 pub(super) fn project_source_fields_with_routes_from_prefix(

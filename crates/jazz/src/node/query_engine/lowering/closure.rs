@@ -170,15 +170,6 @@ pub(super) fn reachable_step_witness_membership_graph(
     request: &QueryProgramRequest,
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
-    // Only application binding routes can cross from the authority residual
-    // into a receiver input.  The raw recursive step may have used trusted
-    // claim carriers while evaluating policy, but those are intentionally
-    // absent from the client-local descriptor.
-    let receiver_routes = receiver_routing_fields(request).map_err(single_gap_report)?;
-    let route_fields = route_fields
-        .intersection(&receiver_routes)
-        .cloned()
-        .collect::<BTreeSet<_>>();
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.access_input, nodes, &mut visited)
         .map_err(single_gap_report)?;
@@ -236,12 +227,7 @@ pub(super) fn reachable_seed_membership_graph(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
     route_fields: &BTreeSet<String>,
-) -> CapabilityResult<(SourceId, GraphBuilder)> {
-    let receiver_routes = receiver_routing_fields(request).map_err(single_gap_report)?;
-    let route_fields = route_fields
-        .intersection(&receiver_routes)
-        .cloned()
-        .collect::<BTreeSet<_>>();
+) -> CapabilityResult<Option<(SourceId, GraphBuilder)>> {
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.access_input, nodes, &mut visited)
         .map_err(single_gap_report)?;
@@ -252,11 +238,12 @@ pub(super) fn reachable_seed_membership_graph(
                 contribution.id, contribution.edge_source
             )))
         })?;
-    let seed_id = recursive.seed_source().ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Operator(
-            "recursive seed witness requires a source root".to_owned(),
-        ))
-    })?;
+    // A literal seed is already a normal bound input of the receiver program;
+    // it has no physical source occurrence to ship or certify. Only physical
+    // seed sources become CoveredInput facts.
+    let Some(seed_id) = recursive.seed_source() else {
+        return Ok(None);
+    };
     let seed_source = resolved_sources.get(seed_id).ok_or_else(|| {
         single_gap_report(UnsupportedReason::Runtime(format!(
             "recursive seed source {seed_id:?} was not resolved"
@@ -264,13 +251,13 @@ pub(super) fn reachable_seed_membership_graph(
     })?;
     let seed = lower_recursive_seed_membership(recursive, seed_source, resolved_sources, request)
         .map_err(single_gap_report)?;
-    Ok((
+    Ok(Some((
         seed_id.clone(),
         seed.graph.project_fields(project_source_fields_with_routes(
             seed_source,
             &route_fields,
         )),
-    ))
+    )))
 }
 
 fn recursive_relation_for_edge<'a>(
