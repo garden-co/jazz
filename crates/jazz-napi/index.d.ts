@@ -358,11 +358,16 @@ export interface SubscriptionRejectedEvent {
 }
 
 export type SubscriptionRejectionReason =
-  SubscriptionUnsupportedShapeCapabilityReason | SubscriptionShapeRegistrationPendingReason | SubscriptionServerFailureReason
+  SubscriptionUnsupportedShapeCapabilityReason | SubscriptionShapeRegistrationPendingReason | SubscriptionServerFailureReason | SubscriptionInvalidAuthoritySourceClosureReason
 
 export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
   code: 'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal'
+}
+
+export interface SubscriptionInvalidAuthoritySourceClosureReason {
+  type: 'InvalidAuthoritySourceClosure'
+  transition: string
 }
 
 export interface SubscriptionShapeRegistrationPendingReason {

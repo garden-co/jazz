@@ -717,6 +717,13 @@ pub struct SubscriptionServerFailureReason {
 }
 
 #[napi(object)]
+pub struct SubscriptionInvalidAuthoritySourceClosureReason {
+    #[napi(js_name = "type", ts_type = "'InvalidAuthoritySourceClosure'")]
+    pub reason_type: String,
+    pub transition: String,
+}
+
+#[napi(object)]
 pub struct SubscriptionTerminalOperation {
     #[napi(js_name = "root_key")]
     pub root_key: Vec<u32>,
@@ -789,10 +796,11 @@ pub type SubscriptionEvent =
     Either3<SubscriptionDeltaEvent, SubscriptionRejectedEvent, SubscriptionClosedEvent>;
 
 #[napi]
-pub type SubscriptionRejectionReason = Either3<
+pub type SubscriptionRejectionReason = Either4<
     SubscriptionUnsupportedShapeCapabilityReason,
     SubscriptionShapeRegistrationPendingReason,
     SubscriptionServerFailureReason,
+    SubscriptionInvalidAuthoritySourceClosureReason,
 >;
 
 #[napi]
@@ -5355,7 +5363,7 @@ fn core_subscription_event_to_napi(
         CoreSubscriptionEvent::Rejected { reason } => {
             let reason = match reason {
                 jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
-                    Either3::A(SubscriptionUnsupportedShapeCapabilityReason {
+                    Either4::A(SubscriptionUnsupportedShapeCapabilityReason {
                         reason_type: "UnsupportedShapeCapability".to_string(),
                         detail: detail.clone(),
                     })
@@ -5365,16 +5373,22 @@ fn core_subscription_event_to_napi(
                 // it for an unsupported capability, which is permanent — that
                 // conflation is the bug this variant was introduced to fix.
                 jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
-                    Either3::B(SubscriptionShapeRegistrationPendingReason {
+                    Either4::B(SubscriptionShapeRegistrationPendingReason {
                         reason_type: "ShapeRegistrationPendingCatalogueAdmission".to_string(),
                     })
                 }
                 jazz::protocol::SubscribeRejectReason::ServerFailure { code } => {
-                    Either3::C(SubscriptionServerFailureReason {
+                    Either4::C(SubscriptionServerFailureReason {
                         reason_type: "ServerFailure".to_string(),
                         code: format!("{code:?}"),
                     })
                 }
+                jazz::protocol::SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                    transition,
+                } => Either4::D(SubscriptionInvalidAuthoritySourceClosureReason {
+                    reason_type: "InvalidAuthoritySourceClosure".to_string(),
+                    transition: transition.clone(),
+                }),
             };
             Ok(Either3::B(SubscriptionRejectedEvent {
                 event_type: "rejected".to_string(),
@@ -5407,6 +5421,11 @@ mod test_fixture_export {
             SubscriptionEvent::Rejected {
                 reason: SubscribeRejectReason::ServerFailure {
                     code: SubscribeServerFailureCode::QueryValidation,
+                },
+            },
+            SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                    transition: "fixture invalid transition".to_owned(),
                 },
             },
             SubscriptionEvent::Closed,
@@ -7558,7 +7577,7 @@ mod tests {
             unsupported,
             Either3::B(crate::SubscriptionRejectedEvent {
                 event_type,
-                reason: Either3::A(crate::SubscriptionUnsupportedShapeCapabilityReason {
+                reason: Either4::A(crate::SubscriptionUnsupportedShapeCapabilityReason {
                     reason_type,
                     detail,
                 }),
@@ -7575,7 +7594,7 @@ mod tests {
             pending,
             Either3::B(crate::SubscriptionRejectedEvent {
                 event_type,
-                reason: Either3::B(crate::SubscriptionShapeRegistrationPendingReason {
+                reason: Either4::B(crate::SubscriptionShapeRegistrationPendingReason {
                     reason_type,
                 }),
             }) if event_type == "rejected"
@@ -7592,13 +7611,32 @@ mod tests {
             server_failure,
             Either3::B(crate::SubscriptionRejectedEvent {
                 event_type,
-                reason: Either3::C(crate::SubscriptionServerFailureReason {
+                reason: Either4::C(crate::SubscriptionServerFailureReason {
                     reason_type,
                     code,
                 }),
             }) if event_type == "rejected"
                 && reason_type == "ServerFailure"
                 && code == "QueryValidation"
+        ));
+
+        let invalid_authority = core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                transition: "authority predecessor is not a source".to_owned(),
+            },
+        })
+        .expect("encode invalid authority rejection");
+        assert!(matches!(
+            invalid_authority,
+            Either3::B(crate::SubscriptionRejectedEvent {
+                event_type,
+                reason: Either4::D(crate::SubscriptionInvalidAuthoritySourceClosureReason {
+                    reason_type,
+                    transition,
+                }),
+            }) if event_type == "rejected"
+                && reason_type == "InvalidAuthoritySourceClosure"
+                && transition == "authority predecessor is not a source"
         ));
 
         let closed = core_subscription_event_to_napi(&CoreSubscriptionEvent::Closed)
@@ -7615,11 +7653,12 @@ mod tests {
         let events = crate::test_fixture_export::subscription_events()
             .expect("encode debug subscription event fixture");
 
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
         assert!(matches!(events[0], Either3::B(_)));
         assert!(matches!(events[1], Either3::B(_)));
         assert!(matches!(events[2], Either3::B(_)));
-        assert!(matches!(events[3], Either3::C(_)));
+        assert!(matches!(events[3], Either3::B(_)));
+        assert!(matches!(events[4], Either3::C(_)));
     }
     /// A short-lived NAPI schema attachment must not own or abandon the
     /// owner-wide OpenBatch lifetime when its JS wrapper is collected.
