@@ -2672,4 +2672,244 @@ mod tests {
         let _ = ws.close(None).await;
         server_task.abort();
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_catalogue_forwarding_times_out_before_response_headers() {
+        let authority_app = axum::Router::new().route(
+            &test_app_route("/schemas"),
+            get(|| async { std::future::pending::<Response>().await }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging authority");
+        let address = listener.local_addr().expect("authority address");
+        let authority_task = tokio::spawn(async move {
+            axum::serve(listener, authority_app)
+                .await
+                .expect("serve authority");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let response = tokio::time::timeout(
+            Duration::from_secs(31),
+            make_test_router(state).oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("forwarding must have a total deadline")
+        .expect("router response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("timeout body");
+        let error: Value = serde_json::from_slice(&body).expect("timeout JSON");
+        assert_eq!(
+            error["error"].as_str(),
+            Some("catalogue upstream request exceeded the 30-second total deadline")
+        );
+        authority_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_catalogue_forwarding_times_out_while_reading_response_body() {
+        let authority_app = axum::Router::new().route(
+            &test_app_route("/schemas"),
+            get(|| async {
+                let stream = futures::stream::once(async {
+                    Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b"partial"))
+                })
+                .chain(futures::stream::pending::<
+                    Result<axum::body::Bytes, std::convert::Infallible>,
+                >());
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Body::from_stream(stream),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind partial authority");
+        let address = listener.local_addr().expect("authority address");
+        let authority_task = tokio::spawn(async move {
+            axum::serve(listener, authority_app)
+                .await
+                .expect("serve authority");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let response = tokio::time::timeout(
+            Duration::from_secs(31),
+            make_test_router(state).oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("forwarding must have a total deadline")
+        .expect("router response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("timeout body");
+        let error: Value = serde_json::from_slice(&body).expect("timeout JSON");
+        assert_eq!(
+            error["error"].as_str(),
+            Some("catalogue upstream request exceeded the 30-second total deadline")
+        );
+        authority_task.abort();
+    }
+
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_preserves_invalid_utf8_non_success_response() {
+        let authority_app = axum::Router::new().route(
+            &test_app_route("/schema/{hash}"),
+            get(|| async {
+                (
+                    StatusCode::CONFLICT,
+                    [(header::CONTENT_TYPE, "application/octet-stream")],
+                    Body::from(vec![0xff, 0x00, 0xfe]),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind response authority");
+        let address = listener.local_addr().expect("authority address");
+        let authority_task = tokio::spawn(async move {
+            axum::serve(listener, authority_app)
+                .await
+                .expect("serve authority");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let response = make_test_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route(
+                        "/schema/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .as_ref(),
+            &[0xff, 0x00, 0xfe]
+        );
+        authority_task.abort();
+    }
+
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_rejects_chunked_response_over_limit() {
+        let authority_app = axum::Router::new().route(
+            &test_app_route("/schema/{hash}"),
+            get(|| async {
+                let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(
+                    axum::body::Bytes::from(vec![b'x'; (8 << 20) + 1]),
+                )]);
+                (StatusCode::OK, Body::from_stream(stream))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind oversized authority");
+        let address = listener.local_addr().expect("authority address");
+        let authority_task = tokio::spawn(async move {
+            axum::serve(listener, authority_app)
+                .await
+                .expect("serve authority");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let response = make_test_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route(
+                        "/schema/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("oversized response body");
+        let error: Value = serde_json::from_slice(&body).expect("oversized response JSON");
+        assert_eq!(
+            error["error"].as_str(),
+            Some("catalogue upstream response body exceeds the 8388608-byte limit")
+        );
+        authority_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_catalogue_forwarding_shutdown_cancels_hanging_mutation() {
+        let authority_app = axum::Router::new().route(
+            &test_app_route("/admin/migrations"),
+            post(|| async { std::future::pending::<Response>().await }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mutation authority");
+        let address = listener.local_addr().expect("authority address");
+        let authority_task = tokio::spawn(async move {
+            axum::serve(listener, authority_app)
+                .await
+                .expect("serve authority");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let app = make_test_router(state.clone());
+        let request = tokio::spawn(async move {
+            app.oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri(test_app_route("/admin/migrations"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"fromHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","toHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","forward":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("router response")
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.shutdown.request_shutdown();
+        let response = tokio::time::timeout(Duration::from_secs(2), request)
+            .await
+            .expect("shutdown must cancel forwarding")
+            .expect("forwarding task");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("shutdown body");
+        let error: Value = serde_json::from_slice(&body).expect("shutdown JSON");
+        assert_eq!(
+            error["error"].as_str(),
+            Some(
+                "catalogue forwarding cancelled during shutdown; the upstream mutation outcome may be unknown; verify catalogue state before retrying"
+            )
+        );
+        assert_eq!(state.shutdown.active_app_requests(), 0);
+        authority_task.abort();
+    }
 }
