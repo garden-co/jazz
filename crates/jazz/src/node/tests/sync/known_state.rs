@@ -662,6 +662,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
     let row_uuid = row(20);
     let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
 
     let (_tx_id, commit_unit) = writer
         .commit_mergeable_unit_settled(
@@ -734,6 +735,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     let row_uuid = row(22);
     let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
 
     let (_tx_id, commit_unit) = writer
         .commit_mergeable_unit_settled(
@@ -763,6 +765,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
 
     drop(reader);
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+    register_shape_binding(&mut reader, &shape, &binding);
     assert_eq!(
         receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
@@ -1143,6 +1146,7 @@ fn fast_known_state_requires_a_live_receipt_after_reopen_and_eviction() {
         MergeableCommit::new("todos", row_uuid, 13).cells(title_cells("persisted")),
     );
     let mut reader = reader;
+    register_shape_binding(&mut reader, &shape, &binding);
     let mut peer = relay_with_system_binding(subscription);
     let update = peer
         .rehydrate_query_for_subscription_with_opts(
