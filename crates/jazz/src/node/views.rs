@@ -1175,6 +1175,8 @@ where
             .filter_map(|(key, state)| state.initial_hydration.then_some(key.clone()))
             .collect::<BTreeSet<_>>();
         for update in &updates {
+            let version_bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
+            all_bundle_refs.extend(version_bundle_refs.iter().copied());
             let Ok(authority_result_key) =
                 self.authority_result_key_for_subscription(update.subscription)
             else {
@@ -1183,8 +1185,6 @@ where
             if update.reset_result_set {
                 initial_hydration_authority_results.insert(authority_result_key.clone());
             }
-            let version_bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
-            all_bundle_refs.extend(version_bundle_refs.iter().copied());
             let in_initial_hydration =
                 initial_hydration_authority_results.contains(&authority_result_key);
             if update.reset_result_set
@@ -1436,8 +1436,19 @@ where
                 input.version.layer,
                 input.version.branch_or_prefix.clone().unwrap_or_default(),
             );
+            let staged_body_witness = admitted_versions.contains(&coordinate);
+            // A known-state repair may have admitted this exact immutable
+            // body in its own request/response frame before the later view
+            // frame that consumes it. Use the same physical lookup, concrete
+            // layer, and canonical-branch check as receiver materialization;
+            // a merely matching tx/row name is not evidence.
+            let resident_body_witness = if staged_body_witness {
+                false
+            } else {
+                self.covered_input_has_resident_body(input).await?
+            };
             if input.version.batch != Some(input.version.tx)
-                || !admitted_versions.contains(&coordinate)
+                || (!staged_body_witness && !resident_body_witness)
             {
                 return Err(Error::MalformedViewUpdate(
                     "covered input is not witnessed by admitted payload",
@@ -1445,6 +1456,37 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn covered_input_has_resident_body(
+        &mut self,
+        input: &crate::protocol::CoveredInputEntry,
+    ) -> Result<bool, Error> {
+        let Some(tx_node_alias) = self.node_aliases.get(&input.version.tx.node).copied() else {
+            return Ok(false);
+        };
+        if self.query_transaction(input.version.tx).await?.is_none() {
+            return Ok(false);
+        }
+        let layer = match input.version.layer {
+            crate::protocol::ResultRowLayer::Content => VersionLayer::Content,
+            crate::protocol::ResultRowLayer::Deletion => VersionLayer::Deletion,
+            crate::protocol::ResultRowLayer::ContentOrDeletion => return Ok(false),
+        };
+        let Some(version) = self
+            .query_version_by_alias(
+                input.version_table.as_str(),
+                input.source_row,
+                layer,
+                input.version.tx.time,
+                tx_node_alias,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        Ok(version.branch_key().canonical_bytes()
+            == input.version.branch_or_prefix.clone().unwrap_or_default())
     }
 
     async fn apply_view_update_inner(
