@@ -66,6 +66,23 @@ fn append_net_peer_source_fact_changes(
     }
 }
 
+fn record_source_fact_transition(
+    transitions: &mut ResultTransitions,
+    fact: ProgramFactEntry,
+    is_present: bool,
+) {
+    if fact.is_peer_source_closure_fact() {
+        transitions
+            .source_fact_presence_changes
+            .push((fact.clone(), is_present));
+    }
+    if is_present {
+        transitions.program_fact_adds.push(fact);
+    } else {
+        transitions.program_fact_removes.push(fact);
+    }
+}
+
 /// Distinguishes independent maintained terminals that can witness the same
 /// peer source fact. Their union, rather than a summed terminal refcount, is
 /// the exact receiver closure: a replacement witness disappearing must not
@@ -237,6 +254,10 @@ pub(crate) struct ResultTransitions {
     pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
+    /// Ordered source-closure presence transitions observed while evaluating
+    /// one terminal. `apply_multisink_deltas` uses this private stream to
+    /// retain the real terminal order while coalescing one complete drain.
+    pub(crate) source_fact_presence_changes: Vec<(ProgramFactEntry, bool)>,
     /// Groove terminal patches are local binding output. They never enter a
     /// peer `ViewUpdate`, whose contract is the covered input closure only.
     pub(crate) terminal_operations: Vec<TerminalOperation>,
@@ -494,6 +515,9 @@ impl MaintainedSubscriptionView {
             }
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
+            for (fact, is_present) in delta_transitions.source_fact_presence_changes {
+                record_peer_source_fact_change(&mut peer_source_fact_changes, fact, is_present);
+            }
             for fact in delta_transitions.program_fact_adds {
                 if fact.is_peer_source_closure_fact() {
                     record_peer_source_fact_change(&mut peer_source_fact_changes, fact, true);
@@ -644,55 +668,41 @@ impl MaintainedSubscriptionView {
                     let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.versions
                         .apply_delta(identity, row, weight, node_aliases)?;
-                    match self.apply_source_fact_delta(
+                    if let Some(is_present) = self.apply_source_fact_delta(
                         SourceFactOrigin::Version,
                         ProgramFactEntry::CoveredInput(covered_input.clone()),
                         weight,
                     ) {
-                        Some(true) => {
-                            transitions
-                                .program_fact_adds
-                                .push(ProgramFactEntry::CoveredInput(covered_input));
-                        }
-                        Some(false) => {
-                            transitions
-                                .program_fact_removes
-                                .push(ProgramFactEntry::CoveredInput(covered_input));
-                        }
-                        None => {}
+                        record_source_fact_transition(
+                            &mut transitions,
+                            ProgramFactEntry::CoveredInput(covered_input),
+                            is_present,
+                        );
                     }
                 }
                 NetEvent::Replacement(source, key, identity, row) => {
                     let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.replacements
                         .apply_delta(key, identity, row, weight, node_aliases)?;
-                    match self.apply_source_fact_delta(
+                    if let Some(is_present) = self.apply_source_fact_delta(
                         SourceFactOrigin::Replacement,
                         ProgramFactEntry::CoveredInput(covered_input.clone()),
                         weight,
                     ) {
-                        Some(true) => {
-                            transitions
-                                .program_fact_adds
-                                .push(ProgramFactEntry::CoveredInput(covered_input));
-                        }
-                        Some(false) => {
-                            transitions
-                                .program_fact_removes
-                                .push(ProgramFactEntry::CoveredInput(covered_input));
-                        }
-                        None => {}
+                        record_source_fact_transition(
+                            &mut transitions,
+                            ProgramFactEntry::CoveredInput(covered_input),
+                            is_present,
+                        );
                     }
                 }
                 NetEvent::ProgramFact(fact) => {
-                    match self.apply_source_fact_delta(
+                    if let Some(is_present) = self.apply_source_fact_delta(
                         SourceFactOrigin::ProgramFact,
                         fact.clone(),
                         weight,
                     ) {
-                        Some(true) => transitions.program_fact_adds.push(fact),
-                        Some(false) => transitions.program_fact_removes.push(fact),
-                        None => {}
+                        record_source_fact_transition(&mut transitions, fact, is_present)
                     }
                 }
                 NetEvent::StructuredAppRow(root, record) => {

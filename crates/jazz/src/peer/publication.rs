@@ -1067,6 +1067,7 @@ impl PeerState {
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
             terminal_operations: _,
+            source_fact_presence_changes: _,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -1489,6 +1490,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
+            source_fact_presence_changes: Vec::new(),
         })
     }
 
@@ -2232,6 +2234,7 @@ impl PeerState {
             observed_result_delta_batches: _,
             requires_authoritative_membership_reconcile: _,
             terminal_operations: _,
+            source_fact_presence_changes: _,
         } = source_transitions;
         let known_state = self
             .downstream_known_states
