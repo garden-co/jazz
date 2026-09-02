@@ -706,7 +706,7 @@ pub(super) struct InlineCollectorResolver {
     pub(super) requests: Vec<SourceRequest>,
     pub(super) prepared_child_titles: Vec<&'static str>,
     pub(super) denied_child_title: Option<&'static str>,
-    prefiltered_child_rows: bool,
+    admitted_child_titles: Option<BTreeSet<&'static str>>,
     root_rows: Vec<InlineCollectorRootRow>,
 }
 
@@ -726,7 +726,7 @@ impl InlineCollectorResolver {
             requests: Vec::new(),
             prepared_child_titles: Vec::new(),
             denied_child_title,
-            prefiltered_child_rows: false,
+            admitted_child_titles: None,
             root_rows: vec![InlineCollectorRootRow {
                 id: 0xd1,
                 title: "parent",
@@ -739,12 +739,13 @@ impl InlineCollectorResolver {
     }
 
     /// Model a receiver's already-authorized CoveredInput closure. The
-    /// client-local compiler must not reevaluate read policy, so this fixture
-    /// removes the denied row before source preparation rather than deriving
-    /// the exclusion from `SourceAuthorizationRequest`.
-    pub(super) fn with_authorized_child_rows(denied_child_title: &'static str) -> Self {
-        let mut resolver = Self::new(Some(denied_child_title));
-        resolver.prefiltered_child_rows = true;
+    /// client-local compiler consumes the authority's exact admitted rows and
+    /// must never derive a second exclusion from `SourceAuthorizationRequest`.
+    pub(super) fn with_admitted_child_rows(
+        admitted_child_titles: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        let mut resolver = Self::new(None);
+        resolver.admitted_child_titles = Some(admitted_child_titles.into_iter().collect());
         resolver
     }
 
@@ -755,7 +756,7 @@ impl InlineCollectorResolver {
             requests: Vec::new(),
             prepared_child_titles: Vec::new(),
             denied_child_title: None,
-            prefiltered_child_rows: false,
+            admitted_child_titles: None,
             root_rows: root_rows
                 .into_iter()
                 .map(|(id, title, created_at)| InlineCollectorRootRow {
@@ -777,7 +778,7 @@ impl InlineCollectorResolver {
             requests: Vec::new(),
             prepared_child_titles: Vec::new(),
             denied_child_title: None,
-            prefiltered_child_rows: false,
+            admitted_child_titles: None,
             root_rows: root_rows
                 .into_iter()
                 .map(
@@ -851,7 +852,10 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                                 );
                             // Client-local sources are the authority-approved
                             // closure, never an unfiltered raw table scan.
-                            let admitted_input_excludes = denied && self.prefiltered_child_rows;
+                            let admitted_input_excludes = self
+                                .admitted_child_titles
+                                .as_ref()
+                                .is_some_and(|admitted| !admitted.contains(title));
                             !(authority_excludes || admitted_input_excludes)
                         })
                         .collect::<Vec<_>>();

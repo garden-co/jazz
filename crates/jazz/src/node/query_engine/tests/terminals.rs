@@ -157,9 +157,10 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
     }));
     assert_eq!(authority_resolver.prepared_child_titles, ["allowed"]);
 
+    let admitted_child_titles = authority_resolver.prepared_child_titles.clone();
     let mut request = collector_request(policy_context());
     request.authorization_mode = QueryAuthorizationMode::ClientLocal;
-    let mut resolver = InlineCollectorResolver::with_authorized_child_rows("denied");
+    let mut resolver = InlineCollectorResolver::with_admitted_child_rows(admitted_child_titles);
     let program = lower_query_program(request, &mut resolver).expect("client collector lowers");
     let terminal = program
         .lowered
@@ -198,7 +199,7 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
 
     let mut empty_request = collector_request(policy_context());
     empty_request.authorization_mode = QueryAuthorizationMode::ClientLocal;
-    let mut empty_resolver = InlineCollectorResolver::with_authorized_child_rows("*");
+    let mut empty_resolver = InlineCollectorResolver::with_admitted_child_rows([]);
     let program =
         lower_query_program(empty_request, &mut empty_resolver).expect("empty collector lowers");
     let terminal = program
