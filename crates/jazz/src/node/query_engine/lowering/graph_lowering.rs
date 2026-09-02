@@ -976,7 +976,7 @@ fn lower_recursive_relation(
     )
 }
 
-fn lower_recursive_relation_cached(
+pub(super) fn lower_recursive_relation_cached(
     root_graph: Option<GraphBuilder>,
     relation: &RecursiveRelationPlan,
     root_source: &ResolvedSource,
@@ -984,6 +984,22 @@ fn lower_recursive_relation_cached(
     request: &QueryProgramRequest,
     lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    // A recursive relation is ordinarily reached through relation-input
+    // postorder and receives its lowered join children. The recursion-owned
+    // witness is also lowered directly by closure terminals; build the same
+    // immediate child cache there instead of taking an alternate lowering
+    // path.
+    let mut owned_children = lowered.cloned().unwrap_or_default();
+    for linear in [&relation.seed, &relation.step] {
+        for step in &linear.steps {
+            if let LinearStep::Join { right, .. } = step {
+                owned_children
+                    .entry(relation_input_key(right))
+                    .or_insert(lower_relation_input(right, resolved_sources, request)?);
+            }
+        }
+    }
+    let lowered = Some(&owned_children);
     let seed_root_source = relation
         .seed_source()
         .and_then(|source| resolved_sources.get(source));
@@ -1020,6 +1036,57 @@ fn lower_recursive_relation_cached(
         None,
         false,
     )?;
+    // Preserve a generic recursion-owned view of the physical step rows
+    // before the normalized recursive projection discards them. The runtime
+    // executes this side graph with the exact same frontier/depth as `step`;
+    // it is not a second reachability traversal.
+    let mut witness_step_plan = relation.step.clone();
+    let Some(LinearStep::Project(_)) = witness_step_plan.steps.last() else {
+        return Err(UnsupportedReason::Operator(
+            "recursive step witness requires a final projection".to_owned(),
+        ));
+    };
+    witness_step_plan.steps.pop();
+    // The recursion-owned side output observes the same evaluated step as
+    // the public recursion, but it is later frozen as a receiver input.  A
+    // policy compiler may carry trusted claim fields through a source graph
+    // while it establishes the authority residual; those fields are not part
+    // of the receiver descriptor and must not become recursive frontier
+    // columns.  Keep only routes that the typed query binding identifies as
+    // user-provided routing parameters.  This is deliberately derived from
+    // the parameter domain and each source descriptor, not from a spelling
+    // convention for hidden fields.
+    let public_routes = receiver_routing_fields(request)?;
+    let mut witness_sources = resolved_sources.clone();
+    for source in witness_sources.values_mut() {
+        source
+            .routing_fields
+            .retain(|field| public_routes.contains(field));
+    }
+    let witness_step_source = witness_sources.get(step_source_id).ok_or_else(|| {
+        UnsupportedReason::Runtime(format!(
+            "recursive witness step source {step_source_id:?} was not resolved"
+        ))
+    })?;
+    let mut witness_children = BTreeMap::new();
+    for step in &witness_step_plan.steps {
+        if let LinearStep::Join { right, .. } = step {
+            witness_children.insert(
+                relation_input_key(right),
+                lower_relation_input(right, &witness_sources, request)?,
+            );
+        }
+    }
+    let step_witness = lower_linear_plan_steps_cached(
+        witness_step_source.graph.clone(),
+        &witness_step_plan,
+        witness_step_source,
+        &witness_sources,
+        request,
+        Some(&witness_children),
+        Some(&witness_step_plan),
+        false,
+    )?;
     let truncate_at_max_iters = matches!(relation.bound, RecursionBound::MaxDepth(_));
     let max_iters = match relation.bound {
         RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
@@ -1032,27 +1099,38 @@ fn lower_recursive_relation_cached(
     }
     let fields = seed.fields.clone();
     Ok(LoweredRelationInput {
-        graph: if truncate_at_max_iters {
-            GraphBuilder::recursive_bounded(
-                seed.graph,
-                step.graph,
-                relation.frontier.0.clone(),
-                max_iters,
-            )
-        } else {
-            GraphBuilder::recursive(
-                seed.graph,
-                step.graph,
-                relation.frontier.0.clone(),
-                max_iters,
-            )
-        },
+        graph: GraphBuilder::recursive_with_step_witness(
+            seed.graph,
+            step.graph,
+            step_witness.graph,
+            relation.frontier.0.clone(),
+            max_iters,
+            truncate_at_max_iters,
+        ),
         root_source: Some(root_source.clone()),
         fields,
         nullable_fields: BTreeSet::new(),
         nullable_field_depths: BTreeMap::new(),
         union_occurrence_carrier: None,
     })
+}
+
+/// Routes which are safe to carry into a receiver-local runtime graph.
+///
+/// `ParameterDomain` distinguishes application binding values from trusted
+/// policy claims.  Both can influence authority compilation, but only the
+/// former are stable, receiver-owned routing keys.  Keeping this distinction
+/// here prevents a raw provenance side output from accidentally retaining an
+/// authority-only claim carrier after the ordinary recursive projection has
+/// correctly discarded it.
+pub(crate) fn receiver_routing_fields(
+    request: &QueryProgramRequest,
+) -> Result<BTreeSet<String>, UnsupportedReason> {
+    Ok(parameter_domain_for_request(request)?
+        .user_params
+        .keys()
+        .map(|param| route_param_field(param))
+        .collect())
 }
 
 pub(super) fn lower_linear_plan_steps(

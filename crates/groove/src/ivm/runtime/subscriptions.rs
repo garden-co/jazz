@@ -789,16 +789,22 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
             GraphBuilder::Recursive {
                 seed,
                 step,
+                step_witness,
                 frontier,
                 max_iters,
                 truncate_at_max_iters,
             } => {
                 child!(seed).hash(&mut hasher);
                 child!(step).hash(&mut hasher);
+                step_witness
+                    .as_ref()
+                    .map(|witness| child!(witness))
+                    .hash(&mut hasher);
                 frontier.hash(&mut hasher);
                 max_iters.hash(&mut hasher);
                 truncate_at_max_iters.hash(&mut hasher);
             }
+            GraphBuilder::RecursiveStepWitness { recursive } => child!(recursive).hash(&mut hasher),
             GraphBuilder::Filter {
                 input,
                 predicate,
@@ -996,6 +1002,7 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                 GraphBuilder::Recursive {
                     seed: a,
                     step: b,
+                    step_witness: witness_a,
                     frontier: c,
                     max_iters: d,
                     truncate_at_max_iters: e,
@@ -1003,13 +1010,21 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                 GraphBuilder::Recursive {
                     seed: x,
                     step: y,
+                    step_witness: witness_b,
                     frontier: z,
                     max_iters: w,
                     truncate_at_max_iters: v,
                 },
-            ) if c == z && d == w && e == v => {
-                pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())])
+            ) if c == z && d == w && e == v && witness_a.is_some() == witness_b.is_some() => {
+                pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())]);
+                if let (Some(a), Some(b)) = (witness_a, witness_b) {
+                    pending.push((a.as_ref(), b.as_ref()));
+                }
             }
+            (
+                GraphBuilder::RecursiveStepWitness { recursive: a },
+                GraphBuilder::RecursiveStepWitness { recursive: b },
+            ) => pending.push((a.as_ref(), b.as_ref())),
             (
                 GraphBuilder::Filter {
                     input: a,
@@ -1973,7 +1988,8 @@ fn lift_literal_filter_node(
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. }
-        | GraphBuilder::StreamingChecksum { .. } => Ok(None),
+        | GraphBuilder::StreamingChecksum { .. }
+        | GraphBuilder::RecursiveStepWitness { .. } => Ok(None),
     }
 }
 
@@ -2193,6 +2209,13 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
             | GraphBuilder::CollectBy { input, .. }
             | GraphBuilder::Aggregate { input, .. } => child!(input),
             GraphBuilder::Recursive { seed, .. } => child!(seed),
+            GraphBuilder::RecursiveStepWitness { recursive } => match recursive.as_ref() {
+                GraphBuilder::Recursive {
+                    step_witness: Some(witness),
+                    ..
+                } => child!(witness),
+                _ => false,
+            },
             GraphBuilder::Join { left, right, .. }
             | GraphBuilder::SemiJoin { left, right, .. }
             | GraphBuilder::AntiJoin { left, right, .. } => child!(left) || child!(right),
@@ -2354,7 +2377,8 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::Aggregate { .. }
         | GraphBuilder::Union { .. }
         | GraphBuilder::StreamingChecksum { .. }
-        | GraphBuilder::VariantProject { .. } => None,
+        | GraphBuilder::VariantProject { .. }
+        | GraphBuilder::RecursiveStepWitness { .. } => None,
     }
 }
 
@@ -2386,16 +2410,23 @@ fn replace_binding_shape(graph: &GraphBuilder, shape: &str) -> GraphBuilder {
             GraphBuilder::Recursive {
                 seed,
                 step,
+                step_witness,
                 frontier,
                 max_iters,
                 truncate_at_max_iters,
             } => GraphBuilder::Recursive {
                 seed: child!(seed),
                 step: child!(step),
+                step_witness: step_witness.as_ref().map(|witness| child!(witness)),
                 frontier: frontier.clone(),
                 max_iters: *max_iters,
                 truncate_at_max_iters: *truncate_at_max_iters,
             },
+            GraphBuilder::RecursiveStepWitness { recursive } => {
+                GraphBuilder::RecursiveStepWitness {
+                    recursive: child!(recursive),
+                }
+            }
             GraphBuilder::Filter {
                 input,
                 predicate,
@@ -3923,6 +3954,16 @@ impl IvmRuntime {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 Ok(seed)
+            }
+            GraphBuilder::RecursiveStepWitness { recursive } => {
+                let GraphBuilder::Recursive {
+                    step_witness: Some(step_witness),
+                    ..
+                } = recursive.as_ref()
+                else {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                };
+                self.infer_builder_output_cached(step_witness, output_memo)
             }
         }
     }

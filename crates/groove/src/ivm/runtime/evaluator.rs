@@ -1066,11 +1066,25 @@ impl TickEvaluator<'_> {
                     )
                 }
                 OpType::Recursive(recursive) => {
-                    let [seed, step] = graph_node.descriptor.inputs.as_slice() else {
+                    let (seed, step, step_witness) = match graph_node.descriptor.inputs.as_slice() {
+                        [seed, step] => (*seed, *step, None),
+                        [seed, step, witness] => (*seed, *step, Some(*witness)),
+                        _ => {
+                            return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                        }
+                    };
+                    self.update_recursive(node, recursive, output_desc, seed, step, step_witness)
+                        .await
+                }
+                OpType::RecursiveStepWitness(_) => {
+                    let [recursive] = graph_node.descriptor.inputs.as_slice() else {
                         return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                     };
-                    self.update_recursive(node, recursive, output_desc, *seed, *step)
-                        .await
+                    // Drive the owner first. Its generic side state is then
+                    // the only source of this output; never re-evaluate a
+                    // recursive step independently.
+                    self.update_node(*recursive).await?;
+                    self.update_recursive_step_witness(*recursive, output_desc)
                 }
                 // Durable writes are an async preparation boundary driven outside
                 // this borrowed evaluator frame by `tick_durable_nodes`.
@@ -2347,10 +2361,16 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         seed: NodeId,
         step: NodeId,
+        step_witness: Option<NodeId>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let storage = self.storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
         let operator_key = self.operator_key(node)?;
         let input_generation = self.input_generation(node);
+        let nodes = RecursiveNodes {
+            seed,
+            step,
+            step_witness,
+        };
         if self.context.eval_mode == EvalMode::Tick {
             let state = match self.operator_states.get(&operator_key) {
                 Some(OperatorState::Recursive(state)) => Some(state.value()),
@@ -2359,8 +2379,7 @@ impl TickEvaluator<'_> {
             if let Some(root) = snapshot_requirement(
                 self.graph,
                 node,
-                seed,
-                step,
+                nodes,
                 self.table_deltas,
                 self.binding_deltas,
                 state,
@@ -2410,8 +2429,7 @@ impl TickEvaluator<'_> {
                 node,
                 recursive,
                 output_desc,
-                seed,
-                step,
+                nodes,
             )
             .await;
             let accumulated = match progress {
@@ -2454,9 +2472,24 @@ impl TickEvaluator<'_> {
             );
             hydrate_recursive_arrangements(&mut runtime, recursive, step, accumulated.clone())
                 .await?;
+            if let Some(witness) = step_witness {
+                hydrate_recursive_arrangements(
+                    &mut runtime,
+                    recursive,
+                    witness,
+                    RecordDeltas {
+                        descriptor: output_desc,
+                        deltas: recursive_as_of.value().accumulated_deltas(),
+                    },
+                )
+                .await?;
+            }
             if recursive_as_of.value().has_pending_hydration() {
-                let next = recursive_as_of.value_mut().finish_hydration_recompute();
+                let (next, step_witness) = recursive_as_of.value_mut().finish_hydration_recompute();
                 recursive_as_of.value_mut().replace_with(next);
+                recursive_as_of
+                    .value_mut()
+                    .replace_step_witness_with(step_witness);
             }
             recursive_as_of
                 .value_mut()
@@ -2495,8 +2528,7 @@ impl TickEvaluator<'_> {
             node,
             recursive,
             output_desc,
-            seed,
-            step,
+            nodes,
         )
         .await;
         let deltas = match deltas {
@@ -2516,6 +2548,26 @@ impl TickEvaluator<'_> {
             .value_mut()
             .mark_hydrated_input_generation(input_generation);
         self.operator_states.insert(operator_key, operator);
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas,
+        })
+    }
+
+    fn update_recursive_step_witness(
+        &mut self,
+        recursive_node: NodeId,
+        output_desc: RecordDescriptor,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let key = self.operator_key(recursive_node)?;
+        let Some(OperatorState::Recursive(state)) = self.operator_states.get(&key) else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(recursive_node));
+        };
+        let deltas = if self.context.eval_mode == EvalMode::Hydrate {
+            state.value().step_witness_accumulated_deltas()
+        } else {
+            state.value().step_witness_deltas()
+        };
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,

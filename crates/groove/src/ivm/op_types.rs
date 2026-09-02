@@ -295,7 +295,15 @@ pub struct RecursiveOp {
     pub truncate_at_max_iters: bool,
     /// Tables read by the seed and step graphs, cached when the graph is compiled.
     pub read_tables: Vec<String>,
+    /// Descriptor of the optional recursion-owned step witness side stream.
+    /// The witness is intentionally generic record data; consumers decide what
+    /// its rows mean.
+    pub step_witness_output: Option<RecordDescriptor>,
 }
+
+/// Exposes the retained generic step witness stream of one recursive input.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RecursiveStepWitnessOp;
 
 // Aggregate.
 

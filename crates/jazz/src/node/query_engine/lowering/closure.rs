@@ -134,6 +134,100 @@ pub(super) fn reachable_contribution_membership_graph(
     )))
 }
 
+/// Return the generic side stream owned by the one recursive step that
+/// physically reads `edge_source`. This deliberately follows the normalized
+/// relation plan instead of joining the final reachable frontier back to an
+/// edge table: the latter cannot distinguish a max-depth frontier from a
+/// node whose outgoing edges were actually evaluated.
+pub(super) fn reachable_step_witness_membership_graph(
+    contribution: &ReachableContribution,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
+    // Only application binding routes can cross from the authority residual
+    // into a receiver input.  The raw recursive step may have used trusted
+    // claim carriers while evaluating policy, but those are intentionally
+    // absent from the client-local descriptor.
+    let receiver_routes = receiver_routing_fields(request).map_err(single_gap_report)?;
+    let route_fields = route_fields
+        .intersection(&receiver_routes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut visited = BTreeSet::new();
+    let plan = analyze_relation_input_node(&contribution.access_input, nodes, &mut visited)
+        .map_err(single_gap_report)?;
+    let recursive =
+        recursive_relation_for_edge(&plan, &contribution.edge_source).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "reachable contribution {} has no recursive step for edge source {:?}",
+                contribution.id, contribution.edge_source
+            )))
+        })?;
+    let root_id = recursive.root_source().ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Operator(
+            "recursive step witness requires a source root".to_owned(),
+        ))
+    })?;
+    let root_source = resolved_sources.get(root_id).ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Runtime(format!(
+            "recursive witness root {:?} was not resolved",
+            root_id
+        )))
+    })?;
+    let edge_source = resolved_sources
+        .get(&contribution.edge_source)
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "recursive edge witness source {:?} was not resolved",
+                contribution.edge_source
+            )))
+        })?;
+    let lowered = lower_recursive_relation_cached(
+        None,
+        recursive,
+        root_source,
+        resolved_sources,
+        request,
+        None,
+    )
+    .map_err(single_gap_report)?;
+    Ok(
+        GraphBuilder::recursive_step_witness(lowered.graph).project_fields(
+            project_join_contribution_fields_with_root_routes(edge_source, &route_fields),
+        ),
+    )
+}
+
+fn recursive_relation_for_edge<'a>(
+    plan: &'a RelationInputPlan,
+    edge_source: &SourceId,
+) -> Option<&'a RecursiveRelationPlan> {
+    let mut pending = vec![plan];
+    while let Some(plan) = pending.pop() {
+        match plan {
+            RelationInputPlan::Recursive(relation)
+                if relation.step_source() == Some(edge_source) =>
+            {
+                return Some(relation);
+            }
+            RelationInputPlan::Recursive(_) => {}
+            RelationInputPlan::Linear(linear) => {
+                for step in linear.steps.iter().rev() {
+                    if let LinearStep::Join { right, .. } = step {
+                        pending.push(right);
+                    }
+                }
+            }
+            RelationInputPlan::Union(union) => {
+                pending.extend(union.branches.iter().rev().map(|branch| &branch.plan));
+            }
+        }
+    }
+    None
+}
+
 pub(super) fn join_contribution_membership_graph(
     visible_root: GraphBuilder,
     contribution: &JoinContribution,

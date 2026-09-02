@@ -1579,6 +1579,7 @@ fn normalize_reachable(
         ReachableContribution {
             id: reachable_id,
             access_source,
+            edge_source,
             access_input: access_join_node,
             root_ref_field: reachable.access_row_column.clone(),
         },

@@ -186,11 +186,22 @@ pub enum GraphBuilder {
     Recursive {
         seed: Arc<GraphBuilder>,
         step: Arc<GraphBuilder>,
+        /// Optional generic side output evaluated once for each actual
+        /// recursive step, with the exact frontier and depth used by `step`.
+        /// It does not participate in the public recursive fixed point.
+        step_witness: Option<Arc<GraphBuilder>>,
         frontier: FrontierName,
         max_iters: usize,
         /// A semantic depth bound truncates the next frontier; a fixpoint
         /// safety limit reports non-convergence instead.
         truncate_at_max_iters: bool,
+    },
+    /// The generic side output of a [`Self::Recursive`] builder that was
+    /// explicitly constructed with `step_witness`. This is deliberately a
+    /// separate graph value: callers may subscribe to it without changing the
+    /// recursive relation's public set semantics.
+    RecursiveStepWitness {
+        recursive: Arc<GraphBuilder>,
     },
     Filter {
         input: Arc<GraphBuilder>,
@@ -629,9 +640,42 @@ impl GraphBuilder {
         Self::Recursive {
             seed: Arc::new(seed),
             step: Arc::new(step),
+            step_witness: None,
             frontier: FrontierName(frontier.into()),
             max_iters,
             truncate_at_max_iters,
+        }
+    }
+
+    /// Build a recursive relation with a generic, recursion-owned side
+    /// output. The witness is evaluated at each actual step using the same
+    /// frontier and semantic depth as `step`; it is never fed back into the
+    /// public fixed point.
+    pub fn recursive_with_step_witness(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        step_witness: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+        truncate_at_max_iters: bool,
+    ) -> Self {
+        Self::Recursive {
+            seed: Arc::new(seed),
+            step: Arc::new(step),
+            step_witness: Some(Arc::new(step_witness)),
+            frontier: FrontierName(frontier.into()),
+            max_iters,
+            truncate_at_max_iters,
+        }
+    }
+
+    /// Expose the side output of a recursive graph constructed with
+    /// [`Self::recursive_with_step_witness`]. Compilation rejects an ordinary
+    /// recursive graph here, making a missing witness unrepresentable at the
+    /// graph boundary.
+    pub fn recursive_step_witness(recursive: GraphBuilder) -> Self {
+        Self::RecursiveStepWitness {
+            recursive: Arc::new(recursive),
         }
     }
 
@@ -674,10 +718,19 @@ impl GraphBuilder {
                     pending.push((right, false));
                     pending.push((left, false));
                 }
-                Self::Recursive { seed, step, .. } => {
+                Self::Recursive {
+                    seed,
+                    step,
+                    step_witness,
+                    ..
+                } => {
+                    if let Some(witness) = step_witness {
+                        pending.push((witness, false));
+                    }
                     pending.push((step, false));
                     pending.push((seed, false));
                 }
+                Self::RecursiveStepWitness { recursive } => pending.push((recursive, false)),
                 Self::Table { .. }
                 | Self::InlineRecords { .. }
                 | Self::InputSource { .. }
@@ -2105,7 +2158,15 @@ impl NodeDescriptor {
                 }
                 Ok(())
             }
-            OpType::Recursive(_) => expect_arity(&self.inputs, 2),
+            OpType::Recursive(recursive) => expect_arity(
+                &self.inputs,
+                if recursive.step_witness_output.is_some() {
+                    3
+                } else {
+                    2
+                },
+            ),
+            OpType::RecursiveStepWitness(_) => expect_arity(&self.inputs, 1),
         }
     }
 }
@@ -2186,6 +2247,7 @@ pub enum OpType {
     /// inflate every recursive graph-compilation frame.
     CollectBy(Box<CollectByOp>),
     Recursive(RecursiveOp),
+    RecursiveStepWitness(RecursiveStepWitnessOp),
     Persist(PersistOp),
     Filter(FilterOp),
     MapProject(MapProjectOp),

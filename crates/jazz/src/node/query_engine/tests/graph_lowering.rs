@@ -1609,6 +1609,41 @@ fn unbound_filter_param_reports_operator_gap() {
     ));
 }
 
+// A trusted authority may use a claim carrier while evaluating policy, but a
+// receiver-local source descriptor may carry only application binding routes.
+// Keep this boundary explicit: copying the authority descriptor here would
+// let a claim-shaped field leak into CoveredInput/witness terminals.
+#[test]
+fn receiver_routes_exclude_authority_claim_carriers() {
+    let claim = claim_param_field(&ClaimPath(vec!["sub".to_owned()]));
+    let mut input = row_set_input(0x93);
+    input.binding.extra_user_params = BTreeMap::from([("workspace".to_owned(), ColumnType::Uuid)]);
+    input.binding.claim_params = BTreeMap::from([(
+        claim.clone(),
+        ProgramClaimParam {
+            path: ClaimPath(vec!["sub".to_owned()]),
+            ty: ColumnType::Uuid,
+        },
+    )]);
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: system_policy_context(),
+        input,
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let receiver_routes = receiver_routing_fields(&request).unwrap();
+    assert_eq!(
+        receiver_routes,
+        BTreeSet::from([route_param_field("workspace")])
+    );
+    assert!(
+        !receiver_routes.contains(&claim),
+        "authority claim carriers must not enter client input descriptors"
+    );
+}
+
 #[test]
 fn aggregate_over_window_fails_closed_for_maintained_lowering() {
     let request = QueryProgramRequest {

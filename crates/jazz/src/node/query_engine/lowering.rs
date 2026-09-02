@@ -447,6 +447,13 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 fields
             }),
             GraphBuilder::Recursive { seed, .. } => child_output(seed),
+            GraphBuilder::RecursiveStepWitness { recursive } => match recursive.as_ref() {
+                GraphBuilder::Recursive {
+                    step_witness: Some(witness),
+                    ..
+                } => child_output(witness),
+                _ => None,
+            },
             GraphBuilder::Union { inputs } => inputs.split_first().and_then(|(first, rest)| {
                 let mut fields = child_output(first)?;
                 for input in rest {
@@ -777,10 +784,19 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
         }
         pending.push((node, true));
         match node {
-            GraphBuilder::Recursive { seed, step, .. } => {
+            GraphBuilder::Recursive {
+                seed,
+                step,
+                step_witness,
+                ..
+            } => {
+                if let Some(witness) = step_witness {
+                    pending.push((witness, false));
+                }
                 pending.push((step, false));
                 pending.push((seed, false));
             }
+            GraphBuilder::RecursiveStepWitness { recursive } => pending.push((recursive, false)),
             GraphBuilder::Filter { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
@@ -858,6 +874,8 @@ use terminals::*;
 
 #[cfg(test)]
 pub(crate) use graph_lowering::binding_value_source_projection_fields_for_test;
+#[cfg(test)]
+pub(crate) use graph_lowering::receiver_routing_fields;
 #[cfg(test)]
 pub(crate) use planning::analyzed_union_labels;
 #[cfg(test)]

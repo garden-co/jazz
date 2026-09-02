@@ -92,6 +92,15 @@ pub(super) fn lowered_terminals(
         .filter(|field| root_route_fields.contains(*field))
         .cloned()
         .collect::<BTreeSet<_>>();
+    // Policy claims may scope authority-local evaluation, but are never part
+    // of a receiver source descriptor or peer closure.  The source-closure
+    // boundary carries only compiler-classified application binding routes.
+    // Keep the authority root layout below intact for its own policy work;
+    // source membership, bodies, and coverage use this narrower route set.
+    let receiver_root_route_fields = root_route_fields
+        .intersection(&receiver_routing_fields(request).map_err(single_gap_report)?)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     // Covered inputs are not generic source snapshots.  Their only lawful
     // producer is the complete authority closure for the exact source
     // occurrence.  In particular, source.graph may have applied table policy
@@ -115,13 +124,50 @@ pub(super) fn lowered_terminals(
                 &root_route_fields,
             ))
     };
-    let mut covered_source_members = closure.result_members.clone();
+    let visible_root_for_receivers = if receiver_root_route_fields.is_empty() {
+        closure.visible_root.clone()
+    } else {
+        closure
+            .visible_root
+            .clone()
+            .project_fields(project_source_fields_with_routes(
+                source,
+                &receiver_root_route_fields,
+            ))
+    };
+    // `lower_closure_membership` is also used by the trusted authority graph,
+    // where policy claims remain valid routing carriers.  Re-project every
+    // inherited member at the receiver boundary, rather than relying on a
+    // later terminal to discard a prefix or on the root-only projection above.
+    // This makes the source descriptor the allowlist: physical source fields
+    // plus compiler-classified application routes, and nothing else crosses
+    // into the peer closure.
+    let mut covered_source_members = closure
+        .result_members
+        .iter()
+        .map(|(source_id, graph)| {
+            let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Runtime(format!(
+                    "closure source {source_id:?} was not resolved"
+                )))
+            })?;
+            Ok((
+                source_id.clone(),
+                graph
+                    .clone()
+                    .project_fields(project_source_fields_with_routes(
+                        resolved_source,
+                        &receiver_root_route_fields,
+                    )),
+            ))
+        })
+        .collect::<CapabilityResult<BTreeMap<_, _>>>()?;
     covered_source_members
         .entry(plan.root_source().clone())
         .and_modify(|existing| {
-            *existing = GraphBuilder::union([existing.clone(), visible_root_with_routes.clone()]);
+            *existing = GraphBuilder::union([existing.clone(), visible_root_for_receivers.clone()]);
         })
-        .or_insert_with(|| visible_root_with_routes.clone());
+        .or_insert_with(|| visible_root_for_receivers.clone());
     // A flat join has no explicit include path, but every join-side row that
     // contributes to a public root is still receiver input.  Derive each
     // contributor from the post-policy visible root—not from its raw table
@@ -146,7 +192,7 @@ pub(super) fn lowered_terminals(
                 &request.input.shape.nodes,
                 resolved_sources,
                 request,
-                &root_route_fields,
+                &receiver_root_route_fields,
             )?
         } else {
             join_contribution_membership_graph(
@@ -157,7 +203,7 @@ pub(super) fn lowered_terminals(
                 &request.input.shape.nodes,
                 resolved_sources,
                 request,
-                &root_route_fields,
+                &receiver_root_route_fields,
             )?
         };
         covered_source_members
@@ -180,14 +226,14 @@ pub(super) fn lowered_terminals(
                 )))
             })?;
         let graph = closure::reachable_contribution_membership_graph(
-            visible_root_with_routes.clone(),
+            visible_root_for_receivers.clone(),
             contribution,
             source,
             access_source,
             &request.input.shape.nodes,
             resolved_sources,
             request,
-            &root_route_fields,
+            &receiver_root_route_fields,
         )?;
         covered_source_members
             .entry(contribution.access_source.clone())
@@ -195,6 +241,19 @@ pub(super) fn lowered_terminals(
                 *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
             })
             .or_insert(graph);
+        let witness = closure::reachable_step_witness_membership_graph(
+            contribution,
+            &request.input.shape.nodes,
+            resolved_sources,
+            request,
+            &receiver_root_route_fields,
+        )?;
+        covered_source_members
+            .entry(contribution.edge_source.clone())
+            .and_modify(|existing| {
+                *existing = GraphBuilder::union([existing.clone(), witness.clone()]);
+            })
+            .or_insert(witness);
     }
     // A correlated collector owns a distinct compiled source occurrence for
     // each child path.  The implicit-reference closure above may happen to
@@ -212,11 +271,11 @@ pub(super) fn lowered_terminals(
             // and may conservatively omit a policy-route carrier; the
             // descriptor-bound projection above is the compiler-owned point
             // that restores it for every receiver source terminal.
-            visible_root_with_routes.clone(),
+            visible_root_for_receivers.clone(),
             source,
             resolved_sources,
             request,
-            &root_route_fields,
+            &receiver_root_route_fields,
             &mut covered_source_members,
         )?;
     }
@@ -515,7 +574,7 @@ pub(super) fn lowered_terminals(
                     resolved_source,
                     resolved_sources,
                     request,
-                    root_route_fields.clone(),
+                    receiver_root_route_fields.clone(),
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
@@ -523,7 +582,7 @@ pub(super) fn lowered_terminals(
                         resolved_source,
                         covered_source.clone(),
                         "version_content",
-                        &root_route_fields,
+                        &receiver_root_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
@@ -547,7 +606,7 @@ pub(super) fn lowered_terminals(
                     resolved_source,
                     resolved_sources,
                     request,
-                    root_route_fields.clone(),
+                    receiver_root_route_fields.clone(),
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),
@@ -555,7 +614,7 @@ pub(super) fn lowered_terminals(
                         resolved_source,
                         covered_source.clone(),
                         "replacement_content",
-                        &root_route_fields,
+                        &receiver_root_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
@@ -582,7 +641,7 @@ pub(super) fn lowered_terminals(
                     resolved_source,
                     resolved_sources,
                     request,
-                    root_route_fields.clone(),
+                    receiver_root_route_fields.clone(),
                 )?;
                 let ProgramFactSchema::ProgramSourceCoverage(schema) = &output.schema else {
                     unreachable!("program-source coverage key has matching schema")
@@ -591,7 +650,7 @@ pub(super) fn lowered_terminals(
                     request,
                     parameter_domain,
                     schema.complete,
-                    &root_route_fields,
+                    &receiver_root_route_fields,
                 )?;
                 terminals.push(LoweredTerminal {
                     sink: scoped_fact_sink_name(fact, source_id),

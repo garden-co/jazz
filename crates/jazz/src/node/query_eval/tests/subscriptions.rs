@@ -79,6 +79,7 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
         GraphBuilder::Recursive { seed, step, .. } => {
             graph_contains_point_scan(seed) || graph_contains_point_scan(step)
         }
+        GraphBuilder::RecursiveStepWitness { recursive } => graph_contains_point_scan(recursive),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }

@@ -170,6 +170,10 @@ pub(crate) struct ReachableContribution {
     pub(crate) id: String,
     /// Access source occurrence for the contributing access rows.
     pub(crate) access_source: SourceId,
+    /// Physical edge occurrence evaluated by the recursive step. Its admitted
+    /// rows are carried through the recursion-owned witness stream, not
+    /// reconstructed from the final reachable frontier.
+    pub(crate) edge_source: SourceId,
     /// Normalized access rows already joined against the recursive closure.
     pub(crate) access_input: RowSetNodeId,
     /// Public access-row column that references the root result row id.
