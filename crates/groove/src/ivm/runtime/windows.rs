@@ -634,11 +634,19 @@ fn update_collect_by_root_terminal_state(
 
     let mut operations = Vec::new();
     // Remove first so the later positional inserts/moves index the final
-    // retained sequence rather than an opaque-key snapshot.
-    for (root_key, before_key) in &before_order {
-        if before_key.is_some()
-            && state.emitted_root_keys.contains(root_key)
-            && !state.groups.contains_key(root_key)
+    // retained sequence rather than an opaque-key snapshot. A group with no
+    // positive occurrence is no more terminal-visible than a missing group:
+    // a reset/revoke can retain its negative maintenance delta until a later
+    // hydration replaces that state. In particular, do not leave a previously
+    // emitted facade occurrence live merely because its internal group is
+    // non-empty.
+    for root_key in before_order.keys() {
+        if state.emitted_root_keys.contains(root_key)
+            && state
+                .groups
+                .get(root_key)
+                .and_then(collect_by_root_order_key)
+                .is_none()
         {
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
@@ -720,14 +728,20 @@ fn update_collect_by_root_terminal_state(
 
     let mut inserts = Vec::new();
     for (root_key, before_key) in &before_order {
-        if before_key.is_some() || !state.groups.contains_key(root_key) {
+        if before_key.is_some() {
             continue;
         }
-        let order_key = state
+        let Some(order_key) = state
             .groups
             .get(root_key)
             .and_then(collect_by_root_order_key)
-            .expect("retained root has an order key");
+        else {
+            // Retractions can reach a freshly reset collector before its
+            // replacement hydration. Keep their negative maintenance state,
+            // but do not manufacture a public occurrence without a positive
+            // order key (or panic while attempting to rank it).
+            continue;
+        };
         let record = state
             .groups
             .get(root_key)
@@ -1592,6 +1606,50 @@ mod root_terminal_tests {
         assert_eq!(moves[1].1, 2);
         assert_ne!(moves[0].0, moves[1].0);
         assert!(moves.iter().all(|(key, _)| key.len() > 17));
+    }
+
+    #[test]
+    fn root_terminal_reset_revoke_does_not_rank_negative_maintenance_state() {
+        let input = record_descriptor();
+        let output = record_descriptor();
+        let collect_by = collector();
+        let mut state = CollectByIncrementalState::default();
+
+        // A reset can discard the prior facade sequence before a delayed
+        // revoke reaches the new collector state. The negative group is
+        // retained for differential accounting, but it is not a public root
+        // and therefore has neither an opaque terminal key nor a rank.
+        let revoked = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", -1)],
+            true,
+        )
+        .unwrap();
+        assert!(revoked.is_empty());
+        assert!(state.emitted_root_order.is_empty());
+        assert!(state.emitted_root_keys.is_empty());
+
+        // The replacement snapshot reconciles that maintenance state and
+        // emits exactly one real occurrence once it becomes positive again.
+        let reopened = update_collect_by_root_terminal_state(
+            input,
+            output,
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", 2)],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            reopened.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Insert { index: 0, .. },
+                ..
+            }]
+        ));
     }
 
     #[test]
