@@ -1423,9 +1423,50 @@ impl HydrationEvaluator<'_> {
                 | OpType::StreamingChecksum(_)
                 | OpType::Distinct
                 | OpType::Negate => Err(IvmRuntimeError::UnsupportedOperator),
-                OpType::SemiJoin(_) | OpType::Aggregate(_) => {
-                    Err(IvmRuntimeError::UnsupportedOperator)
+                OpType::SemiJoin(join) => {
+                    // Recursive hydration evaluates a complete, immutable
+                    // snapshot of the nested graph. A semi-join is positive
+                    // relational algebra, so it is safe to evaluate it with
+                    // fresh replace-mode arrangements just like AntiJoin
+                    // above. In particular, receiver-local Local-first
+                    // source gating uses a semi-join; rejecting it here
+                    // made otherwise valid recursive subscriptions fail at
+                    // opening rather than deriving their terminal locally.
+                    let [left, right] = graph_node.descriptor.inputs.as_slice() else {
+                        return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                    };
+                    let left = self.eval_node(*left).await?;
+                    let right = self.eval_node(*right).await?;
+                    let mut join_state = super::join::SemiJoinState::default();
+                    let mut left_arrangement = AsOf::new(super::join::ArrangementState::default());
+                    let mut right_arrangement = AsOf::new(super::join::ArrangementState::default());
+                    let deltas = join_state.apply(
+                        &mut left_arrangement,
+                        &mut right_arrangement,
+                        join.left_descriptor,
+                        join.right_descriptor,
+                        &output_desc,
+                        &plan_expr_names(&join.left_key),
+                        &plan_expr_names(&join.right_key),
+                        join.comparison,
+                        &left.deltas,
+                        &right.deltas,
+                        SubTick {
+                            tick: 0,
+                            sub_tick: 0,
+                        },
+                        SubTick {
+                            tick: 0,
+                            sub_tick: 0,
+                        },
+                        ArrangementUpdateMode::Replace,
+                    )?;
+                    Ok(RecordDeltas {
+                        descriptor: output_desc,
+                        deltas,
+                    })
                 }
+                OpType::Aggregate(_) => Err(IvmRuntimeError::UnsupportedOperator),
             }
         })
     }

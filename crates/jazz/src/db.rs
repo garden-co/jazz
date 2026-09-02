@@ -5617,7 +5617,7 @@ fn terminal_subscription_output_row(
 /// Decode the Groove ordered key used to address one root output occurrence.
 /// Plain joins are UUID sequences. A union-derived joined source is preceded
 /// by its ordered UTF-8 discriminator.
-fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId, Error> {
+pub(crate) fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId, Error> {
     fn uuid_at(encoded: &[u8], cursor: &mut usize) -> Option<ObjectId> {
         if encoded.get(*cursor).copied() != Some(10) {
             return None;

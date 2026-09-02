@@ -793,6 +793,31 @@ impl MaintainedSubscriptionView {
             .collect()
     }
 
+    /// Return the opaque collector key for one retained root. A root collector
+    /// may only expose a reset once this association is exact: the key carries
+    /// joined occurrence identity which is deliberately absent from the public
+    /// app-row record.
+    pub(crate) fn structured_terminal_root_key(
+        &self,
+        root: RowUuid,
+    ) -> Result<&[u8], super::Error> {
+        let mut keys = self
+            .structured_root_keys
+            .iter()
+            .filter_map(|(key, candidate)| (*candidate == root).then_some(key.as_slice()));
+        let Some(key) = keys.next() else {
+            return Err(super::Error::InvalidStoredValue(
+                "collector root snapshot has no terminal key",
+            ));
+        };
+        if keys.next().is_some() {
+            return Err(super::Error::InvalidStoredValue(
+                "collector root snapshot has ambiguous terminal keys",
+            ));
+        }
+        Ok(key)
+    }
+
     /// Release the app-row collector after a flat subscription's reset has
     /// been materialized. Only structured array output reads this state after
     /// opening; flat subscriptions publish subsequent rows from membership

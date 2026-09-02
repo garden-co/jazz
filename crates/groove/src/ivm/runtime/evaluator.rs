@@ -1828,14 +1828,20 @@ impl TickEvaluator<'_> {
                 direct_tree_slot,
                 state,
                 &input.deltas,
-                self.context.eval_mode == EvalMode::Tick,
+                matches!(self.context.eval_mode, EvalMode::Tick | EvalMode::Hydrate),
             )?;
             self.operator_states.insert(operator_key, operator);
+            // A subscription hydration is the first transition of the same
+            // collector. Retain its operations so the opening/reset consumer
+            // can seed its terminal tree from the exact same root keys used
+            // by all later incremental updates. Hydration still returns the
+            // relational snapshot below; only a Tick suppresses that output
+            // after publishing terminal edits.
+            if !operations.is_empty() {
+                self.terminal_deltas
+                    .insert(node, TerminalDeltas { operations });
+            }
             if self.context.eval_mode == EvalMode::Tick {
-                if !operations.is_empty() {
-                    self.terminal_deltas
-                        .insert(node, TerminalDeltas { operations });
-                }
                 return Ok(RecordDeltas::empty(output_desc));
             }
         }

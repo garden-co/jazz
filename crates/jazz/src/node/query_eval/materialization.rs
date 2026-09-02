@@ -1214,16 +1214,25 @@ where
         local: &LocalMaintainedViewSubscription,
     ) -> Result<LocalMaintainedRelationSnapshot, Error> {
         if local.terminal_schemas.has_root_collector() {
-            let rows = local
+            let terminal_rows = local
                 .maintained
                 .structured_app_rows_in_terminal_order()
                 .into_iter()
-                .map(|(_, record)| CurrentRow::new(local.result_table.clone(), record))
-                .collect::<Vec<_>>();
-            let root_occurrence_ids = rows
-                .iter()
-                .map(|row| OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0)))
-                .collect();
+                .map(|(row_uuid, record)| {
+                    Ok((
+                        crate::db::terminal_root_occurrence_id(
+                            local.maintained.structured_terminal_root_key(row_uuid)?,
+                        )
+                        .map_err(|_| {
+                            Error::InvalidStoredValue(
+                                "collector terminal key cannot identify its root occurrence",
+                            )
+                        })?,
+                        CurrentRow::new(local.result_table.clone(), record),
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            let (root_occurrence_ids, rows): (Vec<_>, Vec<_>) = terminal_rows.into_iter().unzip();
             return Ok(LocalMaintainedRelationSnapshot {
                 snapshot: RelationSnapshot {
                     root_count: rows.len(),

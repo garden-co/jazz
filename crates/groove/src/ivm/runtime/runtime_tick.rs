@@ -36,6 +36,10 @@ struct EvaluationSession<'a> {
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    /// Collector operations produced while hydrating the exact initial
+    /// snapshot. These are the authoritative terminal-tree seed for a new
+    /// subscription, not an incremental side channel.
+    terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     binding_frontiers: HashMap<BindingSourceKey, u64>,
     storage: OwnedStorage<'a>,
     requests: EvaluationRequests<'a>,
@@ -1090,6 +1094,7 @@ impl<'a> EvaluationSession<'a> {
             eval_memo_bytes,
             memo_use_clock: runtime.memo_use_clock,
             node_meta,
+            terminal_deltas: HashMap::default(),
             binding_frontiers: runtime.binding_frontiers.clone(),
             storage,
             requests,
@@ -1171,18 +1176,22 @@ impl<'a> EvaluationSession<'a> {
                         evaluation_inputs: Some(&mut self.evaluation_inputs),
                         context,
                         metrics,
-                        terminal_deltas: HashMap::default(),
+                        terminal_deltas: std::mem::take(&mut self.terminal_deltas),
                         root_ordering_windows: HashMap::default(),
                     };
                     let mut evaluation = evaluator.update_node(node);
-                    match Pin::new(&mut evaluation).poll(cx) {
+                    let result = match Pin::new(&mut evaluation).poll(cx) {
                         Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
-                        Poll::Pending => {
-                            self.work_queue.requeue_yielded(node);
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
-                        }
+                        Poll::Pending => Err(IvmRuntimeError::EvaluationBlocked),
+                    };
+                    drop(evaluation);
+                    self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+                    if matches!(result, Err(IvmRuntimeError::EvaluationBlocked)) {
+                        self.work_queue.requeue_yielded(node);
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
                     }
+                    result
                 };
                 match result {
                     Ok(mut records) => {
@@ -1744,8 +1753,10 @@ impl IvmRuntime {
                 Poll::Ready(Ok(())) => {
                     if let PendingEvaluation::SubscriptionHydration(hydration) = evaluation {
                         let snapshot = subscription_snapshot_from_hydrated(
+                            &self.graph,
                             &hydration.outputs,
                             &hydration.session.outputs,
+                            &hydration.session.terminal_deltas,
                         );
                         let completed = hydration.session.work_queue.registered_nodes();
                         hydration.session.install(self);
@@ -2283,7 +2294,7 @@ impl IvmRuntime {
                 binding_frontier_advance,
             )
             .await?;
-        subscription_snapshot_from_hydrated(outputs, &hydrated)
+        subscription_snapshot_from_hydrated(&self.graph, outputs, &hydrated, &HashMap::default())
     }
 
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -2372,10 +2383,13 @@ impl IvmRuntime {
 }
 
 fn subscription_snapshot_from_hydrated(
+    graph: &IvmGraph,
     outputs: &BTreeMap<String, CompiledNode>,
     hydrated: &HashMap<NodeId, RecordDeltas>,
+    terminal_deltas: &HashMap<NodeId, TerminalDeltas>,
 ) -> Result<MultisinkDeltas, IvmRuntimeError> {
     let mut sinks = BTreeMap::new();
+    let mut terminal_sinks = BTreeMap::new();
     for (sink, output) in outputs {
         let ordering = match output.root_ordering_node {
             Some(node) => Some(
@@ -2396,10 +2410,50 @@ fn subscription_snapshot_from_hydrated(
         if let Some(ordering) = &ordering {
             order_terminal_snapshot(&mut records, ordering)?;
         }
+        if let Some(terminal) =
+            terminal_delta_for_hydrated_output(graph, output.node, terminal_deltas)?
+        {
+            terminal_sinks.insert(sink.clone(), terminal);
+        }
         sinks.insert(sink.clone(), records);
     }
     Ok(MultisinkDeltas {
         sinks,
-        terminal_sinks: BTreeMap::new(),
+        terminal_sinks,
     })
+}
+
+/// Locate the public root collector that belongs to one output and return its
+/// hydration seed operations. This mirrors the incremental terminal selection
+/// rule while keeping the hydration snapshot self-contained.
+fn terminal_delta_for_hydrated_output(
+    graph: &IvmGraph,
+    output: NodeId,
+    terminal_deltas: &HashMap<NodeId, TerminalDeltas>,
+) -> Result<Option<TerminalDeltas>, IvmRuntimeError> {
+    let mut pending = vec![output];
+    let mut seen = HashSet::new();
+    let mut fallback = None;
+    let mut has_public_root = false;
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let graph_node = graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        let is_public_root = matches!(
+            graph_node.descriptor.operator,
+            OpType::CollectBy(ref collect_by) if collect_by.mode == CollectByMode::Root
+        );
+        has_public_root |= is_public_root;
+        if let Some(terminal) = terminal_deltas.get(&node) {
+            if is_public_root {
+                return Ok(Some(terminal.clone()));
+            }
+            fallback.get_or_insert_with(|| terminal.clone());
+        }
+        pending.extend(graph_node.descriptor.inputs.iter().copied());
+    }
+    Ok((!has_public_root).then_some(fallback).flatten())
 }
