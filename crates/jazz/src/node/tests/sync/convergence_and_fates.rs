@@ -258,7 +258,7 @@ fn authority_covered_input_rejects_duplicate_and_impossible_live_deltas_atomical
     let (_dir, mut receiver, authority_result, initial, mut successor) =
         covered_input_receiver_fixture();
     let mut impossible_remove = initial;
-    impossible_remove.version.tx = TxId::new(node(0x7a), TxTime(0x7a));
+    impossible_remove.version.tx = TxId::new(TxTime(0x7a), node(0x7a));
     successor
         .program_fact_removes
         .push(crate::protocol::ProgramFactEntry::CoveredInput(impossible_remove));
@@ -277,6 +277,35 @@ fn authority_covered_input_rejects_live_coverage_changes_atomically() {
             },
         ),
     );
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+#[test]
+fn authority_covered_input_rejects_reset_with_incomplete_source_manifest_atomically() {
+    let (_dir, mut receiver, authority_result, _initial, mut successor) =
+        covered_input_receiver_fixture();
+    let sources = receiver
+        .query
+        .authority_results
+        .get(&authority_result)
+        .expect("fixture installed authority closure")
+        .covered_input_sources
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(sources.len() > 1, "self-join fixture has multiple source occurrences");
+    successor.reset_result_set = true;
+    successor.program_fact_removes.clear();
+    successor.program_fact_adds.extend(sources.iter().skip(1).cloned().map(
+        |source| {
+            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source,
+                    complete: true,
+                },
+            )
+        },
+    ));
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
