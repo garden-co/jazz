@@ -1099,7 +1099,11 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
     let result_rows = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
+            {
+                Some(input.source_row)
+            }
             _ => None,
         })
         .collect::<BTreeSet<_>>();

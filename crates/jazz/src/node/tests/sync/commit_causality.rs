@@ -448,6 +448,24 @@ fn m2_writer_core_reader_converges_against_oracle() {
         assert_view_update_result_set_matches_current_rows(&mut core);
 
         let update = peer.current_rows_update(&mut core, "todos").unwrap();
+        if deletion == Some(DeletionEvent::Deleted) {
+            let SyncMessage::ViewUpdate(payload) = &update else {
+                panic!("expected view update");
+            };
+            assert!(!payload.reset_result_set);
+            assert!(payload.program_fact_adds.iter().any(|fact| {
+                matches!(
+                    fact,
+                    crate::protocol::ProgramFactEntry::CoveredInput(input)
+                        if input.source_row == row_a
+                            && input.version.tx == tx_id
+                            && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+                )
+            }));
+            assert!(version_bundles_for_update(&update)
+                .iter()
+                .any(|bundle| bundle.tx.tx_id == tx_id));
+        }
         reader.apply_sync_message_settled(update).unwrap();
         assert_current_rows_match_oracle(&mut reader, &oracle);
     }

@@ -639,12 +639,36 @@ pub(super) fn lowered_terminals(
                     )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
-                // A deletion is a successor-closure retraction of the
-                // previously admitted content witness.  Do not reopen the
-                // deletion register merely to synthesize a body: that would
-                // disclose a historical row that the current policy closure
-                // no longer permits.  The receiver removes the old exact
-                // CoveredInput when this content terminal retracts it.
+                // A content retraction alone means the authority no longer
+                // selects that source; it might be policy revocation, and
+                // must never be mistaken for a tombstone. When this source
+                // has an explicit deletion-register witness, ship that exact
+                // deletion layer independently. The receiver validates and
+                // ingests its tx/branch/schema carrier while retaining no
+                // deletion tuple in its maintained input relation.
+                if resolved_source.deletion_register.is_none() {
+                    continue;
+                }
+                let deletion_output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::VersionWitnessDeletion,
+                    plan,
+                    source_id,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    source_route_fields.clone(),
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_deletion_fact_sink_name(fact, source_id),
+                    graph: deletion_witness_graph_for_current_register(
+                        resolved_source,
+                        "version_deletion",
+                        request,
+                        &source_route_fields,
+                    )?,
+                    output: OutputTerminalSchema::Fact(deletion_output),
+                });
             }
         } else if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
             for (source_id, resolved_source) in resolved_sources {
@@ -678,9 +702,36 @@ pub(super) fn lowered_terminals(
                     )?,
                     output: OutputTerminalSchema::Fact(content_output),
                 });
-                // See VersionWitnesses above: a complete successor closure
-                // retracts the old input; it never needs an unscoped deleted
-                // body to do so.
+                // A content retraction alone means the authority no longer
+                // selects that source; it might be policy revocation, and
+                // must never be mistaken for a tombstone. When this source
+                // has an explicit deletion-register witness, ship that exact
+                // deletion layer independently. The receiver validates and
+                // ingests its tx/branch/schema carrier while retaining no
+                // deletion tuple in its maintained input relation.
+                if resolved_source.deletion_register.is_none() {
+                    continue;
+                }
+                let deletion_output = fact_output_with_terminal(
+                    fact,
+                    ProgramFactTerminal::ReplacementWitnessDeletion,
+                    plan,
+                    source_id,
+                    resolved_source,
+                    resolved_sources,
+                    request,
+                    source_route_fields.clone(),
+                )?;
+                terminals.push(LoweredTerminal {
+                    sink: scoped_deletion_fact_sink_name(fact, source_id),
+                    graph: deletion_witness_graph_for_current_register(
+                        resolved_source,
+                        "replacement_deletion",
+                        request,
+                        &source_route_fields,
+                    )?,
+                    output: OutputTerminalSchema::Fact(deletion_output),
+                });
             }
         } else if matches!(fact, ProgramFactKey::ProgramSourceCoverage(_)) {
             // Closure coverage is control-plane evidence, not a projection of
@@ -1723,6 +1774,8 @@ fn lowered_aggregate_terminals(
                     graph: deletion_witness_graph_for_current_register(
                         resolved_source,
                         "version_deletion",
+                        request,
+                        &root_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
@@ -1775,6 +1828,8 @@ fn lowered_aggregate_terminals(
                     graph: deletion_witness_graph_for_current_register(
                         resolved_source,
                         "replacement_deletion",
+                        request,
+                        &root_route_fields,
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
                 });
@@ -2640,6 +2695,8 @@ fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
 fn deletion_witness_graph_for_current_register(
     source: &ResolvedSource,
     event_kind: &str,
+    request: &QueryProgramRequest,
+    routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let Some(register) = &source.deletion_register else {
         return Err(Box::new(CapabilityReport {
@@ -2649,10 +2706,15 @@ fn deletion_witness_graph_for_current_register(
             explain: ExplainPlan::default(),
         }));
     };
-    Ok(register
-        .graph
-        .clone()
-        .project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
+    let mut fields = deletion_witness_fields_for_tagged_rows(source, event_kind)?;
+    fields.extend(
+        routing_param_fields
+            .iter()
+            .map(|field| route_literal_project_field(field, request))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(single_gap_report)?,
+    );
+    Ok(register.graph.clone().project_fields(fields))
 }
 
 fn content_version_witness_graph(

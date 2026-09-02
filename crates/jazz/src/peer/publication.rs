@@ -26,6 +26,35 @@ fn ordinary_current_content_member(member: &ResultMemberEntry) -> bool {
         && row.batch.is_none())
 }
 
+/// A raw deletion-register row is not itself read authorization.  It is safe
+/// to deliver only as the exact successor of content this receiver's current
+/// source closure retracted in the same IVM drain.  That distinguishes an
+/// authorized delete from a policy withdrawal, a later delete after access
+/// revocation, and a cold deletion the receiver never observed.
+fn deletion_witness_has_same_drain_content_retraction(
+    fact: &ProgramFactEntry,
+    predecessor: &BTreeSet<ProgramFactEntry>,
+    removals: &[ProgramFactEntry],
+) -> bool {
+    let ProgramFactEntry::CoveredInput(deletion) = fact else {
+        return true;
+    };
+    if deletion.version.layer != crate::protocol::ResultRowLayer::Deletion {
+        return true;
+    }
+    let is_matching_content = |fact: &ProgramFactEntry| {
+        let ProgramFactEntry::CoveredInput(content) = fact else {
+            return false;
+        };
+        content.version.layer == crate::protocol::ResultRowLayer::Content
+            && content.source == deletion.source
+            && content.version_table == deletion.version_table
+            && content.source_row == deletion.source_row
+            && content.version.branch_or_prefix == deletion.version.branch_or_prefix
+    };
+    predecessor.iter().any(is_matching_content) && removals.iter().any(is_matching_content)
+}
+
 /// Reconcile a retained downstream result set against a cold maintained-view
 /// snapshot that contains a static deletion witness. The active membership is
 /// authoritative for removals. Publishability only gates members the
@@ -1081,15 +1110,18 @@ impl PeerState {
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
         let public_result_is_silent = result_member_adds.is_empty() && result_member_removes.is_empty();
-        // Deletion witnesses require a one-shot reconciliation only when the
-        // result terminal itself was silent. When Groove already emitted the
-        // complete public delta, reopening the maintained view would discard
-        // that delta and repeatedly rediscover the same deletion witness.
+        // A deletion witness can require a one-shot membership reconciliation
+        // only when it produced no exact source-closure transition. Once the
+        // deletion-register carrier is present, it is the authoritative
+        // successor evidence: reopening the maintained view would rebuild a
+        // full closure in an incremental frame, repeating its coverage
+        // manifest and previously acknowledged content.
         if public_result_is_silent
+            && raw_program_fact_adds.is_empty()
+            && raw_program_fact_removes.is_empty()
             && (requires_authoritative_membership_reconcile
                 || (observed_result_delta_batches > 0
-                    && raw_program_fact_adds.is_empty()
-                    && raw_program_fact_removes.is_empty()))
+                    ))
         {
             let (tier, read_view) = self
                 .publication_states
@@ -1149,7 +1181,16 @@ impl PeerState {
             .map(|view| view.maintained.active_peer_source_closure_facts())
             .ok_or(Error::InvalidStoredValue(
                 "maintained subscription view is missing source closure state",
-            ))?;
+            ))?
+            .into_iter()
+            .filter(|fact| {
+                deletion_witness_has_same_drain_content_retraction(
+                    fact,
+                    &previous_program_fact_set,
+                    &raw_program_fact_removes,
+                )
+            })
+            .collect::<BTreeSet<_>>();
         let (program_fact_adds, program_fact_removes) =
             canonical_set_delta(&previous_program_fact_set, &current_program_fact_set);
         let fact_add_count = program_fact_adds.len();
@@ -1719,6 +1760,11 @@ impl PeerState {
                 .read_policy
                 .is_some();
         let known_state = self.downstream_known_states.get(&subscription).cloned();
+        let previous_program_fact_set = self
+            .publication_states
+            .get(&subscription)
+            .map(PeerSubscriptionState::program_fact_set)
+            .unwrap_or_default();
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
             self.fast_cursor_authorization_matches(subscription, &known_state);
@@ -1793,8 +1839,19 @@ impl PeerState {
             result_member_removes.clear();
             (Vec::new(), Vec::new(), false)
         } else {
+            let deletion_witness_removals = transitions.program_fact_removes.clone();
             (
-                transitions.program_fact_adds,
+                transitions
+                    .program_fact_adds
+                    .into_iter()
+                    .filter(|fact| {
+                        deletion_witness_has_same_drain_content_retraction(
+                            fact,
+                            &previous_program_fact_set,
+                            &deletion_witness_removals,
+                        )
+                    })
+                    .collect(),
                 transitions.program_fact_removes,
                 reset_result_set,
             )

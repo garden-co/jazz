@@ -4880,6 +4880,370 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
 }
 
 #[test]
+fn policy_revocation_withdraws_covered_input_without_tombstoning_cached_row() {
+    let schema = access_policy_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let project = row(0x40);
+    let doc = row(0x41);
+    let grant = row(0x42);
+    let doc_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", doc, 10).cells(doc_cells("visible", project)),
+        )
+        .unwrap();
+    accept_global(&mut core, doc_tx, 1);
+    let grant_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docAccess", grant, 11).cells(access_cells(doc, owner)),
+        )
+        .unwrap();
+    accept_global(&mut core, grant_tx, 2);
+    core.set_test_provider_claims(
+        owner,
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(owner.test_uuid()),
+        )]),
+    );
+
+    let mut peer = PeerState::edge_client(owner);
+    register_whole_table_receiver(&mut reader, "docs");
+    reader
+        .apply_sync_message_settled(peer.current_rows_update(&mut core, "docs").unwrap())
+        .unwrap();
+    assert_eq!(
+        reader
+            .current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(doc, doc_cells("visible", project))])
+    );
+
+    let revoke_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docAccess", grant, 12).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, revoke_tx, 3);
+    let revoke = peer.current_rows_update(&mut core, "docs").unwrap();
+    let SyncMessage::ViewUpdate(payload) = &revoke else {
+        panic!("expected view update");
+    };
+    assert!(payload.program_fact_adds.iter().all(|fact| {
+        !matches!(
+            fact,
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == doc
+                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+        )
+    }));
+    reader.apply_sync_message_settled(revoke).unwrap();
+
+    assert_eq!(
+        reader
+            .current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(doc, doc_cells("visible", project))]),
+        "policy withdrawal must not be reinterpreted as an authorized deletion"
+    );
+    assert!(
+        reader
+            .subscription_current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .is_empty(),
+        "the receiver-local result still follows the withdrawn coverage"
+    );
+
+    let delete_after_revoke_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, delete_after_revoke_tx, 4);
+    let delete_after_revoke = peer.current_rows_update(&mut core, "docs").unwrap();
+    let SyncMessage::ViewUpdate(payload) = &delete_after_revoke else {
+        panic!("expected view update");
+    };
+    assert!(payload.program_fact_adds.iter().all(|fact| {
+        !matches!(
+            fact,
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == doc
+                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+        )
+    }));
+    reader
+        .apply_sync_message_settled(delete_after_revoke)
+        .unwrap();
+    assert_eq!(
+        reader
+            .current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(doc, doc_cells("visible", project))]),
+        "a post-revocation deletion is not authorized by the earlier read"
+    );
+
+    let unseen = AuthorSubject::for_test_bytes([0xb2; 16]);
+    core.set_test_provider_claims(
+        unseen,
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(unseen.test_uuid()),
+        )]),
+    );
+    let mut unseen_peer = PeerState::edge_client(unseen);
+    let unseen_update = unseen_peer.current_rows_update(&mut core, "docs").unwrap();
+    let SyncMessage::ViewUpdate(payload) = &unseen_update else {
+        panic!("expected view update");
+    };
+    assert!(payload.program_fact_adds.iter().all(|fact| {
+        !matches!(
+            fact,
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == doc
+                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+        )
+    }));
+}
+
+#[test]
+fn policy_visible_delete_carries_tombstone_and_clears_receiver_current_row() {
+    let schema = access_policy_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let project = row(0x50);
+    let doc = row(0x51);
+    let grant = row(0x52);
+    let doc_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", doc, 10).cells(doc_cells("visible", project)),
+        )
+        .unwrap();
+    accept_global(&mut core, doc_tx, 1);
+    let grant_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docAccess", grant, 11).cells(access_cells(doc, owner)),
+        )
+        .unwrap();
+    accept_global(&mut core, grant_tx, 2);
+    core.set_test_provider_claims(
+        owner,
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(owner.test_uuid()),
+        )]),
+    );
+    let mut peer = PeerState::edge_client(owner);
+    register_whole_table_receiver(&mut reader, "docs");
+    reader
+        .apply_sync_message_settled(peer.current_rows_update(&mut core, "docs").unwrap())
+        .unwrap();
+
+    let delete_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", doc, 12).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, delete_tx, 3);
+    let delete = peer.current_rows_update(&mut core, "docs").unwrap();
+    let SyncMessage::ViewUpdate(payload) = &delete else {
+        panic!("expected view update");
+    };
+    assert!(payload.program_fact_adds.iter().any(|fact| {
+        matches!(
+            fact,
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == doc
+                    && input.version.tx == delete_tx
+                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+        )
+    }));
+    reader.apply_sync_message_settled(delete).unwrap();
+    assert!(
+        reader
+            .current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reader
+            .subscription_current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn concurrent_policy_revoke_cannot_cross_authorize_another_rows_tombstone() {
+    let schema = access_policy_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let project = row(0x60);
+    let deleted_doc = row(0x61);
+    let revoked_doc = row(0x62);
+    let deleted_grant = row(0x63);
+    let revoked_grant = row(0x64);
+    let deleted_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", deleted_doc, 10).cells(doc_cells("deleted", project)),
+        )
+        .unwrap();
+    accept_global(&mut core, deleted_tx, 1);
+    let revoked_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", revoked_doc, 11).cells(doc_cells("revoked", project)),
+        )
+        .unwrap();
+    accept_global(&mut core, revoked_tx, 2);
+    for (grant, doc, now_ms, global_time) in [
+        (deleted_grant, deleted_doc, 12, 3),
+        (revoked_grant, revoked_doc, 13, 4),
+    ] {
+        let tx = core
+            .commit_mergeable_settled(
+                MergeableCommit::new("docAccess", grant, now_ms).cells(access_cells(doc, owner)),
+            )
+            .unwrap();
+        accept_global(&mut core, tx, global_time);
+    }
+    core.set_test_provider_claims(
+        owner,
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(owner.test_uuid()),
+        )]),
+    );
+    let mut peer = PeerState::edge_client(owner);
+    register_whole_table_receiver(&mut reader, "docs");
+    reader
+        .apply_sync_message_settled(peer.current_rows_update(&mut core, "docs").unwrap())
+        .unwrap();
+
+    let revoke_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docAccess", revoked_grant, 14)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, revoke_tx, 5);
+    let delete_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", deleted_doc, 15).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, delete_tx, 6);
+    let mixed = peer.current_rows_update(&mut core, "docs").unwrap();
+    let SyncMessage::ViewUpdate(payload) = &mixed else {
+        panic!("expected view update");
+    };
+    assert!(payload.program_fact_adds.iter().any(|fact| {
+        matches!(
+            fact,
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == deleted_doc
+                    && input.version.tx == delete_tx
+                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+        )
+    }));
+    assert!(payload.program_fact_adds.iter().all(|fact| {
+        !matches!(
+            fact,
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == revoked_doc
+                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+        )
+    }));
+    reader.apply_sync_message_settled(mixed).unwrap();
+    assert_eq!(
+        reader
+            .current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(revoked_doc, doc_cells("revoked", project))])
+    );
+    assert!(
+        reader
+            .subscription_current_rows("docs", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn same_row_policy_revoke_and_delete_do_not_leak_a_tombstone() {
+    let schema = access_policy_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let project = row(0x70);
+    let doc = row(0x71);
+    let grant = row(0x72);
+    let doc_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", doc, 10).cells(doc_cells("visible", project)),
+        )
+        .unwrap();
+    accept_global(&mut core, doc_tx, 1);
+    let grant_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docAccess", grant, 11).cells(access_cells(doc, owner)),
+        )
+        .unwrap();
+    accept_global(&mut core, grant_tx, 2);
+    core.set_test_provider_claims(
+        owner,
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(owner.test_uuid()),
+        )]),
+    );
+    let mut peer = PeerState::edge_client(owner);
+    register_whole_table_receiver(&mut reader, "docs");
+    reader
+        .apply_sync_message_settled(peer.current_rows_update(&mut core, "docs").unwrap())
+        .unwrap();
+
+    let revoke_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docAccess", grant, 12).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, revoke_tx, 3);
+    let delete_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, delete_tx, 4);
+    let mixed = peer.current_rows_update(&mut core, "docs").unwrap();
+    let SyncMessage::ViewUpdate(payload) = &mixed else {
+        panic!("expected view update");
+    };
+    assert!(payload.program_fact_adds.iter().all(|fact| {
+        !matches!(
+            fact,
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == doc
+                    && input.version.layer == crate::protocol::ResultRowLayer::Deletion
+        )
+    }));
+}
+
+#[test]
 fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_grant() {
     let schema = access_policy_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
