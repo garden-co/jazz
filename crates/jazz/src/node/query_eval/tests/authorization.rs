@@ -265,15 +265,12 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             identity,
         )
         .expect("prepare retained invite binding on the client before server coverage");
-    register_query_shape(
-        &mut client,
-        &shape,
-        RegisterShapeOptions {
-            tier: DurabilityTier::Edge,
-            ..RegisterShapeOptions::default()
-        },
-    );
-    subscribe_query_binding(&mut client, &shape, &binding);
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    register_query_shape(&mut client, &shape, opts.clone());
+    subscribe_query_binding_with_opts(&mut client, &shape, &binding, opts.clone());
 
     let (_server_dir, mut node) =
         open_node_with_uuid(NodeUuid::from_bytes([0xa8; 16]), schema.clone());
@@ -352,26 +349,13 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     // Mirror the wire receiver: the server reconstructs the client
     // binding from RegisterShape + Subscribe before it prepares the
     // maintained graph under the invite-authenticated identity.
-    register_query_shape(
-        &mut node,
-        &shape,
-        RegisterShapeOptions {
-            tier: DurabilityTier::Edge,
-            ..RegisterShapeOptions::default()
-        },
-    );
-    subscribe_query_binding(&mut node, &shape, &binding);
+    register_query_shape(&mut node, &shape, opts.clone());
+    subscribe_query_binding_with_opts(&mut node, &shape, &binding, opts.clone());
     let registered_values = node
         .query
         .registered_bindings
         .get(&shape.shape_id())
-        .and_then(|bindings| {
-            bindings.get(&(
-                binding.binding_id(),
-                RegisterShapeOptions::default().read_view_key(),
-                None,
-            ))
-        })
+        .and_then(|bindings| bindings.get(&(binding.binding_id(), opts.read_view_key(), None)))
         .map(|registered| registered.values.clone())
         .expect("server reconstructed the subscribed invite binding");
     let server_binding = shape
@@ -599,18 +583,25 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     let client_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
+        read_view: opts.read_view_key(),
     };
+    edge.set_subscription_policy_binding(
+        client_subscription,
+        (
+            identity,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("join_code"),
+                Value::String("invite-123".to_owned()),
+            )]),
+        ),
+    );
     let update = edge
         .rehydrate_query_for_subscription_with_opts(
             &mut node,
             client_subscription,
             &shape,
             &server_binding,
-            RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
-                ..RegisterShapeOptions::default()
-            },
+            opts.clone(),
         )
         .expect("the serving maintained view must retain the invite claim route")
         .expect("the invite subscription has an initial update");
@@ -643,10 +634,15 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         Some(DurabilityTier::Global),
     )
     .expect("a live invite subscription must tolerate its membership CommitUnit");
-    edge.query_update(&mut node, &shape, &server_binding)
-        .expect(
-            "flushing the live invite subscription after membership must preserve its claim route",
-        );
+    edge.query_update_for_subscription_with_opts(
+        &mut node,
+        client_subscription,
+        &shape,
+        &server_binding,
+        opts.clone(),
+    )
+    .expect("flushing the live invite subscription after membership must preserve its claim route")
+    .expect("the live invite subscription has an incremental update");
 
     // The invite has now become ordinary membership. A later normal
     // session must materialize an already-existing private message through
@@ -705,6 +701,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             Value::String(identity.test_uuid().to_string()),
         )]),
     );
+    let (membership_shape, membership_binding) = normal_client
+        .whole_table_shape_binding("chatMembers")
+        .expect("derive admitted chat-members source receiver");
+    register_shape_binding_for_receiver(&mut normal_client, &membership_shape, &membership_binding);
     let mut normal_membership_peer = PeerState::edge_client(identity);
     normal_client
         .apply_sync_message_settled(
@@ -723,42 +723,74 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             Value::Uuid(chat.0),
         )]))
         .expect("bind normal-member message query without include");
+    // This is a durable ordinary client read, unlike the invite relay above:
+    // its public client-local selector consumes the authoritative Global view.
+    let normal_opts = RegisterShapeOptions::default();
     register_query_shape(
         &mut normal_client,
         &simple_message_shape,
-        RegisterShapeOptions {
-            tier: DurabilityTier::Edge,
-            ..RegisterShapeOptions::default()
-        },
+        normal_opts.clone(),
     );
-    subscribe_query_binding(
+    let normal_session = crate::protocol::DelegatedSessionBinding {
+        identity,
+        claims: BTreeMap::from([(
+            crate::query::provider_claim_key("user_id"),
+            Value::String(identity.test_uuid().to_string()),
+        )]),
+    };
+    subscribe_query_binding_with_opts_and_session(
         &mut normal_client,
         &simple_message_shape,
         &simple_message_binding,
+        normal_opts.clone(),
+        Some(normal_session.clone()),
     );
     let mut normal_simple_peer = PeerState::edge_client(identity);
     let normal_simple_subscription = SubscriptionKey {
         shape_id: simple_message_shape.shape_id(),
         binding_id: simple_message_binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
+        read_view: normal_opts.read_view_key(),
     };
-    normal_client
-        .apply_sync_message_settled(
-            normal_simple_peer
-                .rehydrate_query_for_subscription_with_opts(
-                    &mut node,
-                    normal_simple_subscription,
-                    &simple_message_shape,
-                    &simple_message_binding,
-                    RegisterShapeOptions {
-                        tier: DurabilityTier::Edge,
-                        ..RegisterShapeOptions::default()
-                    },
-                )
-                .expect("serve normal-member message snapshot without include")
-                .expect("normal-member message snapshot without include is ready"),
+    normal_simple_peer.set_subscription_policy_binding(
+        normal_simple_subscription,
+        (
+            identity,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("user_id"),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        ),
+    );
+    let normal_simple_update = normal_simple_peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut node,
+            normal_simple_subscription,
+            &simple_message_shape,
+            &simple_message_binding,
+            normal_opts.clone(),
         )
+        .expect("serve normal-member message snapshot without include")
+        .expect("normal-member message snapshot without include is ready");
+    normal_client
+        .apply_sync_message_settled(normal_simple_update)
         .expect("client applies normal-member message snapshot without include");
+    let normal_simple_authority = normal_client
+        .authority_result_key_for_subscription(normal_simple_subscription)
+        .expect("normal client retains the scoped simple-message authority receipt");
+    assert!(
+        normal_client.has_settled_authority_result(&normal_simple_authority),
+        "all admitted source inputs plus their complete coverage settle the simple message receipt"
+    );
+    assert_eq!(
+        normal_client.client_settled_binding_view_key_for_query(
+            &simple_message_shape,
+            &simple_message_binding,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+        ),
+        Some(normal_simple_authority.binding_view),
+        "the client read resolves its exact policy-scoped admitted source closure"
+    );
     assert_eq!(
         normal_client
             .query_rows_for_client(
@@ -774,31 +806,37 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         vec![message],
         "the normal client must first materialize the private seed message without include"
     );
-    register_query_shape(
+    register_query_shape(&mut normal_client, &message_shape, normal_opts.clone());
+    subscribe_query_binding_with_opts_and_session(
         &mut normal_client,
         &message_shape,
-        RegisterShapeOptions {
-            tier: DurabilityTier::Edge,
-            ..RegisterShapeOptions::default()
-        },
+        &message_binding,
+        normal_opts.clone(),
+        Some(normal_session),
     );
-    subscribe_query_binding(&mut normal_client, &message_shape, &message_binding);
     let mut normal_peer = PeerState::edge_client(identity);
     let normal_subscription = SubscriptionKey {
         shape_id: message_shape.shape_id(),
         binding_id: message_binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
+        read_view: normal_opts.read_view_key(),
     };
+    normal_peer.set_subscription_policy_binding(
+        normal_subscription,
+        (
+            identity,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("user_id"),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        ),
+    );
     let normal_update = normal_peer
         .rehydrate_query_for_subscription_with_opts(
             &mut node,
             normal_subscription,
             &message_shape,
             &message_binding,
-            RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
-                ..RegisterShapeOptions::default()
-            },
+            normal_opts.clone(),
         )
         .expect("serve normal-member message include/order snapshot")
         .expect("normal-member message include/order snapshot is ready");

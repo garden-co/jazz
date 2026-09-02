@@ -198,6 +198,16 @@ fn subscribe_query_binding_with_opts(
     binding: &Binding,
     opts: RegisterShapeOptions,
 ) {
+    subscribe_query_binding_with_opts_and_session(node, shape, binding, opts, None);
+}
+
+fn subscribe_query_binding_with_opts_and_session(
+    node: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    opts: RegisterShapeOptions,
+    delegated_session: Option<crate::protocol::DelegatedSessionBinding>,
+) {
     let values = shape
         .params()
         .keys()
@@ -212,7 +222,7 @@ fn subscribe_query_binding_with_opts(
         },
         values,
         known_state: None,
-        delegated_session: None,
+        delegated_session,
     }))
     .unwrap();
 }
