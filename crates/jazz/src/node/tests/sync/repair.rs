@@ -714,7 +714,8 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         )
         .unwrap();
 
-    let mut update = core.view_update_for_current_rows("todos").unwrap();
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
         program_fact_adds,
@@ -874,33 +875,28 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     let (shape, binding) = core.whole_table_shape_binding("tasks").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
 
-    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        subscription: crate::protocol::SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
-        },
-        settled_through: GlobalTime(1),
-        reset_result_set: false,
-        version_carriers: Vec::new(),
-        peer_payload_inventory: Default::default(),
-        result_member_adds: vec![("tasks".to_owned().into(), row_uuid, tx_id).into()],
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    });
+    let subscription = crate::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
+        version_carriers,
+        program_fact_adds,
         ..
-    }) = &update
+    }) = &mut update
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_adds,
-        &vec![("tasks".to_owned().into(), row_uuid, tx_id)],
-        "the pending update names the receiver's projected table"
-    );
+    assert!(program_fact_adds.iter().any(|fact| matches!(
+        fact,
+        crate::protocol::ProgramFactEntry::CoveredInput(input)
+            if input.source.table.as_str() == "tasks"
+                && input.source_row == row_uuid
+                && input.version.tx == tx_id
+    )), "the exact closure names the receiver's projected source row");
+    version_carriers.clear();
 
     let requests = reader
         .missing_known_state_row_version_refs(&update)

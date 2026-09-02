@@ -6,6 +6,90 @@ fn relay_with_system_binding(subscription: SubscriptionKey) -> PeerState {
     peer
 }
 
+fn system_authority_reset(
+    core: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    subscription: SubscriptionKey,
+) -> SyncMessage {
+    let mut peer = relay_with_system_binding(subscription);
+    peer.rehydrate_query_for_subscription_with_opts(
+        core,
+        subscription,
+        shape,
+        binding,
+        RegisterShapeOptions::default(),
+    )
+    .expect("serve exact SYSTEM-scoped closure")
+    .expect("authority reset must be available")
+}
+
+fn receiver_rows(
+    node: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    tier: DurabilityTier,
+) -> Vec<CurrentRow> {
+    node.query_rows_for_client(shape, binding, tier, AuthorSubject::SYSTEM)
+        .resolve()
+        .expect("derive receiver rows from the exact covered-input closure")
+}
+
+fn covered_input_for_row(
+    update: &SyncMessage,
+    row_uuid: RowUuid,
+) -> crate::protocol::CoveredInputEntry {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        program_fact_adds,
+        ..
+    }) = update
+    else {
+        panic!("expected view update");
+    };
+    program_fact_adds
+        .iter()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == row_uuid =>
+            {
+                Some(input.clone())
+            }
+            _ => None,
+        })
+        .expect("authority update must identify the row as an exact covered input")
+}
+
+fn view_update_parts(message: SyncMessage, defer_settlement: bool) -> ViewUpdateParts {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through,
+        reset_result_set,
+        version_carriers,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+    }) = message
+    else {
+        panic!("expected view update");
+    };
+    ViewUpdateParts {
+        subscription,
+        settled_through,
+        defer_settlement,
+        reset_result_set,
+        version_carriers,
+        peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+        authorization_progress: peer_payload_inventory.authorization_progress,
+        opening_pending: peer_payload_inventory.opening_pending,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+    }
+}
+
 #[test]
 fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     // Internal protocol coverage: public APIs only expose this as a background
@@ -31,11 +115,14 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(system_authority_reset(
+            &mut core,
+            &shape,
+            &binding,
+            subscription,
+        ))
         .unwrap();
-    let before = reader
-        .subscription_current_rows("todos", DurabilityTier::Global)
-        .unwrap()
+    let before = receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
         .into_iter()
         .map(current_row_pair)
         .collect::<BTreeMap<_, _>>();
@@ -69,11 +156,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
-        result_member_removes: vec![crate::protocol::ResultMemberEntry::row((
-            groove::Intern::from("todos".to_owned()),
-            row_uuid,
-            TxId::new(TxTime(777), node(44)),
-        ))],
+        result_member_removes: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -84,9 +167,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
         1
     );
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -152,12 +233,11 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
     };
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
-    let initial = core.view_update_for_current_rows("todos").unwrap();
+    let initial = system_authority_reset(&mut core, &shape, &binding, subscription);
+    let covered = covered_input_for_row(&initial, row_uuid);
     reader.apply_sync_message_settled(initial).unwrap();
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -172,13 +252,9 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
-        result_member_removes: vec![crate::protocol::ResultMemberEntry::row((
-            groove::Intern::from("todos".to_owned()),
-            row_uuid,
-            invisible_tx,
-        ))],
+        result_member_removes: Vec::new(),
         program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+        program_fact_removes: vec![crate::protocol::ProgramFactEntry::CoveredInput(covered)],
     });
     assert!(
         reader
@@ -189,10 +265,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
     );
     reader.apply_sync_message_settled(removal).unwrap();
     assert!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
-            .is_empty()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).is_empty()
     );
     assert_eq!(
         reader.settled_through_for_authority_result(&authority_result_key),
@@ -206,7 +279,6 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
     // Internal protocol coverage: this pins the receiver-side membership update
     // rule directly; public queries only observe the final empty set.
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
-    let row_uuid = row(8);
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
@@ -221,11 +293,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
-        result_member_removes: vec![crate::protocol::ResultMemberEntry::row((
-            groove::Intern::from("todos".to_owned()),
-            row_uuid,
-            TxId::new(TxTime(1000), node(45)),
-        ))],
+        result_member_removes: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -238,10 +306,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
     );
     reader.apply_sync_message_settled(removal).unwrap();
     assert!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
-            .is_empty()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).is_empty()
     );
     assert_eq!(
         reader.settled_through_for_authority_result(&authority_result_key),
@@ -278,12 +343,15 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(system_authority_reset(
+            &mut core,
+            &shape,
+            &binding,
+            canonical_subscription,
+        ))
         .unwrap();
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -326,9 +394,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
         .unwrap();
 
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -381,14 +447,8 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
         .unwrap()
         .expect("expected view update");
     let control_version_bundles = version_bundles_for_update(&control_update);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds: control_result_member_adds,
-        ..
-    }) = &control_update
-    else {
-        panic!("expected control view update");
-    };
-    assert_eq!(control_result_member_adds.len(), 1);
+    let control_input = covered_input_for_row(&control_update, row_uuid);
+    assert_eq!(control_input.version.tx, _tx_id);
     assert_eq!(control_version_bundles.len(), 1);
 
     let mut peer = relay_with_system_binding(subscription);
@@ -424,7 +484,6 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     assert!(!reset_result_set);
     assert!(result_member_adds.is_empty());
     assert!(version_bundles.is_empty());
-    assert_eq!(control_result_member_adds.len(), 1);
 
     let missing = reader
         .missing_known_state_row_version_refs(&update)
@@ -456,7 +515,12 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     core.ingest_commit_unit_settled(commit_a, versions_a, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(system_authority_reset(
+            &mut core,
+            &shape,
+            &binding,
+            subscription,
+        ))
         .unwrap();
 
     let (tx_b, unit_b) = writer
@@ -497,25 +561,21 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
         reset_result_set,
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
     assert_eq!(*settled_through, GlobalTime::new(20, 0).unwrap());
-    assert!(!reset_result_set);
-    assert_eq!(
-        result_member_adds,
-        &vec![crate::protocol::ResultMemberEntry::from(
-            crate::protocol::RealRowMemberEntry::current_content((
-                groove::Intern::from("todos".to_owned()),
-                row_b,
-                tx_b,
-            ))
-            .with_settle_position(Some(GlobalTime::new(20, 0).unwrap()))
-        )]
-    );
+    assert!(reset_result_set);
+    assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
+    assert!(program_fact_adds.iter().any(|fact| matches!(
+        fact,
+        crate::protocol::ProgramFactEntry::CoveredInput(input)
+            if input.source_row == row_b && input.version.tx == tx_b
+    )));
     assert_eq!(version_bundles.len(), 1);
 
     assert!(
@@ -579,12 +639,18 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
+        program_fact_adds,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    assert_eq!(result_member_adds.len(), 1);
+    assert!(result_member_adds.is_empty());
+    assert!(program_fact_adds.iter().any(|fact| matches!(
+        fact,
+        crate::protocol::ProgramFactEntry::CoveredInput(input)
+            if input.source_row == row_uuid && input.version.tx == tx_id
+    )));
     assert!(version_bundles.is_empty());
 }
 
@@ -608,7 +674,12 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(system_authority_reset(
+            &mut core,
+            &shape,
+            &binding,
+            subscription,
+        ))
         .unwrap();
 
     let mut peer = relay_with_system_binding(subscription);
@@ -647,9 +718,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
 
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
-        reader
-            .current_rows("todos", DurabilityTier::Local)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -677,12 +746,15 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
-        .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
+        .apply_sync_message_settled(system_authority_reset(
+            &mut core,
+            &shape,
+            &binding,
+            subscription,
+        ))
         .unwrap();
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -692,9 +764,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     drop(reader);
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -737,9 +807,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
 
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Global)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -874,31 +942,15 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             DurabilityTier::Global,
         )
         .unwrap();
-    // Establish the reader's exact unscoped authority receipt through the
-    // normal ViewUpdate path. A deferred update carries membership but has
+    // Establish the exact source closure through the normal authority
+    // publication path. A deferred update carries its input receipts but has
     // not completed its live authority handoff, so it cannot declare even an
     // exact known state yet.
-    let authority_update = |defer_settlement| crate::node::ViewUpdateParts {
-        subscription,
-        settled_through: GlobalTime::default(),
-        defer_settlement,
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        peer_complete_tx_payload_refs: Vec::new(),
-        authorization_progress: None,
-        opening_pending: false,
-        result_member_adds: vec![crate::protocol::ResultMemberEntry::row((
-            groove::Intern::from("todos".to_owned()),
-            row_a,
-            tx_a,
-        ))],
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    };
-    reader
-        .apply_view_update(authority_update(true))
-        .unwrap();
+    let authority_message = system_authority_reset(&mut core, &shape, &binding, subscription);
+    assert_eq!(covered_input_for_row(&authority_message, row_a).version.tx, tx_a);
+    let mut deferred_authority = view_update_parts(authority_message.clone(), true);
+    deferred_authority.settled_through = GlobalTime::default();
+    reader.apply_view_update(deferred_authority).unwrap();
     assert_eq!(
         reader
             .known_state_declaration_for_subscription(
@@ -913,9 +965,9 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         None,
         "a deferred exact receipt must not overclaim known state"
     );
-    reader
-        .apply_view_update(authority_update(false))
-        .unwrap();
+    let mut settled_authority = view_update_parts(authority_message, false);
+    settled_authority.settled_through = GlobalTime::default();
+    reader.apply_view_update(settled_authority).unwrap();
 
     let (tx_b, unit_b) = writer
         .commit_mergeable_unit_settled(
@@ -954,14 +1006,10 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         .unwrap()
         .expect("expected view update");
     let control_bundles = version_bundles_for_update(&control_update);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds: control_members,
-        ..
-    }) = &control_update
-    else {
-        panic!("expected control update");
-    };
-    assert_eq!(control_members.len(), 2);
+    let control_inputs = [row_a, row_b]
+        .map(|row_uuid| covered_input_for_row(&control_update, row_uuid));
+    assert_eq!(control_inputs[0].version.tx, tx_a);
+    assert_eq!(control_inputs[1].version.tx, tx_b);
     assert_eq!(control_bundles.len(), 2);
 
     let mut peer = relay_with_system_binding(subscription);
@@ -979,12 +1027,23 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
+        program_fact_adds,
         ..
     }) = &update
     else {
         panic!("expected declared update");
     };
-    assert_eq!(result_member_adds, control_members);
+    assert!(result_member_adds.is_empty());
+    assert_eq!(
+        program_fact_adds
+            .iter()
+            .filter_map(|fact| match fact {
+                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row_a, row_b]),
+    );
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_b);
     assert!(
@@ -995,9 +1054,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     );
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
-        reader
-            .current_rows("todos", DurabilityTier::Local)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -1066,14 +1123,8 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        ..
-    }) = update
-    else {
-        panic!("expected full update");
-    };
-    assert_eq!(result_member_adds.len(), 1);
+    let covered = covered_input_for_row(&update, row(23));
+    assert_eq!(covered.version.tx, tx_id);
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
 }
@@ -1193,246 +1244,100 @@ fn storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement() {
 
 #[test]
 fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec() {
-    // Internal storage-boundary coverage: applications cannot observe physical
-    // keys, while this verifies all delta modes -- including the nested
-    // descriptor/value payload used by aggregate synthetic members -- survive
-    // through the same reopen path. Codec fixtures cover every fact variant
-    // separately.
+    // Internal storage-boundary coverage: the only durable peer facts are the
+    // exact source manifest and its covered inputs. Exercise add, remove, reset
+    // rewrite, and reopen without reviving a result-payload compatibility path.
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let key = BindingViewKey::from_canonical_subscription_key(subscription);
-    let fact = |path: &str| crate::protocol::ProgramFactEntry::PathCorrelationCoverage(
-        crate::protocol::PathCorrelationCoverageEntry {
-            path: path.to_owned(),
-            source_table: "todos".to_owned().into(),
-            source_row: row(42),
-            correlation_key: vec![path.len() as u8],
-            complete: true,
-        },
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(42), 15).cells(title_cells("covered")),
     );
-    let update = |reset_result_set, adds, removes| {
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through: GlobalTime(1),
-            reset_result_set,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: adds,
-            program_fact_removes: removes,
-        })
+    let reset = system_authority_reset(&mut core, &shape, &binding, subscription);
+    let SyncMessage::ViewUpdate(reset_payload) = &reset else {
+        panic!("expected authority reset");
     };
-    let added = fact("add");
-    reader.apply_sync_message_settled(update(false, vec![added.clone()], vec![])).unwrap();
-    assert_eq!(reader.query.settled_program_facts[&key], BTreeSet::from([added.clone()]));
-    reader.apply_sync_message_settled(update(false, vec![], vec![added])).unwrap();
-    assert!(reader.query.settled_program_facts[&key].is_empty());
-    let rewritten = fact("rewrite");
-    let payload_descriptor = groove::records::RecordDescriptor::new([(
-        "value",
-        groove::records::ValueType::String,
-    )]);
-    let synthetic_row = crate::node::codec::settled_result_value_storage_bytes(
-        &Value::String("group-a".to_owned()),
-        &groove::records::ValueType::String,
-    )
-    .unwrap();
-    let synthetic_replacement = crate::node::codec::settled_result_value_storage_bytes(
-        &Value::U64(1),
-        &groove::records::ValueType::U64,
-    )
-    .unwrap();
-    let nested_payload = crate::protocol::ProgramFactEntry::ResultPayload(
-        crate::protocol::ResultMemberPayloadEntry {
-            member: crate::protocol::ResultMemberEntry::Synthetic {
-                table: "totals".to_owned(),
-                row: synthetic_row,
-                replacement: crate::protocol::SyntheticReplacementToken::from_encoded_record(
-                    synthetic_replacement,
-                ),
-            },
-            descriptor: groove::records::encode_record_descriptor(&payload_descriptor).unwrap(),
-            record: payload_descriptor
-                .create(&[Value::String("large settled payload ".repeat(20_000))])
-                .unwrap(),
-        },
-    );
+    let facts = reset_payload
+        .program_fact_adds
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(facts.iter().all(crate::protocol::ProgramFactEntry::is_peer_source_closure_fact));
+    reader.apply_sync_message_settled(reset.clone()).unwrap();
+    assert!(reader
+        .query
+        .authority_results
+        .values()
+        .any(|state| state.settled_program_facts == facts));
+
+    let mut removal = reset_payload.clone();
+    removal.reset_result_set = false;
+    removal.version_carriers.clear();
+    removal.program_fact_adds.clear();
+    removal.program_fact_removes = facts.iter().cloned().collect();
     reader
-        .apply_sync_message_settled(update(
-            true,
-            vec![rewritten.clone(), nested_payload.clone()],
-            vec![],
-        ))
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(removal))
         .unwrap();
+    assert!(reader
+        .query
+        .authority_results
+        .values()
+        .all(|state| state.settled_program_facts.is_empty()));
+    reader.apply_sync_message_settled(reset).unwrap();
     let settled_facts_store = reader
         .database
         .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
         .unwrap();
-    let durable_fact = futures::executor::block_on(settled_facts_store.prefix_entries(&[]))
-    .unwrap()
-    .into_iter()
-    .find(|entry| {
-        matches!(
-            entry.value.get_idx(0),
-            Ok(Value::Bytes(bytes)) if bytes.len() > 64 * 1024
-        )
-    })
-    .expect("settled program fact is durable");
-    assert!(matches!(&durable_fact.key[3], Value::Bytes(digest) if digest.len() == 32));
-    assert!(matches!(
-        durable_fact.value.get_idx(0).unwrap(),
-        Value::Bytes(bytes) if bytes.len() > 64 * 1024
-    ));
+    let durable_facts = futures::executor::block_on(settled_facts_store.prefix_entries(&[]))
+        .unwrap();
+    assert_eq!(durable_facts.len(), facts.len());
+    assert!(durable_facts
+        .iter()
+        .all(|entry| matches!(entry.key.last(), Some(Value::Bytes(digest)) if digest.len() == 32)));
     drop(reader);
     let reopened = open_node_at(&reader_dir, schema());
-    assert_eq!(
-        reopened.query.settled_program_facts[&key],
-        BTreeSet::from([rewritten, nested_payload])
-    );
+    assert!(reopened
+        .query
+        .authority_results
+        .values()
+        .any(|state| state.settled_program_facts == facts));
 }
 
-/// Internal direct-store recovery receipt for a local reader: large synthetic,
-/// path, and real result identities must reopen through bounded digest keys.
-/// This stays below the public client layer because applications cannot inspect
-/// the direct-store key/value boundary or inject a digest/payload mismatch.
 #[test]
-fn settled_result_members_use_digest_keys_and_recover_large_payloads() {
-    // The member itself is application-shaped data (synthetic rows and path
-    // tuples can be large).  It must therefore never become an ordered-store
-    // key: every durable key has a fixed 32-byte digest and the complete
-    // canonical member is retained in the value cell for exact recovery.
+fn covered_input_reset_never_populates_retired_result_member_storage() {
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let key = BindingViewKey::from_canonical_subscription_key(subscription);
-    let update = |reset_result_set, adds, removes| {
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(61), 16).cells(title_cells("source only")),
+    );
+    reader
+        .apply_sync_message_settled(system_authority_reset(
+            &mut core,
+            &shape,
+            &binding,
             subscription,
-            settled_through: GlobalTime(1),
-            reset_result_set,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: adds,
-            result_member_removes: removes,
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        })
-    };
-
-    let mut real = crate::protocol::RealRowMemberEntry::current_content((
-        groove::Intern::from("todos".to_owned()),
-        row(61),
-        TxId::new(TxTime(61), node(61)),
-    ));
-    // Nearly the maximum member encoding: this used to make the ordered IDB
-    // key too large even though the direct-store value is intentionally able
-    // to carry it.
-    real.branch_or_prefix = Some(vec![0x61; 900 * 1024]);
-    // This is a pure output identity receipt, not a row payload delivery;
-    // avoid claiming that this synthetic view update carries a transaction
-    // whose version bundle was not included above.
-    real.content_tx = None;
-    let real = ResultMemberEntry::Row(real);
-    let synthetic_row = crate::node::codec::settled_result_value_storage_bytes(
-        &Value::String("synthetic ".repeat(10_000)),
-        &groove::records::ValueType::String,
-    )
-    .unwrap();
-    let synthetic_replacement = crate::node::codec::settled_result_value_storage_bytes(
-        &Value::U64(1),
-        &groove::records::ValueType::U64,
-    )
-    .unwrap();
-    let synthetic = ResultMemberEntry::Synthetic {
-        table: "totals".to_owned(),
-        row: synthetic_row,
-        replacement: crate::protocol::SyntheticReplacementToken::from_encoded_record(
-            synthetic_replacement,
-        ),
-    };
-    let path = ResultMemberEntry::PathTuple {
-        path: "album.tracks".to_owned(),
-        source_table: groove::Intern::from("albums".to_owned()),
-        source_row: row(62),
-        target_table: groove::Intern::from("tracks".to_owned()),
-        target_row: row(63),
-        edge_id: Some(vec![0x62; 64 * 1024]),
-        revision: vec![0x63; 96 * 1024],
-    };
-    reader
-        .apply_sync_message_settled(update(
-            false,
-            vec![real.clone(), synthetic.clone(), path.clone()],
-            vec![],
         ))
-        .unwrap();
-    // Repeating an add is idempotent because the digest is a stable identity.
-    reader
-        .apply_sync_message_settled(update(false, vec![synthetic.clone()], vec![]))
         .unwrap();
     let store = reader
         .database
         .direct_record_store(crate::schema::SETTLED_RESULT_MEMBERS_STORE)
         .unwrap();
     let entries = futures::executor::block_on(store.prefix_entries(&[])).unwrap();
-    assert_eq!(entries.len(), 3);
-    assert!(entries.iter().all(|entry| {
-        entry.key.len() == 4
-            && matches!(&entry.key[3], Value::Bytes(digest) if digest.len() == 32)
-            && matches!(entry.value.get_idx(0), Ok(Value::Bytes(bytes)) if bytes.len() > 0)
-    }));
-    assert!(entries.iter().any(|entry| {
-        matches!(entry.value.get_idx(0), Ok(Value::Bytes(bytes)) if bytes.len() > 64 * 1024)
-    }));
-    assert!(entries.iter().any(|entry| {
-        matches!(entry.value.get_idx(0), Ok(Value::Bytes(bytes)) if bytes.len() > 800 * 1024)
-    }));
+    assert!(entries.is_empty());
     drop(reader);
-
-    let mut reopened = open_node_at(&reader_dir, schema());
-    assert_eq!(
-        reopened.query.settled_result_sets[&key],
-        BTreeSet::from([real.clone(), synthetic.clone(), path.clone()])
-    );
-    // Exercise delete and full rewrite using the same digest-key codec.
-    reopened
-        .apply_sync_message_settled(update(false, vec![], vec![path]))
-        .unwrap();
-    reopened
-        .apply_sync_message_settled(update(true, vec![synthetic.clone()], vec![]))
-        .unwrap();
-    drop(reopened);
-    let mut reopened = open_node_at(&reader_dir, schema());
-    assert_eq!(
-        reopened.query.settled_result_sets[&key],
-        BTreeSet::from([synthetic.clone()])
-    );
-
-    // A full-size but unrelated digest must fail closed rather than allowing a
-    // corrupt record to masquerade as a different member.
-    let store = reopened
-        .database
-        .direct_record_store(crate::schema::SETTLED_RESULT_MEMBERS_STORE)
-        .unwrap();
-    futures::executor::block_on(store.set(
-        &[
-            Value::Uuid(key.shape_id.0),
-            Value::Uuid(key.binding_id.0),
-            Value::Uuid(key.read_view.id),
-            Value::Bytes(vec![0xff; 32]),
-        ],
-        &[Value::Bytes(
-            crate::node::codec::result_member_storage_bytes(&synthetic).unwrap(),
-        )],
-    ))
-    .unwrap();
-    assert!(futures::executor::block_on(reopened.recover_known_state_facts()).is_err());
-    assert!(reopened.query.settled_result_sets.is_empty());
-    assert!(reopened.query.settled_through_by_binding_view.is_empty());
+    let reopened = open_node_at(&reader_dir, schema());
+    assert!(reopened.query.authority_results.values().all(|state| state.settled_result_set.is_empty()));
 }
 
 #[test]
@@ -1443,44 +1348,40 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
     // durable recovery is fail-closed, not a request to preserve potentially
     // stale state that was loaded before the corruption was detected.
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let fact = crate::protocol::ProgramFactEntry::PathCorrelationCoverage(
-        crate::protocol::PathCorrelationCoverageEntry {
-            path: "valid".to_owned(),
-            source_table: "todos".to_owned().into(),
-            source_row: row(43),
-            correlation_key: vec![1],
-            complete: true,
-        },
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(43), 17).cells(title_cells("valid")),
     );
-    reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through: GlobalTime(1),
-            reset_result_set: false,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: vec![fact.clone()],
-            program_fact_removes: Vec::new(),
-        }))
-        .unwrap();
+    let reset = system_authority_reset(&mut core, &shape, &binding, subscription);
+    let SyncMessage::ViewUpdate(payload) = &reset else {
+        panic!("expected authority reset");
+    };
+    let fact = payload
+        .program_fact_adds
+        .iter()
+        .find(|fact| matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_)))
+        .cloned()
+        .expect("authority closure contains a valid covered-input fact");
+    reader.apply_sync_message_settled(reset).unwrap();
     let corrupt_store = reader
         .database
         .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
         .unwrap();
+    let mut corrupt_key = futures::executor::block_on(corrupt_store.prefix_entries(&[]))
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("valid closure fact was persisted")
+        .key;
+    *corrupt_key.last_mut().expect("fact digest key component") = Value::Bytes(vec![0xff; 32]);
     futures::executor::block_on(corrupt_store.set(
-            &[
-                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
-                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
-                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
-                // A full-sized but wrong digest proves recovery verifies the
-                // key/value binding rather than only the digest's shape.
-                Value::Bytes(vec![0xff; 32]),
-            ],
+            &corrupt_key,
             &[Value::Bytes(
                 crate::node::codec::program_fact_storage_bytes(&fact).unwrap(),
             )],
@@ -1540,19 +1441,18 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
+        program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_adds,
-        vec![crate::protocol::ResultMemberEntry::from((
-            groove::Intern::from("todos".to_owned()),
-            row_uuid,
-            tx_id,
-        ))]
-    );
+    assert!(result_member_adds.is_empty());
+    assert!(program_fact_adds.iter().any(|fact| matches!(
+        fact,
+        crate::protocol::ProgramFactEntry::CoveredInput(input)
+            if input.source_row == row_uuid && input.version.tx == tx_id
+    )));
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].versions.len(), 1);

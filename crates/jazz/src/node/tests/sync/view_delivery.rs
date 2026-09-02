@@ -45,7 +45,9 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
         ));
     assert!(matches!(
         crate::db::block_on(reader.apply_view_update(payload_update)),
-        Err(Error::InvalidStoredValue("peer view update must not carry authority result payloads"))
+        Err(Error::InvalidStoredValue(
+            "peer view update must carry only covered-input closure facts"
+        ))
     ));
     assert!(reader
         .subscription_current_rows("todos", DurabilityTier::Local)
@@ -74,7 +76,10 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
-    let update = core.view_update_for_current_rows("todos").unwrap();
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
@@ -86,6 +91,8 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             },
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = update
     else {
@@ -95,7 +102,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         subscription,
         core.whole_table_subscription_key("todos").unwrap()
     );
-    assert!(!reset_result_set);
+    assert!(reset_result_set);
     assert!(
         result_member_adds.is_empty(),
         "peer frames carry source/version closure, never authority result membership"
@@ -109,7 +116,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set: false,
+            reset_result_set,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -119,15 +126,13 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            program_fact_adds,
+            program_fact_removes,
         })
         .unwrap();
 
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Local)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Local)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -234,7 +239,10 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
-    let initial = core.view_update_for_current_rows("todos").unwrap();
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let initial = system_authority_reset(&mut core, &shape, &binding, subscription);
     let version_bundles = version_bundles_for_update(&initial);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
@@ -246,18 +254,20 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             },
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = initial
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set);
+    assert!(reset_result_set);
     reader
         .apply_view_update(ViewUpdateParts {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set: false,
+            reset_result_set,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -267,8 +277,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            program_fact_adds,
+            program_fact_removes,
         })
         .unwrap();
 
@@ -291,6 +301,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             },
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = deduped
     else {
@@ -298,11 +310,13 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     };
     assert!(version_bundles.is_empty());
     assert_eq!(peer_payload_inventory_refs, vec![tx_id]);
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), row, tx_id)]
-    );
+    assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
+    assert!(program_fact_adds.iter().any(|fact| matches!(
+        fact,
+        crate::protocol::ProgramFactEntry::CoveredInput(input)
+            if input.source_row == row && input.version.tx == tx_id
+    )));
     reader
         .apply_view_update(ViewUpdateParts {
             subscription: core.whole_table_subscription_key("todos").unwrap(),
@@ -318,8 +332,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            program_fact_adds,
+            program_fact_removes,
         })
         .unwrap();
 }
@@ -403,12 +417,13 @@ fn sync_message_dispatches_commit_fate_and_view_updates() {
     let (fate, _, _) = writer.transaction_state_settled(tx_id).unwrap();
     assert_eq!(fate, Fate::Accepted);
 
-    let view_update = core.view_update_for_current_rows("todos").unwrap();
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let view_update = system_authority_reset(&mut core, &shape, &binding, subscription);
     assert!(reader.apply_sync_message_settled(view_update).unwrap().is_empty());
     assert_eq!(
-        reader
-            .subscription_current_rows("todos", DurabilityTier::Local)
-            .unwrap()
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Local)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
