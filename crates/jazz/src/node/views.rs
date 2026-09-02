@@ -18,6 +18,45 @@ use crate::protocol::{
     build_version_carriers_from_singletons,
 };
 
+fn apply_covered_input_closure_admission_delta(
+    state: &mut AuthorityResultState,
+    cleared: bool,
+    adds: &[ProgramFactEntry],
+    removes: &[ProgramFactEntry],
+) {
+    if cleared {
+        state.covered_input_sources.clear();
+        state.covered_input_versions.clear();
+    }
+    for fact in removes {
+        match fact {
+            ProgramFactEntry::ProgramSourceCoverage(coverage) => {
+                state.covered_input_sources.remove(&coverage.source);
+            }
+            ProgramFactEntry::CoveredInput(input) => {
+                let key = (input.source.clone(), input.source_row);
+                if state.covered_input_versions.get(&key) == Some(input) {
+                    state.covered_input_versions.remove(&key);
+                }
+            }
+            _ => {}
+        }
+    }
+    for fact in adds {
+        match fact {
+            ProgramFactEntry::ProgramSourceCoverage(coverage) => {
+                state.covered_input_sources.insert(coverage.source.clone());
+            }
+            ProgramFactEntry::CoveredInput(input) => {
+                state
+                    .covered_input_versions
+                    .insert((input.source.clone(), input.source_row), input.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
 fn maintained_view_tx_versions_contain_winner(
     tx_versions: &[VersionRow],
     winner: &VersionRow,
@@ -1141,6 +1180,7 @@ where
     pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         self.validate_received_view_update_global_time_durability(&update)?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))?;
+        self.validate_covered_input_closure_admission(std::slice::from_ref(&update))?;
         let bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
         let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
         self.validate_covered_input_body_witnesses(
@@ -1166,6 +1206,7 @@ where
         // preceding valid bundle can advance clocks, allocate aliases, or
         // stage history before a later malformed bundle rejects the frame.
         self.validate_view_update_payloads(&updates)?;
+        self.validate_covered_input_closure_admission(&updates)?;
         let mut all_bundle_refs = Vec::new();
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_authority_results = self
@@ -1352,6 +1393,11 @@ where
                 ));
             }
             let added_facts = update.program_fact_adds.iter().collect::<BTreeSet<_>>();
+            if added_facts.len() != update.program_fact_adds.len() {
+                return Err(Error::InvalidStoredValue(
+                    "peer view update duplicates a source-closure addition",
+                ));
+            }
             if update
                 .program_fact_removes
                 .iter()
@@ -1368,6 +1414,186 @@ where
                 // a durable-ingress bypass for operation provenance.
                 self.admit_contribution_merge_for_storage(bundle.tx)?;
                 self.validate_view_payload_versions(bundle.versions)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A reset with no source facts is an opening/coverage stamp, not proof
+    /// that a previously claimed exact closure became empty. The closure
+    /// state, rather than retired authority result members, owns that choice.
+    fn reset_replaces_authority_source_closure(
+        reset_result_set: bool,
+        has_source_facts: bool,
+        state: Option<&AuthorityResultState>,
+    ) -> bool {
+        reset_result_set
+            && (has_source_facts
+                || !matches!(
+                    state.map(|state| state.source_closure),
+                    Some(crate::node::AuthoritySourceClosure::Claimed { .. })
+                ))
+    }
+
+    /// Preflight only the source keys touched by an authority closure delta.
+    /// The receipt keeps indexes for these two exactness constraints, so an
+    /// ordinary successor remains O(changed), rather than cloning or scanning
+    /// its retained closure.
+    fn validate_covered_input_closure_admission(
+        &mut self,
+        updates: &[ViewUpdateParts],
+    ) -> Result<(), Error> {
+        let mut overlays = BTreeMap::<
+            AuthorityResultKey,
+            (
+                bool,
+                BTreeMap<crate::protocol::ProgramSourceId, bool>,
+                BTreeMap<
+                    (crate::protocol::ProgramSourceId, RowUuid),
+                    Option<crate::protocol::CoveredInputEntry>,
+                >,
+            ),
+        >::new();
+        for update in updates {
+            let Ok(authority_result_key) =
+                self.authority_result_key_for_subscription(update.subscription)
+            else {
+                // A detached subscription is a benign late-frame drop. Its
+                // normal admission path records that metric below.
+                continue;
+            };
+            if self
+                .query
+                .authority_results
+                .get(&authority_result_key)
+                .and_then(|state| state.compiled_covered_input_sources.as_ref())
+                .is_none()
+            {
+                let compiled =
+                    self.compiled_covered_input_sources_for_subscription(update.subscription)?;
+                self.query
+                    .authority_results
+                    .entry(authority_result_key.clone())
+                    .or_default()
+                    .compiled_covered_input_sources = Some(compiled);
+            }
+            let compiled_sources = self
+                .query
+                .authority_results
+                .get(&authority_result_key)
+                .and_then(|state| state.compiled_covered_input_sources.as_ref())
+                .expect("compiled source cache was installed");
+            let overlay = overlays.entry(authority_result_key.clone()).or_default();
+            let state = self.query.authority_results.get(&authority_result_key);
+            let reset_replaces = Self::reset_replaces_authority_source_closure(
+                update.reset_result_set,
+                !update.program_fact_adds.is_empty() || !update.program_fact_removes.is_empty(),
+                state,
+            );
+            if reset_replaces {
+                overlay.0 = true;
+                overlay.1.clear();
+                overlay.2.clear();
+            }
+            for fact in &update.program_fact_removes {
+                match fact {
+                    ProgramFactEntry::ProgramSourceCoverage(coverage) => {
+                        let present =
+                            overlay.1.get(&coverage.source).copied().unwrap_or_else(|| {
+                                !overlay.0
+                                    && state.is_some_and(|state| {
+                                        state.covered_input_sources.contains(&coverage.source)
+                                    })
+                            });
+                        if !present {
+                            return Err(Error::InvalidStoredValue(
+                                "authority source coverage removal is absent from predecessor closure",
+                            ));
+                        }
+                        overlay.1.insert(coverage.source.clone(), false);
+                    }
+                    ProgramFactEntry::CoveredInput(input) => {
+                        let key = (input.source.clone(), input.source_row);
+                        let current = match overlay.2.get(&key) {
+                            Some(current) => current.clone(),
+                            None if overlay.0 => None,
+                            None => state
+                                .and_then(|state| state.covered_input_versions.get(&key).cloned()),
+                        };
+                        if current.as_ref() != Some(input) {
+                            return Err(Error::InvalidStoredValue(
+                                "authority covered input removal is absent from predecessor closure",
+                            ));
+                        }
+                        overlay.2.insert(key, None);
+                    }
+                    _ => {}
+                }
+            }
+            // Closure deltas are sets, not ordered instruction streams. Install
+            // coverage additions before validating the added content members.
+            for fact in &update.program_fact_adds {
+                if let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact {
+                    if !coverage.complete {
+                        return Err(Error::InvalidStoredValue(
+                            "authority source coverage must be complete",
+                        ));
+                    }
+                    if !compiled_sources.contains(&coverage.source) {
+                        return Err(Error::InvalidStoredValue(
+                            "authority source coverage names no compiled source occurrence",
+                        ));
+                    }
+                    overlay.1.insert(coverage.source.clone(), true);
+                }
+            }
+            // A reset is the sole full-closure claim. Its manifest must name
+            // every compiler-owned receiver source, including sources with no
+            // current content rows; incremental frames remain O(changed).
+            if reset_replaces
+                && (overlay.1.len() != compiled_sources.len()
+                    || !compiled_sources
+                        .iter()
+                        .all(|source| overlay.1.get(source).copied() == Some(true)))
+            {
+                return Err(Error::InvalidStoredValue(
+                    "authority reset source coverage does not exactly match compiled source set",
+                ));
+            }
+            for fact in &update.program_fact_adds {
+                if let ProgramFactEntry::CoveredInput(input) = fact {
+                    if !compiled_sources.contains(&input.source) {
+                        return Err(Error::InvalidStoredValue(
+                            "authority covered input names no compiled source occurrence",
+                        ));
+                    }
+                    let source_is_covered =
+                        overlay.1.get(&input.source).copied().unwrap_or_else(|| {
+                            !overlay.0
+                                && state.is_some_and(|state| {
+                                    state.covered_input_sources.contains(&input.source)
+                                })
+                        });
+                    if !source_is_covered {
+                        return Err(Error::InvalidStoredValue(
+                            "authority covered input names a source absent from its coverage manifest",
+                        ));
+                    }
+                    let key = (input.source.clone(), input.source_row);
+                    let current = match overlay.2.get(&key) {
+                        Some(current) => current.clone(),
+                        None if overlay.0 => None,
+                        None => {
+                            state.and_then(|state| state.covered_input_versions.get(&key).cloned())
+                        }
+                    };
+                    if current.as_ref().is_some_and(|existing| existing != input) {
+                        return Err(Error::InvalidStoredValue(
+                            "authority covered input retains conflicting versions for one source row",
+                        ));
+                    }
+                    overlay.2.insert(key, Some(input.clone()));
+                }
             }
         }
         Ok(())
@@ -1654,28 +1880,15 @@ where
             &row_result_adds,
         )
         .await?;
-        let empty_reset = reset_result_set
-            && version_bundles_is_empty
-            && peer_complete_tx_payload_refs.is_empty()
-            && result_member_adds.is_empty()
-            && result_member_removes.is_empty()
-            && program_fact_adds.is_empty()
-            && program_fact_removes.is_empty();
         let persisted_member_adds = result_member_adds.clone();
         let persisted_member_removes = result_member_removes.clone();
         let persisted_fact_adds = program_fact_adds.clone();
         let persisted_fact_removes = program_fact_removes.clone();
-        // A reset only replaces shared canonical state when it carries the
-        // snapshot that will replace it. Empty resets from short-lived duplicate
-        // usage subscriptions are coverage stamps; letting them clear non-empty
-        // shared state makes later one-shot reads less settled than before.
-        let preserve_existing_shared_state = empty_reset
-            && self
-                .query
-                .authority_results
-                .get(&authority_result_key)
-                .is_some_and(|state| !state.settled_result_set.is_empty());
-        let reset_cleared_shared_state = reset_result_set && !preserve_existing_shared_state;
+        let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
+            reset_result_set,
+            !program_fact_adds.is_empty() || !program_fact_removes.is_empty(),
+            self.query.authority_results.get(&authority_result_key),
+        );
         if reset_cleared_shared_state {
             self.clear_settled_result_view(authority_result_key.clone());
         }
@@ -1740,6 +1953,17 @@ where
             program_facts.extend(program_fact_adds);
             fact_rewrite = None;
         }
+        let state = self
+            .query
+            .authority_results
+            .entry(authority_result_key.clone())
+            .or_default();
+        apply_covered_input_closure_admission_delta(
+            state,
+            reset_cleared_shared_state,
+            &persisted_fact_adds,
+            &persisted_fact_removes,
+        );
         if synthetic_result_changed
             && self
                 .query
@@ -1770,7 +1994,7 @@ where
             // it carries retractions. The public subscription materializes its
             // replacement snapshot below, rather than attempting to apply a
             // removal after the reset has cleared the cached result set.
-            if reset_result_set && !preserve_existing_shared_state {
+            if reset_cleared_shared_state {
                 self.query
                     .authority_results
                     .entry(authority_result_key.clone())

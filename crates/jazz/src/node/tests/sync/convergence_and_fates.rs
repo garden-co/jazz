@@ -167,6 +167,24 @@ fn assert_covered_input_rejected_atomically(
     );
 }
 
+fn covered_input_tx_for_row(message: &SyncMessage, row_uuid: RowUuid) -> TxId {
+    let SyncMessage::ViewUpdate(update) = message else {
+        panic!("expected authority view update");
+    };
+    update
+        .program_fact_adds
+        .iter()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == row_uuid =>
+            {
+                Some(input.version.tx)
+            }
+            _ => None,
+        })
+        .expect("authority update must add an exact source witness for the changed row")
+}
+
 #[test]
 fn authority_covered_input_rejects_unknown_same_table_source_role() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
@@ -243,12 +261,16 @@ fn successor_authority_closure_replaces_covered_input_and_detach_retires_it() {
         .authority_result_key_for_subscription(subscription)
         .expect("registered usage owns an authority receipt");
     let mut authority = PeerState::new();
+    let initial_update = authority
+        .rehydrate_query(&mut core, &shape, &binding)
+        .expect("initial covered closure");
+    let initial_covered_tx = covered_input_tx_for_row(&initial_update, row_uuid);
+    assert!(
+        initial_covered_tx == initial_tx || initial_covered_tx.node == core.node_uuid,
+        "the initial source witness must be either the uploader's admitted version or an explicit authority materialization"
+    );
     receiver
-        .apply_sync_message_settled(
-            authority
-                .rehydrate_query(&mut core, &shape, &binding)
-                .expect("initial covered closure"),
-        )
+        .apply_sync_message_settled(initial_update)
         .expect("receive initial covered closure");
 
     let successor_tx = commit_mergeable_global(
@@ -256,12 +278,20 @@ fn successor_authority_closure_replaces_covered_input_and_detach_retires_it() {
         &mut core,
         MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("successor")),
     );
+    let successor_update = authority
+        .query_update(&mut core, &shape, &binding)
+        .expect("successor covered closure");
+    let successor_covered_tx = covered_input_tx_for_row(&successor_update, row_uuid);
+    assert_ne!(
+        successor_covered_tx, initial_covered_tx,
+        "the authority must advance the exact source witness after the uploader's accepted successor"
+    );
+    assert!(
+        successor_covered_tx == successor_tx || successor_covered_tx.node == core.node_uuid,
+        "the source witness must be either the uploader's admitted version or an explicit authority materialization"
+    );
     receiver
-        .apply_sync_message_settled(
-            authority
-                .query_update(&mut core, &shape, &binding)
-                .expect("successor covered closure"),
-        )
+        .apply_sync_message_settled(successor_update)
         .expect("receive successor covered closure");
 
     let covered_versions = receiver.query.authority_results[&authority_result]
@@ -277,11 +307,11 @@ fn successor_authority_closure_replaces_covered_input_and_detach_retires_it() {
         })
         .collect::<BTreeSet<_>>();
     assert!(
-        covered_versions.contains(&successor_tx),
+        covered_versions.contains(&successor_covered_tx),
         "the successor closure must retain the new exact source version: {covered_versions:?}"
     );
     assert!(
-        !covered_versions.contains(&initial_tx),
+        !covered_versions.contains(&initial_covered_tx),
         "the successor closure must retract the absent old source version instead of retaining both: {covered_versions:?}"
     );
     assert_eq!(

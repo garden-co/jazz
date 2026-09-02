@@ -1064,6 +1064,23 @@ where
                 .settled_program_facts
                 .insert(fact);
         }
+        for state in authority_results.values_mut() {
+            state.covered_input_sources.clear();
+            state.covered_input_versions.clear();
+            for fact in &state.settled_program_facts {
+                match fact {
+                    ProgramFactEntry::ProgramSourceCoverage(coverage) if coverage.complete => {
+                        state.covered_input_sources.insert(coverage.source.clone());
+                    }
+                    ProgramFactEntry::CoveredInput(input) => {
+                        state
+                            .covered_input_versions
+                            .insert((input.source.clone(), input.source_row), input.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
         self.query.authority_results = authority_results;
         Ok(())
     }

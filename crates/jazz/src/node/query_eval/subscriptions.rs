@@ -1048,7 +1048,7 @@ where
     /// authenticated ingress use their exact admission binding instead; this
     /// compatibility lookup must never choose a sibling scope by arrival
     /// order.
-    fn unique_registered_binding_for_subscription(
+    pub(super) fn unique_registered_binding_for_subscription(
         &self,
         subscription: SubscriptionKey,
     ) -> Option<&RegisteredBinding> {

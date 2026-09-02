@@ -36,12 +36,12 @@ use crate::ids::{
     RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::protocol::{
-    AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp,
-    MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
-    PolicyBindingKey, ProgramFactEntry, ProgramSourceId, ProgramSourceRole, ReadViewKey,
-    RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication,
-    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
+    AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CoveredInputEntry,
+    CurrentWriteSchema, LensOp, MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest,
+    PhysicalTableIdentity, PolicyBindingKey, ProgramFactEntry, ProgramSourceId, ProgramSourceRole,
+    ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
+    VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
 };
 use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
@@ -1003,6 +1003,12 @@ pub(crate) struct AuthorityResultState {
     settled_result_row_index: BTreeMap<ResultRowMembershipKey, ResultMemberEntry>,
     /// Non-row facts paired with the membership.
     settled_program_facts: BTreeSet<ViewFactEntry>,
+    /// O(changed) admission indexes for the exact source closure. These are
+    /// receiver-local indexes over `settled_program_facts`, rebuilt on reopen;
+    /// they never replace the durable closure itself.
+    covered_input_sources: BTreeSet<ProgramSourceId>,
+    covered_input_versions: BTreeMap<(ProgramSourceId, RowUuid), CoveredInputEntry>,
+    compiled_covered_input_sources: Option<BTreeSet<ProgramSourceId>>,
     /// Optional fast cursor and authorization receipt. The cursor is durable
     /// cache metadata; only `live_settled` permits a new known-state claim.
     settled_through: Option<GlobalTime>,

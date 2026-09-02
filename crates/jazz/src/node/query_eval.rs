@@ -288,6 +288,57 @@ where
         self.query.registered_shapes.get(&shape_id).cloned()
     }
 
+    /// Compiler-owned source identities accepted in one strict peer closure.
+    /// This is intentionally capability discovery only: it allocates no Groove
+    /// inputs and never derives authority output from local rows.
+    pub(crate) fn compiled_covered_input_sources_for_subscription(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Result<BTreeSet<ProgramSourceId>, Error> {
+        let registered = self
+            .unique_registered_binding_for_subscription(subscription)
+            .ok_or(Error::InvalidStoredValue(
+                "subscription referenced unregistered binding",
+            ))?;
+        let shape = self
+            .query
+            .registered_shapes
+            .get(&subscription.shape_id)
+            .ok_or(Error::InvalidStoredValue(
+                "subscription referenced unregistered shape",
+            ))?;
+        let binding = shape.bind(
+            shape
+                .params()
+                .keys()
+                .cloned()
+                .zip(registered.values.iter().cloned())
+                .collect(),
+        )?;
+        let request = self.current_query_program_request(
+            shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            CurrentQueryProgramOutput::MaintainedView,
+            &ReadViewSpec::default(),
+            Some(registered.binding_view_key),
+            QueryAuthorizationMode::ClientLocal,
+        )?;
+        Ok(query_program_source_requests(&request)
+            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?
+            .into_iter()
+            .filter(|source_request| {
+                source_request.visibility == RowVisibility::Visible
+                    && matches!(
+                        request.reads.primary.sources.get(&source_request.source),
+                        Some(SourceExpr::SettledBindingView { .. })
+                    )
+            })
+            .map(|source_request| source_request.source.program_source_id())
+            .collect())
+    }
+
     async fn compile_current_query_program(
         &mut self,
         shape: &ValidatedQuery,

@@ -1649,6 +1649,8 @@ where
             state.settled_result_set.clear();
             state.settled_result_row_index.clear();
             state.settled_program_facts.clear();
+            state.covered_input_sources.clear();
+            state.covered_input_versions.clear();
             state.source_closure = crate::node::AuthoritySourceClosure::Pending;
             state.source_incrementals.clear();
         }
