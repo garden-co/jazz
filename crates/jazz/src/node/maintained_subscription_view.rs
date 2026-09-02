@@ -885,39 +885,20 @@ impl MaintainedSubscriptionView {
             .collect()
     }
 
-    /// The exact public root order emitted by the collector's initial
-    /// snapshot.  Later terminal operations update the subscription snapshot
-    /// directly, so this is only the reset/initial materialization source.
-    pub(crate) fn structured_app_rows_in_terminal_order(&self) -> Vec<(RowUuid, OwnedRecord)> {
-        self.structured_app_row_order
+    /// Return one retained collector row for every opaque terminal key.
+    ///
+    /// A flat relation may legitimately produce multiple occurrences of the
+    /// same root row.  The public row record does not encode its joined
+    /// occurrence, so its `RowUuid` is insufficient as a snapshot key; the
+    /// collector's opaque key is the only exact association.
+    pub(crate) fn structured_app_rows_by_terminal_key(&self) -> Vec<(Vec<u8>, OwnedRecord)> {
+        self.structured_root_keys
             .iter()
-            .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
+            .filter_map(|(key, root)| {
+                self.structured_app_row(*root)
+                    .map(|record| (key.clone(), record))
+            })
             .collect()
-    }
-
-    /// Return the opaque collector key for one retained root. A root collector
-    /// may only expose a reset once this association is exact: the key carries
-    /// joined occurrence identity which is deliberately absent from the public
-    /// app-row record.
-    pub(crate) fn structured_terminal_root_key(
-        &self,
-        root: RowUuid,
-    ) -> Result<&[u8], super::Error> {
-        let mut keys = self
-            .structured_root_keys
-            .iter()
-            .filter_map(|(key, candidate)| (*candidate == root).then_some(key.as_slice()));
-        let Some(key) = keys.next() else {
-            return Err(super::Error::InvalidStoredValue(
-                "collector root snapshot has no terminal key",
-            ));
-        };
-        if keys.next().is_some() {
-            return Err(super::Error::InvalidStoredValue(
-                "collector root snapshot has ambiguous terminal keys",
-            ));
-        }
-        Ok(key)
     }
 
     /// Release the app-row collector after a flat subscription's reset has

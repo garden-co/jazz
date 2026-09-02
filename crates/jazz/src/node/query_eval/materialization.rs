@@ -1216,14 +1216,11 @@ where
         if local.terminal_schemas.has_root_collector() {
             let terminal_rows = local
                 .maintained
-                .structured_app_rows_in_terminal_order()
+                .structured_app_rows_by_terminal_key()
                 .into_iter()
-                .map(|(row_uuid, record)| {
+                .map(|(terminal_key, record)| {
                     Ok((
-                        crate::db::terminal_root_occurrence_id(
-                            local.maintained.structured_terminal_root_key(row_uuid)?,
-                        )
-                        .map_err(|_| {
+                        crate::db::terminal_root_occurrence_id(&terminal_key).map_err(|_| {
                             Error::InvalidStoredValue(
                                 "collector terminal key cannot identify its root occurrence",
                             )
