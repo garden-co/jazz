@@ -1925,7 +1925,12 @@ where
                                             .apply_sync_message(SyncMessage::RegisterShape {
                                                 shape_id: shape.shape_id(),
                                                 ast: ShapeAst::from_validated(shape),
-                                                opts: RegisterShapeOptions::default(),
+                                                // The local producer-side registration must use
+                                                // the same read-view/compiler identity as the
+                                                // Subscribe we are about to apply and transmit.
+                                                // Registering a default alias here leaves the
+                                                // exact usage site without compiler options.
+                                                opts: pending_subscription.opts.clone(),
                                             })
                                             .await?;
                                         let (_, changed) = finish_peer_publication_outcome(
