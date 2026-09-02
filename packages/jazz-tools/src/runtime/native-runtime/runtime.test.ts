@@ -5750,7 +5750,7 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
               preparedQueries.push(query);
               return query;
             },
-            all: (query) => {
+            all: (query: unknown) => {
               lastReadQuery = query;
               return new Uint8Array([0]);
             },
@@ -6086,7 +6086,6 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
     expect(preparedQueries.at(-1)).not.toBe(failedQuery);
   });
 });
-
 
 describe("NativeRuntimeAdapter streaming inserts", () => {
   it("infers the physical kind and applies backpressure to async chunks", async () => {
