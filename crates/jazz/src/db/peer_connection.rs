@@ -1321,6 +1321,25 @@ where
                 // only after the new usage site has settled upstream.
                 continue;
             }
+            let refresh_subscribers = {
+                let group = coverage_groups
+                    .get_mut(&coverage)
+                    .expect("claim-refresh coverage group remains registered");
+                if group.initialized {
+                    // A rebind is a new opening transition for every live
+                    // usage. Reuse the existing pending-initial ownership as
+                    // its per-subscriber send cursor so a later bounded
+                    // transport cannot replay a frame already accepted for a
+                    // sibling.
+                    group.initialized = false;
+                    group.pending_initial_subscribers = group.subscribers.clone();
+                }
+                group
+                    .pending_initial_subscribers
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
             let update = {
                 let mut node = self.node.lock().await;
                 let mut node = node.scoped_active_session_claims(
@@ -1350,7 +1369,7 @@ where
                 rebind_pending = true;
                 continue;
             };
-            for subscription in subscribers {
+            for subscription in refresh_subscribers {
                 let mut update = retarget_view_update(update.clone(), subscription);
                 stamp_view_update_authorization_progress_from(
                     peer,
@@ -1406,6 +1425,11 @@ where
                     &self.downstream_fates,
                     update,
                 )?;
+                coverage_groups
+                    .get_mut(&coverage)
+                    .expect("claim-refresh coverage group remains registered")
+                    .pending_initial_subscribers
+                    .remove(&subscription);
                 if let Some((subscription, receipt)) = receipt {
                     queue_direct_control(
                         &mut self.pending_control_responses,
@@ -1417,16 +1441,16 @@ where
                 }
             }
             // This rehydrate is the replacement opening snapshot for every
-            // usage in the group. In particular, a claim change can arrive
-            // after Subscribe was admitted but before the ordinary owner loop
-            // has served its pending initial reset. Leaving that lifecycle
-            // pending would publish this exact transition a second time below
-            // in the same tick.
+            // successfully sent usage in the group. In particular, a claim
+            // change can arrive after Subscribe was admitted but before the
+            // ordinary owner loop has served its pending initial reset.
+            // Leaving that lifecycle pending would publish this exact
+            // transition a second time below in the same tick; leaving one
+            // unsent subscriber pending preserves its retry cursor.
             let group = coverage_groups
                 .get_mut(&coverage)
                 .expect("rehydrated coverage group remains registered");
-            group.initialized = true;
-            group.pending_initial_subscribers.clear();
+            group.initialized = group.pending_initial_subscribers.is_empty();
         }
         if rebind_pending {
             schedule_tick_in(&self.scheduler, TickUrgency::Immediate);

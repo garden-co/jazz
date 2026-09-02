@@ -1692,12 +1692,11 @@ fn direct_subscription_claim_refresh_replaces_membership_without_touching_same_s
     );
 }
 
-/// Whole-table current-row serving is also a maintained, policy-bound usage
-/// site. Refreshing direct admission must discard its retained receiver and
-/// emit a fresh reset, rather than letting its normal delta path retain the
-/// old session's rows.
+/// A whole-table maintained usage refreshes its direct admission by replacing
+/// the retained receiver with a fresh reset, rather than letting its normal
+/// delta path retain the old session's rows.
 #[test]
-fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
+fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
     let schema = owner_read_schema();
     let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
     let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
@@ -1794,6 +1793,137 @@ fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
         group.policy_binding_origin,
         CoveragePolicyBindingOrigin::DirectAdmitted
     );
+}
+
+/// The maintained-group cursor consumes each accepted replacement reset once.
+/// The public admission contract normally gives one connection one exact
+/// `SubscriptionKey` per coverage group; this white-box pair exercises the
+/// shared group path anyway so a future coalescing caller cannot replay the
+/// first accepted reset when the second send is backpressured.
+#[test]
+fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
+    struct SecondViewUpdateBackpressureTransport {
+        outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+        accepted_view_updates: usize,
+        rejected_second_view_update: bool,
+    }
+
+    impl Transport for SecondViewUpdateBackpressureTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::ViewUpdate(_)) {
+                if self.accepted_view_updates == 1 && !self.rejected_second_view_update {
+                    self.rejected_second_view_update = true;
+                    return Err(TransportError::Backpressure);
+                }
+                self.accepted_view_updates += 1;
+            }
+            self.outbound.borrow_mut().push_back(message);
+            Ok(())
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            None
+        }
+    }
+
+    let schema = owner_read_schema();
+    let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let denied_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert("todos", cells("A only", false, allowed_owner))
+        .unwrap();
+    let client = open_db(0xa1, session_subject, &schema);
+    let allowed_claims =
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(allowed_owner.test_uuid()))]);
+    let denied_claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(denied_owner.test_uuid()))]);
+    client.set_test_provider_claims(session_subject, allowed_claims.clone());
+    let (client_transport, server_transport, _client_sent, _server_sent) = duplex_with_taps();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
+
+    let prepared = prepared(&client, &Query::from("todos"));
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+
+    let mut second_subscription = attachment.subscription();
+    second_subscription.read_view.id = uuid::Uuid::from_bytes([0xc3; 16]);
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    {
+        let mut connection = subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(state) = &mut connection.link else {
+            unreachable!("accepted client is served by a subscriber link")
+        };
+        let coverage = state.served[&attachment.subscription()].clone();
+        state.served.insert(second_subscription, coverage.clone());
+        let group = state
+            .coverage_groups
+            .get_mut(&coverage)
+            .expect("ordinary usage retains its coverage group");
+        group.subscribers.insert(second_subscription);
+        group
+            .pending_initial_subscribers
+            .insert(second_subscription);
+        connection.transport = Box::new(SecondViewUpdateBackpressureTransport {
+            outbound: Rc::clone(&outbound),
+            accepted_view_updates: 0,
+            rejected_second_view_update: false,
+        });
+    }
+
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(denied_claims.clone());
+    let error = subscriber
+        .borrow_mut()
+        .tick()
+        .expect_err("the second fresh reset is backpressured");
+    assert_eq!(error.code, ErrorCode::Backpressure);
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("only the unsent reset retries after capacity returns");
+
+    let outbound = outbound.borrow();
+    let refreshed = outbound
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(refreshed.len(), 2);
+    assert_eq!(
+        refreshed
+            .iter()
+            .map(|update| update.subscription)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([attachment.subscription(), second_subscription]),
+        "each member receives its replacement reset exactly once"
+    );
+    assert!(refreshed.iter().all(|update| {
+        update.reset_result_set
+            && update.result_member_adds.is_empty()
+            && update.result_member_removes.is_empty()
+            && matches!(
+                update.program_fact_adds.as_slice(),
+                [crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage)] if coverage.complete
+            )
+    }));
+    let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
+        unreachable!("accepted client is served by a subscriber link")
+    };
+    let coverage = &state.served[&attachment.subscription()];
+    let group = &state.coverage_groups[coverage];
+    assert!(group.pending_initial_subscribers.is_empty());
+    assert!(group.initialized);
+    assert_eq!(group.policy_binding.1, denied_claims);
+    drop(outbound);
 }
 
 /// A scope-isolated relay usage site retains the immutable session selected by
