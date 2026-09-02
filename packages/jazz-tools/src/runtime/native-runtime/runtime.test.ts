@@ -5669,6 +5669,127 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
     await runtime.query(queryJson("pending"));
     expect(preparedQueries).toHaveLength(515);
   });
+  it("rejects flat acquisition after close without invoking native preparation", async () => {
+    let preparations = 0;
+    let subscriptions = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              preparations += 1;
+              return {};
+            },
+            all: () => new Uint8Array([0]),
+            subscribe: () => {
+              subscriptions += 1;
+              return { readAll: () => [] };
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const queryJson = JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "title", op: "eq", value: "closed" }],
+    });
+
+    await runtime.close();
+    await expect(runtime.query(queryJson)).rejects.toThrow("Native runtime is closed");
+    expect(() => runtime.createSubscription(queryJson)).toThrow("Native runtime is closed");
+    expect(preparations).toBe(0);
+    expect(subscriptions).toBe(0);
+  });
+  it("detaches an attachment when foreground coverage fails", async () => {
+    const detached: unknown[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => false,
+            detachQuery: (attachment) => detached.push(attachment),
+            allAsync: () => {
+              throw new Error("coverage failure");
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connectUpstreamPeer();
+    const queryJson = JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "title", op: "eq", value: "coverage" }],
+    });
+
+    await expect(
+      runtime.query(queryJson, null, "edge", JSON.stringify({ propagation: "full" })),
+    ).rejects.toThrow("coverage failure");
+    expect(detached).toHaveLength(1);
+  });
+  it("detaches an attachment when background coverage fails", async () => {
+    const detached: unknown[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            all: () => new Uint8Array([0]),
+            allAsync: (() => {
+              let reads = 0;
+              return () => {
+                reads += 1;
+                if (reads > 1) throw new Error("background coverage failure");
+                return new Uint8Array([0]);
+              };
+            })(),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => false,
+            detachQuery: (attachment) => detached.push(attachment),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    Object.assign(runtime as object, {
+      serverTransport: new FakeTransport([]),
+      serverCarrier: {},
+      serverCarrierPromise: Promise.resolve(),
+    });
+    const queryJson = JSON.stringify({ table: "todos" });
+
+    await expect(
+      runtime.query(queryJson, null, null, JSON.stringify({ propagation: "full" })),
+    ).resolves.toEqual([]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(detached).toHaveLength(1);
+  });
 });
 
 

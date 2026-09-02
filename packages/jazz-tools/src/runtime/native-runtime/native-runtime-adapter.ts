@@ -2117,6 +2117,7 @@ export class NativeRuntimeAdapter implements Runtime {
             : this.db.subscribe!(query, opts);
       }
       sourceState = { source: subscriptionSource(nativeSubscription!), reading: false };
+      if (this.closed) throw new Error("Native runtime is closed");
       this.subscriptions.set(handle, {
         sources: [sourceState],
         queryJson,
@@ -2716,6 +2717,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private acquirePreparedQuery(queryJson: string): PreparedQueryLease<PreparedQuery> {
+    if (this.closed) throw new Error("Native runtime is closed");
     const queryBytes = encodeQueryJson(queryJson, this.schema);
     return this.preparedQueryCache.acquire(queryBytes, (encoded) => {
       try {
@@ -2757,6 +2759,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } else {
       attachment = this.db.attachQuery(query, opts);
     }
+    try {
     if (!this.db.queryAttachmentIsCovered) return attachment;
     const coverageKey = this.coverageKey(session);
     const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
@@ -2806,6 +2809,14 @@ export class NativeRuntimeAdapter implements Runtime {
       this.peerCoveredQueries.set(query, confirmations);
     }
     return attachment;
+    } catch (error) {
+      try {
+        this.db.detachQuery?.(attachment);
+      } catch (cleanupError) {
+        reportAsyncRuntimeError(cleanupError);
+      }
+      throw error;
+    }
   }
 
   private attachLocalReadCoverageInBackground(
