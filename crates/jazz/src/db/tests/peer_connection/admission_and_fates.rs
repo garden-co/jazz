@@ -1747,6 +1747,11 @@ fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
         !refreshed.is_empty(),
         "claim refresh must publish a replacement ViewUpdate, got {sent:?}"
     );
+    assert_eq!(
+        refreshed.len(),
+        1,
+        "claim refresh must not duplicate one live ViewUpdate transition"
+    );
     for update in refreshed {
         assert_eq!(update.subscription, attachment.subscription());
         assert!(update.reset_result_set);

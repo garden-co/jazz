@@ -1336,7 +1336,7 @@ where
                     maintained_subscription,
                     &shape,
                     &binding,
-                    coverage.opts,
+                    coverage.opts.clone(),
                     progress_waker,
                 )
                 .await?
@@ -1416,6 +1416,17 @@ where
                     );
                 }
             }
+            // This rehydrate is the replacement opening snapshot for every
+            // usage in the group. In particular, a claim change can arrive
+            // after Subscribe was admitted but before the ordinary owner loop
+            // has served its pending initial reset. Leaving that lifecycle
+            // pending would publish this exact transition a second time below
+            // in the same tick.
+            let group = coverage_groups
+                .get_mut(&coverage)
+                .expect("rehydrated coverage group remains registered");
+            group.initialized = true;
+            group.pending_initial_subscribers.clear();
         }
         if rebind_pending {
             schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
