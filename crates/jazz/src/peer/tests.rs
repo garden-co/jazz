@@ -4365,19 +4365,7 @@ fn maintained_subscription_view_exclusive_delta_stays_maintained() {
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), row(0x61), tx_id)]
-    );
-    assert!(result_member_removes.is_empty());
+    assert_view_update_rows(update, vec![("todos", row(0x61), tx_id)], Vec::new());
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
@@ -4732,20 +4720,13 @@ fn maintained_subscription_view_new_binding_after_forget_has_no_stale_state() {
         )]))
     );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        reset_result_set,
-        ..
-    }) = update
+        reset_result_set, ..
+    }) = &update
     else {
         panic!("expected view update");
     };
-    assert!(reset_result_set);
-    assert_eq!(
-        result_member_adds,
-        vec![(groove::Intern::new("todos".to_owned()), row(0x32), other_tx,)]
-    );
-    assert!(result_member_removes.is_empty());
+    assert!(*reset_result_set);
+    assert_view_update_rows(update, vec![("todos", row(0x32), other_tx)], Vec::new());
 }
 
 #[test]
@@ -5361,21 +5342,10 @@ fn incremental_query_result_set_tracks_identical_cell_rewrite_tx_id() {
         .unwrap();
     accept_global(&mut core, second_tx, 2);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected query view update");
-    };
-    assert_eq!(
-        result_member_removes,
-        vec![("todos".to_owned().into(), row_uuid, first_tx)]
-    );
-    assert_eq!(
-        result_member_adds,
-        vec![("todos".to_owned().into(), row_uuid, second_tx)]
+    assert_view_update_rows(
+        update,
+        vec![("todos", row_uuid, second_tx)],
+        vec![("todos", row_uuid, first_tx)],
     );
     assert_eq!(
         row_result_set(&peer, subscription),
@@ -5486,21 +5456,10 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     accept_global(&mut core, second_match_tx, 3);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = &update
-    else {
-        panic!("expected query view update");
-    };
-    assert_eq!(
-        result_member_removes,
-        &vec![("todos".to_owned().into(), row_uuid, first_tx)]
-    );
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row_uuid, second_match_tx)]
+    assert_view_update_rows(
+        update.clone(),
+        vec![("todos", row_uuid, second_match_tx)],
+        vec![("todos", row_uuid, first_tx)],
     );
     assert_eq!(
         row_result_set(&peer, subscription),
@@ -5589,28 +5548,13 @@ fn incremental_query_result_set_rebuilds_stale_closure_rows() {
     accept_global(&mut core, second_line_tx, 4);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected query view update");
-    };
-    assert_eq!(
-        result_member_removes,
-        vec![("stock".to_owned().into(), stock_row, stock_v1)]
-    );
-    assert_eq!(
-        result_member_adds,
+    assert_view_update_rows(
+        update,
         vec![
-            (
-                "orderLines".to_owned().into(),
-                second_line_row,
-                second_line_tx
-            ),
-            ("stock".to_owned().into(), stock_row, stock_v2),
-        ]
+            ("orderLines", second_line_row, second_line_tx),
+            ("stock", stock_row, stock_v2),
+        ],
+        vec![("stock", stock_row, stock_v1)],
     );
     assert_eq!(
         row_result_set(&peer, subscription),

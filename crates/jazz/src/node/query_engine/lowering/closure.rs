@@ -219,12 +219,12 @@ pub(super) fn flat_join_contribution_membership_graph(
         )));
     };
     let (visible_key, relation_key) = match (
-        flat_join_visible_field(left),
+        flat_join_visible_field(left, nodes),
         lower_relation_key_ref(right, &plan, &lowered, request),
     ) {
         (Ok(visible), Ok(relation)) => (visible, relation),
         _ => (
-            flat_join_visible_field(right).map_err(single_gap_report)?,
+            flat_join_visible_field(right, nodes).map_err(single_gap_report)?,
             lower_relation_key_ref(left, &plan, &lowered, request).map_err(single_gap_report)?,
         ),
     };
@@ -249,37 +249,33 @@ pub(super) fn flat_join_contribution_membership_graph(
     )
 }
 
-fn flat_join_visible_field(value: &NormalizedValueRef) -> Result<String, UnsupportedReason> {
-    match value {
-        NormalizedValueRef::SourceField { source, field } => Ok(format!(
-            "{}.{}",
-            flat_join_source_scope(source),
-            logical_user_column(field)
-        )),
-        NormalizedValueRef::RowId(RowIdRef::Source(source)) => {
-            if matches!(source.path.components.as_slice(), [SourceRole::Root]) {
-                Ok("row_uuid".to_owned())
-            } else {
-                Ok(format!("{}.id", flat_join_source_scope(source)))
-            }
-        }
-        _ => Err(UnsupportedReason::Operator(
-            "flat join contribution key must reference a source field".to_owned(),
-        )),
-    }
-}
-
-fn flat_join_source_scope(source: &SourceId) -> &str {
-    source
-        .path
-        .components
-        .last()
-        .and_then(|role| match role {
-            SourceRole::Alias(alias) => alias.rsplit(':').next(),
-            SourceRole::Root => None,
-            _ => None,
+fn flat_join_visible_field(
+    value: &NormalizedValueRef,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+) -> Result<String, UnsupportedReason> {
+    // The rendered flat root is the compiler-owned `flat_join:output`
+    // projection. Its field names intentionally preserve the query's public
+    // aliases (`root.title`, `peer.title`, …), which cannot be recovered from
+    // a `SourceId`: the root occurrence has no alias in its path. Resolve the
+    // exact normalized value through that projection instead of reconstructing
+    // a spelling from a table name. This also keeps the contributor terminal
+    // aligned with future projection/layout changes.
+    let Some(RowSetExpr::Project { columns, .. }) =
+        nodes.get(&RowSetNodeId("flat_join:output".to_owned()))
+    else {
+        return Err(UnsupportedReason::Operator(
+            "flat join contribution is missing its output projection".to_owned(),
+        ));
+    };
+    columns
+        .iter()
+        .find(|column| &column.value == value)
+        .map(|column| column.output.name.clone())
+        .ok_or_else(|| {
+            UnsupportedReason::Operator(
+                "flat join contribution key is not retained by the output projection".to_owned(),
+            )
         })
-        .unwrap_or(source.table.as_str())
 }
 
 fn required_closure_parent_graph(
