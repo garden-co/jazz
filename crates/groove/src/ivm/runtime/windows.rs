@@ -561,7 +561,7 @@ fn update_collect_by_root_terminal_state(
     if !emit {
         state.groups.clear();
         state.roots.clear();
-        state.root_order.clear();
+        state.emitted_root_order.clear();
         state.emitted_root_keys.clear();
     }
     let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
@@ -588,13 +588,6 @@ fn update_collect_by_root_terminal_state(
                     .and_then(collect_by_root_order_key),
             );
         }
-        if let Some(order_key) = state
-            .groups
-            .get(&group_key)
-            .and_then(collect_by_root_order_key)
-        {
-            state.root_order.remove(&order_key);
-        }
         let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
         let state_key = (sort_key, delta.record.clone());
         let group = state.groups.entry(group_key.clone()).or_default();
@@ -604,24 +597,49 @@ fn update_collect_by_root_terminal_state(
         } else {
             group.insert(state_key, weight);
         }
-        if let Some(order_key) = state
-            .groups
-            .get(&group_key)
-            .and_then(collect_by_root_order_key)
-        {
-            state.root_order.insert(order_key, group_key.clone());
-        }
     }
     state.groups.retain(|_, group| !group.is_empty());
     if !emit {
         return Ok(Vec::new());
     }
 
+    // Capture the actual public sequence once before replacing changed sort
+    // keys below. Terminal edits are applied sequentially, so final ranks
+    // alone are insufficient for a batch that mixes moves and inserts.
+    let mut public_sequence = state
+        .emitted_root_order
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // `groups` also retains join-maintenance state that may never be exposed
+    // as a root terminal. Keep the public rank index in sync only for roots
+    // which were actually materialized, so an internal group cannot shift a
+    // subscriber-visible Insert or Move position.
+    for (root_key, before_key) in &before_order {
+        if !state.emitted_root_keys.contains(root_key) {
+            continue;
+        }
+        if let Some(before_key) = before_key {
+            state.emitted_root_order.remove(before_key);
+        }
+        if let Some(after_key) = state
+            .groups
+            .get(root_key)
+            .and_then(collect_by_root_order_key)
+        {
+            state.emitted_root_order.insert(after_key, root_key.clone());
+        }
+    }
+
     let mut operations = Vec::new();
     // Remove first so the later positional inserts/moves index the final
     // retained sequence rather than an opaque-key snapshot.
     for (root_key, before_key) in &before_order {
-        if before_key.is_some() && !state.groups.contains_key(root_key) {
+        if before_key.is_some()
+            && state.emitted_root_keys.contains(root_key)
+            && !state.groups.contains_key(root_key)
+        {
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
                 root_key: root_key.clone(),
@@ -631,8 +649,75 @@ fn update_collect_by_root_terminal_state(
                 },
             });
             state.emitted_root_keys.remove(root_key);
+            public_sequence.retain(|key| key != root_key);
         }
     }
+
+    // `emitted_root_order` is already the compiled total order. Snapshot its
+    // retained entries once per batch so changed roots can find their target
+    // positions without re-scanning the whole result for every Move or
+    // Insert.
+    let retained_final_order = state
+        .emitted_root_order
+        .iter()
+        .filter(|(_, root_key)| state.emitted_root_keys.contains(*root_key))
+        .map(|(order_key, root_key)| (order_key.clone(), root_key.clone()))
+        .collect::<Vec<_>>();
+    let retained_final_positions = retained_final_order
+        .iter()
+        .enumerate()
+        .map(|(index, (_, root_key))| (root_key.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+
+    // Reposition retained occurrences before inserting new ones. Their target
+    // index is their rank among retained public roots only; inserting first
+    // would make a final absolute rank address the wrong mutable sequence.
+    let mut moves = Vec::new();
+    for (root_key, before_key) in &before_order {
+        let Some(before_key) = before_key else {
+            continue;
+        };
+        if !before.get(root_key).is_some_and(Option::is_some)
+            || !state.emitted_root_keys.contains(root_key)
+        {
+            continue;
+        }
+        let Some(after_key) = state
+            .groups
+            .get(root_key)
+            .and_then(collect_by_root_order_key)
+        else {
+            continue;
+        };
+        if *before_key != after_key {
+            moves.push((after_key, root_key.clone()));
+        }
+    }
+    moves.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (_, root_key) in moves {
+        let index = *retained_final_positions
+            .get(&root_key)
+            .expect("moved root has a final retained position");
+        let current_index = public_sequence
+            .iter()
+            .position(|key| key == &root_key)
+            .expect("emitted root is present in the public sequence");
+        if current_index == index {
+            continue;
+        }
+        let root_key = public_sequence.remove(current_index);
+        public_sequence.insert(index, root_key.clone());
+        operations.push(TerminalOperation {
+            root_descriptor: output_desc,
+            root_key: root_key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Move {
+                key: root_key,
+                index,
+            },
+        });
+    }
+
     let mut inserts = Vec::new();
     for (root_key, before_key) in &before_order {
         if before_key.is_some() || !state.groups.contains_key(root_key) {
@@ -643,7 +728,6 @@ fn update_collect_by_root_terminal_state(
             .get(root_key)
             .and_then(collect_by_root_order_key)
             .expect("retained root has an order key");
-        let index = state.root_order.range(..order_key.clone()).count();
         let record = state
             .groups
             .get(root_key)
@@ -661,85 +745,38 @@ fn update_collect_by_root_terminal_state(
                     "new root collector group did not render a terminal row".into(),
                 )
             })?;
-        inserts.push((
-            index,
-            TerminalOperation {
-                root_descriptor: output_desc,
-                root_key: root_key.clone(),
-                path: Vec::new(),
-                edit: TerminalEdit::Insert {
-                    index,
-                    key: root_key.clone(),
-                    value: record.to_vec(),
-                },
+        inserts.push((order_key, root_key.clone(), record));
+    }
+    inserts.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+    for (new_roots_before, (order_key, root_key, record)) in inserts.into_iter().enumerate() {
+        // Insert lower-ranked new occurrences first. Each insertion joins the
+        // mutable sequence before the next rank is computed. Existing roots
+        // come from the one batch snapshot above; earlier new roots all sort
+        // before this one because `inserts` is ordered by the same total key.
+        let index = retained_final_order.partition_point(|(candidate, _)| candidate < &order_key)
+            + new_roots_before;
+        state.emitted_root_order.insert(order_key, root_key.clone());
+        state.emitted_root_keys.insert(root_key.clone());
+        public_sequence.insert(index, root_key.clone());
+        operations.push(TerminalOperation {
+            root_descriptor: output_desc,
+            root_key: root_key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Insert {
+                index,
+                key: root_key,
+                value: record.to_vec(),
             },
-        ));
-    }
-    inserts.sort_by_key(|(index, _)| *index);
-    for (_, operation) in inserts {
-        let order_key = state
-            .groups
-            .get(&operation.root_key)
-            .and_then(collect_by_root_order_key)
-            .expect("inserted root has an order key");
-        let _ = order_key;
-        state.emitted_root_keys.insert(operation.root_key.clone());
-        operations.push(operation);
-    }
-
-    let mut moves = Vec::new();
-    for (root_key, before_key) in &before_order {
-        let Some(before_key) = before_key else {
-            continue;
-        };
-        // A join-side maintenance delta can touch an internal root grouping
-        // that did not render a public root terminal row. It has no retained
-        // facade occurrence to move.
-        if !before.get(root_key).is_some_and(Option::is_some)
-            || !state.emitted_root_keys.contains(root_key)
-        {
-            continue;
-        }
-        let Some(after_key) = state
-            .groups
-            .get(root_key)
-            .and_then(collect_by_root_order_key)
-        else {
-            continue;
-        };
-        if *before_key == after_key {
-            continue;
-        }
-        let index = state.root_order.range(..after_key.clone()).count();
-        moves.push((
-            index,
-            TerminalOperation {
-                root_descriptor: output_desc,
-                root_key: root_key.clone(),
-                path: Vec::new(),
-                edit: TerminalEdit::Move {
-                    key: root_key.clone(),
-                    index,
-                },
-            },
-        ));
-    }
-    moves.sort_by_key(|(index, _)| *index);
-    for (_, operation) in moves {
-        let before_key = before_order
-            .get(&operation.root_key)
-            .and_then(Option::as_ref)
-            .expect("moved root had a prior order key");
-        let after_key = state
-            .groups
-            .get(&operation.root_key)
-            .and_then(collect_by_root_order_key)
-            .expect("moved root has an order key");
-        let _ = (before_key, after_key);
-        operations.push(operation);
+        });
     }
 
     for (root_key, before_record) in before {
+        // `groups` can retain a root-collector maintenance group before it
+        // has ever been presented to this terminal consumer. Without a prior
+        // Insert, an Update would address no facade occurrence.
+        if !state.emitted_root_keys.contains(&root_key) {
+            continue;
+        }
         let after_record = state.groups.get(&root_key).map_or(Ok(None), |group| {
             let records = group
                 .iter()
@@ -1353,4 +1390,280 @@ fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     }
     key.push(0);
     key.push(0);
+}
+
+#[cfg(test)]
+mod root_terminal_tests {
+    use super::*;
+
+    fn record_descriptor() -> RecordDescriptor {
+        RecordDescriptor::new([
+            ("root", ValueType::Uuid),
+            ("joined", ValueType::Uuid),
+            ("rank", ValueType::String),
+        ])
+    }
+
+    fn collector() -> CollectByOp {
+        let projection = |field: &str, field_idx| CollectByProjection {
+            field: field.to_owned(),
+            field_idx,
+            output_name: field.to_owned(),
+            unwrap_nullable: false,
+        };
+        CollectByOp {
+            mode: CollectByMode::Root,
+            group_fields: vec!["root".to_owned(), "joined".to_owned()],
+            group_field_indices: vec![0, 1],
+            parent_fields: vec![
+                projection("root", 0),
+                projection("joined", 1),
+                projection("rank", 2),
+            ],
+            child_fields: Vec::new(),
+            child_descriptor: RecordDescriptor::default(),
+            collection_field: String::new(),
+            collection_field_index: 0,
+            slots: Vec::new(),
+            tuple_fields: Vec::new(),
+            occurrence_id_fields: vec!["root".to_owned(), "joined".to_owned()],
+            occurrence_id_field_indices: vec![0, 1],
+            order_fields: vec![TopByOrderField {
+                field: "rank".to_owned(),
+                direction: TopByDirection::Desc,
+            }],
+            tie_fields: vec!["root".to_owned(), "joined".to_owned()],
+            sort_field_indices: vec![2, 0, 1],
+            sort_directions: vec![
+                TopByDirection::Desc,
+                TopByDirection::Asc,
+                TopByDirection::Asc,
+            ],
+            offset: 0,
+            limit: TopByLimit::Unbounded,
+        }
+    }
+
+    fn record(root: u8, joined: u8, rank: &str) -> Bytes {
+        record_descriptor()
+            .create(&[
+                Value::Uuid(uuid::Uuid::from_bytes([root; 16])),
+                Value::Uuid(uuid::Uuid::from_bytes([joined; 16])),
+                Value::String(rank.to_owned()),
+            ])
+            .unwrap()
+            .into()
+    }
+
+    fn delta(root: u8, joined: u8, rank: &str, weight: i64) -> RecordDelta {
+        RecordDelta {
+            record: record(root, joined, rank),
+            weight,
+        }
+    }
+
+    fn root_key(root: u8, joined: u8) -> Vec<u8> {
+        encoded_record_key_part(record_descriptor(), &record(root, joined, "key"), &[0, 1]).unwrap()
+    }
+
+    fn apply_root_operations(roots: &mut Vec<(Vec<u8>, String)>, operations: &[TerminalOperation]) {
+        let rank = |value: &[u8]| {
+            let Value::String(rank) = BorrowedRecord::new(value, &record_descriptor())
+                .get_idx(2)
+                .unwrap()
+            else {
+                panic!("root terminal rank must decode as text");
+            };
+            rank
+        };
+        for operation in operations {
+            assert!(operation.path.is_empty());
+            match &operation.edit {
+                TerminalEdit::Insert { index, key, value } => {
+                    roots.insert(*index, (key.clone(), rank(value)));
+                }
+                TerminalEdit::Remove { key } => {
+                    let index = roots.iter().position(|(root, _)| root == key).unwrap();
+                    roots.remove(index);
+                }
+                TerminalEdit::Move { key, index } => {
+                    let current = roots.iter().position(|(root, _)| root == key).unwrap();
+                    let root = roots.remove(current);
+                    roots.insert(*index, root);
+                }
+                TerminalEdit::Update { key, value } => {
+                    let (_, existing_rank) = roots
+                        .iter_mut()
+                        .find(|(root, _)| root == key)
+                        .expect("terminal root update addresses a present occurrence");
+                    *existing_rank = rank(value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn root_terminal_order_excludes_non_emitted_groups_and_moves_exact_occurrences() {
+        let input = record_descriptor();
+        let output = record_descriptor();
+        let collect_by = collector();
+        let mut state = CollectByIncrementalState::default();
+
+        // A prior maintenance-only group ranks before every public root, but
+        // was installed with `emit = false` and therefore has no facade
+        // occurrence. It must not offset later public positions.
+        assert!(
+            update_collect_by_root_terminal_state(
+                input.clone(),
+                output.clone(),
+                &collect_by,
+                &mut state,
+                &[delta(0xf0, 0xf1, "zzzz", 1)],
+                false,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            update_collect_by_root_terminal_state(
+                input.clone(),
+                output.clone(),
+                &collect_by,
+                &mut state,
+                &[delta(0xf0, 0xf1, "zzzz", -1), delta(0xf0, 0xf1, "zzzzz", 1),],
+                true,
+            )
+            .unwrap()
+            .is_empty(),
+            "a non-emitted maintenance group cannot leak an unaddressable Update"
+        );
+
+        let opened = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[
+                delta(0xa1, 0x11, "alpha", 1),
+                delta(0xb1, 0x22, "maria", 1),
+                delta(0xc1, 0x33, "zoe", 1),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            opened
+                .iter()
+                .filter_map(|operation| match operation.edit {
+                    TerminalEdit::Insert { index, .. } => Some(index),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the non-emitted zzzz maintenance group cannot shift public inserts"
+        );
+
+        // Two simultaneous sort changes exercise final-index computation for
+        // more than one Move. The keys remain root+joined occurrences rather
+        // than collapsing to the shared public root UUID.
+        let moved = update_collect_by_root_terminal_state(
+            input,
+            output,
+            &collect_by,
+            &mut state,
+            &[
+                delta(0xa1, 0x11, "alpha", -1),
+                delta(0xa1, 0x11, "yyyy", 1),
+                delta(0xc1, 0x33, "zoe", -1),
+                delta(0xc1, 0x33, "aaaa", 1),
+            ],
+            true,
+        )
+        .unwrap();
+        let moves = moved
+            .iter()
+            .filter_map(|operation| match operation.edit {
+                TerminalEdit::Move { index, .. } => Some((operation.root_key.clone(), index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(moves.len(), 2);
+        assert_eq!(moves[0].1, 0);
+        assert_eq!(moves[1].1, 2);
+        assert_ne!(moves[0].0, moves[1].0);
+        assert!(moves.iter().all(|(key, _)| key.len() > 17));
+    }
+
+    #[test]
+    fn root_terminal_mixed_remove_move_insert_mutates_to_final_public_order() {
+        let input = record_descriptor();
+        let output = record_descriptor();
+        let collect_by = collector();
+        let mut state = CollectByIncrementalState::default();
+        let opened = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[
+                delta(0xa1, 0x11, "zoe", 1),
+                delta(0xb1, 0x22, "maria", 1),
+                delta(0xd1, 0x44, "beta", 1),
+            ],
+            true,
+        )
+        .unwrap();
+        let mut roots = Vec::new();
+        apply_root_operations(&mut roots, &opened);
+        assert_eq!(
+            roots,
+            vec![
+                (root_key(0xa1, 0x11), "zoe".to_owned()),
+                (root_key(0xb1, 0x22), "maria".to_owned()),
+                (root_key(0xd1, 0x44), "beta".to_owned()),
+            ]
+        );
+
+        // The batch retracts D, lowers A below B, and inserts C between them.
+        // Applying the terminal stream itself must reach B,C,A; final ranks
+        // emitted independently would instead produce C,B,A.
+        let mixed = update_collect_by_root_terminal_state(
+            input,
+            output,
+            &collect_by,
+            &mut state,
+            &[
+                delta(0xd1, 0x44, "beta", -1),
+                delta(0xa1, 0x11, "zoe", -1),
+                delta(0xa1, 0x11, "alpha", 1),
+                delta(0xc1, 0x33, "lima", 1),
+            ],
+            true,
+        )
+        .unwrap();
+        assert!(
+            mixed
+                .iter()
+                .any(|operation| matches!(operation.edit, TerminalEdit::Remove { .. }))
+        );
+        assert!(
+            mixed
+                .iter()
+                .any(|operation| matches!(operation.edit, TerminalEdit::Move { .. }))
+        );
+        assert!(
+            mixed
+                .iter()
+                .any(|operation| matches!(operation.edit, TerminalEdit::Insert { .. }))
+        );
+        apply_root_operations(&mut roots, &mixed);
+        assert_eq!(
+            roots,
+            vec![
+                (root_key(0xb1, 0x22), "maria".to_owned()),
+                (root_key(0xc1, 0x33), "lima".to_owned()),
+                (root_key(0xa1, 0x11), "alpha".to_owned()),
+            ]
+        );
+    }
 }

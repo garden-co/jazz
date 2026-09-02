@@ -54,9 +54,10 @@ pub(super) struct CollectByIncrementalState {
 pub(super) struct CollectByIncrementalPayload {
     pub(super) groups: CollectByGroups,
     pub(super) roots: BTreeMap<CollectByOrderKey, i64>,
-    /// Ordered root-collector occurrence index. Unlike `groups`, whose key
-    /// is the opaque output identity, this follows the compiled TopBy key.
-    pub(super) root_order: BTreeMap<CollectByOrderKey, Vec<u8>>,
+    /// Ordered public root-collector occurrence index. Unlike `groups`, whose
+    /// key is the opaque output identity, this follows the compiled TopBy key
+    /// and excludes maintenance-only groups that never reached a terminal.
+    pub(super) emitted_root_order: BTreeMap<CollectByOrderKey, Vec<u8>>,
     /// Root terminal groups that have actually been emitted to a subscriber.
     /// Some join-maintenance rows share a sort key but are not facade roots.
     pub(super) emitted_root_keys: BTreeSet<Vec<u8>>,

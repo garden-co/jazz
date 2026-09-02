@@ -545,11 +545,12 @@ fn subscription_reset_preserves_ordered_flat_join_window_with_duplicate_roots() 
             ),
         ]
     );
-    drop(subscription);
+    block_on(subscription.close()).unwrap();
 
     // A non-key order update stays within the unwindowed result but changes
-    // its rank. The root terminal must publish a positional Move, rather than
-    // relying on its opaque occurrence-key map to choose a new order.
+    // its rank. Groove emits an exact opaque-key Move; the public subscription
+    // reducer consumes root terminal edits into indexed `updated` rows (only
+    // descendant terminal edits cross this API boundary).
     let move_query = Query::from("users")
         .join_via_column("todos", "ownerId", "id", [])
         .order_by("name", OrderDirection::Desc);
@@ -563,23 +564,14 @@ fn subscription_reset_preserves_ordered_flat_join_window_with_duplicate_roots() 
     )
     .unwrap();
     db.tick().unwrap();
-    let SubscriptionEvent::Delta {
-        terminal_operations,
-        ..
-    } = block_on(moved.next_raw()).unwrap()
-    else {
+    let SubscriptionEvent::Delta { updated, .. } = block_on(moved.next_raw()).unwrap() else {
         panic!("rank change must publish a structured delta");
     };
-    let maria_key_prefix = [10]
-        .into_iter()
-        .chain(row(0xb1).0.as_bytes().iter().copied())
-        .collect::<Vec<_>>();
-    assert!(terminal_operations.iter().any(|operation| {
-        operation.root_key.get(..17) == Some(maria_key_prefix.as_slice())
-            && matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Move { index: 0, .. }
-            )
+    assert!(updated.iter().any(|output| {
+        output.row.row_uuid() == row(0xb1)
+            && output.previous_index == Some(1)
+            && output.index == 0
+            && output.row.cell_at(0) == Some(Value::String("zzzz".to_owned()))
     }));
 }
 
