@@ -5489,7 +5489,7 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
               preparedQueries.push(query);
               return query;
             },
-            all: (query: unknown) => {
+            all: (query: object) => {
               lastReadQuery = query;
               return new Uint8Array([0]);
             },
