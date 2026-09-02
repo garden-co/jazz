@@ -122,7 +122,6 @@ export class PreparedQueryCache<T extends object> {
       // Eviction bookkeeping is complete before cleanup is notified.
     }
   }
-
 }
 
 class CacheLease<T extends object> implements PreparedQueryLease<T> {

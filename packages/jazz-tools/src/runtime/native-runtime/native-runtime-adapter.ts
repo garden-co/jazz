@@ -26,10 +26,7 @@ import type {
 } from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
-import {
-  PreparedQueryCache,
-  type PreparedQueryLease,
-} from "./prepared-query-cache.js";
+import { PreparedQueryCache, type PreparedQueryLease } from "./prepared-query-cache.js";
 import {
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
   isReservedJazzIssuer,
@@ -2148,7 +2145,8 @@ export class NativeRuntimeAdapter implements Runtime {
     } catch (error) {
       try {
         if (sourceState) closeSubscriptionSource(sourceState.source);
-        else if (nativeSubscription) closeSubscriptionSource(subscriptionSource(nativeSubscription));
+        else if (nativeSubscription)
+          closeSubscriptionSource(subscriptionSource(nativeSubscription));
       } catch (cleanupError) {
         reportAsyncRuntimeError(cleanupError);
       }
@@ -2761,55 +2759,55 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     try {
-    if (!this.db.queryAttachmentIsCovered) return attachment;
-    const coverageKey = this.coverageKey(session);
-    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
-    const mayReusePeerConfirmation = this.nonDurableClient && !readPropagationIsFull(optionsJson);
-    const requiresFreshPeerConfirmation =
-      this.nonDurableClient &&
-      readPropagationIsFull(optionsJson) &&
-      confirmedPeerActivityEpoch != null;
-    // A prior confirmation can recover a reattachment only if no newer worker
-    // frame has arrived. Otherwise the old coverage state could be exposed to
-    // a query whose authorization (for example, an authorship-scoped policy)
-    // is about to change.
-    if (
-      mayReusePeerConfirmation &&
-      confirmedPeerActivityEpoch != null &&
-      this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
-      this.db.queryAttachmentIsCovered(attachment)
-    ) {
-      return attachment;
-    }
-    const minimumPeerActivityEpoch = this.nonDurableClient
-      ? this.peerTransportActivityEpoch
-      : undefined;
-    const pendingPeerActivityEpoch =
-      this.nonDurableClient &&
-      !requiresFreshPeerConfirmation &&
-      this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
+      if (!this.db.queryAttachmentIsCovered) return attachment;
+      const coverageKey = this.coverageKey(session);
+      const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
+      const mayReusePeerConfirmation = this.nonDurableClient && !readPropagationIsFull(optionsJson);
+      const requiresFreshPeerConfirmation =
+        this.nonDurableClient &&
+        readPropagationIsFull(optionsJson) &&
+        confirmedPeerActivityEpoch != null;
+      // A prior confirmation can recover a reattachment only if no newer worker
+      // frame has arrived. Otherwise the old coverage state could be exposed to
+      // a query whose authorization (for example, an authorship-scoped policy)
+      // is about to change.
+      if (
+        mayReusePeerConfirmation &&
+        confirmedPeerActivityEpoch != null &&
+        this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
+        this.db.queryAttachmentIsCovered(attachment)
+      ) {
+        return attachment;
+      }
+      const minimumPeerActivityEpoch = this.nonDurableClient
         ? this.peerTransportActivityEpoch
         : undefined;
-    await this.waitForQueryCoverage(
-      attachment,
-      query,
-      readOptions(tier, false, optionsJson),
-      session?.identity,
-      minimumPeerActivityEpoch,
-      pendingPeerActivityEpoch,
-      mayReusePeerConfirmation && confirmedPeerActivityEpoch != null,
-    );
-    if (
-      this.nonDurableClient &&
-      this.db.queryAttachmentIsCovered(attachment) &&
-      queryLease.isCurrent() &&
-      !this.closed
-    ) {
-      const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
-      confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
-      this.peerCoveredQueries.set(query, confirmations);
-    }
-    return attachment;
+      const pendingPeerActivityEpoch =
+        this.nonDurableClient &&
+        !requiresFreshPeerConfirmation &&
+        this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
+          ? this.peerTransportActivityEpoch
+          : undefined;
+      await this.waitForQueryCoverage(
+        attachment,
+        query,
+        readOptions(tier, false, optionsJson),
+        session?.identity,
+        minimumPeerActivityEpoch,
+        pendingPeerActivityEpoch,
+        mayReusePeerConfirmation && confirmedPeerActivityEpoch != null,
+      );
+      if (
+        this.nonDurableClient &&
+        this.db.queryAttachmentIsCovered(attachment) &&
+        queryLease.isCurrent() &&
+        !this.closed
+      ) {
+        const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
+        confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
+        this.peerCoveredQueries.set(query, confirmations);
+      }
+      return attachment;
     } catch (error) {
       try {
         this.db.detachQuery?.(attachment);
@@ -3826,7 +3824,6 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 }
-
 
 function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
   subscription.deferredVisiblePublication = false;
