@@ -3311,7 +3311,18 @@ where
         Error,
     > {
         self.open_seeded_maintained_subscription_view_with_waker(
-            shape, binding, identity, tier, read_view, None,
+            shape,
+            binding,
+            identity,
+            tier,
+            read_view,
+            RegisterShapeOptions {
+                tier,
+                read_view: read_view.clone(),
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key(),
+            None,
         )
         .await
     }
@@ -3325,6 +3336,7 @@ where
         identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
+        read_view_key: ReadViewKey,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
@@ -3343,6 +3355,7 @@ where
             identity,
             tier,
             read_view,
+            read_view_key,
             QueryAuthorizationMode::TrustedServing,
             None,
             None,
@@ -3393,6 +3406,12 @@ where
             binding,
             identity,
             read_view,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                read_view: read_view.clone(),
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key(),
             authority_result_key,
             None,
         )
@@ -3405,6 +3424,7 @@ where
         binding: &Binding,
         identity: AuthorSubject,
         read_view: &ReadViewSpec,
+        read_view_key: ReadViewKey,
         authority_result_key: AuthorityResultKey,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
@@ -3435,6 +3455,7 @@ where
                 identity,
                 DurabilityTier::Edge,
                 read_view,
+                read_view_key,
                 QueryAuthorizationMode::ClientLocal,
                 settled_binding_view,
                 Some(authority_result_key.clone()),
@@ -3534,7 +3555,18 @@ where
         Error,
     > {
         self.open_seeded_authorization_support_subscription_view_with_waker(
-            shape, binding, identity, tier, read_view, None,
+            shape,
+            binding,
+            identity,
+            tier,
+            read_view,
+            RegisterShapeOptions {
+                tier,
+                read_view: read_view.clone(),
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key(),
+            None,
         )
         .await
     }
@@ -3546,6 +3578,7 @@ where
         identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
+        read_view_key: ReadViewKey,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
@@ -3564,6 +3597,7 @@ where
             identity,
             tier,
             read_view,
+            read_view_key,
             QueryAuthorizationMode::TrustedServing,
             None,
             None,
@@ -3592,6 +3626,7 @@ where
         identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
+        read_view_key: ReadViewKey,
         authorization_mode: QueryAuthorizationMode,
         settled_binding_view: Option<BindingViewKey>,
         settled_authority_result_key: Option<AuthorityResultKey>,
@@ -3782,6 +3817,7 @@ where
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
+        maintained.set_read_view(read_view_key);
         if storage_backed_result_materialization {
             maintained.enable_storage_backed_result_materialization();
         }

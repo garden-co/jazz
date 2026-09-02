@@ -183,6 +183,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
             &binding,
             AuthorSubject::SYSTEM,
             &ReadViewSpec::default(),
+            subscription.read_view,
             authority_result_key.clone(),
             None,
         )
@@ -462,6 +463,7 @@ fn relay_edge_open_after_live_authority_receipt_seeds_initial_membership() {
                 &binding,
                 AuthorSubject::SYSTEM,
                 &ReadViewSpec::default(),
+                subscription.read_view,
                 authority_key,
                 None,
             )

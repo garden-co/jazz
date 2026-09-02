@@ -1568,6 +1568,7 @@ impl PeerState {
                     binding,
                     policy_identity,
                     read_view,
+                    subscription.read_view,
                     source_authority_result_key
                         .clone()
                         .expect("strict relay source resolved above"),
@@ -1593,6 +1594,7 @@ impl PeerState {
                     policy_identity,
                     tier,
                     read_view,
+                    subscription.read_view,
                     progress_waker,
                 )
                 .await
@@ -1615,6 +1617,7 @@ impl PeerState {
                     policy_identity,
                     tier,
                     read_view,
+                    subscription.read_view,
                     progress_waker,
                 )
                 .await

@@ -330,6 +330,12 @@ where
                 identity,
                 tier,
                 read_view,
+                RegisterShapeOptions {
+                    tier,
+                    read_view: read_view.clone(),
+                    ..RegisterShapeOptions::default()
+                }
+                .read_view_key(),
                 authorization_mode,
                 settled_binding_view,
                 settled_authority_result_key.clone(),

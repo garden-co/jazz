@@ -113,6 +113,10 @@ struct VersionDecodePlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
+    /// The immutable resolved read-view identity of this maintained program.
+    /// Terminal row members must retain it so distinct branch views never
+    /// collapse when their source row and transaction coincide.
+    read_view: crate::protocol::ReadViewKey,
     result_weights: BTreeMap<ResultMemberEntry, i64>,
     /// Result memberships already exposed to the subscription consumer. A
     /// result-current terminal can advance before the companion content
@@ -162,6 +166,7 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
+            read_view: Default::default(),
             result_weights: BTreeMap::new(),
             published_result_members: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
@@ -373,6 +378,9 @@ fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
 }
 
 impl MaintainedSubscriptionView {
+    pub(crate) fn set_read_view(&mut self, read_view: crate::protocol::ReadViewKey) {
+        self.read_view = read_view;
+    }
     pub(crate) fn uses_storage_backed_result_materialization(&self) -> bool {
         self.storage_backed_result_materialization
     }
@@ -418,6 +426,7 @@ impl MaintainedSubscriptionView {
                     tables,
                     node_aliases,
                     &mut decode_plan_cache,
+                    self.read_view,
                 )
                 .map(|event| (event, weight))
             })
@@ -1728,6 +1737,7 @@ fn decode_typed_terminal_record(
     tables: &TableSchemas,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     decode_plan_cache: &mut VersionDecodePlanCache,
+    read_view: crate::protocol::ReadViewKey,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
         MaintainedTerminalKind::AggregateAppRows(schema) => {
@@ -1852,6 +1862,7 @@ fn decode_typed_terminal_record(
             ))
             .with_occurrence_id(occurrence_id)
             .with_settle_position(settle_position);
+            member.read_view = read_view;
             member.branch_or_prefix = branch_or_prefix;
             let member: ResultMemberEntry = match flat_join_digest {
                 Some(digest) => member.with_row_digest(digest),
