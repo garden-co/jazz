@@ -1641,31 +1641,7 @@ where
     /// baseline. Keeping this path non-suspending ensures consumers observe
     /// the demotion before the replacement transport can publish anything.
     fn demote_authority_receipt_subscriptions(&self) {
-        let mut retained = Vec::new();
-        for weak in self.subscriptions.borrow().iter() {
-            let Some(state) = weak.upgrade() else {
-                continue;
-            };
-            {
-                let mut state = state.borrow_mut();
-                if state.propagates_upstream {
-                    state.requires_authority_receipt = true;
-                    if state.settled {
-                        state.settled = false;
-                        let event = subscription_delta_event(
-                            state.read_tier,
-                            false,
-                            &state.snapshot,
-                            &state.snapshot,
-                            state.terminal_rows,
-                        );
-                        let _ = state.sender.unbounded_send(event);
-                    }
-                }
-            }
-            retained.push(Rc::downgrade(&state));
-        }
-        *self.subscriptions.borrow_mut() = retained;
+        demote_authority_receipt_subscriptions(&self.subscriptions);
     }
 
     /// Attach this node to an upstream peer over a binding-supplied transport.

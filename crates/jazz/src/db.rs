@@ -4562,6 +4562,38 @@ fn subscription_delta_event(
     subscription_delta_event_with_reset(tier, settled, previous, current, false, terminal_rows)
 }
 
+/// Retire authority settlement without disturbing the receiver-local terminal
+/// snapshot. A stale/nonselected authority update invalidates only the receipt:
+/// the same local collector continues to own the visible rows until a fresh
+/// exact closure arrives.
+pub(in crate::db) fn demote_authority_receipt_subscriptions(subscriptions: &SubscriptionList) {
+    let mut retained = Vec::new();
+    for weak in subscriptions.borrow().iter() {
+        let Some(state) = weak.upgrade() else {
+            continue;
+        };
+        {
+            let mut state_ref = state.borrow_mut();
+            if state_ref.propagates_upstream {
+                state_ref.requires_authority_receipt = true;
+                if state_ref.settled {
+                    state_ref.settled = false;
+                    let event = subscription_delta_event(
+                        state_ref.read_tier,
+                        false,
+                        &state_ref.snapshot,
+                        &state_ref.snapshot,
+                        state_ref.terminal_rows,
+                    );
+                    let _ = state_ref.sender.unbounded_send(event);
+                }
+            }
+        }
+        retained.push(Rc::downgrade(&state));
+    }
+    *subscriptions.borrow_mut() = retained;
+}
+
 /// Publishes an ordered terminal as explicit root placements.
 ///
 /// Every changed occurrence carries its previous and final position, so

@@ -6,7 +6,7 @@
 //! rows.
 
 use super::*;
-use crate::node::query_engine::BranchViewSourceBase;
+use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
 use std::{future::Future, pin::Pin};
 pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
@@ -4076,20 +4076,7 @@ fn normalized_bound_value(
 }
 
 pub(super) fn current_row_fields(table: &TableSchema) -> Vec<String> {
-    let mut fields = vec!["row_uuid".to_owned()];
-    fields.extend(
-        table
-            .columns
-            .iter()
-            .map(|column| user_column_field(&column.name)),
-    );
-    fields.push("$createdBy".to_owned());
-    fields.push("$createdAt".to_owned());
-    fields.push("$updatedBy".to_owned());
-    fields.push("$updatedAt".to_owned());
-    fields.push("tx_time".to_owned());
-    fields.push("tx_node_id".to_owned());
-    fields
+    current_row_field_names(table)
 }
 
 pub(super) fn global_current_storage_fields(

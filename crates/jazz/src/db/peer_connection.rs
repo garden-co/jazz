@@ -2479,6 +2479,7 @@ where
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
+                                        &self.subscriptions,
                                         &mut pending_view_updates,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
@@ -2503,6 +2504,7 @@ where
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
+                                        &self.subscriptions,
                                         &mut pending_view_updates,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
@@ -2837,6 +2839,7 @@ where
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
+                                        &self.subscriptions,
                                         &mut pending_view_updates,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
@@ -3157,6 +3160,7 @@ where
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
+                                        &self.subscriptions,
                                         &mut pending_view_updates,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
@@ -3249,6 +3253,7 @@ where
                     if !pending_view_updates.is_empty() {
                         apply_pending_authority_view_updates(
                             &self.node,
+                            &self.subscriptions,
                             &mut pending_view_updates,
                             &self.awaiting_initial_authority_coverage,
                             &mut pending_initial_coverage_clears,
@@ -5502,6 +5507,7 @@ fn stage_initial_coverage_clear_for_update(
 
 async fn apply_pending_authority_view_updates<S>(
     node: &SharedNodeState<S>,
+    subscriptions: &SubscriptionList,
     pending: &mut Vec<PendingAuthorityViewUpdate>,
     awaiting: &AwaitingInitialAuthorityCoverage,
     clears: &mut BTreeSet<CoverageKey>,
@@ -5559,6 +5565,11 @@ where
                 receipts.binding_views.clear();
                 receipts.subscriptions.clear();
                 receipts.confirmation_floor = receipts.confirmation_floor.max(invalidation_cut);
+                // Keep the receiver-local terminal state intact, but make the
+                // receipt demotion visible before this stale authority frame
+                // can publish any ordinary update. A replacement connection
+                // must prove a fresh exact closure for every subscription.
+                demote_authority_receipt_subscriptions(subscriptions);
             }
         }
     }
