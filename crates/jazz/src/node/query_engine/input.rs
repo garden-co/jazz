@@ -97,6 +97,13 @@ pub(crate) struct NormalizedRowSetShape {
     /// Join-side rows that are part of the materialized maintained/sync
     /// payload when they contribute to a visible root result.
     pub(crate) join_contributions: Vec<JoinContribution>,
+    /// Parent rows consumed by a caller-requested `inherits` semi-join.
+    ///
+    /// Unlike policy-internal inheritance proofs, these rows remain part of
+    /// the receiver's query semantics. The authority filters them through the
+    /// parent read policy, then publishes precisely the admitted parents that
+    /// visible child rows reference.
+    pub(crate) inherited_contributions: Vec<InheritedContribution>,
     /// Reachable access rows that contribute to a visible root result through
     /// a recursive closure.
     pub(crate) reachable_contributions: Vec<ReachableContribution>,
@@ -160,6 +167,19 @@ pub(crate) struct JoinContribution {
     /// Normalized relation node that proves payload rows contribute to visible roots.
     pub(crate) input: RowSetNodeId,
     /// Predicate between visible root rows and the contribution relation.
+    pub(crate) membership: PredicateExpr,
+}
+
+/// One caller-requested inherited-parent source consumed by a root semi-join.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InheritedContribution {
+    /// Stable normalized path, for example `query:inherits:0`.
+    pub(crate) id: String,
+    /// Parent source occurrence read by the receiver query.
+    pub(crate) source: SourceId,
+    /// Parent relation after its authority-side read policy has been applied.
+    pub(crate) input: RowSetNodeId,
+    /// The child-reference = parent-row-id semi-join predicate.
     pub(crate) membership: PredicateExpr,
 }
 

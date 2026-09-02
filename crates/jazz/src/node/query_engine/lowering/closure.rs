@@ -357,6 +357,61 @@ pub(super) fn join_contribution_membership_graph(
     )
 }
 
+/// Derive the parent rows consumed by a caller-requested `inherits` semi-join.
+///
+/// This is intentionally separate from `JoinContribution`: a parent policy may
+/// itself use joins or inheritance as authority-only proof, while this source
+/// occurrence is present in the receiver's user-query AST.  The authority
+/// lowers the already policy-filtered parent relation, limits it to parents of
+/// visible children, and sends that exact source occurrence to the receiver.
+pub(super) fn inherited_contribution_membership_graph(
+    visible_root: GraphBuilder,
+    contribution: &InheritedContribution,
+    root_source: &ResolvedSource,
+    parent_source: &ResolvedSource,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
+    let mut visited = BTreeSet::new();
+    let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
+        .map_err(single_gap_report)?;
+    let lowered = lower_relation_input_for_contributor(&plan, resolved_sources, request)
+        .map_err(single_gap_report)?;
+    let (root_keys, join_keys) = lower_root_to_relation_key_pairs(
+        &contribution.membership,
+        root_source,
+        &plan,
+        &lowered,
+        request,
+    )
+    .map_err(single_gap_report)?;
+    if let Some(join_key) = join_keys
+        .iter()
+        .find(|join_key| !lowered.fields.contains(*join_key))
+    {
+        return Err(single_gap_report(UnsupportedReason::Operator(format!(
+            "inherited contribution {} does not provide parent key field {join_key}",
+            contribution.id
+        ))));
+    }
+    let mut parent_graph = lowered.graph;
+    let mut unwrapped_join_keys = BTreeSet::new();
+    for join_key in &join_keys {
+        if lowered.nullable_fields.contains(join_key)
+            && unwrapped_join_keys.insert(join_key.clone())
+        {
+            parent_graph = unwrap_nullable_join_key(parent_graph, join_key.clone(), 1);
+        }
+    }
+    Ok(
+        GraphBuilder::join(visible_root, parent_graph, root_keys, join_keys).project_fields(
+            project_join_contribution_fields_with_root_routes(parent_source, route_fields),
+        ),
+    )
+}
+
 /// Derive one flat-join source from the already-authorized rendered root.
 ///
 /// Flat output projection deliberately gives every public source field a

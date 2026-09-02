@@ -293,6 +293,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -452,6 +453,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -677,6 +679,7 @@ fn assert_current_join_via_union_relation_input(
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: {
                     let mut nodes = BTreeMap::from([
@@ -942,6 +945,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                         },
                     ]),
                 }],
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -1078,6 +1082,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
                         },
                     },
                 }],
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -1216,6 +1221,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -1437,6 +1443,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -1907,6 +1914,7 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (

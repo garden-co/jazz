@@ -181,6 +181,7 @@ pub(super) fn normalized_shape(byte: u8) -> NormalizedRowSetShape {
         auxiliary_sources: BTreeSet::new(),
         closure_paths: Vec::new(),
         join_contributions: Vec::new(),
+        inherited_contributions: Vec::new(),
         reachable_contributions: Vec::new(),
         nodes: BTreeMap::from([(
             root,
@@ -229,6 +230,7 @@ pub(super) fn chained_row_set_input(
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
             join_contributions: Vec::new(),
+            inherited_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
@@ -312,6 +314,7 @@ pub(super) fn aggregate_over_window_row_set_input(byte: u8) -> RowSetProgramInpu
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
             join_contributions: Vec::new(),
+            inherited_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
@@ -393,6 +396,7 @@ pub(super) fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgr
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
             join_contributions: Vec::new(),
+            inherited_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
@@ -989,6 +993,7 @@ pub(super) fn correlated_path_request(
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (

@@ -7,7 +7,7 @@
 //! build executable Groove graphs.
 
 use super::*;
-use crate::node::query_engine::CoverageScope;
+use crate::node::query_engine::{CoverageScope, InheritedContribution};
 
 pub(super) fn root_source_id(table: &str) -> SourceId {
     SourceId {
@@ -134,6 +134,7 @@ pub(super) fn storage_backed_maintained_view_eligible(
         && normalized.closure_paths.is_empty()
         && normalized.auxiliary_sources.is_empty()
         && normalized.join_contributions.is_empty()
+        && normalized.inherited_contributions.is_empty()
         && normalized.reachable_contributions.is_empty()
 }
 
@@ -2335,6 +2336,7 @@ fn normalize_policy_atom_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
+    inherited_contributions: &mut Vec<InheritedContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &RuntimeSchema,
     root_source: &SourceId,
@@ -2365,6 +2367,7 @@ fn normalize_policy_atom_chain(
             nodes,
             auxiliary_sources,
             join_contributions,
+            inherited_contributions,
             reachable_contributions,
             schema,
             root_source,
@@ -2373,6 +2376,7 @@ fn normalize_policy_atom_chain(
             &format!("{prefix}:inherits:{index}"),
             binding_source_shape,
             param_types,
+            record_join_contributions,
             inheritance_path,
         )?;
     }
@@ -2400,6 +2404,7 @@ fn normalize_inherited_parent_policy(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
+    inherited_contributions: &mut Vec<InheritedContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &RuntimeSchema,
     child_source: &SourceId,
@@ -2408,6 +2413,7 @@ fn normalize_inherited_parent_policy(
     prefix: &str,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
+    record_inherited_contributions: bool,
     inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let child_table = table_schema(schema, &child_source.table)?;
@@ -2455,6 +2461,7 @@ fn normalize_inherited_parent_policy(
                 nodes,
                 auxiliary_sources,
                 join_contributions,
+                inherited_contributions,
                 reachable_contributions,
                 schema,
                 &parent_source,
@@ -2470,6 +2477,7 @@ fn normalize_inherited_parent_policy(
                 nodes,
                 auxiliary_sources,
                 join_contributions,
+                inherited_contributions,
                 reachable_contributions,
                 schema,
                 &parent_source,
@@ -2489,20 +2497,29 @@ fn normalize_inherited_parent_policy(
         };
     }
     let join_node = RowSetNodeId(format!("{prefix}:join"));
+    let membership = NormalizedPredicateExpr::Compare {
+        left: NormalizedValueRef::SourceField {
+            source: child_source.clone(),
+            field: inherits.parent_column.clone(),
+        },
+        op: NormalizedComparisonOp::Eq,
+        right: NormalizedValueRef::RowId(RowIdRef::Source(parent_source.clone())),
+    };
+    if record_inherited_contributions {
+        inherited_contributions.push(InheritedContribution {
+            id: prefix.to_owned(),
+            source: parent_source.clone(),
+            input: parent_current.clone(),
+            membership: membership.clone(),
+        });
+    }
     nodes.insert(
         join_node.clone(),
         RowSetExpr::Join {
             left: child_current,
             right: parent_current,
             mode: NormalizedJoinMode::Semi,
-            on: NormalizedPredicateExpr::Compare {
-                left: NormalizedValueRef::SourceField {
-                    source: child_source.clone(),
-                    field: inherits.parent_column.clone(),
-                },
-                op: NormalizedComparisonOp::Eq,
-                right: NormalizedValueRef::RowId(RowIdRef::Source(parent_source)),
-            },
+            on: membership,
         },
     );
     Ok(join_node)
@@ -2513,6 +2530,7 @@ fn normalize_policy_branch_authorization(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
+    inherited_contributions: &mut Vec<InheritedContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &RuntimeSchema,
     root_source: &SourceId,
@@ -2537,6 +2555,7 @@ fn normalize_policy_branch_authorization(
             nodes,
             auxiliary_sources,
             join_contributions,
+            inherited_contributions,
             reachable_contributions,
             schema,
             root_source,
@@ -2582,6 +2601,7 @@ fn normalize_policy_branch_authorization(
             nodes,
             auxiliary_sources,
             join_contributions,
+            inherited_contributions,
             reachable_contributions,
             schema,
             root_source,
@@ -2761,6 +2781,7 @@ where
         )]);
         let mut current = source_node;
         let mut join_contributions = Vec::new();
+        let mut inherited_contributions = Vec::new();
         let mut reachable_contributions = Vec::new();
         let inheritance_path = InheritanceExpansionPath::default();
 
@@ -2786,6 +2807,7 @@ where
                     &mut nodes,
                     &mut auxiliary_sources,
                     &mut join_contributions,
+                    &mut inherited_contributions,
                     &mut reachable_contributions,
                     schema,
                     &root_source,
@@ -2831,6 +2853,7 @@ where
                     &mut nodes,
                     &mut auxiliary_sources,
                     &mut join_contributions,
+                    &mut inherited_contributions,
                     &mut reachable_contributions,
                     schema,
                     &root_source,
@@ -2893,6 +2916,7 @@ where
                 &mut nodes,
                 &mut auxiliary_sources,
                 &mut join_contributions,
+                &mut inherited_contributions,
                 &mut reachable_contributions,
                 schema,
                 &root_source,
@@ -3186,6 +3210,7 @@ where
             auxiliary_sources,
             closure_paths,
             join_contributions,
+            inherited_contributions,
             reachable_contributions,
             nodes,
         };

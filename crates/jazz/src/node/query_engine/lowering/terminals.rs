@@ -213,6 +213,34 @@ pub(super) fn lowered_terminals(
             })
             .or_insert(graph);
     }
+    // A caller-requested `inherits` is a receiver-local semi-join.  Its
+    // parent source must cross the authority boundary, but only after the
+    // authority has applied the parent read policy.  Do not publish nested
+    // policy proof sources: those are absent from the client query AST.
+    for contribution in &request.input.shape.inherited_contributions {
+        let parent_source = resolved_sources.get(&contribution.source).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "inherited contribution source {:?} was not resolved",
+                contribution.source
+            )))
+        })?;
+        let graph = closure::inherited_contribution_membership_graph(
+            visible_root_for_receivers.clone(),
+            contribution,
+            source,
+            parent_source,
+            &request.input.shape.nodes,
+            resolved_sources,
+            request,
+            &receiver_root_route_fields,
+        )?;
+        covered_source_members
+            .entry(contribution.source.clone())
+            .and_modify(|existing| {
+                *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
+            })
+            .or_insert(graph);
+    }
     // Recursive reachability is receiver-local semantics too. Its admitted
     // access rows are exact source inputs, not authority-only proof, so emit
     // them under their own source occurrence just like join contributors.
