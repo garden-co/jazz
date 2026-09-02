@@ -1031,6 +1031,30 @@ where
             let group = coverage_groups
                 .remove(old)
                 .expect("coverage key came from coverage_groups");
+            // A serving authority's propagated usage is only a lifecycle
+            // handle: it never supplies the authority result for this group.
+            // Its owner must nevertheless follow the replacement coverage
+            // key, so a later unsubscribe/rejection cannot be routed to the
+            // stale claim scope. Scope relays instead retire and replace the
+            // opaque upstream usage below, because that usage *does* name an
+            // authority result admitted under the old immutable claims.
+            if group.upstream_opts.propagate_upstream
+                && group.upstream_opts.binding_source != BindingSource::RelayAuthoritySession
+            {
+                let mut owners = self.relay_upstream_subscription_owners.borrow_mut();
+                if let Some(owner) = owners.get_mut(&group.upstream_subscription) {
+                    debug_assert_eq!(
+                        owner.downstream_connection_epoch, connection_epoch,
+                        "direct claim refresh found an upstream handle owned by another connection"
+                    );
+                    debug_assert_eq!(
+                        owner.coverage, *old,
+                        "direct claim refresh found an upstream handle for another coverage group"
+                    );
+                    owner.coverage = refreshed.clone();
+                    owner.policy_binding = refreshed_direct_binding.clone();
+                }
+            }
             coverage_groups.insert(refreshed.clone(), group);
             for coverage in served.values_mut() {
                 if coverage == old {
@@ -1223,7 +1247,16 @@ where
         let mut rebind_pending = false;
         for (coverage, shape, binding, policy_binding, binding_origin, subscribers) in groups {
             let maintained_subscription = coverage_group_subscription_key(&coverage);
+            let retained_authorization_progress = subscribers
+                .iter()
+                .map(|subscription| peer.authorization_progress_for_subscription(*subscription))
+                .max()
+                .unwrap_or_default();
             peer.set_subscription_policy_binding(maintained_subscription, policy_binding);
+            peer.retain_authorization_progress_for_subscription(
+                maintained_subscription,
+                retained_authorization_progress,
+            );
             if binding_origin == CoveragePolicyBindingOrigin::DirectAdmitted {
                 // Update every concrete usage site before reopening the shared
                 // evaluator. A cold rehydrate can yield, but no later repair

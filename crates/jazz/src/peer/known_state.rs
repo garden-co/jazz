@@ -52,6 +52,21 @@ impl PeerState {
             .map_or(0, |state| state.authorization_progress)
     }
 
+    /// Carry an already-served authorization generation to a replacement
+    /// maintained usage. Claim rebinding changes the coverage-group key, but
+    /// does not reset the concrete downstream usages' generation: a fresh
+    /// reset from the replacement must remain comparable with their retained
+    /// fast cursors.
+    pub(crate) fn retain_authorization_progress_for_subscription(
+        &mut self,
+        subscription: SubscriptionKey,
+        authorization_progress: u64,
+    ) {
+        let state = self.publication_states.entry(subscription).or_default();
+        state.authorization_progress = authorization_progress;
+        state.has_served_authorization_progress = true;
+    }
+
     /// Drop one subscription and eagerly unregister any maintained Groove
     /// subscription from the runtime before dropping the receiver.
     pub fn forget_subscription_with_node<S>(
