@@ -704,7 +704,9 @@ impl SourceGraphPreparer for FakeSourceResolver {
 /// is explicitly out of scope for this change.
 pub(super) struct InlineCollectorResolver {
     pub(super) requests: Vec<SourceRequest>,
+    pub(super) prepared_child_titles: Vec<&'static str>,
     pub(super) denied_child_title: Option<&'static str>,
+    prefiltered_child_rows: bool,
     root_rows: Vec<InlineCollectorRootRow>,
 }
 
@@ -722,7 +724,9 @@ impl InlineCollectorResolver {
     pub(super) fn new(denied_child_title: Option<&'static str>) -> Self {
         Self {
             requests: Vec::new(),
+            prepared_child_titles: Vec::new(),
             denied_child_title,
+            prefiltered_child_rows: false,
             root_rows: vec![InlineCollectorRootRow {
                 id: 0xd1,
                 title: "parent",
@@ -734,12 +738,24 @@ impl InlineCollectorResolver {
         }
     }
 
+    /// Model a receiver's already-authorized CoveredInput closure. The
+    /// client-local compiler must not reevaluate read policy, so this fixture
+    /// removes the denied row before source preparation rather than deriving
+    /// the exclusion from `SourceAuthorizationRequest`.
+    pub(super) fn with_authorized_child_rows(denied_child_title: &'static str) -> Self {
+        let mut resolver = Self::new(Some(denied_child_title));
+        resolver.prefiltered_child_rows = true;
+        resolver
+    }
+
     pub(super) fn with_root_rows(
         root_rows: impl IntoIterator<Item = (u8, &'static str, u64)>,
     ) -> Self {
         Self {
             requests: Vec::new(),
+            prepared_child_titles: Vec::new(),
             denied_child_title: None,
+            prefiltered_child_rows: false,
             root_rows: root_rows
                 .into_iter()
                 .map(|(id, title, created_at)| InlineCollectorRootRow {
@@ -759,7 +775,9 @@ impl InlineCollectorResolver {
     ) -> Self {
         Self {
             requests: Vec::new(),
+            prepared_child_titles: Vec::new(),
             denied_child_title: None,
+            prefiltered_child_rows: false,
             root_rows: root_rows
                 .into_iter()
                 .map(
@@ -819,29 +837,45 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                             .expect("inline parent")
                     })
                     .collect(),
-                "todo_tags" => [(0xd2, "allowed"), (0xd3, "denied")]
-                    .into_iter()
-                    .filter(|(_, title)| {
-                        !matches!(
-                            (&request.authorization, self.denied_child_title),
-                            (SourceAuthorizationRequest::PolicyFiltered { .. }, Some(denied))
-                                if denied == "*" || *title == denied
-                        )
-                    })
-                    .map(|(id, title)| {
-                        descriptor
-                            .create(&[
-                                Value::Uuid(row(id).0),
-                                Value::Nullable(Some(Box::new(Value::String(title.to_owned())))),
-                                Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
-                                Value::U64(20),
-                                Value::Uuid(row(0xa2).0),
-                                Value::U64(21),
-                                Value::Uuid(row(0xa2).0),
-                            ])
-                            .expect("inline child")
-                    })
-                    .collect(),
+                "todo_tags" => {
+                    let children = [(0xd2, "allowed"), (0xd3, "denied")]
+                        .into_iter()
+                        .filter(|(_, title)| {
+                            let denied = self
+                                .denied_child_title
+                                .is_some_and(|denied| denied == "*" || denied == *title);
+                            let authority_excludes = denied
+                                && matches!(
+                                    request.authorization,
+                                    SourceAuthorizationRequest::PolicyFiltered { .. }
+                                );
+                            // Client-local sources are the authority-approved
+                            // closure, never an unfiltered raw table scan.
+                            let admitted_input_excludes = denied && self.prefiltered_child_rows;
+                            !(authority_excludes || admitted_input_excludes)
+                        })
+                        .collect::<Vec<_>>();
+                    self.prepared_child_titles
+                        .extend(children.iter().map(|(_, title)| *title));
+                    children
+                        .into_iter()
+                        .map(|(id, title)| {
+                            descriptor
+                                .create(&[
+                                    Value::Uuid(row(id).0),
+                                    Value::Nullable(Some(Box::new(Value::String(
+                                        title.to_owned(),
+                                    )))),
+                                    Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+                                    Value::U64(20),
+                                    Value::Uuid(row(0xa2).0),
+                                    Value::U64(21),
+                                    Value::Uuid(row(0xa2).0),
+                                ])
+                                .expect("inline child")
+                        })
+                        .collect()
+                }
                 "todo_labels" => vec![
                     descriptor
                         .create(&[

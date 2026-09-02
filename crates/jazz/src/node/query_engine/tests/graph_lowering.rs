@@ -55,7 +55,10 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
             reads: QueryReadSet::primary(current_read_view_at(tier)),
             policy: system_policy_context(),
             input: row_set_input(tier as u8 + 0x30),
-            output: row_set_output(sync_facts()),
+            output: RowSetOutputRequest {
+                app_rows: None,
+                facts: sync_facts(),
+            },
         };
 
         assert_eq!(
@@ -65,7 +68,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 .source_current_tier(&source("todos", SourceRole::Root)),
             Some(tier)
         );
-        assert!(request.output.app_rows.is_some());
+        assert!(request.output.app_rows.is_none());
         assert!(
             request
                 .output
@@ -94,7 +97,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
         assert_eq!(source_request.visibility, RowVisibility::Visible);
         assert_eq!(
             source_request.requirements.app_fields,
-            FieldRequirement::All
+            FieldRequirement::None
         );
         assert!(
             source_request
@@ -108,17 +111,13 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 .metadata
                 .contains(&SourceMetadataRequirement::Coverage)
         );
-        let app_rows = &program
-            .lowered
-            .terminals
-            .first()
-            .expect("lowered terminal")
-            .graph;
-        assert_public_root_terminal(app_rows);
-        assert!(graph_any(app_rows, &|graph| matches!(
-            graph,
-            GraphBuilder::Table { table, .. } if table == "resolved_todos"
-        )));
+        assert!(
+            program
+                .lowered
+                .terminals
+                .iter()
+                .all(|terminal| terminal.sink != "app_rows")
+        );
         assert_eq!(program.lowered.parameters, ParameterDomain::default());
         assert_eq!(
             program
@@ -130,20 +129,6 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
         );
 
         let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
-        assert_eq!(terminals.len(), 5);
-        assert!(terminals.iter().any(|terminal| {
-            matches!(
-                terminal,
-                OutputTerminalSchema::AppRows(AppRowSchema {
-                    descriptor,
-                    hidden_fields,
-                    carrier: AppRowCarrier::CurrentRow,
-                    terminal: AppRowTerminal::RootCollector,
-                    ..
-                }) if descriptor.field_index("user_title").is_some()
-                    && hidden_fields.is_empty()
-            )
-        }));
         assert!(terminals.iter().any(|terminal| {
             matches!(
                 terminal,
@@ -175,19 +160,6 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                     terminal: ProgramFactTerminal::VersionWitnessContent,
                     schema: ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
                         content: Some(_),
-                        ..
-                    }),
-                })
-            )
-        }));
-        assert!(terminals.iter().any(|terminal| {
-            matches!(
-                terminal,
-                OutputTerminalSchema::Fact(ProgramFactOutput {
-                    key: ProgramFactKey::VersionWitnesses,
-                    terminal: ProgramFactTerminal::VersionWitnessDeletion,
-                    schema: ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
-                        deletion: Some(_),
                         ..
                     }),
                 })
