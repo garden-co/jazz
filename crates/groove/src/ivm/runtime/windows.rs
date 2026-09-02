@@ -1635,6 +1635,46 @@ mod root_terminal_tests {
         // The replacement snapshot reconciles that maintenance state and
         // emits exactly one real occurrence once it becomes positive again.
         let reopened = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", 2)],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            reopened.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Insert { index: 0, .. },
+                ..
+            }]
+        ));
+
+        // Once public, a revoke that crosses zero must remove the facade
+        // occurrence even though its signed maintenance group remains. A
+        // subsequent replacement then re-enters through a fresh Insert,
+        // never an Update or Move against the discarded terminal key.
+        let removed = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", -2)],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            removed.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Remove { .. },
+                ..
+            }]
+        ));
+        assert!(state.emitted_root_order.is_empty());
+        assert!(state.emitted_root_keys.is_empty());
+
+        let reentered = update_collect_by_root_terminal_state(
             input,
             output,
             &collect_by,
@@ -1644,7 +1684,7 @@ mod root_terminal_tests {
         )
         .unwrap();
         assert!(matches!(
-            reopened.as_slice(),
+            reentered.as_slice(),
             [TerminalOperation {
                 edit: TerminalEdit::Insert { index: 0, .. },
                 ..
