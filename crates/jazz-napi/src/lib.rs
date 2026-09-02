@@ -40,8 +40,8 @@ use serde::Deserialize;
 /// consumers.
 #[napi]
 pub type JsonValue = serde_json::Value;
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -53,6 +53,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::FutureExt;
+#[cfg(test)]
+use futures::channel::oneshot;
 use futures::future::LocalBoxFuture;
 use futures::lock::Mutex as LocalMutex;
 use futures::task::{ArcWake, waker};
@@ -66,8 +68,10 @@ use jazz::db::{
     PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
     Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
     ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
-    StreamingValueUpload as CoreStreamingValueUpload, SubscriptionEvent as CoreSubscriptionEvent,
-    SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    StreamingValueUpload as CoreStreamingValueUpload,
+    StreamingValueUploadCleanupTicket as CoreStreamingValueUploadCleanupTicket,
+    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionStream,
+    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::records::{
@@ -221,7 +225,7 @@ struct WriteResult {
 }
 
 type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
-
+#[derive(Clone)]
 enum NapiDbInnerStorage {
     Memory(Rc<CoreDb<CoreMemoryStorage>>),
     Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
@@ -234,6 +238,407 @@ impl NapiDbInnerStorage {
             (Self::Persistent(left), Self::Persistent(right)) => left.shares_runtime_with(right),
             _ => false,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamingOwnerState {
+    Open,
+    Closing,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamingViewState {
+    Active,
+    Closing,
+}
+
+struct StreamingTerminal {
+    view_id: u64,
+    db: NapiDbInnerStorage,
+    upload: Option<CoreStreamingValueUpload>,
+    cleanup_only: bool,
+}
+
+struct PendingStreamingCleanup {
+    sequence: u64,
+    view_id: u64,
+    owner_scoped: bool,
+    db: NapiDbInnerStorage,
+    ticket: CoreStreamingValueUploadCleanupTicket,
+}
+
+#[derive(Default)]
+struct StreamingCleanupFailures {
+    first: Option<(u64, String)>,
+    secondary: Option<(u64, String)>,
+    additional: u64,
+}
+impl StreamingCleanupFailures {
+    fn record_failure(&mut self, sequence: u64, error: String) {
+        let additional = self.additional;
+        let mut entries = Vec::with_capacity(3);
+        if let Some(entry) = self.first.take() {
+            entries.push(entry);
+        }
+        if let Some(entry) = self.secondary.take() {
+            entries.push(entry);
+        }
+        entries.push((sequence, error));
+        Self::replace_with_bounded(self, entries, additional);
+    }
+
+    fn merge(&mut self, other: Self) {
+        let additional = self.additional.saturating_add(other.additional);
+        let mut entries = Vec::with_capacity(4);
+        if let Some(entry) = self.first.take() {
+            entries.push(entry);
+        }
+        if let Some(entry) = self.secondary.take() {
+            entries.push(entry);
+        }
+        if let Some(entry) = other.first {
+            entries.push(entry);
+        }
+        if let Some(entry) = other.secondary {
+            entries.push(entry);
+        }
+        Self::replace_with_bounded(self, entries, additional);
+    }
+
+    fn replace_with_bounded(target: &mut Self, mut entries: Vec<(u64, String)>, additional: u64) {
+        entries.sort_by_key(|(sequence, _)| *sequence);
+        let mut entries = entries.into_iter();
+        target.first = entries.next();
+        target.secondary = entries.next();
+        target.additional = additional.saturating_add(entries.count() as u64);
+    }
+}
+
+struct StreamingOwnerLifecycle {
+    state: Cell<StreamingOwnerState>,
+    next_view_id: Cell<u64>,
+    next_stream_id: Cell<u64>,
+    next_cleanup_sequence: Cell<u64>,
+    views: RefCell<BTreeMap<u64, StreamingViewState>>,
+    streams: RefCell<BTreeMap<u64, Rc<RefCell<StreamingTerminal>>>>,
+    pending: RefCell<Vec<PendingStreamingCleanup>>,
+    failures: RefCell<BTreeMap<u64, StreamingCleanupFailures>>,
+    close_result: RefCell<Option<std::result::Result<(), String>>>,
+    view_close_results: RefCell<BTreeMap<u64, std::result::Result<(), String>>>,
+    orphaned_closing_views: RefCell<BTreeSet<u64>>,
+    cleanup_drain_lock: Rc<LocalMutex<()>>,
+    cleanup_drain_waiters: Cell<u32>,
+    cleanup_drain_active: Cell<bool>,
+    #[cfg(test)]
+    drain_test_gate: RefCell<Option<oneshot::Receiver<()>>>,
+}
+
+impl StreamingOwnerLifecycle {
+    fn new() -> Rc<Self> {
+        Rc::new(Self {
+            state: Cell::new(StreamingOwnerState::Open),
+            next_view_id: Cell::new(1),
+            next_stream_id: Cell::new(1),
+            next_cleanup_sequence: Cell::new(1),
+            views: RefCell::new(BTreeMap::from([(0, StreamingViewState::Active)])),
+            streams: RefCell::new(BTreeMap::new()),
+            pending: RefCell::new(Vec::new()),
+            failures: RefCell::new(BTreeMap::new()),
+            close_result: RefCell::new(None),
+            view_close_results: RefCell::new(BTreeMap::new()),
+            orphaned_closing_views: RefCell::new(BTreeSet::new()),
+            cleanup_drain_lock: Rc::new(LocalMutex::new(())),
+            cleanup_drain_waiters: Cell::new(0),
+            cleanup_drain_active: Cell::new(false),
+            #[cfg(test)]
+            drain_test_gate: RefCell::new(None),
+        })
+    }
+
+    fn register_view(&self) -> napi::Result<u64> {
+        if self.state.get() != StreamingOwnerState::Open {
+            return Err(napi::Error::from_reason("database is closed"));
+        }
+        let id = self.next_view_id.get();
+        self.next_view_id.set(id.saturating_add(1));
+        self.views
+            .borrow_mut()
+            .insert(id, StreamingViewState::Active);
+        Ok(id)
+    }
+
+    fn ensure_admitted(&self, view_id: u64) -> napi::Result<()> {
+        if self.state.get() != StreamingOwnerState::Open
+            || !matches!(
+                self.views.borrow().get(&view_id),
+                Some(StreamingViewState::Active)
+            )
+        {
+            return Err(napi::Error::from_reason("database is closed"));
+        }
+        Ok(())
+    }
+
+    fn ensure_stream_active(&self, stream_id: u64) -> napi::Result<()> {
+        if self.state.get() != StreamingOwnerState::Open
+            || !self.streams.borrow().contains_key(&stream_id)
+        {
+            return Err(napi::Error::from_reason("streaming insert is closed"));
+        }
+        Ok(())
+    }
+
+    fn register_stream(
+        &self,
+        view_id: u64,
+        db: NapiDbInnerStorage,
+        upload: CoreStreamingValueUpload,
+    ) -> napi::Result<(u64, Rc<RefCell<StreamingTerminal>>)> {
+        self.ensure_admitted(view_id)?;
+        let id = self.next_stream_id.get();
+        self.next_stream_id.set(id.saturating_add(1));
+        let terminal = Rc::new(RefCell::new(StreamingTerminal {
+            view_id,
+            cleanup_only: false,
+            db,
+            upload: Some(upload),
+        }));
+        self.streams.borrow_mut().insert(id, Rc::clone(&terminal));
+        Ok((id, terminal))
+    }
+
+    fn take_stream(
+        &self,
+        stream_id: u64,
+    ) -> Option<(NapiDbInnerStorage, CoreStreamingValueUpload)> {
+        let terminal = self.streams.borrow_mut().remove(&stream_id)?;
+        let mut terminal = terminal.borrow_mut();
+        Some((terminal.db.clone(), terminal.upload.take()?))
+    }
+
+    fn enqueue_cleanup(
+        &self,
+        view_id: u64,
+        db: NapiDbInnerStorage,
+        upload: CoreStreamingValueUpload,
+    ) {
+        let ticket = match &db {
+            NapiDbInnerStorage::Memory(db) => db.enqueue_streaming_value_upload_cleanup(upload),
+            NapiDbInnerStorage::Persistent(db) => db.enqueue_streaming_value_upload_cleanup(upload),
+        };
+        let sequence = self.next_cleanup_sequence.get();
+        self.next_cleanup_sequence.set(sequence.saturating_add(1));
+        self.pending.borrow_mut().push(PendingStreamingCleanup {
+            sequence,
+            view_id,
+            owner_scoped: false,
+            db,
+            ticket,
+        });
+    }
+
+    fn retire_stream(&self, stream_id: u64) {
+        let Some(terminal) = self.streams.borrow_mut().remove(&stream_id) else {
+            return;
+        };
+        let mut terminal = terminal.borrow_mut();
+        if let Some(upload) = terminal.upload.take() {
+            self.enqueue_cleanup(terminal.view_id, terminal.db.clone(), upload);
+        }
+    }
+
+    fn close_view(&self, view_id: u64) {
+        if self.state.get() != StreamingOwnerState::Open {
+            return;
+        }
+        let mut views = self.views.borrow_mut();
+        if !matches!(views.get(&view_id), Some(StreamingViewState::Active)) {
+            return;
+        }
+        views.insert(view_id, StreamingViewState::Closing);
+        drop(views);
+        let ids = self
+            .streams
+            .borrow()
+            .iter()
+            .filter_map(|(id, stream)| (stream.borrow().view_id == view_id).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.retire_stream(id);
+        }
+    }
+
+    fn orphan_view(&self, view_id: u64) {
+        if !matches!(
+            self.views.borrow().get(&view_id),
+            Some(StreamingViewState::Active)
+        ) {
+            return;
+        }
+        self.close_view(view_id);
+        self.views.borrow_mut().remove(&view_id);
+        let mut pending = self.pending.borrow_mut();
+        for cleanup in pending
+            .iter_mut()
+            .filter(|cleanup| cleanup.view_id == view_id)
+        {
+            cleanup.owner_scoped = true;
+        }
+        drop(pending);
+        let failure = self.failures.borrow_mut().remove(&view_id);
+        if let Some(failure) = failure {
+            self.failures
+                .borrow_mut()
+                .entry(0)
+                .or_default()
+                .merge(failure);
+        }
+    }
+
+    fn mark_orphaned_closing_view(&self, view_id: u64) {
+        if matches!(
+            self.views.borrow().get(&view_id),
+            Some(StreamingViewState::Closing)
+        ) {
+            self.views.borrow_mut().remove(&view_id);
+            self.orphaned_closing_views.borrow_mut().insert(view_id);
+        }
+    }
+
+    fn take_orphaned_closing_view(&self, view_id: u64) -> bool {
+        self.orphaned_closing_views.borrow_mut().remove(&view_id)
+    }
+
+    fn close_owner(&self) {
+        if self.state.get() != StreamingOwnerState::Open {
+            return;
+        }
+        self.state.set(StreamingOwnerState::Closing);
+        self.views.borrow_mut().clear();
+        let ids = self.streams.borrow().keys().copied().collect::<Vec<_>>();
+        for id in ids {
+            self.retire_stream(id);
+        }
+    }
+
+    fn record_completion(
+        &self,
+        view_id: u64,
+        owner_scoped: bool,
+        sequence: u64,
+        result: std::result::Result<(), String>,
+    ) {
+        if let Err(error) = result {
+            let target = if owner_scoped { 0 } else { view_id };
+            self.failures
+                .borrow_mut()
+                .entry(target)
+                .or_default()
+                .record_failure(sequence, error);
+        }
+    }
+
+    fn collect_completed(&self) {
+        let mut pending = self.pending.borrow_mut();
+        let mut retained = Vec::new();
+        for cleanup in pending.drain(..) {
+            let Some(result) = cleanup.ticket.result() else {
+                retained.push(cleanup);
+                continue;
+            };
+            self.record_completion(
+                cleanup.view_id,
+                cleanup.owner_scoped,
+                cleanup.sequence,
+                result.map_err(|error| error.to_string()),
+            );
+        }
+        *pending = retained;
+    }
+
+    #[cfg(test)]
+    fn cleanup_error(&self) -> Option<String> {
+        Self::format_cleanup_error(&self.failures.borrow())
+    }
+
+    fn take_cleanup_error(&self) -> Option<String> {
+        let failures = std::mem::take(&mut *self.failures.borrow_mut());
+        Self::format_cleanup_error(&failures)
+    }
+
+    fn take_cleanup_error_for_view(&self, view_id: u64) -> Option<String> {
+        let failure = self.failures.borrow_mut().remove(&view_id)?;
+        let failures = BTreeMap::from([(view_id, failure)]);
+        let error = Self::format_cleanup_error(&failures);
+        self.failures
+            .borrow_mut()
+            .entry(0)
+            .or_default()
+            .merge(failures.into_values().next().expect("failure present"));
+        error
+    }
+
+    fn format_cleanup_error(failures: &BTreeMap<u64, StreamingCleanupFailures>) -> Option<String> {
+        let mut entries = failures
+            .values()
+            .flat_map(|failure| {
+                failure
+                    .first
+                    .iter()
+                    .chain(failure.secondary.iter())
+                    .map(|(sequence, error)| (*sequence, error.clone()))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(sequence, _)| *sequence);
+        let (sequence, first) = entries.first()?.clone();
+        let secondary = entries.get(1).map(|(_, error)| error.clone());
+        let additional = entries.iter().skip(2).count().saturating_add(
+            failures
+                .values()
+                .map(|failure| failure.additional as usize)
+                .sum(),
+        );
+        let mut message = format!("streaming cleanup failed at sequence {sequence}: {first}");
+        if let Some(secondary) = secondary {
+            message.push_str(&format!("; secondary: {secondary}"));
+        }
+        if additional > 0 {
+            message.push_str(&format!("; {additional} additional cleanup failure(s)"));
+        }
+        Some(message)
+    }
+    async fn drain_cleanups(&self) {
+        let waiters = self.cleanup_drain_waiters.get();
+        self.cleanup_drain_waiters.set(waiters.saturating_add(1));
+        let guard = self.cleanup_drain_lock.lock().await;
+        self.cleanup_drain_waiters
+            .set(self.cleanup_drain_waiters.get().saturating_sub(1));
+        self.cleanup_drain_active.set(true);
+        #[cfg(test)]
+        let drain_test_gate = self.drain_test_gate.borrow_mut().take();
+        #[cfg(test)]
+        if let Some(drain_test_gate) = drain_test_gate {
+            let _ = drain_test_gate.await;
+        }
+        let db = self
+            .pending
+            .borrow()
+            .first()
+            .map(|cleanup| cleanup.db.clone());
+        if let Some(db) = db {
+            match db {
+                NapiDbInnerStorage::Memory(db) => db.drain_queued_mutations_for_binding().await,
+                NapiDbInnerStorage::Persistent(db) => db.drain_queued_mutations_for_binding().await,
+            }
+        }
+        self.collect_completed();
+        self.cleanup_drain_active.set(false);
+        drop(guard);
+    }
+    fn cleanup_drain_blocks_tick(&self) -> bool {
+        self.cleanup_drain_active.get() || self.cleanup_drain_waiters.get() > 0
     }
 }
 
@@ -1448,6 +1853,8 @@ fn abandon_transaction_handle(
 pub struct NapiDb {
     inner: NapiDbInner,
     owns_runtime: bool,
+    view_id: u64,
+    streaming: Rc<StreamingOwnerLifecycle>,
     // Only explicit backend opens mint this in-process capability. It is
     // independent of the SYSTEM author value.
     trusted_backend: bool,
@@ -1462,6 +1869,8 @@ pub struct NapiDb {
 #[napi(js_name = "StreamingMutation")]
 pub struct StreamingMutation {
     db: NapiDbInner,
+    lifecycle: Rc<StreamingOwnerLifecycle>,
+    stream_id: u64,
     table: String,
     row_id: CoreRowUuid,
     cells: Option<CoreRowCells>,
@@ -1472,14 +1881,25 @@ pub struct StreamingMutation {
     updated_at_ms: Option<u64>,
     head: Option<CoreBranchSelector>,
     base: Option<CoreBranchViewBase>,
-    upload: Option<CoreStreamingValueUpload>,
 }
 
 #[napi]
 impl StreamingMutation {
     #[napi]
     pub fn push(&mut self, chunk: Uint8Array) -> napi::Result<()> {
-        let upload = self
+        self.lifecycle.ensure_stream_active(self.stream_id)?;
+        let terminal = self
+            .lifecycle
+            .streams
+            .borrow()
+            .get(&self.stream_id)
+            .cloned()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let mut terminal = terminal.borrow_mut();
+        if terminal.cleanup_only {
+            return Err(napi::Error::from_reason("streaming insert is closed"));
+        }
+        let upload = terminal
             .upload
             .as_mut()
             .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
@@ -1495,26 +1915,34 @@ impl StreamingMutation {
                 core_block_on(db.push_streaming_value_upload(upload, chunk.as_ref()))
             }
         };
+        if result.is_err() {
+            terminal.cleanup_only = true;
+        }
         result.map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi]
     pub fn finish(&mut self) -> napi::Result<Write> {
-        let upload = self
-            .upload
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
-        let cells = self
-            .cells
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
-        let db = self.db.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
+        self.lifecycle.ensure_stream_active(self.stream_id)?;
+        if self
+            .lifecycle
+            .streams
+            .borrow()
+            .get(&self.stream_id)
+            .is_some_and(|stream| stream.borrow().cleanup_only)
+        {
+            return Err(napi::Error::from_reason("streaming insert is closed"));
+        }
+        if self.cells.is_none() {
+            return Err(napi::Error::from_reason("streaming insert is closed"));
+        }
+        let Some((storage, upload)) = self.lifecycle.take_stream(self.stream_id) else {
+            return Err(napi::Error::from_reason("streaming insert is closed"));
+        };
+        let cells = self.cells.take().expect("checked above");
+        match storage {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
+                Rc::clone(&db),
                 core_block_on(db.finish_streaming_value_upload(
                     upload,
                     self.mutation,
@@ -1531,7 +1959,7 @@ impl StreamingMutation {
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
+                Rc::clone(&db),
                 core_block_on(db.finish_streaming_value_upload(
                     upload,
                     self.mutation,
@@ -1553,14 +1981,10 @@ impl StreamingMutation {
     #[napi]
     pub fn abort(&mut self) -> napi::Result<bool> {
         self.cells.take();
-        let Some(upload) = self.upload.take() else {
+        let Some((storage, upload)) = self.lifecycle.take_stream(self.stream_id) else {
             return Ok(false);
         };
-        let db = self.db.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
+        match storage {
             NapiDbInnerStorage::Memory(db) => {
                 core_block_on(db.abort_streaming_value_upload(upload))
             }
@@ -1570,6 +1994,25 @@ impl StreamingMutation {
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(true)
+    }
+}
+
+impl Drop for StreamingMutation {
+    fn drop(&mut self) {
+        self.lifecycle.retire_stream(self.stream_id);
+    }
+}
+
+impl Drop for NapiDb {
+    fn drop(&mut self) {
+        if !self.owns_runtime {
+            self.streaming.mark_orphaned_closing_view(self.view_id);
+            self.streaming.orphan_view(self.view_id);
+            self.streaming
+                .view_close_results
+                .borrow_mut()
+                .remove(&self.view_id);
+        }
     }
 }
 
@@ -2074,6 +2517,10 @@ impl NapiDb {
         head: Option<JsonValue>,
         base: Option<JsonValue>,
     ) -> napi::Result<StreamingMutation> {
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?;
+        self.streaming.ensure_admitted(self.view_id)?;
         if self.inner.borrow().is_none() {
             return Err(napi::Error::from_reason("database is closed"));
         }
@@ -2100,23 +2547,31 @@ impl NapiDb {
         }
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
-        let upload = {
+        let (upload, storage) = {
             let db = self.inner.borrow();
             let db = db
                 .as_ref()
                 .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
             match db {
-                NapiDbInnerStorage::Memory(db) => {
+                NapiDbInnerStorage::Memory(db) => (
                     db.begin_streaming_value_upload(&table, &cells, &column)
-                }
-                NapiDbInnerStorage::Persistent(db) => {
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                    NapiDbInnerStorage::Memory(Rc::clone(db)),
+                ),
+                NapiDbInnerStorage::Persistent(db) => (
                     db.begin_streaming_value_upload(&table, &cells, &column)
-                }
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                    NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                ),
             }
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?
         };
+        let (stream_id, _) = self
+            .streaming
+            .register_stream(self.view_id, storage, upload)?;
         Ok(StreamingMutation {
             db: Rc::clone(&self.inner),
+            lifecycle: Rc::clone(&self.streaming),
+            stream_id,
             table,
             row_id,
             cells: Some(cells),
@@ -2124,12 +2579,9 @@ impl NapiDb {
             mutation,
             identity,
             attribution: None,
-            updated_at_ms: updated_at_ms
-                .map(|value| checked_u64(value, "updatedAtMs"))
-                .transpose()?,
+            updated_at_ms,
             head,
             base,
-            upload: Some(upload),
         })
     }
 
@@ -2192,9 +2644,12 @@ impl NapiDb {
             identity,
             false,
         )?;
+        let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
+            view_id: 0,
+            streaming,
             trusted_backend: false,
             attributed_mergeable_batches: Rc::default(),
         })
@@ -2215,9 +2670,12 @@ impl NapiDb {
             identity,
             true,
         )?;
+        let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
+            view_id: 0,
+            streaming,
             trusted_backend: true,
             attributed_mergeable_batches: Rc::default(),
         })
@@ -2251,9 +2709,12 @@ impl NapiDb {
             identity,
             false,
         )?;
+        let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
+            view_id: 0,
+            streaming,
             trusted_backend: false,
             attributed_mergeable_batches: Rc::default(),
         })
@@ -2269,11 +2730,14 @@ impl NapiDb {
         let identity = core_open_identity(&config, None)?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
+        let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
             owns_runtime: true,
+            view_id: 0,
+            streaming,
             trusted_backend: false,
             attributed_mergeable_batches: Rc::default(),
         })
@@ -2291,11 +2755,14 @@ impl NapiDb {
         let identity = core_open_backend_identity(&config)?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, true)?;
+        let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
             owns_runtime: true,
+            view_id: 0,
+            streaming,
             trusted_backend: true,
             attributed_mergeable_batches: Rc::default(),
         })
@@ -2319,11 +2786,14 @@ impl NapiDb {
         let identity = core_open_identity(&config, Some(&proof))?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
+        let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
             owns_runtime: true,
+            view_id: 0,
+            streaming,
             trusted_backend: false,
             attributed_mergeable_batches: Rc::default(),
         })
@@ -2332,6 +2802,7 @@ impl NapiDb {
     /// Register and return a typed view backed by this same runtime owner.
     #[napi(js_name = "registerSchema")]
     pub fn register_schema(&self, schema: Uint8Array) -> napi::Result<Self> {
+        self.streaming.ensure_admitted(self.view_id)?;
         let schema = decode_public_schema(&schema)?;
         let db = self.inner.borrow();
         let db = db
@@ -2347,9 +2818,12 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             )),
         };
+        let view_id = self.streaming.register_view()?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(view))),
             owns_runtime: false,
+            view_id,
+            streaming: Rc::clone(&self.streaming),
             trusted_backend: self.trusted_backend,
             attributed_mergeable_batches: Rc::clone(&self.attributed_mergeable_batches),
         })
@@ -3544,6 +4018,9 @@ impl NapiDb {
 
     #[napi]
     pub fn tick(&self) -> napi::Result<()> {
+        if self.streaming.cleanup_drain_blocks_tick() {
+            return Ok(());
+        }
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -3552,9 +4029,11 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => core_poll_once(db.tick()),
             NapiDbInnerStorage::Persistent(db) => core_poll_once(db.tick()),
         };
-        completed
+        let result = completed
             .unwrap_or(Ok(()))
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
+            .map_err(|error| napi::Error::from_reason(error.to_string()));
+        self.streaming.collect_completed();
+        result
     }
 
     /// Configure Jazz-owned upload ingress and unpublished-tree expiry limits.
@@ -4066,37 +4545,139 @@ impl NapiDb {
 
     #[napi(js_name = "__closePollable", skip_typescript)]
     pub fn close(&self) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
-        let inner = self.inner.borrow_mut().take();
+        let lifecycle = Rc::clone(&self.streaming);
         let owns_runtime = self.owns_runtime;
-        native_read_or_pending(Box::pin(async move {
-            if owns_runtime && let Some(inner) = inner {
-                match inner {
-                    NapiDbInnerStorage::Memory(db) => {
-                        close_owned_napi_runtime(db).await?;
-                    }
-                    NapiDbInnerStorage::Persistent(db) => {
-                        close_owned_napi_runtime(db).await?;
-                    }
-                }
+        let view_id = self.view_id;
+        if !owns_runtime {
+            if let Some(result) = lifecycle.view_close_results.borrow().get(&view_id).cloned() {
+                return native_read_or_pending(Box::pin(async move {
+                    result
+                        .map(|()| Uint8Array::new(Vec::new()))
+                        .map_err(napi::Error::from_reason)
+                }));
             }
-            Ok(Uint8Array::new(Vec::new()))
+            if matches!(
+                lifecycle.views.borrow().get(&view_id),
+                Some(StreamingViewState::Closing)
+            ) {
+                return native_read_or_pending(Box::pin(async move {
+                    futures::future::poll_fn(|cx| {
+                        match lifecycle.view_close_results.borrow().get(&view_id).cloned() {
+                            Some(Ok(())) => Poll::Ready(Ok(Uint8Array::new(Vec::new()))),
+                            Some(Err(error)) => Poll::Ready(Err(napi::Error::from_reason(error))),
+                            None => {
+                                cx.waker().wake_by_ref();
+                                Poll::Pending
+                            }
+                        }
+                    })
+                    .await
+                }));
+            }
+        }
+        if lifecycle.state.get() == StreamingOwnerState::Closing {
+            return native_read_or_pending(Box::pin(async move {
+                futures::future::poll_fn(|cx| match lifecycle.close_result.borrow().clone() {
+                    Some(Ok(())) => Poll::Ready(Ok(Uint8Array::new(Vec::new()))),
+                    Some(Err(error)) => Poll::Ready(Err(napi::Error::from_reason(error))),
+                    None => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await
+            }));
+        }
+        if lifecycle.state.get() == StreamingOwnerState::Closed {
+            let result = lifecycle.close_result.borrow().clone().unwrap_or(Ok(()));
+            return native_read_or_pending(Box::pin(async move {
+                result
+                    .map(|()| Uint8Array::new(Vec::new()))
+                    .map_err(napi::Error::from_reason)
+            }));
+        }
+        let inner = self.inner.borrow_mut().take();
+        if owns_runtime {
+            lifecycle.close_owner();
+        } else {
+            lifecycle.close_view(view_id);
+        }
+        native_read_or_pending(Box::pin(async move {
+            let result = if owns_runtime {
+                if let Some(inner) = inner {
+                    match inner {
+                        NapiDbInnerStorage::Memory(db) => {
+                            close_owned_napi_runtime(db, Rc::clone(&lifecycle)).await
+                        }
+                        NapiDbInnerStorage::Persistent(db) => {
+                            close_owned_napi_runtime(db, Rc::clone(&lifecycle)).await
+                        }
+                    }
+                } else {
+                    lifecycle.drain_cleanups().await;
+                    lifecycle
+                        .take_cleanup_error()
+                        .map_or(Ok(()), |error| Err(napi::Error::from_reason(error)))
+                }
+            } else {
+                lifecycle.drain_cleanups().await;
+                let cleanup_error = lifecycle.take_cleanup_error_for_view(view_id);
+                lifecycle.views.borrow_mut().remove(&view_id);
+                cleanup_error.map_or(Ok(()), |error| Err(napi::Error::from_reason(error)))
+            };
+            let stored = result
+                .as_ref()
+                .copied()
+                .map_err(|error| error.reason.clone());
+            if owns_runtime {
+                lifecycle.state.set(StreamingOwnerState::Closed);
+                *lifecycle.close_result.borrow_mut() = Some(stored);
+            } else if !lifecycle.take_orphaned_closing_view(view_id) {
+                lifecycle
+                    .view_close_results
+                    .borrow_mut()
+                    .entry(view_id)
+                    .or_insert(stored);
+            }
+            result.map(|()| Uint8Array::new(Vec::new()))
         }))
     }
 }
-
-async fn close_owned_napi_runtime<S>(db: Rc<CoreDb<S>>) -> napi::Result<()>
+async fn close_owned_napi_runtime<S>(
+    db: Rc<CoreDb<S>>,
+    lifecycle: Rc<StreamingOwnerLifecycle>,
+) -> napi::Result<()>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
     let cleanup_db = Rc::clone(&db);
-    close_after_cleanup(
+    lifecycle.drain_cleanups().await;
+    let cleanup_error = lifecycle.take_cleanup_error();
+    let close_result = close_after_cleanup(
         move || {
             cleanup_db.set_tick_scheduler(None);
             cleanup_db.clear_mutation_error_callback();
         },
         async move { db.close().await.map_err(napi_error) },
     )
-    .await
+    .await;
+    compose_close_result(close_result, cleanup_error)
+}
+
+fn compose_close_result(
+    close_result: napi::Result<()>,
+    cleanup_error: Option<String>,
+) -> napi::Result<()> {
+    match close_result {
+        Err(error) => match cleanup_error {
+            Some(cleanup) => Err(napi::Error::from_reason(format!(
+                "{}; secondary: {cleanup}",
+                error.reason
+            ))),
+            None => Err(error),
+        },
+        Ok(()) => cleanup_error.map_or(Ok(()), |error| Err(napi::Error::from_reason(error))),
+    }
 }
 
 async fn close_after_cleanup<F>(cleanup: impl FnOnce(), close: F) -> napi::Result<()>
@@ -5446,14 +6027,15 @@ mod tests {
         CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, JazzServer, JazzServerInner,
         NapiDb, NapiDbInnerStorage, NapiTxKind, NapiWrite, PendingNativeRead,
         PendingNativeSubscriptionBatch, PendingSubscriptionBatchOutcome,
-        PendingSubscriptionBatchPoll, PreparedQuery, RestoreOptions, Tx, UpdateOptions,
-        UpsertOptions, authority_epoch_from_bigint, close_after_cleanup, core_author_id_from_bytes,
-        core_block_on, core_claim_value_from_json, core_drive_direct_mutation_once,
-        core_insert_options, core_open_backend_identity, core_open_identity,
-        core_read_opts_from_json, core_read_tier_from_str, core_restore_options,
-        core_subscription_event_to_napi, core_update_options, core_upsert_options,
-        core_write_memory, core_write_state_to_json, encode_core_subscription_delta,
-        requeue_retryable_subscription_batch, unknown_transaction_kind_message,
+        PendingSubscriptionBatchPoll, PreparedQuery, RestoreOptions, StreamingOwnerLifecycle, Tx,
+        UpdateOptions, UpsertOptions, authority_epoch_from_bigint, close_after_cleanup,
+        core_author_id_from_bytes, core_block_on, core_claim_value_from_json,
+        core_drive_direct_mutation_once, core_insert_options, core_open_backend_identity,
+        core_open_identity, core_read_opts_from_json, core_read_tier_from_str,
+        core_restore_options, core_subscription_event_to_napi, core_update_options,
+        core_upsert_options, core_write_memory, core_write_state_to_json,
+        encode_core_subscription_delta, requeue_retryable_subscription_batch,
+        unknown_transaction_kind_message,
     };
 
     #[test]
@@ -5477,6 +6059,28 @@ mod tests {
         assert!(
             callback_weak.upgrade().is_none(),
             "a failed storage close must not retain the JS mutation callback"
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_is_secondary_to_close_failure() {
+        let result = crate::compose_close_result(
+            Err(napi::Error::from_reason("injected close failure")),
+            Some("streaming cleanup failed at sequence 4: cleanup".to_owned()),
+        )
+        .expect_err("close failure must remain visible");
+        assert_eq!(
+            result.reason,
+            "injected close failure; secondary: streaming cleanup failed at sequence 4: cleanup"
+        );
+        let cleanup_only = crate::compose_close_result(
+            Ok(()),
+            Some("streaming cleanup failed at sequence 4: cleanup".to_owned()),
+        )
+        .expect_err("cleanup failure must be returned when close succeeds");
+        assert_eq!(
+            cleanup_only.reason,
+            "streaming cleanup failed at sequence 4: cleanup"
         );
     }
 
@@ -5854,7 +6458,7 @@ mod tests {
             .begin_streaming_mutation_encoded(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xd2; 16]),
-                Uint8Array::from(cells),
+                Uint8Array::from(cells.clone()),
                 "payload".to_owned(),
                 None,
                 None,
@@ -5878,6 +6482,390 @@ mod tests {
             0,
             "Drop cleanup must win before the TTL backstop"
         );
+        let mut retained = db
+            .begin_streaming_mutation_encoded(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xd3; 16]),
+                Uint8Array::from(cells),
+                "payload".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("begin retained streaming mutation");
+        retained
+            .push(Uint8Array::from(b"closed-with-owner".to_vec()))
+            .expect("stage retained streaming bytes");
+        assert!(
+            matches!(db.close().expect("close owner"), Either::A(_)),
+            "in-memory owner close completes after cleanup drain"
+        );
+        assert!(retained.push(Uint8Array::from(b"late".to_vec())).is_err());
+        assert!(!retained.abort().expect("closed abort is idempotent"));
+        assert!(retained.finish().is_err());
+        assert!(
+            matches!(db.close().expect("repeat owner close"), Either::A(_)),
+            "repeated close replays the completed result"
+        );
+    }
+
+    #[test]
+    fn schema_view_lifecycle_retires_only_view_streams() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("payload", ColumnType::Bytea)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = serde_json::to_vec(&source).expect("encode view schema");
+        let config = encode_persistent_open_config(CoreAuthorSubject::for_test_bytes([0xd4; 16]));
+        let owner = NapiDb::open_memory(Uint8Array::from(schema.clone()), Uint8Array::from(config))
+            .expect("open view fixture");
+        let view = owner
+            .register_schema(Uint8Array::from(schema.clone()))
+            .expect("register schema view");
+        let descriptor = RecordDescriptor::new(Vec::<(String, ValueType)>::new());
+        let raw = descriptor.create(&[]).expect("encode view cells");
+        let cells = postcard::to_allocvec(&(descriptor, raw)).expect("encode view cells");
+        let mut view_stream = view
+            .begin_streaming_mutation_encoded(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xd5; 16]),
+                Uint8Array::from(cells.clone()),
+                "payload".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("begin view stream");
+        view_stream
+            .push(Uint8Array::from(b"view".to_vec()))
+            .expect("stage view stream");
+        let mut owner_stream = owner
+            .begin_streaming_mutation_encoded(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xd6; 16]),
+                Uint8Array::from(cells.clone()),
+                "payload".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("begin owner stream");
+        owner_stream
+            .push(Uint8Array::from(b"owner".to_vec()))
+            .expect("stage owner stream");
+
+        drop(view);
+        assert!(
+            view_stream
+                .push(Uint8Array::from(b"late".to_vec()))
+                .is_err()
+        );
+        assert!(!view_stream.abort().expect("dropped view abort"));
+        owner_stream
+            .push(Uint8Array::from(b"still-open".to_vec()))
+            .expect("view drop must preserve sibling stream admission");
+        assert!(owner_stream.abort().expect("abort owner stream"));
+
+        let closed_view = owner
+            .register_schema(Uint8Array::from(schema.clone()))
+            .expect("register explicitly closed view");
+        let mut closed_stream = closed_view
+            .begin_streaming_mutation_encoded(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xd9; 16]),
+                Uint8Array::from(cells.clone()),
+                "payload".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("begin explicitly closed view stream");
+        closed_stream
+            .push(Uint8Array::from(b"closed-view".to_vec()))
+            .expect("stage explicitly closed view stream");
+        assert!(
+            matches!(
+                closed_view.close().expect("close schema view"),
+                Either::A(_)
+            ),
+            "explicit view close drains its admitted stream"
+        );
+        assert!(
+            closed_stream
+                .push(Uint8Array::from(b"late".to_vec()))
+                .is_err()
+        );
+        assert!(!closed_stream.abort().expect("explicitly closed view abort"));
+        assert!(
+            matches!(
+                closed_view.close().expect("repeat close schema view"),
+                Either::A(_)
+            ),
+            "repeated view close replays its result"
+        );
+
+        owner
+            .set_large_value_staging_policy(1.0, 60_000.0, None)
+            .expect("set restrictive ingress policy");
+        let mut failed_stream = owner
+            .begin_streaming_mutation_encoded(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xd7; 16]),
+                Uint8Array::from(cells),
+                "payload".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("begin failed stream");
+        let push_error = failed_stream
+            .push(Uint8Array::from(vec![
+                0xd8;
+                groove::large_values::LEAF_MAX_BYTES
+                    + 1
+            ]))
+            .expect_err("ingress rejection must be reported");
+        assert!(push_error.reason.contains("rate limit"));
+        assert!(
+            failed_stream
+                .push(Uint8Array::from(b"retry".to_vec()))
+                .is_err(),
+            "a push failure transitions the stream to cleanup-only"
+        );
+        assert!(
+            failed_stream.finish().is_err(),
+            "cleanup-only streams cannot publish"
+        );
+        assert!(failed_stream.abort().expect("abort failed stream"));
+
+        assert!(
+            matches!(owner.close().expect("close owner"), Either::A(_)),
+            "owner close remains usable after view drop and push failure"
+        );
+    }
+
+    // Cleanup-error compression is binding-private and only observable through
+    // owner close when storage injection is active; keep its bounded accounting
+    // receipt next to the public lifecycle tests.
+    #[test]
+    fn streaming_cleanup_errors_keep_first_sequence_and_bound_secondaries() {
+        let lifecycle = StreamingOwnerLifecycle::new();
+        lifecycle.record_completion(0, false, 4, Err("first".to_owned()));
+        lifecycle.record_completion(0, false, 9, Err("second".to_owned()));
+        lifecycle.record_completion(0, false, 12, Err("third".to_owned()));
+        assert_eq!(
+            lifecycle.cleanup_error().as_deref(),
+            Some(
+                "streaming cleanup failed at sequence 4: first; secondary: second; \
+                 1 additional cleanup failure(s)"
+            )
+        );
+    }
+
+    #[test]
+    fn cleanup_failures_are_consumed_by_their_view_close() {
+        let lifecycle = StreamingOwnerLifecycle::new();
+        lifecycle.record_completion(1, false, 4, Err("view A".to_owned()));
+        lifecycle.record_completion(2, false, 9, Err("view B".to_owned()));
+
+        assert_eq!(
+            lifecycle.take_cleanup_error_for_view(1).as_deref(),
+            Some("streaming cleanup failed at sequence 4: view A")
+        );
+        assert_eq!(
+            lifecycle.cleanup_error().as_deref(),
+            Some("streaming cleanup failed at sequence 4: view A; secondary: view B")
+        );
+        assert_eq!(
+            lifecycle.take_cleanup_error_for_view(2).as_deref(),
+            Some("streaming cleanup failed at sequence 9: view B")
+        );
+        assert_eq!(
+            lifecycle.cleanup_error().as_deref(),
+            Some("streaming cleanup failed at sequence 4: view A; secondary: view B")
+        );
+        assert!(lifecycle.take_cleanup_error().is_some());
+        assert!(lifecycle.cleanup_error().is_none());
+    }
+
+    #[test]
+    fn cleanup_failure_merge_preserves_global_sequence_order() {
+        let lifecycle = StreamingOwnerLifecycle::new();
+        lifecycle.record_completion(0, false, 2, Err("second".to_owned()));
+        lifecycle.record_completion(0, false, 3, Err("third".to_owned()));
+        let view_id = lifecycle.register_view().expect("register view");
+        lifecycle.record_completion(view_id, false, 1, Err("first".to_owned()));
+
+        let _ = lifecycle
+            .take_cleanup_error_for_view(view_id)
+            .expect("view cleanup failure");
+        assert_eq!(
+            lifecycle.cleanup_error().as_deref(),
+            Some(
+                "streaming cleanup failed at sequence 1: first; secondary: second; 1 additional cleanup failure(s)"
+            )
+        );
+    }
+    #[test]
+    fn orphaned_view_failures_fold_into_bounded_owner_accounting() {
+        let lifecycle = StreamingOwnerLifecycle::new();
+        let view_id = lifecycle.register_view().expect("register orphaned view");
+        lifecycle.record_completion(view_id, false, 4, Err("orphaned".to_owned()));
+        lifecycle.orphan_view(view_id);
+        assert!(!lifecycle.views.borrow().contains_key(&view_id));
+        assert!(
+            lifecycle.take_cleanup_error_for_view(view_id).is_none(),
+            "orphaned view failures are not retained per dead view"
+        );
+        assert_eq!(
+            lifecycle.cleanup_error().as_deref(),
+            Some("streaming cleanup failed at sequence 4: orphaned")
+        );
+    }
+
+    #[test]
+    fn orphaned_closing_view_marker_is_reaped_after_completion() {
+        let lifecycle = StreamingOwnerLifecycle::new();
+        let view_id = lifecycle.register_view().expect("register closing view");
+        lifecycle.close_view(view_id);
+        lifecycle.mark_orphaned_closing_view(view_id);
+        assert!(!lifecycle.views.borrow().contains_key(&view_id));
+        assert!(lifecycle.take_orphaned_closing_view(view_id));
+        assert!(!lifecycle.take_orphaned_closing_view(view_id));
+        assert!(lifecycle.orphaned_closing_views.borrow().is_empty());
+    }
+
+    #[test]
+    fn concurrent_cleanup_drains_serialize_fifo_and_block_tick() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("payload", ColumnType::Bytea)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = serde_json::to_vec(&source).expect("encode drain schema");
+        let config = encode_persistent_open_config(CoreAuthorSubject::for_test_bytes([0xe1; 16]));
+        let owner = NapiDb::open_memory(Uint8Array::from(schema.clone()), Uint8Array::from(config))
+            .expect("open drain owner");
+        let first_view = owner
+            .register_schema(Uint8Array::from(schema.clone()))
+            .expect("register first drain view");
+        let second_view = owner
+            .register_schema(Uint8Array::from(schema))
+            .expect("register second drain view");
+        let descriptor = RecordDescriptor::new(Vec::<(String, ValueType)>::new());
+        let raw = descriptor.create(&[]).expect("encode drain cells");
+        let cells = postcard::to_allocvec(&(descriptor, raw)).expect("encode drain cells");
+        let mut first_stream = first_view
+            .begin_streaming_mutation_encoded(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xe2; 16]),
+                Uint8Array::from(cells.clone()),
+                "payload".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("begin first drain stream");
+        first_stream
+            .push(Uint8Array::from(b"first".to_vec()))
+            .expect("stage first drain stream");
+        let mut second_stream = second_view
+            .begin_streaming_mutation_encoded(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xe3; 16]),
+                Uint8Array::from(cells),
+                "payload".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("begin second drain stream");
+        second_stream
+            .push(Uint8Array::from(b"second".to_vec()))
+            .expect("stage second drain stream");
+        drop(first_stream);
+        drop(second_stream);
+
+        let lifecycle = Rc::clone(&owner.streaming);
+        let (release_tx, release_rx) = oneshot::channel();
+        *lifecycle.drain_test_gate.borrow_mut() = Some(release_rx);
+        let mut first_close = match first_view.close().expect("start first view close") {
+            Either::B(pending) => pending,
+            Either::A(_) => panic!("first close unexpectedly completed synchronously"),
+        };
+        let mut second_close = match second_view.close().expect("start second view close") {
+            Either::B(pending) => pending,
+            Either::A(_) => panic!("second close unexpectedly completed synchronously"),
+        };
+        assert_eq!(
+            lifecycle.pending.borrow().len(),
+            2,
+            "both cleanup operations remain queued behind the first drain"
+        );
+        owner.tick().expect("tick while first view close drains");
+        assert_eq!(
+            lifecycle.pending.borrow().len(),
+            2,
+            "tick cannot pop either cleanup successor during the pending drain"
+        );
+        assert!(
+            first_close
+                .poll()
+                .expect("poll first pending close")
+                .is_none()
+        );
+        assert!(
+            second_close
+                .poll()
+                .expect("poll second pending close")
+                .is_none()
+        );
+
+        release_tx.send(()).expect("release first close drain");
+        assert!(
+            first_close
+                .poll()
+                .expect("settle first view close")
+                .is_some()
+        );
+        assert!(
+            second_close
+                .poll()
+                .expect("settle second view close")
+                .is_some()
+        );
+        assert!(lifecycle.pending.borrow().is_empty());
     }
 
     /// The direct NAPI mutation surface is intentionally synchronous only for
@@ -7238,6 +8226,8 @@ mod tests {
                 &owner,
             ))))),
             owns_runtime: false,
+            view_id: 0,
+            streaming: StreamingOwnerLifecycle::new(),
             trusted_backend: false,
             attributed_mergeable_batches: Rc::default(),
         };
@@ -7263,6 +8253,8 @@ mod tests {
                 &view,
             ))))),
             owns_runtime: false,
+            view_id: 0,
+            streaming: StreamingOwnerLifecycle::new(),
             trusted_backend: false,
             attributed_mergeable_batches: Rc::default(),
         };
@@ -7292,6 +8284,8 @@ mod tests {
                 &other_owner,
             ))))),
             owns_runtime: false,
+            view_id: 0,
+            streaming: StreamingOwnerLifecycle::new(),
             trusted_backend: false,
             attributed_mergeable_batches: Rc::default(),
         };

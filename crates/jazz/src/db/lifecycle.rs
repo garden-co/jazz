@@ -512,6 +512,42 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Enqueue exact cleanup for an opaque binding-owned streaming upload.
+    ///
+    /// The operation bypasses ordinary mutation admission so a cleanup
+    /// admitted before close can still retire its pending durable claim.
+    #[doc(hidden)]
+    pub fn enqueue_streaming_value_upload_cleanup(
+        &self,
+        upload: StreamingValueUpload,
+    ) -> StreamingValueUploadCleanupTicket {
+        let result = Rc::new(RefCell::new(None));
+        let id = upload.cleanup_id();
+        let completion_result = Rc::clone(&result);
+        let node = Rc::clone(&self.node.node);
+        self.node.enqueue_transaction_cleanup_with_completion(
+            Box::pin(async move {
+                node.lock()
+                    .await
+                    .evict_pending_large_value_upload(id)
+                    .await
+                    .map_err(Error::from)
+            }),
+            Some(Box::new(move |outcome| {
+                *completion_result.borrow_mut() = Some(outcome);
+            })),
+        );
+        StreamingValueUploadCleanupTicket { result }
+    }
+
+    /// Drain operations admitted by a binding without closing mutation
+    /// admission. Views use this to await their own cleanup tickets while the
+    /// shared owner remains usable.
+    #[doc(hidden)]
+    pub async fn drain_queued_mutations_for_binding(&self) {
+        self.node.drain_queued_mutations().await;
+    }
+
     /// Queue a transaction-local read behind already-admitted transaction
     /// work. Bindings retain the returned receiver instead of synchronously
     /// polling cold storage on their host thread.
