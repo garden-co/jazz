@@ -2899,7 +2899,7 @@ fn replacement_winner(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use groove::ivm::RecordDelta;
     use groove::records::{Value, ValueType};
@@ -3549,6 +3549,93 @@ mod tests {
         append_net_peer_source_fact_changes(&mut transitions, changes);
         assert!(transitions.program_fact_adds.is_empty());
         assert!(transitions.program_fact_removes.is_empty());
+    }
+
+    #[test]
+    fn multisink_shared_source_fact_retracts_only_after_its_last_terminal() {
+        let descriptor = RecordDescriptor::new([("complete", ValueType::Bool)]);
+        let source = test_source();
+        let coverage_schema = super::super::query_engine::ProgramSourceCoverageSchema {
+            source: source.clone(),
+            complete: true,
+            routing_param_fields: BTreeSet::new(),
+        };
+        let schemas = MaintainedTerminalSchemas {
+            sinks: BTreeMap::from([
+                (
+                    "source-a".to_owned(),
+                    MaintainedTerminalKind::ProgramSourceCoverage(coverage_schema.clone()),
+                ),
+                (
+                    "source-b".to_owned(),
+                    MaintainedTerminalKind::ProgramSourceCoverage(coverage_schema),
+                ),
+            ]),
+        };
+        let tables = BTreeMap::new();
+        let deltas = |weight| RecordDeltas {
+            descriptor,
+            deltas: vec![RecordDelta {
+                record: descriptor.create(&[Value::Bool(true)]).unwrap().into(),
+                weight,
+            }],
+        };
+        let fact =
+            ProgramFactEntry::ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry {
+                source,
+                complete: true,
+            });
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        let initial = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([
+                        ("source-a".to_owned(), deltas(1)),
+                        ("source-b".to_owned(), deltas(1)),
+                    ]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(initial.program_fact_adds, vec![fact.clone()]);
+        assert!(initial.program_fact_removes.is_empty());
+
+        let retain = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([("source-a".to_owned(), deltas(-1))]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert!(retain.program_fact_adds.is_empty());
+        assert!(retain.program_fact_removes.is_empty());
+        assert!(
+            maintained
+                .active_peer_source_closure_facts()
+                .contains(&fact)
+        );
+
+        let retract = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([("source-b".to_owned(), deltas(-1))]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert!(retract.program_fact_adds.is_empty());
+        assert_eq!(retract.program_fact_removes, vec![fact]);
     }
 
     fn replacement_content(row: VersionRow) -> DecodedMaintainedEvent {
