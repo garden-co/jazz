@@ -1056,7 +1056,10 @@ fn reset_accepts_identical_annotated_duplicates() {
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
             program_fact_adds: todos_source_closure(tx_id, std::slice::from_ref(&conflicting)),
-            program_fact_removes: vec![removed_todos_input(tx_id)],
+            // This case isolates conflicting transaction metadata.  An absent
+            // covered-input removal is independently rejected by
+            // `reset_conflicts_with_member_removals_are_atomic`.
+            program_fact_removes: Vec::new(),
         };
         let result = match path {
             ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![replay]).resolve(),
@@ -1395,6 +1398,7 @@ fn assert_reset_authored_columns_conflict(
     with_member_removal: bool,
 ) {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -1421,9 +1425,18 @@ fn assert_reset_authored_columns_conflict(
     if reversed {
         versions.reverse();
     }
-    let source_closure = todos_source_closure(tx_id, &versions);
+    // Keep the impossible-removal control independent from duplicate metadata:
+    // it needs one otherwise-valid source member so admission reaches the
+    // predecessor-removal check first.
+    let source_versions = if with_member_removal {
+        &versions[..1]
+    } else {
+        &versions[..]
+    };
+    let source_closure = todos_source_closure(tx_id, source_versions);
     let version_bundles = versions
         .into_iter()
+        .take(if with_member_removal { 1 } else { 2 })
         .map(|version| VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: tx.clone(),
@@ -1466,13 +1479,24 @@ fn assert_reset_authored_columns_conflict(
         ResetConflictPath::Single => reader.apply_view_update(update).resolve(),
     };
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
-        ),
-        "{path:?} reset must reject conflicting authored columns (reversed: {reversed})"
-    );
+    if with_member_removal {
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidAuthoritySourceClosure { ref transition, .. })
+                    if transition.contains("covered input removal is absent from predecessor closure")
+            ),
+            "{path:?} reset must reject an absent covered-input removal (reversed: {reversed}): {result:?}"
+        );
+    } else {
+        assert!(
+            matches!(
+                result,
+                Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
+            ),
+            "{path:?} reset must reject conflicting authored columns (reversed: {reversed})"
+        );
+    }
     assert!(reader.query_transaction(tx_id).unwrap().is_none());
     assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
     assert!(reader.query_all_versions().unwrap().is_empty());
