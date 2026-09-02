@@ -57,7 +57,15 @@ fn lower_correlated_path_plan(
         .child
         .steps
         .iter()
-        .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+        // The path graph carries physical parent/child witnesses. Public
+        // child projections are applied by the collector after the path, so
+        // they must not rename or discard the row/version fields used here.
+        .filter(|step| {
+            !matches!(
+                step,
+                LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Project(_)
+            )
+        })
         .cloned()
         .collect::<Vec<_>>();
     let child_relation_plan = LinearCurrentRoot {
@@ -326,7 +334,18 @@ pub(super) fn lower_correlated_path_relation_graph_from_parent(
             path.child
                 .steps
                 .iter()
-                .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+                // Correlated paths are a source-level relationship boundary.
+                // The collector projects the public child record after that
+                // boundary, while relationship edges and nested paths still
+                // need the child's physical row/version fields. In
+                // particular, a final public projection can rename or omit
+                // `row_uuid`, which must not shape the path graph.
+                .filter(|step| {
+                    !matches!(
+                        step,
+                        LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Project(_)
+                    )
+                })
                 .cloned()
                 .collect()
         },
@@ -375,6 +394,15 @@ fn child_steps_for_relation_edges(steps: &[LinearStep]) -> Vec<LinearStep> {
     let mut filtered = Vec::with_capacity(steps.len());
     for step in steps {
         match step {
+            // Relation-edge terminals describe the physical parent/child
+            // witnesses, not the child query's rendered row. A final public
+            // projection can rename `row_uuid` to `id` and discard the
+            // version fields the edge needs; retain the source layout here
+            // and let the public collector perform that projection on its
+            // own path.
+            LinearStep::Project(_) => {
+                previous_was_order_by = false;
+            }
             LinearStep::Slice { .. } if !previous_was_order_by => {
                 previous_was_order_by = false;
             }
@@ -431,6 +459,29 @@ pub(super) fn lower_relation_input(
     lowered
         .remove(&relation_input_key(plan))
         .ok_or_else(|| UnsupportedReason::Runtime("relation input was not lowered".to_owned()))
+}
+
+/// Lower a relation as an input to a source-closure contributor terminal.
+///
+/// A relation facade's final `Project` renders its public output.  Contributor
+/// terminals instead freeze the source occurrence that supplied that output,
+/// including its row/version witness fields.  Keeping that terminal rendering
+/// here would make a later source projection ask a projected join input for
+/// `row_uuid` and silently conflate public aliases with physical identity.
+/// All membership operators remain unchanged; only the outer rendered result
+/// projection is removed.
+pub(super) fn lower_relation_input_for_contributor(
+    plan: &RelationInputPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let mut source_plan = plan.clone();
+    if let RelationInputPlan::Linear(linear) = &mut source_plan
+        && matches!(linear.steps.last(), Some(LinearStep::Project(_)))
+    {
+        linear.steps.pop();
+    }
+    lower_relation_input(&source_plan, resolved_sources, request)
 }
 
 /// Relation inputs are nested by policy joins.  Lower them in postorder so a

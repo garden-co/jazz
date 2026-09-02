@@ -100,8 +100,8 @@ fn reachable_contribution_membership_graph(
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.access_input, nodes, &mut visited)
         .map_err(single_gap_report)?;
-    let lowered =
-        lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
+    let lowered = lower_relation_input_for_contributor(&plan, resolved_sources, request)
+        .map_err(single_gap_report)?;
     let join_field = user_column_field(&contribution.root_ref_field);
     if !lowered.fields.contains(&join_field) {
         return Err(Box::new(CapabilityReport {
@@ -146,8 +146,8 @@ pub(super) fn join_contribution_membership_graph(
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
         .map_err(single_gap_report)?;
-    let lowered =
-        lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
+    let lowered = lower_relation_input_for_contributor(&plan, resolved_sources, request)
+        .map_err(single_gap_report)?;
     let (root_keys, join_keys) = lower_root_to_relation_key_pairs(
         &contribution.membership,
         root_source,
@@ -208,8 +208,8 @@ pub(super) fn flat_join_contribution_membership_graph(
     let mut visited = BTreeSet::new();
     let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
         .map_err(single_gap_report)?;
-    let lowered =
-        lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
+    let lowered = lower_relation_input_for_contributor(&plan, resolved_sources, request)
+        .map_err(single_gap_report)?;
     let PredicateExpr::Compare {
         left,
         op: ComparisonOp::Eq,
