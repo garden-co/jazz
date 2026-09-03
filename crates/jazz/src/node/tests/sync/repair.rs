@@ -1164,9 +1164,26 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        result_member_adds: vec![("tasks".to_owned().into(), task_row, tx_id).into()],
+        result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
+        program_fact_adds: vec![crate::protocol::ProgramFactEntry::CoveredInput(
+            crate::protocol::CoveredInputEntry {
+                source: crate::protocol::ProgramSourceId {
+                    table: "tasks".to_owned().into(),
+                    path: vec![crate::protocol::ProgramSourceRole::Root],
+                },
+                version_table: "tasks".to_owned().into(),
+                source_row: task_row,
+                version: crate::protocol::RowVersionRefEntry {
+                    tx: tx_id,
+                    schema_version: Some(reintroduced.version_id()),
+                    layer: crate::protocol::ResultRowLayer::Content,
+                    batch: Some(tx_id),
+                    branch_or_prefix: None,
+                    row_digest: None,
+                },
+            },
+        )],
         program_fact_removes: Vec::new(),
     });
     assert_eq!(

@@ -2938,8 +2938,16 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         vec![("todos", first_row, first_tx)],
     );
     assert!(program_fact_adds.iter().all(|fact| {
-        !matches!(fact, ProgramFactEntry::CoveredInput(input) if input.source_row == first_row)
+        !matches!(fact, ProgramFactEntry::CoveredInput(input)
+            if input.source_row == first_row
+                && input.version.layer == crate::protocol::ResultRowLayer::Content)
     }));
+    assert!(program_fact_adds.iter().any(|fact| {
+        matches!(fact, ProgramFactEntry::CoveredInput(input)
+            if input.source_row == first_row
+                && input.version.tx == delete_first_tx
+                && input.version.layer == crate::protocol::ResultRowLayer::Deletion)
+    }), "the authorized deletion witness clears cached state without restoring the deleted content input");
     assert!(
         program_fact_removes.iter().any(|fact| {
             matches!(
@@ -3931,10 +3939,11 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     );
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(
-        metrics.footprint.structured_app_rows, 1,
-        "flat updates retain the same local collector used for reset and deltas"
+        metrics.footprint.structured_app_rows, 0,
+        "retaining the collector does not retain a row that left its result"
     );
-    assert!(metrics.footprint.structured_app_rows_bytes > 0);
+    assert_eq!(metrics.footprint.result_rows, 0);
+    assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
 
     let restored_tx = core
         .commit_mergeable_settled(

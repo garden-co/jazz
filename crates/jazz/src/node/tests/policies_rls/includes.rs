@@ -632,17 +632,9 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     core.accept_global_for_test(update_tx).unwrap();
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds, ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
+    let (adds, _) = canonical_view_update_rows(&update);
     assert_eq!(
-        result_member_adds
-            .into_iter()
-            .filter_map(crate::protocol::ResultMemberEntry::into_row)
-            .collect::<BTreeSet<_>>(),
+        adds.into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([("roots".to_owned().into(), row(0xd2), update_tx)])
     );
 }
