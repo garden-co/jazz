@@ -838,4 +838,54 @@ mod tests {
         let b = WriteStream::new(7, 10, 16, &rows, &authors, 1.1, 1.1);
         assert_eq!(a.steps(), b.steps());
     }
+
+    #[test]
+    fn write_stream_uses_fractional_millisecond_cadence_at_600_per_second() {
+        let rows = vec![deterministic_row_uuid(1, "rows", 0)];
+        let authors = vec![
+            AuthorSubject::authenticated("urn:jazz:sim", &rows[0].0.to_string())
+                .expect("simulation issuer is external"),
+        ];
+        let stream = WriteStream::new(7, 600, 6, &rows, &authors, 1.1, 1.1);
+
+        assert_eq!(
+            stream
+                .steps()
+                .iter()
+                .map(|step| step.at_ms)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 3, 5, 6, 8]
+        );
+    }
+
+    #[test]
+    fn write_stream_repeats_milliseconds_at_2000_per_second() {
+        let rows = vec![deterministic_row_uuid(1, "rows", 0)];
+        let authors = vec![
+            AuthorSubject::authenticated("urn:jazz:sim", &rows[0].0.to_string())
+                .expect("simulation issuer is external"),
+        ];
+        let stream = WriteStream::new(7, 2_000, 8, &rows, &authors, 1.1, 1.1);
+
+        assert_eq!(
+            stream
+                .steps()
+                .iter()
+                .map(|step| step.at_ms)
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1, 1, 2, 2, 3, 3]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "write stream edits per second must be positive")]
+    fn write_stream_rejects_zero_rate() {
+        let rows = vec![deterministic_row_uuid(1, "rows", 0)];
+        let authors = vec![
+            AuthorSubject::authenticated("urn:jazz:sim", &rows[0].0.to_string())
+                .expect("simulation issuer is external"),
+        ];
+
+        let _ = WriteStream::new(7, 0, 1, &rows, &authors, 1.1, 1.1);
+    }
 }
