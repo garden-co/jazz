@@ -14,7 +14,7 @@ import {
   type WriteReceipt,
 } from "./client.js";
 import type { AppContext } from "./context.js";
-import type { WasmSchema } from "../drivers/types.js";
+import type { RuntimeSubscriptionDelta, WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
   let mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
@@ -165,6 +165,183 @@ describe("JazzClient subscription ownership", () => {
     expect(runtime.unsubscribe).toHaveBeenCalledOnce();
     expect(runtime.unsubscribe).toHaveBeenCalledWith(41);
   });
+  it("delivers established runtime failures through the subscription error callback", () => {
+    const runtime = makeFakeRuntime();
+    const failure = new Error("subscription stream failed");
+    runtime.createSubscription.mockReturnValue(42);
+    let emit!: (result: RuntimeSubscriptionDelta | Error) => void;
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      emit = onUpdate as typeof emit;
+    });
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+    const callback = vi.fn();
+    const onError = vi.fn();
+
+    expect(() =>
+      client.subscribe('{"table":"todos"}', { onUpdate: callback, onError }),
+    ).not.toThrow();
+    emit(failure);
+    emit(new Error("late duplicate failure"));
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(failure);
+    expect(runtime.unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledWith(42);
+  });
+
+  it("contains terminal error callback failures after releasing the native handle", () => {
+    const runtime = makeFakeRuntime();
+    const failure = new Error("subscription stream failed");
+    const callbackFailure = new Error("terminal callback failed");
+    let emit!: (result: RuntimeSubscriptionDelta | Error) => void;
+    runtime.createSubscription.mockReturnValue(45);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      emit = onUpdate as typeof emit;
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+
+    client.subscribe('{"table":"todos"}', {
+      onUpdate: vi.fn(),
+      onError: () => {
+        throw callbackFailure;
+      },
+    });
+    expect(() => emit(failure)).not.toThrow();
+
+    expect(runtime.unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledWith(45);
+    expect(consoleError).toHaveBeenCalledWith(
+      "Jazz subscription error callback failed",
+      callbackFailure,
+    );
+    consoleError.mockRestore();
+  });
+
+  it("releases a terminal subscription exactly once when onError reentrantly unsubscribes", () => {
+    const runtime = makeFakeRuntime();
+    const failure = new Error("subscription stream failed");
+    let emit!: (result: RuntimeSubscriptionDelta | Error) => void;
+    runtime.createSubscription.mockReturnValue(46);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      emit = onUpdate as typeof emit;
+    });
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+    const id = client.subscribe('{"table":"todos"}', {
+      onUpdate: vi.fn(),
+      onError: () => client.unsubscribe(id),
+    });
+
+    emit(failure);
+    emit({ added: [], updated: [], removed: [] });
+
+    expect(runtime.unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledWith(46);
+  });
+
+  it("fences a queued terminal frame after public unsubscribe without releasing twice", () => {
+    const runtime = makeFakeRuntime();
+    let emit!: (result: RuntimeSubscriptionDelta | Error) => void;
+    runtime.createSubscription.mockReturnValue(47);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      emit = onUpdate as typeof emit;
+    });
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+    const onError = vi.fn();
+    const id = client.subscribe('{"table":"todos"}', { onUpdate: vi.fn(), onError });
+
+    client.unsubscribe(id);
+    emit(new Error("queued terminal failure"));
+    client.unsubscribe(id);
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(runtime.unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledWith(47);
+  });
+
+  it("terminalizes only the affected subscription and keeps siblings live", () => {
+    const runtime = makeFakeRuntime();
+    const callbacks = new Map<number, (result: RuntimeSubscriptionDelta | Error) => void>();
+    runtime.createSubscription.mockReturnValueOnce(51).mockReturnValueOnce(52);
+    runtime.executeSubscription.mockImplementation((handle, onUpdate) => {
+      callbacks.set(handle, onUpdate as (result: RuntimeSubscriptionDelta | Error) => void);
+    });
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+    const affectedUpdate = vi.fn();
+    const affectedError = vi.fn();
+    const siblingUpdate = vi.fn();
+    const siblingError = vi.fn();
+
+    client.subscribe('{"table":"affected"}', { onUpdate: affectedUpdate, onError: affectedError });
+    client.subscribe('{"table":"sibling"}', { onUpdate: siblingUpdate, onError: siblingError });
+
+    const failure = new Error("affected subscription failed");
+    callbacks.get(51)!(failure);
+    callbacks.get(51)!({ added: [], updated: [], removed: [] });
+    callbacks.get(52)!({ added: [], updated: [], removed: [] });
+
+    expect(affectedError).toHaveBeenCalledTimes(1);
+    expect(affectedError).toHaveBeenCalledWith(failure);
+    expect(affectedUpdate).not.toHaveBeenCalled();
+    expect(siblingError).not.toHaveBeenCalled();
+    expect(siblingUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a legacy function-form terminal error and fences later updates", () => {
+    const runtime = makeFakeRuntime();
+    const failure = new Error("legacy subscription failed");
+    let emit!: (result: RuntimeSubscriptionDelta | Error) => void;
+    runtime.createSubscription.mockReturnValue(43);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      emit = onUpdate as typeof emit;
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+    const onUpdate = vi.fn();
+
+    client.subscribe('{"table":"todos"}', onUpdate);
+    emit(failure);
+    emit({ added: [], updated: [], removed: [] });
+    emit(new Error("duplicate failure"));
+
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz subscription error", failure);
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("routes update callback failures through onError and contains onError exceptions", () => {
+    const runtime = makeFakeRuntime();
+    const callbackFailure = new Error("subscription callback failed");
+    const errorCallbackFailure = new Error("subscription error callback failed");
+    let emit!: (result: RuntimeSubscriptionDelta | Error) => void;
+    runtime.createSubscription.mockReturnValue(44);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      emit = onUpdate as typeof emit;
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+    const onUpdate = vi.fn(() => {
+      throw callbackFailure;
+    });
+    const onError = vi.fn(() => {
+      throw errorCallbackFailure;
+    });
+
+    client.subscribe('{"table":"todos"}', { onUpdate, onError });
+    expect(() => emit({ added: [], updated: [], removed: [] })).not.toThrow();
+    emit({ added: [], updated: [], removed: [] });
+
+    expect(onUpdate).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(callbackFailure);
+    expect(runtime.unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledWith(44);
+    expect(consoleError).toHaveBeenCalledWith(
+      "Jazz subscription error callback failed",
+      errorCallbackFailure,
+    );
+  });
 });
 
 describe("JazzClient native session boundary", () => {
@@ -242,7 +419,24 @@ describe("JazzClient.updateAuthToken", () => {
 
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({
-      jwt_token: "new.jwt.token",
+      jwt_token: null,
+      backend_secret: "backend-abc",
+    });
+  });
+
+  it("does not mix an admin credential into a backend transport refresh", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      ...makeContext(),
+      adminSecret: "admin-xyz",
+      backendSecret: "backend-abc",
+    });
+
+    client.updateAuthToken("new.jwt.token");
+
+    const arg = runtime.updateAuth.mock.calls[0][0] as string;
+    expect(JSON.parse(arg)).toEqual({
+      jwt_token: null,
       backend_secret: "backend-abc",
     });
   });
@@ -309,7 +503,7 @@ describe("JazzClient.updateCookieSession", () => {
 
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({
-      jwt_token: "initial.jwt.token",
+      jwt_token: null,
       backend_secret: "backend-secret",
       backend_session: refreshed,
     });
@@ -328,6 +522,9 @@ describe("resolveDefaultDurabilityTier", () => {
 
 describe("public read tiers", () => {
   it("lowers each new public tier to the existing native durability contract", () => {
+    expect(resolveReadTier("local-first")).toBe("local");
+    expect(resolveReadTier("remote")).toBe("edge");
+    expect(resolveReadTier("remote-if-possible")).toBe("edge");
     expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
     expect(resolveReadTier(ReadTier.Remote)).toBe("edge");
     expect(resolveReadTier(ReadTier.RemoteIfPossible)).toBe("edge");
@@ -336,15 +533,71 @@ describe("public read tiers", () => {
   it("keeps legacy read durability controls byte-for-byte compatible", () => {
     for (const tier of ["local", "edge", "global"] as const) {
       expect(resolveReadTier(tier)).toBe(tier);
-      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({ tier });
+      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({
+        tier,
+        localUpdates: "immediate",
+      });
     }
   });
 
-  it("does not reinterpret remote-if-possible as a third native tier", () => {
+  it("infers the own-write overlay policy from the product read tier", () => {
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.LocalFirst })).toMatchObject({
+      tier: "local",
+      localUpdates: "immediate",
+    });
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.Remote })).toMatchObject({
+      tier: "edge",
+      localUpdates: "deferred",
+    });
     expect(
       resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.RemoteIfPossible }),
     ).toMatchObject({
       tier: "edge",
+      localUpdates: "immediate",
+    });
+  });
+
+  it.each([
+    [ReadTier.LocalFirst, "local", undefined],
+    [ReadTier.Remote, "edge", JSON.stringify({ local_updates: "deferred" })],
+    [ReadTier.RemoteIfPossible, "edge", undefined],
+  ] as const)(
+    "keeps public %s reads full and derives their own-write policy",
+    async (tier, nativeTier, expectedOptionsJson) => {
+      const runtime = makeFakeRuntime();
+      runtime.query.mockResolvedValue([]);
+      runtime.createSubscription.mockReturnValue(7);
+      const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+      const injected = {
+        tier,
+        propagation: "local-only",
+        localUpdates: "immediate",
+        openTransactionId: "forged-open-transaction",
+        runtimeSettledTier: "global",
+      } as any;
+
+      await client.query('{"relation_ir":{"table":"todos"}}', injected);
+      const subscription = client.subscribe(
+        '{"relation_ir":{"table":"todos"}}',
+        () => {},
+        injected,
+      );
+
+      expect(runtime.query.mock.calls[0]?.[2]).toBe(nativeTier);
+      expect(runtime.query.mock.calls[0]?.[3]).toBe(expectedOptionsJson);
+      expect(runtime.createSubscription.mock.calls[0]?.[2]).toBe(nativeTier);
+      expect(runtime.createSubscription.mock.calls[0]?.[3]).toBe(expectedOptionsJson);
+      client.unsubscribe(subscription);
+    },
+  );
+});
+
+describe("internal read tiers", () => {
+  it("lowers local-only reads without exposing upstream propagation", () => {
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: "local-only" })).toMatchObject({
+      tier: "local",
+      localUpdates: "immediate",
+      propagation: "local-only",
     });
   });
 });
@@ -383,11 +636,25 @@ describe("JazzClient transaction query plumbing", () => {
         branch: { head, base: { kind: "current", branch: base } },
       },
     );
+    client.upsert(
+      "todos",
+      "00000000-0000-0000-0000-000000000002",
+      {},
+      {
+        branch: { head, base: { kind: "current", branch: base } },
+      },
+    );
 
     expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
       branch_view: { head: { values: { workspace: [1, 4, 7, 0, 0, 0] } } },
     });
     expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
+      branch_view: {
+        head: { values: { workspace: [1, 4, 7, 0, 0, 0] } },
+        base: { Current: { values: { workspace: [1, 4, 1, 0, 0, 0] } } },
+      },
+    });
+    expect(JSON.parse(runtime.upsert.mock.calls[0][3] as string)).toMatchObject({
       branch_view: {
         head: { values: { workspace: [1, 4, 7, 0, 0, 0] } },
         base: { Current: { values: { workspace: [1, 4, 1, 0, 0, 0] } } },
@@ -485,7 +752,7 @@ describe("JazzClient transaction query plumbing", () => {
     client.insertInternal("todos", {}, undefined, undefined, undefined, transactionId);
 
     await expect(
-      client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      client.queryInternal(JSON.stringify({ relation_ir: { table: "todos" } }), {
         localUpdates: "deferred",
         openTransactionId: transactionId,
       }),

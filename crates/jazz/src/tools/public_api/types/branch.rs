@@ -341,7 +341,7 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
             hasher.update(&[12]);
         }
         ColumnType::Bytea => {
-            hasher.update(&[10]);
+            hasher.update(&[16]);
         }
         ColumnType::Json { schema } => {
             hasher.update(&[11]);

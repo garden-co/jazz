@@ -174,8 +174,20 @@ without creating a second physical storage partition. Changing any storage-shape
 input yields a new `SchemaVersionId`. This content-addressing is what lets
 multiple storage schema versions coexist (ch. 10).
 
+Column-type encoding is recursive and tag-discriminated. In particular, a
+payload enum contributes its distinct type tag, declared case count and order,
+then each case's name, declared field count and order, and each field's name,
+recursive type, and nullability. Payload-field references, defaults, and merge
+metadata are not part of this inner type encoding. This exact byte layout is
+shared by the Rust and TypeScript structural hashers and is covered by their
+cross-runtime corpus. The corpus has a unique fixture hash for every portable
+column-type tag, top-level nullability, and representative recursively nested
+Array, Row, Enum, and payload-enum shapes; a change to any encoded schema
+component yields a different schema identity.
+
 _Further invariants._ `INV-DATA-7` — `SchemaVersionId` changes when a column's
-merge strategy changes.
+merge strategy changes. `INV-DATA-8` — every portable column type, including
+payload-enum case and field structure, is part of structural schema identity.
 
 ### 2.5 Rows, versions, and layers
 
@@ -357,7 +369,11 @@ slots do not make their semantics interchangeable:
   serializability if encountered on a mergeable receipt. An authority MUST NOT
   interpret either those values or mergeable parents as compare-and-swap
   evidence. Optional `contribution_merge` is non-causal, field-grained
-  calculated-merge provenance, not a read dependency.
+  calculated-merge provenance, not a read dependency. It may also carry
+  versioned branch-view copy evidence: exact target/base coordinates, source
+  row, and source content version for a first inherited head overlay. That is
+  authority-checked operation provenance, never a parent, history dependency,
+  or serializability read.
 - An `Exclusive` transaction carries its table-bound compare-and-swap evidence:
   `base_snapshot`, point reads `(table, row_uuid, observed TxId)`, absent reads
   `(table, row_uuid)`, and predicate reads `(table, shape_id, canonical query,

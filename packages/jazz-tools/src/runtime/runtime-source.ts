@@ -47,6 +47,8 @@ export interface BrowserWorkerConnection {
   flushLocal(): Promise<void>;
   openInspectorControlPort(): Promise<MessagePort>;
   shutdown(): Promise<void>;
+  /** Present only after an authenticated Inspector control-port attachment. */
+  getAuthenticatedInspectorAttachmentPhysicalDbName?(): string | null;
 }
 
 export interface BrowserFollowerConnection {

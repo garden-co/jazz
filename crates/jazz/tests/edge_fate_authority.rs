@@ -65,6 +65,24 @@ fn read_only_schema() -> JazzSchema {
     )
 }
 
+fn write_only_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("completed", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::False)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    )
+}
+
 fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -334,6 +352,114 @@ fn core_authority_rejects_omitted_insert_after_read_policy_closes_table() {
     pump_client_edge(&alice, &wire, &mut core, session);
 
     assert!(block_on(write.wait(DurabilityTier::Global)).is_err());
+}
+
+/// A writer may retain a local preimage despite losing read access, so its
+/// mergeable update and upsert stage optimistically. The core alone decides
+/// read-for-write admission, rejects both writes, restores the accepted row,
+/// and exposes neither the target nor its contents through the writer view.
+///
+/// alice ──seed──► core ──accepted──► alice
+/// alice ──update/upsert(hidden row)──► core ──rejected──► alice rollback
+///
+/// Planted positive: temporarily removing the authority's mergeable
+/// read-for-write check makes either `wait(Global)` succeed and the SYSTEM
+/// inspection observe the forged title.
+#[test]
+fn core_authority_rejects_write_only_update_and_upsert_and_rolls_back() {
+    let schema = write_only_schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc3, AuthorSubject::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let alice = open_db(0xa4, author(0xa4), &schema);
+    let wire = QueuedWireTransport::default();
+    let session = connect_client_to_edge(&mut core, &alice, &wire, author(0xa4));
+
+    let seed = block_on(alice.insert(
+        "todos",
+        BTreeMap::from([
+            (
+                "title".to_owned(),
+                Value::String("accepted base".to_owned()),
+            ),
+            ("completed".to_owned(), Value::Bool(false)),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    let target = seed.row_uuid();
+    pump_client_edge(&alice, &wire, &mut core, session);
+    assert!(block_on(seed.wait(DurabilityTier::Global)).is_ok());
+
+    let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
+    let rows_for = |identity| {
+        block_on(alice.all_for_identity(&prepared, ReadOpts::default(), identity))
+            .unwrap()
+            .into_iter()
+            .map(|row| row.cell(&schema.tables[0], "title").unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        rows_for(author(0xa4)).is_empty(),
+        "writer must not learn target"
+    );
+    assert_eq!(
+        rows_for(AuthorSubject::SYSTEM),
+        vec![Value::String("accepted base".to_owned())]
+    );
+    let target_debug = format!("{target:?}");
+
+    for (operation, write) in [
+        (
+            "UPDATE",
+            block_on(alice.update(
+                "todos",
+                target,
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("forged update".to_owned()),
+                )]),
+                Default::default(),
+            ))
+            .expect("client stages hidden-row update optimistically"),
+        ),
+        (
+            "UPSERT",
+            block_on(alice.upsert(
+                "todos",
+                target,
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("forged upsert".to_owned()),
+                )]),
+                Default::default(),
+            ))
+            .expect("client stages hidden-row upsert optimistically"),
+        ),
+    ] {
+        assert!(block_on(write.wait(DurabilityTier::Local)).is_ok());
+        pump_client_edge(&alice, &wire, &mut core, session);
+        let error = block_on(write.wait(DurabilityTier::Global))
+            .expect_err("authority must reject write-only {operation}");
+        assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
+        assert!(
+            !error.message.contains("accepted base")
+                && !error.message.contains("forged")
+                && !error.message.contains(&target_debug),
+            "rejection must not disclose target details: {error:?}"
+        );
+        assert!(
+            rows_for(author(0xa4)).is_empty(),
+            "writer must remain blind after {operation}"
+        );
+        assert_eq!(
+            rows_for(AuthorSubject::SYSTEM),
+            vec![Value::String("accepted base".to_owned())],
+            "rejected {operation} must roll back the optimistic row"
+        );
+    }
 }
 
 /// Black-box regression for authored-column carriage across the public Db and

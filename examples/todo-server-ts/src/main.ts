@@ -343,8 +343,16 @@ export async function createServer(
  * @returns RunningServer with server instance and actual port
  */
 export function startServer(todoServer: TodoServer, port: number = 0): Promise<RunningServer> {
-  return new Promise((resolve) => {
-    const server = todoServer.app.listen(port, () => {
+  return new Promise((resolve, reject) => {
+    const server = todoServer.app.listen(port);
+
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+
+    const onListening = () => {
+      server.off("error", onError);
       const address = server.address();
       const actualPort = typeof address === "object" && address ? address.port : port;
       resolve({
@@ -353,7 +361,10 @@ export function startServer(todoServer: TodoServer, port: number = 0): Promise<R
         port: actualPort,
         baseUrl: `http://localhost:${actualPort}`,
       });
-    });
+    };
+
+    server.once("error", onError);
+    server.once("listening", onListening);
   });
 }
 

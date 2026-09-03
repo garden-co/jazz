@@ -695,6 +695,26 @@ fn aggregate_count_over_filtered_query() {
     assert_eq!(rows[0].test_cells_by_descriptor()["count"], Value::U64(3));
 }
 
+/// An ungrouped aggregate has one empty group. This is intentionally a direct
+/// one-shot query-engine test: it pins the same Groove identity row used by
+/// maintained and authority-covered aggregate evaluation without involving
+/// transport settlement.
+#[test]
+fn aggregate_count_over_empty_query_returns_identity_row() {
+    let (_dir, mut node) = open_node();
+    let shape = Query::from("issues")
+        .filter(eq(col("state"), lit("absent")))
+        .count()
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].test_cells_by_descriptor()["count"], Value::U64(0));
+}
+
 #[test]
 fn aggregate_sum_min_max_over_filtered_query() {
     let (_dir, mut node) = open_node();

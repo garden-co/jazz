@@ -5,6 +5,7 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::ivm::graph::NodeId;
 use crate::schema::DatabaseSchema;
 use crate::storage::{KeyValue, OwnedStorage, ScanRequest, StorageFuture};
 use crate::{chunks::ChunkLease, chunks::ChunkRequest, chunks::OwnedChunkProvider};
@@ -97,12 +98,33 @@ impl LoadedChunkBytes {
 pub(crate) struct EvaluationInputs {
     loaded: BTreeMap<EvaluationRequestKey, EvaluationRequestOutput>,
     missing: BTreeSet<EvaluationRequestKey>,
+    /// A streaming operator may evict only chunks it alone reached. Other
+    /// operators can remain suspended on the same descriptor in this shared
+    /// evaluation session, so global cache eviction would make them livelock.
+    chunk_owners: BTreeMap<EvaluationRequestKey, BTreeSet<NodeId>>,
+    chunk_scope: Option<NodeId>,
 }
 
 impl EvaluationInputs {
-    pub(crate) fn release_chunks(&mut self) {
-        self.loaded
-            .retain(|key, _| !matches!(key, EvaluationRequestKey::Chunk(_)));
+    pub(crate) fn set_chunk_scope(&mut self, scope: Option<NodeId>) {
+        self.chunk_scope = scope;
+    }
+
+    /// Release only chunks no other evaluation path has claimed. This keeps
+    /// streaming operators bounded without invalidating a peer operator's
+    /// outstanding interrupted traversal.
+    pub(crate) fn release_chunks_owned_by(&mut self, owner: NodeId) {
+        self.loaded.retain(|key, _| {
+            if !matches!(key, EvaluationRequestKey::Chunk(_)) {
+                return true;
+            }
+            let Some(owners) = self.chunk_owners.get_mut(key) else {
+                return false;
+            };
+            owners.remove(&owner);
+            !owners.is_empty()
+        });
+        self.chunk_owners.retain(|_, owners| !owners.is_empty());
     }
 
     pub(crate) fn take_missing_chunks(&mut self) -> Vec<ChunkRequest> {
@@ -141,6 +163,12 @@ impl EvaluationInputs {
         request: ChunkRequest,
     ) -> Result<&bytes::Bytes, super::IvmRuntimeError> {
         let key = EvaluationRequestKey::Chunk(request);
+        if let Some(scope) = self.chunk_scope {
+            self.chunk_owners
+                .entry(key.clone())
+                .or_default()
+                .insert(scope);
+        }
         if !self.loaded.contains_key(&key) {
             self.missing.insert(key);
             return Err(super::IvmRuntimeError::EvaluationBlocked);
@@ -813,5 +841,35 @@ mod tests {
         assert_eq!(pending_requests.poll_eager_retry(&mut context), 0);
         assert_eq!(pending_polls.get(), 2);
         assert!(pending_requests.has_pending());
+    }
+
+    // This is intentionally an internal mechanism test: a streaming operator
+    // and an indirect scalar operator can share one interruptible evaluation
+    // session, but chunk residency is not otherwise publicly observable.
+    #[test]
+    fn releasing_one_operator_chunks_preserves_a_shared_operator_chunk() {
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(b"chunk").0,
+            locator: crate::large_values::Locator::from_seed(b"shared-chunk"),
+        };
+        let mut inputs = EvaluationInputs::default();
+        inputs.install_chunk(request.clone(), bytes::Bytes::from_static(b"chunk"));
+
+        let streaming = NodeId(1);
+        let filter = NodeId(2);
+        inputs.set_chunk_scope(Some(streaming));
+        assert_eq!(inputs.chunk(request.clone()).unwrap().as_ref(), b"chunk");
+        inputs.set_chunk_scope(Some(filter));
+        assert_eq!(inputs.chunk(request.clone()).unwrap().as_ref(), b"chunk");
+        inputs.set_chunk_scope(None);
+
+        inputs.release_chunks_owned_by(streaming);
+        assert_eq!(inputs.chunk(request.clone()).unwrap().as_ref(), b"chunk");
+
+        inputs.release_chunks_owned_by(filter);
+        assert!(matches!(
+            inputs.chunk(request),
+            Err(super::super::IvmRuntimeError::EvaluationBlocked)
+        ));
     }
 }

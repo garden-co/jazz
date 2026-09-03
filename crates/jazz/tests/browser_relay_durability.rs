@@ -7,24 +7,46 @@ use std::rc::Rc;
 mod common;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts, SubscriptionEvent,
-    TickScheduler, TickUrgency, Transport, block_on,
+    ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts,
+    SubscriptionEvent, TickScheduler, TickUrgency, Transport, block_on,
 };
 use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
-use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::CurrentRow;
 use jazz::protocol::{
-    RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
+    CoveredInputEntry, ProgramFactEntry, ProgramSourceCoverageEntry, ProgramSourceId,
+    ProgramSourceRole, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
+    VersionBundleScope, VersionCarrier, VersionRecord, ViewUpdatePayload,
 };
 use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
+use jazz::time::{GlobalTime, TxTime};
 use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, TransactionId,
 };
-use jazz::tx::{DurabilityTier, Fate};
+use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
+
+/// Mirror the production browser-worker upstream: the client side has already
+/// been admitted to forward one scope binding, and the authority side installs
+/// that exact server-issued capability. A plain duplex or generic relay is not
+/// a substitute for either half.
+macro_rules! connect_scope_isolated_worker_to_core {
+    ($worker:expr, $core:expr, $identity:expr) => {{
+        let (worker_upstream_transport, core_transport) = duplex();
+        let worker_upstream = block_on($worker.connect_upstream(worker_upstream_transport));
+        let core_subscriber = $core.accept_scope_isolated_relay_subscriber_for_test(
+            core_transport,
+            $identity,
+            BTreeMap::new(),
+            1,
+        );
+        (worker_upstream, core_subscriber)
+    }};
+}
 
 #[derive(Default)]
 struct AuthorityTransportState {
@@ -57,6 +79,44 @@ impl Transport for ScriptedAuthorityTransport {
     }
 }
 
+/// Transparent wire tap used by black-box topology receipts. It observes what
+/// the authority actually sends without giving the test an alternate message
+/// application path.
+struct RecordingTransport {
+    inner: Box<dyn Transport>,
+    sent: Rc<RefCell<Vec<SyncMessage>>>,
+    drop_commits: bool,
+}
+
+impl Transport for RecordingTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), jazz::wire::TransportError> {
+        self.sent.borrow_mut().push(message.clone());
+        if self.drop_commits && matches!(message, SyncMessage::CommitUnit { .. }) {
+            return Ok(());
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
+fn recording_transport(
+    inner: Box<dyn Transport>,
+    drop_commits: bool,
+) -> (Box<dyn Transport>, Rc<RefCell<Vec<SyncMessage>>>) {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    (
+        Box::new(RecordingTransport {
+            inner,
+            sent: Rc::clone(&sent),
+            drop_commits,
+        }),
+        sent,
+    )
+}
+
 fn scripted_authority(
     rejection: Option<SubscribeRejectReason>,
 ) -> (Box<dyn Transport>, Rc<RefCell<AuthorityTransportState>>) {
@@ -70,7 +130,23 @@ fn scripted_authority(
     )
 }
 
-use common::compile_schema;
+use common::{compile_schema, exists, outer_eq, session_eq};
+
+/// Advance the production-shaped two-browser topology by one owner turn at
+/// every hop.  Keeping the foreground and worker turns distinct is important:
+/// a relay receipt is not allowed to serve a downstream subscription in the
+/// same turn in which it received its authority update.
+macro_rules! pump_two_browser_relays {
+    ($owner_foreground:expr, $owner_worker:expr, $owner_edge:expr, $core:expr, $guest_edge:expr, $guest_worker:expr, $guest_foreground:expr, $label:expr) => {{
+        $owner_foreground.tick().expect($label);
+        $owner_worker.tick().expect($label);
+        $owner_edge.tick().expect($label);
+        $core.tick().expect($label);
+        $guest_edge.tick().expect($label);
+        $guest_worker.tick().expect($label);
+        $guest_foreground.tick().expect($label);
+    }};
+}
 
 trait FutureResultExpectExt<T, E>: Future<Output = Result<T, E>> + Sized {
     fn expect(self, message: &str) -> T
@@ -133,7 +209,21 @@ fn assert_scheduled_urgencies(
 fn schema() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+            // Scope-isolated relay tests exercise server-authorized transport,
+            // not missing-policy rejection. Explicitly model the permissive
+            // example-app policy that the old trusted SYSTEM fixture had
+            // accidentally bypassed.
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
             .build(),
     )
 }
@@ -159,6 +249,48 @@ fn included_relation_schema() -> JazzSchema {
                     .fk_column("author", "profiles")
                     .column("body", ColumnType::Text)
                     .column("created", ColumnType::Timestamp),
+            )
+            .build(),
+    )
+}
+
+/// The policy topology used by BandChat's maintained room-message query.  A
+/// member's message is visible only through the room-membership policy source,
+/// so this exercises policy-source generation as well as ordinary row delivery.
+fn band_chat_message_schema() -> JazzSchema {
+    let member_of_outer_room = exists(
+        "room_members",
+        vec![
+            outer_eq("room_id", "room_id"),
+            session_eq("member_author", &["user"]),
+        ],
+    );
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("rooms").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("room_members")
+                    .fk_column("room_id", "rooms")
+                    .column("member_author", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("room_id", "rooms")
+                    .column("text", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(member_of_outer_room)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
             )
             .build(),
     )
@@ -286,6 +418,41 @@ fn open_persistent_browser_worker(
     db
 }
 
+/// Open the same scope-admitted worker shape that a browser host uses. The
+/// unsafe constructor is exercised only by this topology fixture: production
+/// hosts authenticate and bind the owner before opening the relay storage.
+fn open_persistent_scope_isolated_browser_worker(
+    path: &std::path::Path,
+    node: u8,
+    author: AuthorSubject,
+    schema: &JazzSchema,
+) -> Db<RocksDbStorage> {
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open(path, &refs).expect("open scoped persistent browser worker storage");
+    let scope = unsafe {
+        ClientRelayScope::from_admitted_storage_owner("browser-test-profile".to_owned(), author)
+    };
+    unsafe {
+        block_on(Db::open_scope_isolated_client_relay(
+            DbConfig::new(
+                schema.clone(),
+                storage,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author,
+                },
+            ),
+            scope,
+        ))
+    }
+    .expect("open scoped persistent browser worker")
+}
+
 /// A browser main-thread write is optimistic but not Local-durable until the
 /// dedicated worker persists it. Alice owns the non-durable main-thread Db and
 /// the worker is a fate-neutral relay with no upstream server.
@@ -297,6 +464,248 @@ fn open_persistent_browser_worker(
 ///       │                                             │
 ///       └─ wait(Local) ◄──FateUpdate(Pending/Local)───┘
 /// ```
+/// The test-only upstream handle stages through the worker's normal inbound
+/// queue and observes the real outbound Subscribe. This lets the repair E2E
+/// fixture below injects an incomplete covered-input closure without adding a
+/// production message-application API.
+#[test]
+fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
+    let foreground = open_db(0x19, alice, &schema);
+    let storage = tempfile::tempdir().expect("scope-isolated worker storage");
+    let worker =
+        open_persistent_scope_isolated_browser_worker(storage.path(), 0x29, alice, &schema);
+    let (authority_transport, _authority_state) = scripted_authority(None);
+    let upstream = block_on(worker.connect_upstream_for_test(authority_transport));
+
+    let (foreground_transport, worker_transport) = duplex();
+    let foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let worker_foreground = worker.accept_subscriber(worker_transport, alice);
+    let todos = foreground
+        .prepare_query(&foreground.table("todos"))
+        .expect("prepare foreground todos query");
+    let _subscription = block_on(foreground.subscribe(
+        &todos,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe through scope-isolated worker");
+
+    foreground.tick().expect("send foreground subscription");
+    worker.tick().expect("forward subscription upstream");
+    let outbound = upstream.take_outbound_for_test();
+    let subscription_key = outbound
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Subscribe(subscribe) => Some(subscribe.subscription),
+            _ => None,
+        })
+        .expect("real worker transport emitted its authority subscription");
+
+    let row = RowUuid(uuid::Uuid::from_bytes([0x61; 16]));
+    let tx_id = TxId::new(TxTime(61), NodeUuid::from_bytes([0x62; 16]));
+    let transaction = Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 1,
+        made_by: alice,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: None,
+    };
+    let table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "todos")
+        .expect("todos table");
+    let version = VersionRecord::from_cells(
+        table,
+        schema.version_id(),
+        row,
+        Vec::new(),
+        alice,
+        tx_id.time.physical_ms(),
+        alice,
+        tx_id.time.physical_ms(),
+        &BTreeMap::from([("title".to_owned(), Value::String("repair body".to_owned()))]),
+        None,
+    )
+    .expect("encode authority row version");
+    let request = RowVersionRef::new("todos", row, tx_id);
+    // INV-SYNC-36: an authority never sends result membership. It declares a
+    // complete source closure and ships the exact source witness, from which
+    // the receiver derives its own terminal.
+    let source = ProgramSourceId {
+        table: "todos".to_owned().into(),
+        path: vec![ProgramSourceRole::Root],
+    };
+    let incomplete = SyncMessage::ViewUpdate(ViewUpdatePayload {
+        subscription: subscription_key,
+        settled_through: GlobalTime(1),
+        reset_result_set: true,
+        version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
+            scope: VersionBundleScope::CompleteTransaction,
+            tx: transaction.clone(),
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: DurabilityTier::Global,
+        })],
+        peer_payload_inventory: Default::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: vec![
+            ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+                source: source.clone(),
+                complete: true,
+            }),
+            ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                source,
+                version_table: "todos".to_owned().into(),
+                source_row: row,
+                version: RowVersionRefEntry {
+                    tx: tx_id,
+                    schema_version: Some(schema.version_id()),
+                    layer: ResultRowLayer::Content,
+                    batch: Some(tx_id),
+                    branch_or_prefix: Some(vec![1, 0, 0, 0, 0]),
+                    row_digest: None,
+                },
+            }),
+        ],
+        program_fact_removes: Vec::new(),
+    });
+    assert!(
+        block_on(worker.stage_upstream_message_for_test(&upstream, incomplete))
+            .expect("stage incomplete authority view update"),
+        "the selected upstream may mint an authority receipt"
+    );
+    worker.tick().expect("apply covered authority closure");
+    foreground
+        .tick()
+        .expect("deliver locally derived foreground view");
+    assert!(
+        foreground
+            .read(&todos)
+            .expect("read repaired foreground state")
+            .len()
+            == 1,
+        "the same-scope foreground receives the repaired authority body"
+    );
+    block_on(worker.flush_for_test()).expect("durably flush repaired worker state");
+
+    // A second still-attached upstream replaces the test receipt owner. The
+    // first handle may still stage a frame for ordinary stale-path testing,
+    // but it must not mark that frame as disclosure-authorizing.
+    let (successor_transport, _successor_state) = scripted_authority(None);
+    let successor = block_on(worker.connect_upstream_for_test(successor_transport));
+    assert!(
+        !block_on(worker.stage_upstream_message_for_test(
+            &upstream,
+            SyncMessage::ChunkRequestBatch(jazz::protocol::ChunkRequestBatch {
+                requests: Vec::new(),
+            }),
+        ))
+        .expect("stage stale upstream frame"),
+        "a still-attached predecessor cannot mint an authority receipt"
+    );
+    assert!(
+        block_on(worker.stage_upstream_message_for_test(
+            &successor,
+            SyncMessage::ChunkRequestBatch(jazz::protocol::ChunkRequestBatch {
+                requests: Vec::new(),
+            }),
+        ))
+        .expect("stage successor upstream frame"),
+        "only the selected successor may mint an authority receipt"
+    );
+
+    assert!(foreground.detach_connection(&foreground_upstream));
+    assert!(worker.detach_connection(&worker_foreground));
+    drop(foreground_upstream);
+    drop(worker_foreground);
+    drop(foreground);
+    drop(worker);
+
+    // The authority link and the initial foreground are gone. A freshly
+    // opened worker with the exact same durable scope may still serve the
+    // physical version it was previously authorized to learn; it must not
+    // need to re-run current policy to repair the new foreground.
+    let reopened =
+        open_persistent_scope_isolated_browser_worker(storage.path(), 0x29, alice, &schema);
+    let (mut reopened_foreground_transport, reopened_worker_transport) = duplex();
+    let _reopened_foreground = reopened.accept_subscriber(reopened_worker_transport, alice);
+    reopened_foreground_transport
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![request],
+            delegated_session: None,
+        })
+        .expect("foreground requests retained repair");
+    reopened
+        .tick()
+        .expect("serve retained same-scope repair after reopen");
+    reopened
+        .tick()
+        .expect("flush retained same-scope repair after reopen");
+    let replies =
+        std::iter::from_fn(|| reopened_foreground_transport.try_recv()).collect::<Vec<_>>();
+    assert!(
+        replies.iter().any(|reply| matches!(
+            reply,
+            SyncMessage::RowVersionPayloads { version_bundles } if version_bundles.len() == 1
+        )),
+        "same-scope reopen serves the previously authority-delivered exact version, got {replies:?}"
+    );
+
+    let bob = AuthorSubject::for_test_bytes([0xba; 16]);
+    let (mut bob_transport, bob_worker_transport) = duplex();
+    let _bob_foreground = reopened.accept_subscriber(bob_worker_transport, bob);
+    bob_transport
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![RowVersionRef::new("todos", row, tx_id)],
+            delegated_session: None,
+        })
+        .expect("other subject requests retained repair");
+    assert!(
+        block_on(reopened.tick()).is_err(),
+        "an out-of-scope foreground request must fail closed before a repair reply"
+    );
+    let bob_replies = std::iter::from_fn(|| bob_transport.try_recv()).collect::<Vec<_>>();
+    assert!(
+        !bob_replies
+            .iter()
+            .any(|reply| matches!(reply, SyncMessage::RowVersionPayloads { .. })),
+        "a different foreground subject must never reuse Alice's durable repair ledger"
+    );
+
+    let (mut generic_transport, generic_worker_transport) = duplex();
+    let _generic_relay = reopened.accept_relay_subscriber(generic_worker_transport);
+    generic_transport
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![RowVersionRef::new("todos", row, tx_id)],
+            delegated_session: None,
+        })
+        .expect("generic relay requests retained repair");
+    // A generic relay may be forwarded/ignored rather than rejected with a
+    // transport error, but it must never receive the scope-owned body.
+    let _ = block_on(reopened.tick());
+    let _ = block_on(reopened.tick());
+    let generic_replies = std::iter::from_fn(|| generic_transport.try_recv()).collect::<Vec<_>>();
+    assert!(
+        !generic_replies
+            .iter()
+            .any(|reply| matches!(reply, SyncMessage::RowVersionPayloads { .. })),
+        "a generic relay lacks a foreground session capability and must fail closed"
+    );
+}
+
 #[test]
 fn non_durable_browser_client_waits_for_worker_local_ack() {
     let schema = schema();
@@ -491,14 +900,14 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     let worker = open_db(0x23, AuthorSubject::SYSTEM, &schema);
     let core = open_core(0x34, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
 
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let write = main_thread
         .insert(
@@ -531,10 +940,23 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     worker
         .tick()
         .expect("apply and forward core fate downstream");
-    assert_scheduled_urgencies(
-        &worker_scheduler,
-        &[TickUrgency::AfterCurrentTurn],
-        "core fate ingress at the worker",
+    let ingress_wakes = worker_scheduler.take_urgencies();
+    assert!(
+        ingress_wakes.contains(&TickUrgency::AfterCurrentTurn),
+        "core fate ingress must schedule owner-turn fate publication: {ingress_wakes:?}"
+    );
+    // A concurrent authoritative membership addition may also request an
+    // Immediate Local wake (INV-EDGE-21). That internal wake is intentionally
+    // not a second public fate projection, so assert the observable turn
+    // boundary instead of treating its optional scheduler request as a stable
+    // wire-level event.
+    main_thread
+        .tick()
+        .expect("a Local wake before the owner turn cannot publish the core fate");
+    assert_eq!(
+        global_wait.get(),
+        None,
+        "the worker must not publish a Global fate before its scheduled owner turn"
     );
     worker
         .tick()
@@ -586,10 +1008,19 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
         1
     );
     let events = std::iter::from_fn(|| edge_subscription.try_next_event()).collect::<Vec<_>>();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        SubscriptionEvent::Delta { added, .. } if added.len() == 1
-    )));
+    let additions = events
+        .iter()
+        .filter(|event| matches!(event, SubscriptionEvent::Delta { added, .. } if added.len() == 1))
+        .count();
+    assert_eq!(
+        additions, 1,
+        "the internal Local wake must contribute to one public Edge projection, not a duplicate: {events:?}"
+    );
+    assert_eq!(
+        events.len(),
+        1,
+        "the worker authority source must not create a second public projection: {events:?}"
+    );
 
     // A second mutation after the relay has installed Edge coverage must make
     // the full main -> worker -> core -> worker -> main round trip without
@@ -608,10 +1039,25 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     core.tick().expect("accept update at core");
     worker_scheduler.clear();
     worker.tick().expect("forward update fate");
-    assert_scheduled_urgencies(
-        &worker_scheduler,
-        &[TickUrgency::AfterCurrentTurn],
-        "update fate ingress at the worker",
+    let update_ingress_wakes = worker_scheduler.take_urgencies();
+    assert!(
+        update_ingress_wakes.contains(&TickUrgency::AfterCurrentTurn),
+        "update fate ingress must schedule owner-turn fate publication: {update_ingress_wakes:?}"
+    );
+    main_thread
+        .tick()
+        .expect("a Local wake before the owner turn cannot publish the update fate");
+    assert!(
+        !matches!(
+            main_thread
+                .write_state(update_tx)
+                .expect("update state before owner turn"),
+            jazz::db::WriteState {
+                durability: DurabilityTier::Global,
+                ..
+            }
+        ),
+        "the worker must not publish the update's Global fate before its owner turn"
     );
     worker
         .tick()
@@ -715,7 +1161,7 @@ fn browser_client_hydrates_local_structured_subscription_without_authority() {
     let schema = included_relation_schema();
     let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
     let worker = open_db(0x25, AuthorSubject::SYSTEM, &schema);
-    worker.set_relay_authority_session_owner();
+    worker.set_relay_authority_session_owner_for_test();
     let profile = worker
         .insert(
             "profiles",
@@ -811,13 +1257,13 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
     let core = open_core(0x3e, &schema);
     let writer = open_db(0x4e, AuthorSubject::for_test_bytes([0xbc; 16]), &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let (writer_transport, core_writer_transport) = duplex();
     let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
     let _core_writer = core.accept_subscriber(
@@ -1193,6 +1639,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }))
             .expect("subscribe with distinct wire key");
     }
@@ -1258,6 +1705,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }))
             .expect("subscribe with a fresh rejected wire key");
         for _ in 0..3 {
@@ -1288,6 +1736,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
             subscription: first,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .expect("resubscribe a previously rejected wire key");
     for _ in 0..3 {
@@ -1451,6 +1900,98 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
     );
 }
 
+/// Local and propagation are independent axes at a browser relay. A Local
+/// foreground read returns the worker's resident knowledge immediately, while
+/// the default Full propagation still registers the exact upstream usage and
+/// later reconciles the authority membership into that same subscription.
+#[test]
+fn browser_client_local_full_returns_immediately_then_reconciles_upstream() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let worker = open_db(0x25, alice, &schema);
+    let core = open_core(0x35, &schema);
+    let server_writer = open_db(0x45, alice, &schema);
+    worker.set_relay_authority_session_owner_for_test();
+    worker
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("worker-local".to_owned()))]),
+            Default::default(),
+        )
+        .expect("seed worker-local todo");
+    let (writer_transport, core_writer_transport) = duplex();
+    let _writer_upstream = block_on(server_writer.connect_upstream(writer_transport));
+    let _core_writer = core.accept_subscriber(core_writer_transport, alice);
+    server_writer
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("server-only".to_owned()))]),
+            Default::default(),
+        )
+        .expect("seed server-only todo");
+
+    let main_thread = open_db(0x15, alice, &schema);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
+    for _ in 0..8 {
+        server_writer.tick().expect("upload server-only seed");
+        worker.tick().expect("upload worker-local seed");
+        core.tick().expect("accept worker-local seed");
+        server_writer.tick().expect("settle server-only seed");
+        worker.tick().expect("settle worker-local seed");
+    }
+
+    let todos = main_thread
+        .prepare_query(&main_thread.table("todos"))
+        .expect("prepare Local+Full todos query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &todos,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe Local+Full through worker");
+    assert_truthful_empty_local_opening(subscription.try_next_event());
+
+    main_thread.tick().expect("register Local+Full coverage");
+    worker
+        .tick()
+        .expect("serve local knowledge and queue upstream Subscribe");
+    main_thread.tick().expect("apply immediate Local result");
+    assert_eq!(
+        main_thread
+            .read(&todos)
+            .expect("read immediate Local view")
+            .len(),
+        1,
+        "Local must not wait for the queued upstream authority result",
+    );
+
+    for _ in 0..8 {
+        core.tick().expect("serve propagated Local usage");
+        worker.tick().expect("reconcile exact upstream membership");
+        main_thread.tick().expect("apply reconciled Local result");
+    }
+    assert_eq!(
+        main_thread
+            .read(&todos)
+            .expect("read reconciled Local view")
+            .len(),
+        2,
+        "Full propagation must eventually add the server-only row",
+    );
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubscriptionEvent::Delta { added, .. } if added.len() == 1
+    )));
+}
+
 /// A browser local-only subscription crosses the private main/worker boundary
 /// so the fresh in-memory main Db can hydrate from durable worker state, but it
 /// must not cross the worker/server boundary.
@@ -1460,6 +2001,7 @@ fn browser_client_local_only_subscription_stops_at_worker() {
     let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
     let worker = open_db(0x2a, alice, &schema);
     let core = open_core(0x3a, &schema);
+    worker.set_relay_authority_session_owner_for_test();
     worker
         .insert(
             "todos",
@@ -1479,9 +2021,8 @@ fn browser_client_local_only_subscription_stops_at_worker() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -1531,6 +2072,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let worker = open_db(0x27, alice, &schema);
     let core = open_core(0x37, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let seeder = open_db(0x18, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
@@ -1564,9 +2106,8 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -1624,6 +2165,20 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 }
 
 #[test]
+/// Alice seeds one exclusive transaction containing sibling rows; her browser
+/// main thread asks its durable worker relay for each sibling as an Edge read.
+///
+/// ```text
+/// alice ──exclusive org/todo/check/note──► core
+/// browser main ──Edge sibling query──► worker ──► core
+/// ```
+///
+/// The core must accept and persist the whole exclusive bundle before the
+/// relay extends its projection for each sibling. Besides the view-scoped
+/// cardinality contract, this keeps the deep authoritative-ingest path on a
+/// normal host thread rather than relying on an enlarged test stack. The
+/// ordinary `Db::tick` boundary must therefore remain stack-safe when this
+/// receipt runs on libtest's default 2 MiB worker stack.
 fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let schema = compile_schema(
         &SchemaBuilder::new()
@@ -1647,13 +2202,13 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let core = open_core(0x43, &schema);
     let seeder = open_db(0x44, alice, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let (seed_transport, core_seed_transport) = duplex();
     let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
     let _core_seed = core.accept_subscriber(core_seed_transport, alice);
@@ -1828,7 +2383,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let worker = open_db(0x2f, alice, &schema);
     let core = open_core(0x3f, &schema);
     main_thread.set_non_durable_client();
-    worker.set_relay_authority_session_owner();
+    worker.set_relay_authority_session_owner_for_test();
     let scheduler = Rc::new(CountingScheduler::default());
     worker.set_tick_scheduler(Some(scheduler.clone()));
 
@@ -1864,9 +2419,8 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let query = main_thread
         .prepare_query(
@@ -1921,6 +2475,413 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     );
 }
 
+/// INV-SYNC-36: peer sync carries the authorized input closure, not the
+/// authority's presentation-layer terminal. The receiving Db must still
+/// materialize the nested result by running its own maintained graph.
+#[test]
+fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() {
+    let schema = included_relation_schema();
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let receiver = open_db(0xd2, alice, &schema);
+    let core = open_core(0xd3, &schema);
+    let seeder = open_db(0xd4, alice, &schema);
+
+    let (seed_transport, core_seed_transport) = duplex();
+    let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
+    let _seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let profile = seeder
+        .insert(
+            "profiles",
+            BTreeMap::from([("name".to_owned(), Value::String("Ada".to_owned()))]),
+            Default::default(),
+        )
+        .expect("seed nested profile");
+    let message = seeder
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("author".to_owned(), Value::Uuid(profile.row_uuid().0)),
+                (
+                    "body".to_owned(),
+                    Value::String("receiver derived".to_owned()),
+                ),
+                ("created".to_owned(), Value::U64(1)),
+            ]),
+            Default::default(),
+        )
+        .expect("seed nested root");
+    for _ in 0..8 {
+        seeder.tick().expect("upload nested fixture");
+        core.tick().expect("accept nested fixture");
+        seeder.tick().expect("settle nested fixture");
+    }
+
+    let (receiver_transport, core_transport) = duplex();
+    let (recorded_core_transport, authority_messages) = recording_transport(core_transport, false);
+    let _receiver_upstream = block_on(receiver.connect_upstream(receiver_transport));
+    let _core_subscriber = core.accept_subscriber(recorded_core_transport, alice);
+    let query = receiver
+        .prepare_query(
+            &Query::from("messages")
+                .array_subquery(ArraySubquery::new("sender", "profiles", "id", "author"))
+                .order_by("created", OrderDirection::Desc),
+        )
+        .expect("prepare nested remote query");
+    let mut subscription = block_on(receiver.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe to nested remote query");
+    assert!(subscription.try_next_event().is_none());
+    for _ in 0..12 {
+        receiver.tick().expect("send nested subscription");
+        core.tick().expect("serve nested closure");
+        receiver.tick().expect("derive nested terminal locally");
+    }
+
+    let authority_updates = authority_messages
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update.clone()),
+            SyncMessage::AuthorizationScopeView { view, .. } => Some(view.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !authority_updates.is_empty(),
+        "authority sent no covered input closure"
+    );
+    assert!(
+        authority_updates.iter().any(|update| {
+            update
+                .program_fact_adds
+                .iter()
+                .any(|fact| matches!(fact, jazz::protocol::ProgramFactEntry::CoveredInput(_)))
+        }),
+        "authority sent no typed covered input: {authority_updates:?}",
+    );
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    let nested = events.iter().find_map(|event| match event {
+        SubscriptionEvent::Delta {
+            added,
+            settled: true,
+            ..
+        } => added
+            .iter()
+            .find(|row| row.row.row_uuid() == message.row_uuid()),
+        _ => None,
+    });
+    let nested = nested.expect("receiver-local IVM did not publish the nested root");
+    let (descriptor, raw) = nested.row.encoded_record();
+    let record = BorrowedRecord::new(raw, descriptor);
+    let Value::Array(sender) = record.get("sender").expect("nested sender") else {
+        panic!("sender must be materialized as an array")
+    };
+    assert!(matches!(
+        sender.as_slice(),
+        [Value::Record(sender)] if matches!(sender.get("name"), Ok(Value::String(name)) if name == "Ada")
+    ));
+}
+
+/// INV-SYNC-36: Local and strict remote are two input selections for the same
+/// maintained program. Local may include a pending row and order it against
+/// authority rows; strict remote must exclude that unadmitted row and must not
+/// publish before its exact authority usage site settles.
+#[test]
+fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let receiver = open_db(0xd6, alice, &schema);
+    let core = open_core(0xd7, &schema);
+    let seeder = open_db(0xd8, alice, &schema);
+
+    let (seed_transport, core_seed_transport) = duplex();
+    let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
+    let _seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let mut authority_rows = Vec::new();
+    for title in ["A", "C"] {
+        authority_rows.push(
+            seeder
+                .insert(
+                    "todos",
+                    BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                    Default::default(),
+                )
+                .expect("seed authority row")
+                .row_uuid(),
+        );
+    }
+    for _ in 0..8 {
+        seeder.tick().expect("upload authority rows");
+        core.tick().expect("accept authority rows");
+        seeder.tick().expect("settle authority rows");
+    }
+    let pending = receiver
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("B".to_owned()))]),
+            Default::default(),
+        )
+        .expect("insert receiver-local pending row");
+
+    let (receiver_transport, core_transport) = duplex();
+    let (receiver_transport, _receiver_messages) = recording_transport(receiver_transport, true);
+    let _receiver_upstream = block_on(receiver.connect_upstream(receiver_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let query = receiver
+        .prepare_query(&Query::from("todos").order_by("title", OrderDirection::Asc))
+        .expect("prepare ordered input-selection query");
+    let mut local = block_on(receiver.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe local-first");
+    let mut strict = block_on(receiver.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe strict remote");
+    assert!(
+        strict.try_next_event().is_none(),
+        "strict remote must wait for its fresh exact authority closure"
+    );
+    for _ in 0..12 {
+        receiver.tick().expect("send exact usage sites");
+        core.tick().expect("serve authority closures");
+        receiver.tick().expect("reconcile receiver inputs");
+    }
+
+    let ordered_ids = |events: &[SubscriptionEvent]| {
+        let mut rows = Vec::new();
+        for event in events {
+            let SubscriptionEvent::Delta {
+                reset,
+                added,
+                removed,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if *reset {
+                rows.clear();
+            }
+            for removal in removed {
+                rows.retain(|row| *row != removal.row_uuid);
+            }
+            for addition in added {
+                rows.retain(|row| *row != addition.row.row_uuid());
+                rows.insert(addition.index.min(rows.len()), addition.row.row_uuid());
+            }
+        }
+        rows
+    };
+    let local_events =
+        std::iter::from_fn(|| local.try_next_event()).collect::<Vec<SubscriptionEvent>>();
+    let strict_events =
+        std::iter::from_fn(|| strict.try_next_event()).collect::<Vec<SubscriptionEvent>>();
+    let local_ids = ordered_ids(&local_events);
+    let strict_ids = ordered_ids(&strict_events);
+    assert_eq!(
+        local_ids,
+        vec![authority_rows[0], pending.row_uuid(), authority_rows[1]],
+        "local-first must order authority A, pending B, authority C: {local_events:?}"
+    );
+    assert!(
+        !strict_ids.contains(&pending.row_uuid()),
+        "strict remote must not supplement its authority closure from unrelated pending state: {strict_events:?}"
+    );
+    assert_eq!(
+        strict_ids, authority_rows,
+        "strict remote contains authority A and C only"
+    );
+}
+
+/// A BandChat room owner's foreground keeps a maintained Edge subscription
+/// while a separately scoped guest foreground writes a message.  This is the
+/// complete browser path, rather than a direct client/core shortcut:
+///
+/// ```text
+/// owner foreground -> owner worker -> owner edge -> Core -> guest edge -> guest worker -> guest foreground
+/// guest foreground -> guest worker -> guest edge -> Core -> owner edge -> owner worker -> owner foreground
+/// ```
+///
+/// In particular, the owner's live message subscription must be refreshed by
+/// the guest's remote row after the membership policy source has been settled.
+#[test]
+fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() {
+    let schema = band_chat_message_schema();
+    let owner = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let guest = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let owner_foreground = open_db(0x61, owner, &schema);
+    let owner_worker = open_db(0x62, owner, &schema);
+    let owner_edge = open_db(0x63, AuthorSubject::SYSTEM, &schema);
+    let guest_edge = open_db(0x64, AuthorSubject::SYSTEM, &schema);
+    let guest_worker = open_db(0x65, guest, &schema);
+    let guest_foreground = open_db(0x66, guest, &schema);
+    let core = open_core(0x67, &schema);
+    owner_foreground.set_non_durable_client();
+    guest_foreground.set_non_durable_client();
+    owner_worker.set_relay_authority_session_owner_for_test();
+    guest_worker.set_relay_authority_session_owner_for_test();
+    owner_edge.set_relay_authority_session_owner_for_test();
+    guest_edge.set_relay_authority_session_owner_for_test();
+
+    let (owner_foreground_transport, owner_worker_downstream_transport) = duplex();
+    let _owner_foreground_upstream =
+        block_on(owner_foreground.connect_upstream(owner_foreground_transport));
+    let _owner_worker_subscriber =
+        owner_worker.accept_subscriber(owner_worker_downstream_transport, owner);
+    let (owner_worker_transport, owner_edge_transport) = duplex();
+    let _owner_worker_upstream = block_on(owner_worker.connect_upstream(owner_worker_transport));
+    let _owner_edge_subscriber = owner_edge.accept_scope_isolated_relay_subscriber_for_test(
+        owner_edge_transport,
+        owner,
+        BTreeMap::new(),
+        1,
+    );
+    let (_owner_edge_upstream, _owner_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(owner_edge, core, owner);
+
+    let (guest_foreground_transport, guest_worker_downstream_transport) = duplex();
+    let _guest_foreground_upstream =
+        block_on(guest_foreground.connect_upstream(guest_foreground_transport));
+    let _guest_worker_subscriber =
+        guest_worker.accept_subscriber(guest_worker_downstream_transport, guest);
+    let (guest_worker_transport, guest_edge_transport) = duplex();
+    let _guest_worker_upstream = block_on(guest_worker.connect_upstream(guest_worker_transport));
+    let _guest_edge_subscriber = guest_edge.accept_scope_isolated_relay_subscriber_for_test(
+        guest_edge_transport,
+        guest,
+        BTreeMap::new(),
+        1,
+    );
+    let (_guest_edge_upstream, _guest_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(guest_edge, core, guest);
+
+    let room = owner_foreground
+        .insert(
+            "rooms",
+            BTreeMap::from([(
+                "name".to_owned(),
+                Value::String("relay rehearsal".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("owner creates room");
+    for _ in 0..8 {
+        pump_two_browser_relays!(
+            owner_foreground,
+            owner_worker,
+            owner_edge,
+            core,
+            guest_edge,
+            guest_worker,
+            guest_foreground,
+            "settle room"
+        );
+    }
+    for member in [owner, guest] {
+        owner_foreground
+            .insert(
+                "room_members",
+                BTreeMap::from([
+                    ("room_id".to_owned(), Value::Uuid(room.row_uuid().0)),
+                    (
+                        "member_author".to_owned(),
+                        Value::String(member.canonical().to_owned()),
+                    ),
+                ]),
+                Default::default(),
+            )
+            .expect("owner admits room member");
+        for _ in 0..8 {
+            pump_two_browser_relays!(
+                owner_foreground,
+                owner_worker,
+                owner_edge,
+                core,
+                guest_edge,
+                guest_worker,
+                guest_foreground,
+                "settle room membership"
+            );
+        }
+    }
+
+    let messages = owner_foreground
+        .prepare_query(&Query::from("messages").filter(eq(col("room_id"), lit(room.row_uuid().0))))
+        .expect("prepare maintained room messages query");
+    let mut owner_subscription = block_on(owner_foreground.subscribe(
+        &messages,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("owner subscribes through scope relay");
+    for _ in 0..10 {
+        pump_two_browser_relays!(
+            owner_foreground,
+            owner_worker,
+            owner_edge,
+            core,
+            guest_edge,
+            guest_worker,
+            guest_foreground,
+            "establish owner message coverage"
+        );
+    }
+    let _opening = std::iter::from_fn(|| owner_subscription.try_next_event()).collect::<Vec<_>>();
+
+    let guest_message = guest_foreground
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("room_id".to_owned(), Value::Uuid(room.row_uuid().0)),
+                (
+                    "text".to_owned(),
+                    Value::String("guest arrives remotely".to_owned()),
+                ),
+            ]),
+            Default::default(),
+        )
+        .expect("guest writes through own scope relay");
+    for _ in 0..12 {
+        pump_two_browser_relays!(
+            owner_foreground,
+            owner_worker,
+            owner_edge,
+            core,
+            guest_edge,
+            guest_worker,
+            guest_foreground,
+            "deliver guest message to owner foreground"
+        );
+    }
+
+    let updates = std::iter::from_fn(|| owner_subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        updates.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, .. }
+                if added.iter().any(|row| row.row.row_uuid() == guest_message.row_uuid())
+        )),
+        "owner foreground missed the remote guest row through the relay chain: {updates:?}",
+    );
+}
+
 /// A cold browser foreground must finish one complete structured authority
 /// reset when the worker already has no local query runtime for the new remote
 /// usage site. Alice's main runtime opens a bounded ordered message relation;
@@ -1940,7 +2901,7 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
     let worker = open_db(0x34, alice, &schema);
     let core = open_core(0x44, &schema);
     main_thread.set_non_durable_client();
-    worker.set_relay_authority_session_owner();
+    worker.set_relay_authority_session_owner_for_test();
     let scheduler = Rc::new(CountingScheduler::default());
     worker.set_tick_scheduler(Some(scheduler.clone()));
 
@@ -1986,9 +2947,8 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let query = main_thread
         .prepare_query(
@@ -2125,7 +3085,7 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let alice = AuthorSubject::for_test_bytes([0xb3; 16]);
     let worker = open_db(0x2b, alice, &schema);
     let core = open_core(0x3b, &schema);
-    worker.set_relay_authority_session_owner();
+    worker.set_relay_authority_session_owner_for_test();
 
     let seeder = open_db(0x4b, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
@@ -2152,9 +3112,8 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let (first_transport, first_worker_transport) = duplex();
     let first_connection = block_on(first_tab.connect_upstream(first_transport));
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let first_query = first_tab
         .prepare_query(&first_tab.table("todos"))
         .expect("prepare first-tab Edge query");
@@ -2280,15 +3239,14 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     }
 
     let worker = open_persistent_worker(storage.path(), 0x2d, &schema);
-    worker.set_relay_authority_session_owner();
+    worker.set_relay_authority_session_owner_for_test();
     let first_tab = open_db(0x1f, alice, &schema);
     first_tab.set_non_durable_client();
     let (first_transport, first_worker_transport) = duplex();
     let first_connection = block_on(first_tab.connect_upstream(first_transport));
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
-    let (worker_upstream_transport, core_worker_transport) = duplex();
-    let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_worker_subscriber = core.accept_subscriber(core_worker_transport, alice);
+    let (worker_upstream, core_worker_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let exact_query = Query::from("todos")
         .order_by("title", OrderDirection::Asc)
         .offset(1);
@@ -2365,7 +3323,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     );
 
     let reopened_worker = open_persistent_worker(storage.path(), 0x2d, &schema);
-    reopened_worker.set_relay_authority_session_owner();
+    reopened_worker.set_relay_authority_session_owner_for_test();
     let scheduler = Rc::new(CountingScheduler::default());
     reopened_worker.set_tick_scheduler(Some(scheduler.clone()));
     let reopened_tab = open_db(0x20, alice, &schema);
@@ -2375,9 +3333,16 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let _reopened_worker_connection =
         reopened_worker.accept_subscriber(reopened_worker_transport, alice);
     let (reopened_upstream_transport, reopened_core_transport) = duplex();
+    let (reopened_core_transport, reopened_authority_messages) =
+        recording_transport(reopened_core_transport, false);
     let _reopened_upstream =
         block_on(reopened_worker.connect_upstream(reopened_upstream_transport));
-    let _reopened_core_subscriber = core.accept_subscriber(reopened_core_transport, alice);
+    let _reopened_core_subscriber = core.accept_scope_isolated_relay_subscriber_for_test(
+        reopened_core_transport,
+        alice,
+        BTreeMap::new(),
+        1,
+    );
     let reopened_query = reopened_tab
         .prepare_query(&exact_query)
         .expect("prepare reopened Edge query");
@@ -2432,6 +3397,51 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         .is_empty(),
         "fresh empty authority membership must not expose the recovered row",
     );
+    assert!(
+        reopened_authority_messages
+            .borrow()
+            .iter()
+            .any(|message| matches!(
+                message,
+                SyncMessage::ViewUpdate(_) | SyncMessage::AuthorizationScopeView { .. }
+            )),
+        "reconnect must receive a covered-input update; peer ViewUpdate has no terminal carrier",
+    );
+
+    let regranted = seeder
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("regranted after reconnect".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("regrant bounded authority membership");
+    for _ in 0..12 {
+        seeder.tick().expect("upload regranted row");
+        core.tick().expect("accept regranted row");
+        reopened_worker.tick().expect("relay regranted closure");
+        reopened_tab
+            .tick()
+            .expect("derive regranted bounded window");
+    }
+    let regranted_rows = block_on(reopened_tab.all(
+        &reopened_query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("read regranted bounded authority membership");
+    assert_eq!(
+        regranted_rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![regranted.row_uuid()],
+        "revocation, reconnect, and regrant must transition the receiver-local bounded terminal",
+    );
 
     assert!(seeder.detach_connection(&seeder_connection));
     assert!(core.detach_connection(&core_seed_subscriber));
@@ -2448,16 +3458,15 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
     let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
     let worker = open_db(0xc3, alice, &schema);
     let core = open_core(0xc4, &schema);
-    worker.set_relay_authority_session_owner();
+    worker.set_relay_authority_session_owner_for_test();
 
     let main_thread = open_db(0xc5, alice, &schema);
     main_thread.set_non_durable_client();
     let (main_transport, worker_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let row_id = jazz::ids::RowUuid::from_bytes([0xc6; 16]);
     let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
@@ -2556,6 +3565,10 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     let core = open_core(0x3c, &schema);
     let writer = open_db(0x4c, alice, &schema);
     main_thread.set_non_durable_client();
+    // The production broker marks its persistent worker as the authority
+    // session owner, so downstream Edge pages re-publish the received window
+    // rather than applying its absolute offset to the worker's local overlay.
+    worker.set_relay_authority_session_owner_for_test();
 
     let (writer_transport, core_writer_transport) = duplex();
     let _writer_connection = block_on(writer.connect_upstream(writer_transport));
@@ -2583,9 +3596,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let query = main_thread
         .prepare_query(
@@ -2868,6 +3880,10 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
     let core = open_core(0x3d, &schema);
     let writer = open_db(0x4d, alice, &schema);
     main_thread.set_non_durable_client();
+    // Match the persistent browser worker: every bounded one-shot page is
+    // re-published from its own authority-session membership and retains its
+    // independent detach lifetime.
+    worker.set_relay_authority_session_owner_for_test();
 
     let (writer_transport, core_writer_transport) = duplex();
     let _writer_connection = block_on(writer.connect_upstream(writer_transport));
@@ -2893,9 +3909,8 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     for offset in 1..=5 {
         let query = main_thread
@@ -2984,13 +3999,13 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let worker = open_db(0x29, alice, &schema);
     let core = open_core(0x39, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -3043,6 +4058,106 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     );
 }
 
+/// Two independently scoped relays can carry authority streams for the same
+/// canonical empty query. Each downstream browser must receive its own
+/// settled handoff; one receipt cannot make the sibling scope ambiguous or
+/// leave it waiting forever. A persistent browser worker owns exactly one
+/// immutable auth scope, so this deliberately uses one worker per identity.
+#[test]
+fn browser_relay_hands_off_each_policy_scoped_empty_result_independently() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb8; 16]);
+    let alice_main = open_db(0x1a, alice, &schema);
+    let bob_main = open_db(0x1b, bob, &schema);
+    let alice_worker = open_db(0x29, alice, &schema);
+    let bob_worker = open_db(0x2a, bob, &schema);
+    let core = open_core(0x39, &schema);
+    alice_main.set_non_durable_client();
+    bob_main.set_non_durable_client();
+    alice_worker.set_relay_authority_session_owner_for_test();
+    bob_worker.set_relay_authority_session_owner_for_test();
+
+    let (alice_transport, worker_alice_transport) = duplex();
+    let _alice_connection = block_on(alice_main.connect_upstream(alice_transport));
+    let _worker_alice = alice_worker.accept_subscriber(worker_alice_transport, alice);
+    let (bob_transport, worker_bob_transport) = duplex();
+    let _bob_connection = block_on(bob_main.connect_upstream(bob_transport));
+    let _worker_bob = bob_worker.accept_subscriber(worker_bob_transport, bob);
+    let (_alice_upstream, _core_alice) =
+        connect_scope_isolated_worker_to_core!(alice_worker, core, alice);
+    let (_bob_upstream, _core_bob) = connect_scope_isolated_worker_to_core!(bob_worker, core, bob);
+
+    let alice_todos = alice_main
+        .prepare_query(&alice_main.table("todos"))
+        .expect("prepare Alice empty Edge query");
+    let bob_todos = bob_main
+        .prepare_query(&bob_main.table("todos"))
+        .expect("prepare Bob empty Edge query");
+    let edge_opts = ReadOpts {
+        tier: DurabilityTier::Edge,
+        ..ReadOpts::default()
+    };
+    let mut alice_subscription = block_on(alice_main.subscribe(&alice_todos, edge_opts.clone()))
+        .expect("subscribe Alice at Edge through worker relay");
+    let mut bob_subscription = block_on(bob_main.subscribe(&bob_todos, edge_opts))
+        .expect("subscribe Bob at Edge through worker relay");
+    assert!(alice_subscription.try_next_event().is_none());
+    assert!(bob_subscription.try_next_event().is_none());
+
+    for _ in 0..8 {
+        alice_main.tick().expect("register Alice worker view");
+        bob_main.tick().expect("register Bob worker view");
+        alice_worker
+            .tick()
+            .expect("forward Alice's policy group upstream");
+        bob_worker
+            .tick()
+            .expect("forward Bob's policy group upstream");
+        core.tick().expect("serve authority snapshots");
+        alice_worker
+            .tick()
+            .expect("apply and hand off Alice's authority snapshot");
+        bob_worker
+            .tick()
+            .expect("apply and hand off Bob's authority snapshot");
+        alice_main.tick().expect("apply Alice handoff");
+        bob_main.tick().expect("apply Bob handoff");
+    }
+
+    let is_settled_empty = |event: &SubscriptionEvent| {
+        matches!(
+            event,
+            SubscriptionEvent::Delta {
+                added,
+                settled: true,
+                ..
+            } if added.is_empty()
+        )
+    };
+    let alice_events =
+        std::iter::from_fn(|| alice_subscription.try_next_event()).collect::<Vec<_>>();
+    let bob_events = std::iter::from_fn(|| bob_subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        alice_events.iter().any(is_settled_empty),
+        "Alice needs her own settled-empty handoff: {alice_events:?}"
+    );
+    assert!(
+        bob_events.iter().any(is_settled_empty),
+        "Bob needs her own settled-empty handoff: {bob_events:?}"
+    );
+    assert_eq!(
+        alice_worker.relay_upstream_subscription_owner_count_for_test(),
+        1,
+        "Alice's scope retains its own relay upstream usage site"
+    );
+    assert_eq!(
+        bob_worker.relay_upstream_subscription_owner_count_for_test(),
+        1,
+        "Bob's scope retains its own relay upstream usage site"
+    );
+}
+
 /// Reopening the in-memory main runtime must replay the accepted parent of a
 /// pending update before replaying the update's Local acknowledgement.
 #[test]
@@ -3051,10 +4166,10 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
     let worker = open_db(0x28, alice, &schema);
     let core = open_core(0x38, &schema);
+    worker.set_relay_authority_session_owner_for_test();
 
-    let (worker_upstream_transport, core_transport) = duplex();
-    let worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (worker_upstream, core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
     let base = worker
         .insert(
             "todos",
@@ -3463,6 +4578,7 @@ fn reopened_worker_forgets_recovered_foreground_marker_after_global_acceptance()
     let successor = open_db(0x20, alice, &schema);
     successor.set_non_durable_client();
     let worker = open_persistent_browser_worker(storage.path(), 0x2f, alice, &schema);
+    worker.set_relay_authority_session_owner_for_test();
     assert!(
         worker.has_recovered_browser_relay_tx_for_test(tx_id),
         "worker restart must mark the recovered unresolved foreground transaction"
@@ -3476,9 +4592,8 @@ fn reopened_worker_forgets_recovered_foreground_marker_after_global_acceptance()
     let (successor_transport, worker_subscriber_transport) = duplex();
     let successor_connection = block_on(successor.connect_upstream(successor_transport));
     let worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
-    let (worker_upstream_transport, core_transport) = duplex();
-    let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (worker_upstream, core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
 
     worker.tick().expect("replay recovered foreground write");
     successor

@@ -437,7 +437,12 @@ where
                 }
                 match context.trust {
                     CommitUnitTrust::Session => context.identity,
-                    CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
+                    // Relay transport has no permission subject. A relayed
+                    // write must reach a serving authority through its
+                    // topology-owned admission path; it cannot borrow SYSTEM
+                    // or the transport identity here.
+                    CommitUnitTrust::Relay => return Ok(context.admitted_write_authorization),
+                    CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }
             }
@@ -448,7 +453,114 @@ where
         if permission_subject.is_anonymous() {
             return Ok(false);
         }
+        // Non-root branch writes have mandatory canonical operation intent.
+        // Do not treat an absent descriptor as an ordinary insert: that would
+        // let a raw sender relabel an inherited first-head overlay and bypass
+        // source read policy. The intent binds to the exact authored version,
+        // and only the authority proves its declared source/existence facts.
+        let branch_versions = versions
+            .iter()
+            .filter(|version| !version.branch_key().values.is_empty())
+            .collect::<Vec<_>>();
+        if !branch_versions.is_empty() {
+            if tx.kind != TxKind::Mergeable {
+                return Ok(false);
+            }
+            let Some(provenance) = &tx.contribution_merge else {
+                return Ok(false);
+            };
+            // Content and deletion registers may emit separate final versions
+            // for one physical branch row (for example a move's destination
+            // content write plus restore). They share one operation identity;
+            // require exactly one canonical intent per physical row/head.
+            let mut branch_coordinates = BTreeSet::new();
+            for version in &branch_versions {
+                let Ok(table_id) = self
+                    .physical_table_id_for_schema(version.schema_version(), version.table())
+                else {
+                    return Ok(false);
+                };
+                branch_coordinates.insert((
+                    table_id,
+                    version.schema_version(),
+                    version.row_uuid(),
+                    version.branch_key().clone(),
+                ));
+            }
+            if provenance.branch_write_intents.len() != branch_coordinates.len() {
+                return Ok(false);
+            }
+            for intent in &provenance.branch_write_intents {
+                let matching_versions = branch_versions
+                    .iter()
+                    .copied()
+                    .filter(|version| {
+                    version.schema_version() == intent.authored_schema
+                        && version.row_uuid() == intent.row_uuid
+                        && version.branch_key() == &intent.head
+                        && self
+                            .physical_table_id_for_schema(version.schema_version(), version.table())
+                            .ok()
+                            == Some(intent.physical_table_id)
+                    })
+                    .collect::<Vec<_>>();
+                if matching_versions.is_empty() {
+                    return Ok(false);
+                }
+                match &intent.operation {
+                    crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence) => {
+                        if matching_versions.iter().any(|version| {
+                            !version.parents().is_empty()
+                                || version.deletion() == Some(DeletionEvent::Deleted)
+                        })
+                            || !self
+                                .branch_view_copy_satisfies_read_for_write_visibility(
+                                    evidence,
+                                    intent.authored_schema,
+                                    permission_subject,
+                                    Some(tx.tx_id),
+                                )
+                                .await?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    crate::tx::BranchWriteOperation::ExactHeadInsert => {
+                        // This classifies the author's parentless write, not
+                        // an absence precondition at admission. Independent
+                        // offline inserts into the same head merge normally.
+                        // The ordinary policy checks below still require read
+                        // and update permission if an existing head is known.
+                        if matching_versions
+                            .iter()
+                            .any(|version| !version.parents().is_empty())
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    crate::tx::BranchWriteOperation::ExactHeadUpdate => {
+                        if matching_versions
+                            .iter()
+                            .any(|version| version.parents().is_empty())
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+        }
         for version in versions {
+            if tx.kind == TxKind::Mergeable
+                && !self
+                    .version_satisfies_read_for_write_visibility(
+                        version,
+                        permission_subject,
+                        Some(tx.tx_id),
+                    )
+                    .await?
+            {
+                return Ok(false);
+            }
             if !self
                 .version_satisfies_write_policy(version, permission_subject, tx.tx_id)
                 .await?
@@ -459,7 +571,10 @@ where
         Ok(true)
     }
 
-    pub(super) async fn version_satisfies_write_policy(
+    /// Evaluate one candidate under the active exact session scope. Terminal
+    /// relay admission uses this after its support proof before it may issue a
+    /// non-wire authorization receipt.
+    pub(crate) async fn version_satisfies_write_policy(
         &mut self,
         version: &VersionRecord,
         author: AuthorSubject,

@@ -8,11 +8,172 @@
 use super::*;
 use crate::node::query_engine::BranchViewSourceBase;
 use crate::protocol::{BranchViewBase, SnapshotRef};
+use crate::tx::{BranchViewCopyBase, BranchViewCopyEvidence};
 
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Resolve the exact inherited content version used when a branch-view
+    /// mutation creates the first physical head overlay.  This is operation
+    /// evidence only: callers must carry it to authority admission rather than
+    /// turn it into a history parent or a transaction read set.
+    pub(crate) async fn inherited_branch_view_copy_evidence(
+        &mut self,
+        table: &str,
+        head: &BranchSelector,
+        base: Option<&BranchViewBase>,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BranchViewCopyEvidence>, Error> {
+        let Some(base) = base else {
+            return Ok(None);
+        };
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+            .schema
+            .clone();
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let (head, _) = schema
+            .project_branch_view_selector(&table_schema, head)
+            .map_err(Error::InvalidBranchKey)?;
+        let base = match base {
+            BranchViewBase::Current(selector) => {
+                let (branch, _) = schema
+                    .project_branch_view_selector(&table_schema, selector)
+                    .map_err(Error::InvalidBranchKey)?;
+                BranchViewCopyBase::Current(branch)
+            }
+            BranchViewBase::Snapshot { branch, snapshot } => {
+                let (branch, _) = schema
+                    .project_branch_view_selector(&table_schema, branch)
+                    .map_err(Error::InvalidBranchKey)?;
+                BranchViewCopyBase::Snapshot {
+                    branch,
+                    snapshot: snapshot.clone(),
+                }
+            }
+        };
+        let (head_content, head_deletions) = self
+            .branch_winners_for_schema(table, schema_version, DurabilityTier::Local, &head, None)
+            .await?;
+        if head_content.contains_key(&row_uuid) || head_deletions.contains_key(&row_uuid) {
+            return Ok(None);
+        }
+        let (base_key, snapshot) = match &base {
+            BranchViewCopyBase::Current(branch) => (branch, None),
+            BranchViewCopyBase::Snapshot { branch, snapshot } => (branch, Some(snapshot)),
+        };
+        let (content, deletions) = self
+            .branch_winners_for_schema(
+                table,
+                schema_version,
+                DurabilityTier::Local,
+                base_key,
+                snapshot,
+            )
+            .await?;
+        let Some(source) = content.get(&row_uuid) else {
+            return Ok(None);
+        };
+        if deletions
+            .get(&row_uuid)
+            .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
+        {
+            return Ok(None);
+        }
+        Ok(Some(BranchViewCopyEvidence {
+            version: 1,
+            head,
+            base,
+            table: table.to_owned(),
+            row_uuid,
+            source_version: self.version_tx_id(source)?,
+        }))
+    }
+
+    /// Re-resolve non-causal branch-view copy evidence at an authority.
+    ///
+    /// The evidence is deliberately not a history parent, so it cannot rely on
+    /// ordinary parent parking or causal validation. Instead the authority
+    /// proves that the target still has no physical head overlay and that the
+    /// exact source version is the winner selected by the declared live or
+    /// frozen base. Any malformed coordinate, replacement head, deleted
+    /// source, or winner mismatch is simply not admissible authorization
+    /// evidence.
+    pub(super) async fn resolve_branch_view_copy_evidence(
+        &mut self,
+        evidence: &BranchViewCopyEvidence,
+        authored_schema: SchemaVersionId,
+        candidate_tx_id: Option<TxId>,
+    ) -> Result<Option<VersionRow>, Error> {
+        if evidence.version != 1 {
+            return Ok(None);
+        }
+        let _table_schema = match self.table_in_schema(&evidence.table, authored_schema) {
+            Ok(table) => table,
+            Err(Error::TableNotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        // Evidence stores already-projected physical branch keys. It must not
+        // be projected a second time at admission: tables can have different
+        // branch dimensions in one transaction.
+        let head = evidence.head.clone();
+        let base = match &evidence.base {
+            BranchViewCopyBase::Current(branch) => Some((branch.clone(), None)),
+            BranchViewCopyBase::Snapshot { branch, snapshot } => {
+                Some((branch.clone(), Some(snapshot)))
+            }
+        };
+        let Some((base_key, snapshot)) = base else {
+            return Ok(None);
+        };
+        let (head_content, head_deletions) = self
+            .branch_winners_for_schema(
+                &evidence.table,
+                authored_schema,
+                DurabilityTier::Local,
+                &head,
+                None,
+            )
+            .await?;
+        let physical_head_winners = head_content
+            .get(&evidence.row_uuid)
+            .into_iter()
+            .chain(head_deletions.get(&evidence.row_uuid))
+            .map(|version| self.version_tx_id(version))
+            .collect::<Result<Vec<_>, _>>()?;
+        if physical_head_winners
+            .iter()
+            .any(|winner| Some(*winner) != candidate_tx_id)
+        {
+            return Ok(None);
+        }
+        let (content, deletions) = self
+            .branch_winners_for_schema(
+                &evidence.table,
+                authored_schema,
+                DurabilityTier::Local,
+                &base_key,
+                snapshot,
+            )
+            .await?;
+        let Some(source) = content.get(&evidence.row_uuid) else {
+            return Ok(None);
+        };
+        if deletions
+            .get(&evidence.row_uuid)
+            .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
+            || self.version_tx_id(source)? != evidence.source_version
+        {
+            return Ok(None);
+        }
+        Ok(Some(source.clone()))
+    }
+
     /// Return every persisted spelling of a logical branch key that can occur
     /// across the table's monotone schema history. Older spellings omit later
     /// branch columns and are equivalent only when the selector supplies those
@@ -196,7 +357,7 @@ where
             }))
     }
 
-    async fn branch_winners_for_schema(
+    pub(super) async fn branch_winners_for_schema(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
@@ -354,7 +515,7 @@ where
         Ok((base_rows, deleted_base_rows))
     }
 
-    fn materialize_branch_view_winners(
+    pub(super) fn materialize_branch_view_winners(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,

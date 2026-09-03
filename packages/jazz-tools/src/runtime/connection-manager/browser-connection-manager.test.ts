@@ -54,6 +54,149 @@ describe("BrowserConnectionManager.shutdown", () => {
 });
 
 describe("BrowserConnectionManager explicit transport transitions", () => {
+  it("enables Inspector-local reads only from the worker attachment receipt", async () => {
+    const connection = {
+      ready: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(
+        () => "jazz-inspector-authenticated-root",
+      ),
+    } as unknown as BrowserWorkerConnection;
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: { createBrowserWorkerConnection: vi.fn(() => connection) },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+      enableAuthenticatedInspectorLocalReads: vi.fn(),
+      clearAuthenticatedInspectorLocalReads: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+
+    await vi.waitFor(() =>
+      expect(host.enableAuthenticatedInspectorLocalReads).toHaveBeenCalledWith(
+        "jazz-inspector-authenticated-root",
+      ),
+    );
+  });
+
+  it("revokes an Inspector receipt when a failed follower is replaced, and requires a fresh receipt", async () => {
+    const firstReady = deferred();
+    const secondReady = deferred();
+    const first = {
+      ready: vi.fn(() => firstReady.promise),
+      reconnect: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(() => "same-coordinate"),
+    } as unknown as BrowserWorkerConnection;
+    const second = {
+      ready: vi.fn(() => secondReady.promise),
+      reconnect: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(() => "same-coordinate"),
+    } as unknown as BrowserWorkerConnection;
+    const callbacks: Array<{ onFailure(error: unknown): void }> = [];
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: {
+        createBrowserWorkerConnection: vi.fn((input) => {
+          callbacks.push(input);
+          return callbacks.length === 1 ? first : second;
+        }),
+      },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+      enableAuthenticatedInspectorLocalReads: vi.fn(),
+      clearAuthenticatedInspectorLocalReads: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+
+    // The original connection fails before its init receipt resolves. Its late
+    // receipt must not authorize the replacement merely because the physical
+    // coordinate is identical.
+    callbacks[0]?.onFailure(new Error("closed"));
+    const reconnect = manager.reconnect();
+    firstReady.resolve();
+    await vi.waitFor(() =>
+      expect(host.runtimeSource.createBrowserWorkerConnection).toHaveBeenCalledTimes(2),
+    );
+    expect(host.enableAuthenticatedInspectorLocalReads).not.toHaveBeenCalled();
+    // Initial open, follower retirement, then the replacement opening each
+    // revoke authority. In particular, removing the retirement clear makes
+    // this assertion fail even though the replacement uses the same root.
+    expect(host.clearAuthenticatedInspectorLocalReads).toHaveBeenCalledTimes(3);
+
+    secondReady.resolve();
+    await reconnect;
+    await vi.waitFor(() =>
+      expect(host.enableAuthenticatedInspectorLocalReads).toHaveBeenCalledWith("same-coordinate"),
+    );
+    expect(host.enableAuthenticatedInspectorLocalReads).toHaveBeenCalledTimes(1);
+  });
+
+  it("revokes an Inspector receipt before storage reset", async () => {
+    const connection = {
+      ready: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(() => "authenticated-root"),
+    } as unknown as BrowserWorkerConnection;
+    let onStorageReset: (() => void) | undefined;
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: {
+        createBrowserWorkerConnection: vi.fn((input) => {
+          onStorageReset = input.onStorageReset;
+          return connection;
+        }),
+      },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+      enableAuthenticatedInspectorLocalReads: vi.fn(),
+      clearAuthenticatedInspectorLocalReads: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+    await vi.waitFor(() =>
+      expect(host.enableAuthenticatedInspectorLocalReads).toHaveBeenCalledOnce(),
+    );
+
+    onStorageReset?.();
+    await vi.waitFor(() =>
+      expect(host.clearAuthenticatedInspectorLocalReads).toHaveBeenCalledTimes(2),
+    );
+  });
+
   it("serializes disconnect/reconnect and releases remote readiness after the last transition", async () => {
     const disconnectGate = deferred();
     const connection = {
@@ -135,6 +278,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       },
       markUnauthenticated: vi.fn(),
       clearAuthError: vi.fn(),
+      clearAuthenticatedInspectorLocalReads: vi.fn(),
     } as unknown as DbForConnection;
     const manager = new BrowserConnectionManager(host);
     (
@@ -177,6 +321,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       },
       markUnauthenticated: vi.fn(),
       clearAuthError: vi.fn(),
+      clearAuthenticatedInspectorLocalReads: vi.fn(),
     } as unknown as DbForConnection;
     const manager = new BrowserConnectionManager(host);
     await manager.disconnect();
@@ -223,6 +368,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       },
       markUnauthenticated: vi.fn(),
       clearAuthError: vi.fn(),
+      clearAuthenticatedInspectorLocalReads: vi.fn(),
     } as unknown as DbForConnection;
     const manager = new BrowserConnectionManager(host);
     (
@@ -260,6 +406,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       },
       markUnauthenticated: vi.fn(),
       clearAuthError: vi.fn(),
+      clearAuthenticatedInspectorLocalReads: vi.fn(),
     } as unknown as DbForConnection;
     const manager = new BrowserConnectionManager(host);
     (

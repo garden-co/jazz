@@ -3,6 +3,55 @@
 use super::*;
 use crate::time::TxTime;
 
+/// Opaque handle for one upstream connection selected by a test host.
+///
+/// This exists only behind the `testing` feature so integration tests can
+/// stage a real protocol frame through one unambiguous production connection
+/// without exposing a normal-runtime message injection API.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct TestUpstreamConnectionHandle {
+    connection_epoch: u64,
+    outbound: Rc<RefCell<Vec<SyncMessage>>>,
+}
+
+#[cfg(feature = "testing")]
+impl TestUpstreamConnectionHandle {
+    /// Drain frames emitted by the selected connection's real transport.
+    #[doc(hidden)]
+    pub fn take_outbound_for_test(&self) -> Vec<SyncMessage> {
+        std::mem::take(&mut *self.outbound.borrow_mut())
+    }
+}
+
+#[cfg(feature = "testing")]
+struct ObservedTestTransport {
+    inner: Box<dyn Transport>,
+    outbound: Rc<RefCell<Vec<SyncMessage>>>,
+}
+
+#[cfg(feature = "testing")]
+impl Transport for ObservedTestTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message.clone())?;
+        self.outbound.borrow_mut().push(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        self.inner.permits_delegated_sessions()
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -21,7 +70,7 @@ where
     /// Internal test inspection for the retry-payload ownership boundary.
     /// Foreign rejections may be observed for live notification, but they may
     /// not become this database's durable retry payload.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
         self.node.has_retained_rejection_for_test(tx_id)
@@ -30,7 +79,7 @@ where
     /// Internal test inspection for browser-relay recovered foreground
     /// transactions. The marker is process-local and must be consumed by
     /// either terminal fate, not only rejection.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
         self.node.has_recovered_browser_relay_tx_for_test(tx_id)
@@ -99,7 +148,41 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         })
+    }
+
+    /// Open the durable, scope-admitted half of a client relay.
+    ///
+    /// # Safety
+    /// The host must already bind this storage root to exactly one durable
+    /// authentication scope and expose the resulting Db only to that scope's
+    /// foregrounds. This is deliberately an open-time host capability, not a
+    /// mutable Db method that an application can acquire after attaching
+    /// arbitrary storage or peers.
+    #[doc(hidden)]
+    pub async unsafe fn open_scope_isolated_client_relay(
+        config: DbConfig<S>,
+        scope: ClientRelayScope,
+    ) -> Result<Self, Error> {
+        let db = Self::open(config).await?;
+        db.node.configure_scope_isolated_client_relay(scope)?;
+        Ok(db)
+    }
+
+    /// Test-only hook for topology fixtures. Production hosts must use the
+    /// scope-admitted constructor above; no public binding exposes this toggle.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_relay_authority_session_owner_for_test(&self) {
+        // SAFETY: test fixtures use a fixed synthetic host-admitted scope.
+        let scope = ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
+        self.node
+            .configure_scope_isolated_client_relay(scope)
+            .expect("test scope is stable");
     }
 
     /// Open a Db allowed to record external provenance while preserving this
@@ -150,6 +233,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         };
         Ok((db, receipt))
     }
@@ -188,6 +275,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         })
     }
 
@@ -224,6 +315,7 @@ where
             NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
+        node.restore_edge_authority_uploads().await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: bootstrap_schema,
@@ -242,6 +334,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         })
     }
 
@@ -355,6 +451,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: self.backend_attribution,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::clone(&self.fail_next_subscription_refresh),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::clone(&self.stall_next_subscription_refresh),
         })
     }
 
@@ -440,13 +540,24 @@ where
         Ok(())
     }
 
-    /// Flush node-local maintenance state, write a clean-close marker, and
-    /// close storage without blocking the caller's executor.
+    /// Close maintenance admission, terminalize open transactions and streams,
+    /// flush node-local state, write a clean-close marker, and close storage
+    /// without blocking the caller's executor.
     pub async fn close(&self) -> Result<(), Error> {
         if self.schema_view_is_fixed {
             return Ok(());
         }
         self.node.begin_mutation_shutdown();
+        // Transaction admission and Drop maintenance must cross their shutdown
+        // boundary before close can suspend. The final sweep is transferred to
+        // node-owned maintenance now, so cancellation while any accepted owner
+        // operation or waiter drains cannot leave open transactions behind.
+        self.node.begin_transaction_abandonment_shutdown();
+        // Subscription finalization has the same ownership boundary. Capture
+        // every live stream before waiting for a close owner so cancellation
+        // cannot admit a late finalizer outside the terminal retirement set.
+        self.node.begin_subscription_finalization_shutdown();
+        let _close_owner = self.node.lock_close_owner().await;
         // Mutation admission belongs to the binding-facing owner. Once that
         // owner enters Closing it retains this Db and awaits every operation
         // it already accepted, in FIFO order, before storage is retired.
@@ -460,11 +571,10 @@ where
         // Acknowledge that durable rejection before closing storage; there is
         // no later owner turn after close to flush the bounded acknowledgement.
         self.node.flush_deferred_rejection_discards().await?;
-        // Close finalization admission before the first await. This makes the
-        // queued retirement set and durable close one lifecycle transition:
-        // a stream dropped while storage is shutting down is either in this
-        // drain or already part of the retired terminal runtime.
-        self.node.begin_subscription_finalization_shutdown();
+        // Both finalization gates and their terminal retirement sets were
+        // transferred before the first suspension point. Finishing the sweeps
+        // remains ordered after every accepted mutation and wait observer.
+        self.node.finish_transaction_abandonment_shutdown().await?;
         self.node.drain_subscription_finalizations().await?;
         self.node.node.lock().await.close().await?;
         self.node.retire_subscription_runtime_after_close();
@@ -538,6 +648,10 @@ where
             reserved_tx_id: Some(tx_id),
             owner_operation_admitted: true,
             backend_attribution: self.backend_attribution,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::clone(&self.fail_next_subscription_refresh),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::clone(&self.stall_next_subscription_refresh),
         }
     }
 
@@ -555,6 +669,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: true,
             backend_attribution: self.backend_attribution,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::clone(&self.fail_next_subscription_refresh),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::clone(&self.stall_next_subscription_refresh),
         }
     }
 
@@ -564,13 +682,6 @@ where
         } else {
             self.node.ensure_mutation_admission_open()
         }
-    }
-
-    /// Configure this durable process as the internal browser relay that owns
-    /// fresh upstream authority sessions for client Edge reads.
-    #[doc(hidden)]
-    pub fn set_relay_authority_session_owner(&self) {
-        self.node.set_relay_authority_session_owner();
     }
 
     /// Restore unsettled writes relayed from a browser client sharing this
@@ -784,6 +895,50 @@ where
         self.node.connect_upstream(transport).await
     }
 
+    /// Attach an upstream with a test-only opaque handle for staging inbound
+    /// protocol frames and observing the frames emitted by that same link.
+    ///
+    /// Production bindings must use [`Db::connect_upstream`]. This helper is
+    /// deliberately feature-gated: it exercises the ordinary inbound queue,
+    /// rather than creating a second message-application path for tests.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub async fn connect_upstream_for_test(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> TestUpstreamConnectionHandle {
+        let outbound = Rc::new(RefCell::new(Vec::new()));
+        let connection = self
+            .node
+            .connect_upstream(Box::new(ObservedTestTransport {
+                inner: transport,
+                outbound: Rc::clone(&outbound),
+            }))
+            .await;
+        let connection_epoch = connection.lock().await.connection_epoch;
+        TestUpstreamConnectionHandle {
+            connection_epoch,
+            outbound,
+        }
+    }
+
+    /// Stage one protocol frame on the exactly selected test upstream.
+    ///
+    /// The frame is consumed by the normal `PeerConnection::tick` inbound
+    /// loop. A stale, detached, or ambiguous handle fails explicitly rather
+    /// than selecting an arbitrary connection.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub async fn stage_upstream_message_for_test(
+        &self,
+        handle: &TestUpstreamConnectionHandle,
+        message: SyncMessage,
+    ) -> Result<bool, String> {
+        self.node
+            .stage_upstream_message_for_test(handle.connection_epoch, message)
+            .await
+    }
+
     /// Install or clear the scheduler used to wake this database's live peer
     /// connections when local writes, subscription registrations, or transport
     /// events create sync work.
@@ -831,6 +986,60 @@ where
         identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.accept_subscriber(transport, identity)
+    }
+
+    /// Test-only topology admission for a subjectless relay transport.
+    /// Production servers must derive this capability from their authenticated
+    /// handshake, never from a caller-selected identity or wire frame.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn accept_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_relay_subscriber(transport)
+    }
+
+    /// Test-only server admission for one authenticated scope-isolated relay.
+    /// Production servers derive this capability from their authenticated
+    /// handshake rather than accepting test-supplied identity, claims, or
+    /// epoch values.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn accept_scope_isolated_relay_subscriber_for_test(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_scope_isolated_relay_subscriber(
+            transport,
+            identity,
+            claims,
+            admission_epoch,
+        )
+    }
+
+    /// Server/host-only scope-relay admission after authenticated handshake.
+    // The public serving shell reaches this through its runtime-selected
+    // backend enum. Keep this crate-private so an embedding application cannot
+    // mint a scope-relay capability from caller-controlled claims.
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_scope_isolated_relay_subscriber(
+            transport,
+            identity,
+            claims,
+            admission_epoch,
+        )
     }
 
     /// Accept a subscriber connection served under `identity` with auth claims.
@@ -899,15 +1108,38 @@ where
 
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
-    pub async fn tick(&self) -> Result<(), Error> {
+    pub fn tick(&self) -> impl Future<Output = Result<(), Error>> + '_ {
+        StackSafeFuture::new(self.tick_inner())
+    }
+
+    async fn tick_inner(&self) -> Result<(), Error> {
+        // A later queued mutation may be cold while holding its retained
+        // preparation continuation.  Persist resident publications before
+        // polling that queue so unrelated cold preparation cannot starve an
+        // earlier local durability boundary or its outbox release.
+        if self.node.has_pending_local_publications() {
+            self.node.settle_local_publications().await?;
+        }
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
         if queued_mutation_pending {
+            // A cold FIFO owner operation remains retained at the queue head.
+            // If a close future was cancelled while polling it, its terminal
+            // sweeps still belong to node maintenance and must not wait for
+            // that operation to wake before becoming observable.
+            if self.node.transaction_abandonment_shutdown_is_pending() {
+                self.node.finish_transaction_abandonment_shutdown().await?;
+            }
+            if self.node.subscription_finalization_shutdown_is_pending() {
+                self.node.drain_subscription_finalizations().await?;
+            }
             return Ok(());
         }
         self.node.drain_subscription_finalizations().await?;
-        self.node.settle_local_publications().await?;
+        if self.node.has_pending_local_publications() {
+            self.node.settle_local_publications().await?;
+        }
         self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
@@ -915,15 +1147,32 @@ where
     }
 
     /// Service every connection once and return binding-observable wake counts.
-    pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+    pub fn tick_stats(&self) -> impl Future<Output = Result<DbTickStats, Error>> + '_ {
+        StackSafeFuture::new(self.tick_stats_inner())
+    }
+
+    async fn tick_stats_inner(&self) -> Result<DbTickStats, Error> {
+        // See `tick`: previously admitted resident publications must keep
+        // progressing even when the next FIFO preparation is cold.
+        if self.node.has_pending_local_publications() {
+            self.node.settle_local_publications().await?;
+        }
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
         if queued_mutation_pending {
+            if self.node.transaction_abandonment_shutdown_is_pending() {
+                self.node.finish_transaction_abandonment_shutdown().await?;
+            }
+            if self.node.subscription_finalization_shutdown_is_pending() {
+                self.node.drain_subscription_finalizations().await?;
+            }
             return Ok(DbTickStats::default());
         }
         self.node.drain_subscription_finalizations().await?;
-        self.node.settle_local_publications().await?;
+        if self.node.has_pending_local_publications() {
+            self.node.settle_local_publications().await?;
+        }
         let stats = self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
@@ -939,6 +1188,17 @@ where
 
     #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        #[cfg(test)]
+        if self.stall_next_subscription_refresh.replace(false) {
+            std::future::pending::<()>().await;
+        }
+        #[cfg(test)]
+        if self.fail_next_subscription_refresh.replace(false) {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "injected subscription refresh failure",
+            ));
+        }
         let refreshed = self.node.refresh_subscriptions().await?;
         if refreshed > 0 {
             self.node.mark_subscriber_connections_dirty();

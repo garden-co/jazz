@@ -10,12 +10,13 @@ use jazz::ids::{
     RowUuid, SchemaVersionId,
 };
 use jazz::protocol::{
-    CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
-    PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
-    RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey,
-    SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
-    build_version_bundle_runs_from_singletons,
+    CatalogueAck, CatalogueSnapshot, CoveredInputEntry, CurrentWriteSchema,
+    DelegatedSessionBinding, LensOp, MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity,
+    PhysicalIdentityManifest, PhysicalTableIdentity, ProgramFactEntry, ProgramSourceId,
+    ProgramSourceRole, RegisterShapeOptions, ResultRowEntry, ResultRowLayer, RowVersionRef,
+    RowVersionRefEntry, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
+    SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
+    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
@@ -64,8 +65,17 @@ const BINDING_CODEC_GOLDEN_FIXTURE_PATH: &str = concat!(
 #[derive(Deserialize)]
 struct WireFrameArtifactCorpus {
     format: String,
-    error_frame_hex: String,
+    error_frames: Vec<WireFrameArtifactError>,
     rejections: Vec<WireFrameArtifactRejection>,
+}
+
+#[derive(Clone, Deserialize)]
+struct WireFrameArtifactError {
+    name: String,
+    frame_hex: String,
+    code: jazz::wire::WireErrorCode,
+    retry: jazz::wire::WireRetry,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -308,6 +318,51 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
 
     vec![
         (
+            "authority_publication_two_complete_transactions",
+            "AuthorityPublication",
+            SyncMessage::AuthorityPublication(jazz::protocol::AuthorityPublication {
+                tx_id,
+                commits: (0..2)
+                    .map(|index| {
+                        let schema = compiled_todos_schema(&["title"]);
+                        jazz::protocol::AuthorityCommitUnit {
+                            tx: Transaction {
+                                tx_id: TxId::new(TxTime(12 + index), node),
+                                kind: TxKind::Mergeable,
+                                n_total_writes: 1,
+                                made_by: author,
+                                permission_subject: None,
+                                base_snapshot: None,
+                                row_read_set: None,
+                                absent_read_set: None,
+                                predicate_read_set: None,
+                                user_metadata_json: None,
+                                contribution_merge: None,
+                            },
+                            versions: vec![
+                                VersionRecord::from_cells(
+                                    &schema.tables()[0],
+                                    schema_version,
+                                    row,
+                                    if index == 0 { Vec::new() } else { vec![tx_id] },
+                                    author,
+                                    12,
+                                    author,
+                                    12 + index,
+                                    &BTreeMap::from([(
+                                        "title".to_owned(),
+                                        format!("publication-{index}"),
+                                    )]),
+                                    None,
+                                )
+                                .expect("publication fixture row encodes"),
+                            ],
+                        }
+                    })
+                    .collect(),
+            }),
+        ),
+        (
             "chunk_upload_start_root_descriptor",
             "ChunkUploadStart",
             SyncMessage::ChunkUploadStart(jazz::protocol::ChunkUploadStart {
@@ -357,6 +412,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }),
         ),
         (
@@ -373,6 +429,24 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                         authorization_progress: 9,
                     },
                 ),
+                delegated_session: None,
+            }),
+        ),
+        (
+            "subscribe_delegated_session_claim_snapshot",
+            "Subscribe",
+            SyncMessage::Subscribe(Subscribe {
+                shape_id,
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: Some(DelegatedSessionBinding {
+                    identity: AuthorSubject::for_test_bytes([0x73; 16]),
+                    claims: BTreeMap::from([(
+                        "user_id".to_owned(),
+                        Value::String("delegated-user".to_owned()),
+                    )]),
+                }),
             }),
         ),
         (
@@ -401,7 +475,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
-            "view_update_reset_with_row_add",
+            "view_update_reset_with_covered_input",
             "ViewUpdate",
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
@@ -413,10 +487,24 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     authorization_progress: Some(9),
                     opening_pending: false,
                 },
-                result_member_adds: vec![result_row_entry(tx_id).into()],
+                result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
-                program_fact_adds: Vec::new(),
+                program_fact_adds: vec![ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                    source: ProgramSourceId {
+                        table: "todos".to_owned().into(),
+                        path: vec![ProgramSourceRole::Root],
+                    },
+                    version_table: "todos".to_owned().into(),
+                    source_row: row,
+                    version: RowVersionRefEntry {
+                        tx: tx_id,
+                        schema_version: Some(schema_version),
+                        layer: ResultRowLayer::Content,
+                        batch: Some(tx_id),
+                        branch_or_prefix: Some(Vec::new()),
+                        row_digest: None,
+                    },
+                })],
                 program_fact_removes: Vec::new(),
             }),
         ),
@@ -431,13 +519,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             }),
         ),
         (
-            "view_update_terminal_patch",
+            "view_update_covered_input_all_source_roles",
             "ViewUpdate",
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
@@ -447,16 +534,29 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: vec![TerminalOperation {
-                    root_descriptor: RecordDescriptor::new([("enabled", ValueType::Bool)]),
-                    root_key: vec![10; 17],
-                    path: vec![TerminalPathSegment::Collection("children".to_owned())],
-                    edit: TerminalEdit::Move {
-                        key: vec![11; 17],
-                        index: 3,
+                program_fact_adds: vec![ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                    source: ProgramSourceId {
+                        table: "todos".to_owned().into(),
+                        path: vec![
+                            ProgramSourceRole::Root,
+                            ProgramSourceRole::Alias("self".to_owned()),
+                            ProgramSourceRole::RecursiveSeed("seed".to_owned()),
+                            ProgramSourceRole::RecursiveStep("step".to_owned()),
+                            ProgramSourceRole::CorrelatedChild("items".to_owned()),
+                            ProgramSourceRole::Policy("read".to_owned()),
+                        ],
                     },
-                }],
-                program_fact_adds: Vec::new(),
+                    version_table: "todos".to_owned().into(),
+                    source_row: RowUuid::from_bytes([0x79; 16]),
+                    version: RowVersionRefEntry {
+                        tx: tx_id,
+                        schema_version: Some(schema_version),
+                        layer: ResultRowLayer::Content,
+                        batch: Some(tx_id),
+                        branch_or_prefix: Some(vec![0x01]),
+                        row_digest: None,
+                    },
+                })],
                 program_fact_removes: Vec::new(),
             }),
         ),
@@ -564,6 +664,21 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "FetchRowVersions",
             SyncMessage::FetchRowVersions {
                 requests: vec![RowVersionRef::new("todos", row, tx_id)],
+                delegated_session: None,
+            },
+        ),
+        (
+            "fetch_row_versions_delegated_session_claim_snapshot",
+            "FetchRowVersions",
+            SyncMessage::FetchRowVersions {
+                requests: vec![RowVersionRef::new("todos", row, tx_id)],
+                delegated_session: Some(DelegatedSessionBinding {
+                    identity: AuthorSubject::for_test_bytes([0x74; 16]),
+                    claims: BTreeMap::from([(
+                        "user_id".to_owned(),
+                        Value::String("delegated-repair-user".to_owned()),
+                    )]),
+                }),
             },
         ),
         (
@@ -648,7 +763,11 @@ fn fixture_manifest() -> Manifest {
     let fixtures = wire_fixture_messages()
         .into_iter()
         .map(|(name, message_family, message)| {
-            let payload = encode_sync_message(&message).expect("sync message encodes");
+            message.validate_wire_contract().unwrap_or_else(|error| {
+                panic!("wire fixture {name} violates its semantic contract: {error:?}")
+            });
+            let payload = encode_sync_message(&message)
+                .unwrap_or_else(|error| panic!("wire fixture {name} cannot encode: {error}"));
             let frame = WireFrame::Message(WireEnvelope::new(
                 WIRE_PROTOCOL_VERSION,
                 FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -907,6 +1026,116 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
     }
 }
 
+/// An authority may send source inputs to Alice's client, never a collector
+/// result that bypasses Alice's compiled query: authority --result row--> reject.
+#[test]
+fn peer_wire_rejects_authority_result_members() {
+    let (_, _, message) = wire_fixture_messages()
+        .into_iter()
+        .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
+        .unwrap();
+    let SyncMessage::ViewUpdate(mut view) = message else {
+        panic!("view fixture")
+    };
+    view.result_member_adds
+        .push(result_row_entry(TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]))).into());
+    let invalid = SyncMessage::ViewUpdate(view);
+    assert!(encode_sync_message(&invalid).is_err());
+    let bytes = postcard::to_allocvec(&invalid).unwrap();
+    assert!(
+        decode_sync_message(&bytes).is_err(),
+        "raw legacy result-member payload must also fail closed"
+    );
+}
+
+#[test]
+fn covered_input_source_paths_require_an_exact_valid_v1_identity() {
+    let (_, _, message) = wire_fixture_messages()
+        .into_iter()
+        .find(|(name, _, _)| *name == "view_update_covered_input_all_source_roles")
+        .expect("covered-input source-role corpus exists");
+    let encoded = encode_sync_message(&message).expect("frozen source-role message encodes");
+    assert_eq!(
+        decode_sync_message(&encoded).expect("frozen source-role message decodes"),
+        message
+    );
+
+    // Alias is postcard enum tag 1 followed by the uniquely named `self`
+    // component. A future role can never silently decode as an existing one.
+    let alias_marker = [1, 4, b's', b'e', b'l', b'f'];
+    let alias_offset = encoded
+        .windows(alias_marker.len())
+        .position(|window| window == alias_marker)
+        .expect("frozen source-role corpus contains its alias tag");
+    let mut unknown_role = encoded.clone();
+    unknown_role[alias_offset] = 6;
+    assert!(
+        decode_sync_message(&unknown_role).is_err(),
+        "an unknown source role cannot fall back to the same-table or collector source"
+    );
+
+    let SyncMessage::ViewUpdate(mut invalid) = message else {
+        panic!("covered-input corpus is a view update");
+    };
+    let ProgramFactEntry::CoveredInput(input) = &mut invalid.program_fact_adds[0] else {
+        panic!("covered-input corpus carries the fact");
+    };
+    input.source.path = vec![ProgramSourceRole::Alias(String::new())];
+    assert!(
+        encode_sync_message(&SyncMessage::ViewUpdate(invalid.clone())).is_err(),
+        "the producer rejects malformed source paths rather than encoding a default"
+    );
+    let noncanonical_invalid = postcard::to_allocvec(&SyncMessage::ViewUpdate(invalid)).unwrap();
+    assert!(
+        decode_sync_message(&noncanonical_invalid).is_err(),
+        "the decoder rejects a syntactically complete but malformed source path"
+    );
+}
+
+#[test]
+fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
+    let messages = wire_fixture_messages();
+    for name in ["subscribe_empty_todos_binding", "fetch_row_versions_todos"] {
+        let (_, _, message) = messages
+            .iter()
+            .find(|(candidate, _, _)| *candidate == name)
+            .expect("v1 direct-policy fixture exists");
+        let mut old_shape = encode_sync_message(message).expect("v1 message encodes");
+        assert_eq!(
+            old_shape.pop(),
+            Some(0),
+            "{name}: fixture must end in its explicit delegated_session=None tag"
+        );
+        assert!(
+            decode_sync_message(&old_shape).is_err(),
+            "{name}: the pre-delegation record shape must not decode as v1"
+        );
+    }
+
+    let (_, _, message) = messages
+        .iter()
+        .find(|(name, _, _)| *name == "subscribe_delegated_session_claim_snapshot")
+        .expect("delegated Subscribe fixture exists");
+    let expected = encode_sync_message(message).expect("delegated Subscribe encodes");
+    let SyncMessage::Subscribe(mut changed) = message.clone() else {
+        panic!("delegated fixture must be Subscribe");
+    };
+    changed
+        .delegated_session
+        .as_mut()
+        .expect("delegated fixture carries a snapshot")
+        .claims
+        .insert(
+            "user_id".to_owned(),
+            Value::String("different-user".to_owned()),
+        );
+    assert_ne!(
+        encode_sync_message(&SyncMessage::Subscribe(changed)).expect("changed snapshot encodes"),
+        expected,
+        "a delegated claim change must alter the frozen v1 payload"
+    );
+}
+
 #[test]
 fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
     let corpus: WireFrameArtifactCorpus =
@@ -942,23 +1171,59 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
         "the exhaustiveness receipt detects a planted new/unaccounted family"
     );
 
-    let error_bytes = parse_hex(&corpus.error_frame_hex);
-    jazz::wire::validate_frame_for_artifact_corpus(&error_bytes, negotiated_features)
-        .expect("the representative WireFrame::Error is a complete canonical frame");
-    assert_eq!(
-        jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"),
+    for error in &corpus.error_frames {
+        let error_bytes = parse_hex(&error.frame_hex);
+        jazz::wire::validate_frame_for_artifact_corpus(&error_bytes, negotiated_features)
+            .unwrap_or_else(|decode_error| {
+                panic!(
+                    "{} is a complete canonical error frame: {decode_error}",
+                    error.name
+                )
+            });
+        assert_eq!(
+            jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"),
+            WireFrame::Error(jazz::wire::WireError::new(
+                error.code,
+                error.retry,
+                error.message.clone(),
+            )),
+            "{} carries exact code, retry, and message fields",
+            error.name,
+        );
+        assert_eq!(
+            encode_frame(&jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"))
+                .expect("error frame re-encodes"),
+            error_bytes,
+            "{} has one canonical v1 spelling",
+            error.name,
+        );
+    }
+    let bootstrap = corpus
+        .error_frames
+        .iter()
+        .find(|error| error.name == "runtime bootstrap not ready")
+        .expect("not-ready error is frozen in the v1 corpus");
+    let mut planted_wrong_code = bootstrap.clone();
+    planted_wrong_code.code = jazz::wire::WireErrorCode::MalformedFrame;
+    assert_ne!(
+        jazz::wire::decode_frame(&parse_hex(&bootstrap.frame_hex)).expect("error frame decodes"),
         WireFrame::Error(jazz::wire::WireError::new(
-            jazz::wire::WireErrorCode::MalformedFrame,
-            jazz::wire::WireRetry::Never,
-            "fixture error",
+            planted_wrong_code.code,
+            planted_wrong_code.retry,
+            planted_wrong_code.message,
         )),
-        "the corpus carries an exact structured-error frame, not only a valid tag"
+        "the corpus receipt detects a planted wrong error code",
     );
-    assert_eq!(
-        encode_frame(&jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"))
-            .expect("error frame re-encodes"),
-        error_bytes,
-        "the representative error has one canonical v1 spelling"
+    let mut planted_wrong_retry = bootstrap.clone();
+    planted_wrong_retry.retry = jazz::wire::WireRetry::Never;
+    assert_ne!(
+        jazz::wire::decode_frame(&parse_hex(&bootstrap.frame_hex)).expect("error frame decodes"),
+        WireFrame::Error(jazz::wire::WireError::new(
+            planted_wrong_retry.code,
+            planted_wrong_retry.retry,
+            planted_wrong_retry.message,
+        )),
+        "the corpus receipt detects a planted wrong retry field",
     );
     for rejection in &corpus.rejections {
         let rejection_features = rejection
