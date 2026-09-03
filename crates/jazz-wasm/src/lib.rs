@@ -630,6 +630,14 @@ struct WasmWireTransport {
 }
 
 // Temporary covered-input publication diagnostic; remove after browser repair.
+#[wasm_bindgen(
+    inline_js = "export function traceSourceSend(message) { const channel = new BroadcastChannel('jazz-source-debug'); channel.postMessage(message); channel.close(); }"
+)]
+extern "C" {
+    #[wasm_bindgen(js_name = traceSourceSend)]
+    fn trace_source_send(message: &str);
+}
+
 struct TracedSubscriberTransport<T>(T);
 
 impl<T: jazz::db::Transport> jazz::db::Transport for TracedSubscriberTransport<T> {
@@ -651,6 +659,7 @@ impl<T: jazz::db::Transport> jazz::db::Transport for TracedSubscriberTransport<T
                 payload.peer_payload_inventory.opening_pending,
                 payload.program_fact_adds.len(), payload.version_carriers.len(),
             );
+            trace_source_send(&summary);
             if let Ok(console) =
                 js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("console"))
             {

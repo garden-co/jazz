@@ -403,7 +403,7 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
                                 path: vec![
                                     crate::protocol::ProgramSourceRole::Root,
                                     crate::protocol::ProgramSourceRole::Alias(
-                                        "include:18446744073709551615:0".to_owned(),
+                                        "reference:assignee".to_owned(),
                                     ),
                                 ],
                             },

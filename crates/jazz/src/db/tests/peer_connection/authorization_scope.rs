@@ -1424,6 +1424,16 @@ fn scope_relay_empty_includes_publish_complete_source_manifest() {
 }
 
 fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_includes: bool) {
+    // Match a browser host: query I/O may yield to a later scheduled turn.
+    // This test drives those turns explicitly rather than running a JS loop.
+    struct HostScheduler;
+    impl TickScheduler for HostScheduler {
+        fn schedule_tick(&self, _urgency: TickUrgency) {}
+        fn schedule_tick_after(&self, _delay_ms: u64) {}
+        fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+            Some(futures::task::noop_waker())
+        }
+    }
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
@@ -1448,6 +1458,8 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
     let relay = open_db(0x65, author, &schema);
     relay.set_relay_authority_session_owner_for_test();
     let foreground = open_db(0x66, author, &schema);
+    relay.set_tick_scheduler(Some(Rc::new(HostScheduler)));
+    foreground.set_tick_scheduler(Some(Rc::new(HostScheduler)));
     foreground.set_non_durable_client();
     let cached = row(0x67);
     if seed_cache {

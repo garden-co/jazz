@@ -11,6 +11,11 @@ import { app } from "../../schema.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { type Db, type DbConfig } from "jazz-tools";
 
+// Temporary diagnostic bridge: SharedWorker console output is not forwarded
+// by this browser runner, so bring the source-manifest trace onto the page.
+const sourceTrace = new BroadcastChannel("jazz-source-debug");
+sourceTrace.onmessage = ({ data }) => console.warn(data);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
