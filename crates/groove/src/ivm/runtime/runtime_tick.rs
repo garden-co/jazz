@@ -659,45 +659,34 @@ impl IncrementalEvaluation<'_> {
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
-        runtime
-            .operator_states
-            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
-        for state in self.operator_states.values_mut() {
+        for (key, state) in &mut self.operator_states {
             if let OperatorState::Recursive(recursive) = state {
                 recursive.value_mut().commit_staged_positive();
             }
+            runtime.operator_states.remove(key);
         }
         runtime
             .operator_states
             .extend(std::mem::take(&mut self.operator_states));
 
-        runtime
-            .arrangement_states
-            .retain(|key, _| !self.relevant_nodes.contains(&key.input));
-        for state in self.arrangement_states.values_mut() {
+        for (key, state) in &mut self.arrangement_states {
             state.value_mut().commit_overlay();
+            runtime.arrangement_states.remove(key);
         }
         runtime
             .arrangement_states
             .extend(std::mem::take(&mut self.arrangement_states));
-        runtime
-            .arrangement_keys_by_input
-            .retain(|node, _| !self.relevant_nodes.contains(node));
+        for node in self.arrangement_keys_by_input.keys() {
+            runtime.arrangement_keys_by_input.remove(node);
+        }
         runtime
             .arrangement_keys_by_input
             .extend(std::mem::take(&mut self.arrangement_keys_by_input));
 
         runtime
             .eval_memo
-            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
-        runtime
-            .eval_memo
             .extend(std::mem::take(&mut self.eval_memo));
-        runtime.eval_memo_bytes = runtime
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
+        runtime.eval_memo_bytes = runtime.eval_memo_bytes.saturating_add(self.eval_memo_bytes);
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
         // Retainers are owned by graph lifecycle operations, not by this
         // evaluation snapshot. Preserve their current live value when a
@@ -713,12 +702,13 @@ impl IncrementalEvaluation<'_> {
         }
         runtime
             .node_meta
-            .retain(|node, _| !self.relevant_nodes.contains(node));
-        runtime
-            .node_meta
             .extend(std::mem::take(&mut self.node_meta));
-        runtime.table_frontiers = std::mem::take(&mut self.table_frontiers);
-        runtime.binding_frontiers = std::mem::take(&mut self.binding_frontiers);
+        runtime
+            .table_frontiers
+            .extend(std::mem::take(&mut self.table_frontiers));
+        runtime
+            .binding_frontiers
+            .extend(std::mem::take(&mut self.binding_frontiers));
         runtime.current_tick = self.current_tick;
         runtime
             .pending_binding_retractions
@@ -2155,40 +2145,67 @@ impl IvmRuntime {
         // node, while unrelated graph state remains in the live runtime.
         let (relevant_nodes, _) = EvaluationWorkQueue::new(affected_nodes.iter().copied())
             .discover_incremental(&self.graph)?;
-        let mut operator_states = self
-            .operator_states
+        // Capture by graph key, never by filtering global retained maps. Root
+        // state is the only durable evaluator state; recursive child scopes
+        // are scratch and are removed before publication.
+        let mut operator_states = relevant_nodes
             .iter()
-            .filter(|(key, _)| relevant_nodes.contains(&key.node))
-            .map(|(key, state)| (key.clone(), state.clone()))
+            .filter_map(|node| {
+                let key = OperatorStateKey {
+                    scope: ScopeId::root(),
+                    node: *node,
+                };
+                self.operator_states
+                    .get(&key)
+                    .cloned()
+                    .map(|state| (key, state))
+            })
             .collect::<HashMap<_, _>>();
-        let mut arrangement_states = self
-            .arrangement_states
-            .iter()
-            .filter(|(key, _)| relevant_nodes.contains(&key.input))
-            .map(|(key, state)| (key.clone(), state.clone()))
-            .collect::<HashMap<_, _>>();
-        let mut arrangement_keys_by_input = self
-            .arrangement_keys_by_input
-            .iter()
-            .filter(|(input, _)| relevant_nodes.contains(input))
-            .map(|(input, keys)| (*input, keys.clone()))
-            .collect::<HashMap<_, _>>();
-        let mut eval_memo = self
-            .eval_memo
-            .iter()
-            .filter(|(key, _)| relevant_nodes.contains(&key.node))
-            .map(|(key, entry)| (key.clone(), entry.clone()))
-            .collect::<HashMap<_, _>>();
-        let mut eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
+        let mut arrangement_states = HashMap::default();
+        let mut arrangement_keys_by_input = HashMap::default();
+        for input in &relevant_nodes {
+            let Some(keys) = self.arrangement_keys_by_input.get(input) else {
+                continue;
+            };
+            for key in keys {
+                if let Some(state) = self.arrangement_states.get(key) {
+                    arrangement_states.insert(key.clone(), state.clone());
+                    arrangement_keys_by_input
+                        .entry(*input)
+                        .or_insert_with(HashSet::default)
+                        .insert(key.clone());
+                }
+            }
+        }
+        // Tick memo entries are disposable. Recomputing the affected graph is
+        // bounded by that graph slice and avoids a global memo scan.
+        let mut eval_memo = HashMap::default();
+        let mut eval_memo_bytes = 0;
         let mut memo_use_clock = self.memo_use_clock;
-        let mut node_meta = self
-            .node_meta
+        let mut node_meta = relevant_nodes
             .iter()
-            .filter(|(node, _)| relevant_nodes.contains(node))
-            .map(|(node, meta)| (*node, meta.clone()))
+            .filter_map(|node| self.node_meta.get(node).cloned().map(|meta| (*node, meta)))
             .collect::<HashMap<_, _>>();
-        let mut table_frontiers = self.table_frontiers.clone();
-        let mut binding_frontiers = self.binding_frontiers.clone();
+        let mut table_frontiers = HashMap::default();
+        let mut binding_frontiers = HashMap::default();
+        for node in &relevant_nodes {
+            let Some(graph_node) = self.graph.node(*node) else {
+                continue;
+            };
+            match &graph_node.descriptor.operator {
+                OpType::TableSource(source) => {
+                    if let Some(frontier) = self.table_frontiers.get(&source.table) {
+                        table_frontiers.insert(source.table.clone(), *frontier);
+                    }
+                }
+                OpType::BindingSource(source) => {
+                    if let Some(frontier) = self.binding_frontiers.get(&source.key) {
+                        binding_frontiers.insert(source.key.clone(), *frontier);
+                    }
+                }
+                _ => {}
+            }
+        }
         let current_tick = self.current_tick + 1;
         let table_delta_records = table_deltas
             .iter()
