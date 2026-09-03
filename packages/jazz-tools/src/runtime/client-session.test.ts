@@ -178,6 +178,51 @@ describe("client session resolution", () => {
     expect(session?.claims.aud).toBeUndefined();
   });
 
+  it("preserves prototype-named flat claims as own data properties through public cloning", () => {
+    // JSON payloads cannot contain symbols or accessors, but they can contain
+    // every string key, including names with legacy Object.prototype behavior.
+    const payload = JSON.parse(
+      '{"iss":"https://issuer.example","sub":"alice","__proto__":{"polluted":true},"constructor":"app-constructor","prototype":{"version":1},"role":"editor"}',
+    ) as Record<string, unknown>;
+    const internal = internalSessionFromVerifiedReservedJwtPayload(
+      { ...payload, iss: LOCAL_FIRST_JWT_ISSUER },
+      "local-first",
+    )!;
+    const session = sessionFromVerifiedReservedJwtPayload(
+      { ...payload, iss: LOCAL_FIRST_JWT_ISSUER },
+      "local-first",
+    )!;
+
+    expect(Object.getPrototypeOf(internal.claims)).toBeNull();
+    expect(Object.keys(internal.claims)).toEqual(["__proto__", "constructor", "prototype", "role"]);
+    expect(Object.hasOwn(internal.claims, "__proto__")).toBe(true);
+    expect(Object.hasOwn(internal.claims, "constructor")).toBe(true);
+    expect(Object.hasOwn(internal.claims, "prototype")).toBe(true);
+    expect(internal.claims.__proto__).toEqual({ polluted: true });
+    expect(internal.claims.constructor).toBe("app-constructor");
+    expect(internal.claims.prototype).toEqual({ version: 1 });
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+
+    // Public publication clones and freezes the claim dictionary, while the
+    // native bridge can enumerate these own JSON properties as a BTreeMap.
+    expect(Object.keys(session.claims)).toEqual([
+      "__proto__",
+      "constructor",
+      "prototype",
+      "role",
+      "iss",
+      "sub",
+    ]);
+    expect(session.claims.__proto__).toEqual({ polluted: true });
+    expect(session.claims.constructor).toBe("app-constructor");
+    expect(session.claims.prototype).toEqual({ version: 1 });
+    expect(JSON.parse(JSON.stringify(session.claims))).toEqual(
+      JSON.parse(
+        '{"__proto__":{"polluted":true},"constructor":"app-constructor","prototype":{"version":1},"role":"editor","iss":"urn:jazz:local-first","sub":"alice"}',
+      ),
+    );
+  });
+
   it("preserves exact nonblank JWT issuer and subject bytes and rejects ASCII-whitespace-only components", () => {
     const spaced = resolveClientSessionSync({
       appId: "app-jwt-spaced-subject",

@@ -89,6 +89,8 @@ export function isTrustedReservedSession(
 }
 
 export interface JwtPayload {
+  /** Application-defined flat JWT claims. Known transport claims below retain their types. */
+  [claim: string]: unknown;
   jazz_pub_key?: unknown;
   sub?: unknown;
   iss?: unknown;
@@ -106,7 +108,10 @@ const REGISTERED_JWT_CLAIMS = new Set(["iss", "sub", "aud", "exp", "nbf", "iat",
  * `null`, arrays, and objects, remains available to application code.
  */
 function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> | null {
-  const claims: Record<string, unknown> = {};
+  // A null-prototype dictionary makes every JSON key a data property. In
+  // particular, assigning an untrusted `__proto__` key to `{}` would invoke
+  // Object.prototype's legacy setter instead of preserving the claim.
+  const claims: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const [name, value] of Object.entries(payload).sort(compareUtf8)) {
     if (!REGISTERED_JWT_CLAIMS.has(name)) claims[name] = value;
   }
