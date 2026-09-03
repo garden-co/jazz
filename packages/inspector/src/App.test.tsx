@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -263,6 +263,59 @@ describe("App", () => {
     expect(preview).toBeDefined();
     expect(stored.activeConnectionId).toBe(preview?.id);
   });
+
+  it("keeps connections open when an edit submission is cancelled while schema hashes load", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:19879",
+            appId: "local-app-id",
+            adminSecret: "local-admin-secret",
+            env: "dev",
+            branch: "main",
+            schemaHash: "hash-a",
+          },
+        ],
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("Inspector ready")).not.toBeNull();
+    const storedBeforeEdit = localStorage.getItem(STORAGE_KEY);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open connections" }));
+    expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Local dev" }));
+    expect(await screen.findByRole("heading", { name: "Edit connection" })).not.toBeNull();
+
+    let resolveSchemaHashes!: (result: { hashes: string[] }) => void;
+    const pendingSchemaHashes = new Promise<{ hashes: string[] }>((resolve) => {
+      resolveSchemaHashes = resolve;
+    });
+    fetchSchemaHashesMock.mockImplementationOnce(() => pendingSchemaHashes);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
+
+    await act(async () => {
+      resolveSchemaHashes({ hashes: ["hash-c"] });
+      await pendingSchemaHashes;
+    });
+
+    expect(screen.getByRole("heading", { name: "Connections" })).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "Select schema" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(localStorage.getItem(STORAGE_KEY)).toBe(storedBeforeEdit);
+  });
+
 
   it("prefills the connection form from partial hash params", async () => {
     localStorage.setItem(
