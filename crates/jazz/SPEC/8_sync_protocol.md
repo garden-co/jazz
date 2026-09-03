@@ -67,6 +67,11 @@ foreground binding admitted for that exact relay scope and attachment; the
 upstream authority, not the relay, evaluates policy under that binding (ch. 7,
 ch. 9).
 
+A browser's scope-isolated client relay authenticates with its foreground
+session, not an administrative credential incidentally present in application
+configuration. Administrative admission must not replace that session or
+silently change the relay's transport capability.
+
 **Implementation status (2026-07-27).** Relay aggregation onto a shared upstream
 shape is intended, but the current implementation does not guarantee it. Its
 aggregation and covering-shape semantics remain an open design question below.

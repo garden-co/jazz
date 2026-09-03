@@ -327,7 +327,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
-        authJson: JSON.stringify(runtimeAuth(config)),
+        authJson: JSON.stringify(browserWorkerTransportAuth(config)),
         sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
@@ -370,7 +370,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         onFailure,
       },
     );
-    connection.updateAuth(JSON.stringify(runtimeAuth(config)), sessionClaims);
+    connection.updateAuth(JSON.stringify(browserWorkerTransportAuth(config)), sessionClaims);
     return connection;
   }
 
@@ -444,10 +444,13 @@ function isPersistentBrowserConfig(config: DbConfig): boolean {
   return isBrowserRuntime() && (config.driver?.type ?? "persistent") === "persistent";
 }
 
-function runtimeAuth(config: DbConfig): Record<string, unknown> {
+/** @internal A client relay never acquires the application's admin capability. */
+export function browserWorkerTransportAuth(config: DbConfig): Record<string, unknown> {
   return {
     jwt_token: config.jwtToken ?? null,
-    ...(config.adminSecret ? { admin_secret: config.adminSecret } : {}),
+    // Dev/deployment credentials may coexist with a user session in DbConfig.
+    // Sending them here would override JWT admission at the server and remove
+    // this connection's scope-isolated client-relay capability.
     ...(config.cookieSession ? { backend_session: config.cookieSession } : {}),
   };
 }

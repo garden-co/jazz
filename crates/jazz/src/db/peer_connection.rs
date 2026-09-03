@@ -136,6 +136,18 @@ fn relay_upstream_subscription_key(
     }
 }
 
+fn relay_authority_coverage_key(coverage: &CoverageKey) -> CoverageKey {
+    let mut upstream = coverage.clone();
+    upstream.opts = upstream_register_shape_options(
+        coverage.opts.tier,
+        coverage.opts.read_view.clone(),
+        DurabilityTier::Global,
+        coverage.opts.propagate_upstream,
+    );
+    upstream.opts.binding_source = BindingSource::RelayAuthoritySession;
+    upstream
+}
+
 pub(crate) fn coverage_group_subscription_key(coverage: &CoverageKey) -> SubscriptionKey {
     let binding_id = coverage
         .policy_binding
@@ -1070,9 +1082,11 @@ where
                 && group.upstream_opts.binding_source != BindingSource::RelayAuthoritySession
             {
                 let mut owners = self.relay_upstream_subscription_owners.borrow_mut();
-                if let Some(owner) =
-                    owners.get_mut(&(group.upstream_subscription, connection_epoch))
-                {
+                if let Some(owner) = owners.get_mut(&(
+                    group.upstream_subscription,
+                    connection_epoch,
+                    old.opts.read_view_key(),
+                )) {
                     debug_assert_eq!(
                         owner.downstream_connection_epoch, connection_epoch,
                         "direct claim refresh found an upstream handle owned by another connection"
@@ -1109,6 +1123,7 @@ where
         // includes the new immutable delegated snapshot.
         let mut upstream_replacements = Vec::new();
         let mut refreshed_authority_sources = BTreeMap::new();
+        let mut refreshed_upstream_handles = BTreeMap::new();
         let groups = coverage_groups
             .iter_mut()
             .map(|(coverage, group)| {
@@ -1123,16 +1138,19 @@ where
                         && let Some(downstream_subscription) = group.subscribers.first().copied()
                     {
                         let old_upstream_subscription = group.upstream_subscription;
-                        let fresh_upstream_subscription = self.relay_upstream_subscription_owners
+                        let authority_coverage = relay_authority_coverage_key(coverage);
+                        let fresh_upstream_subscription = refreshed_upstream_handles.get(&authority_coverage).copied()
+                            .or_else(|| self.relay_upstream_subscription_owners
                             .borrow().iter()
-                            .find(|(_, owner)| owner.coverage == *coverage && owner.policy_binding == refreshed_direct_binding)
-                            .map(|((subscription, _), _)| *subscription)
+                            .find(|(_, owner)| relay_authority_coverage_key(&owner.coverage) == authority_coverage && owner.policy_binding == refreshed_direct_binding)
+                            .map(|((subscription, _, _), _)| *subscription))
                             .unwrap_or_else(|| relay_upstream_subscription_key(
                             connection_epoch,
                             downstream_subscription,
                             group.upstream_opts.read_view_key(),
                             &refreshed_direct_binding,
                         ));
+                        refreshed_upstream_handles.insert(authority_coverage, fresh_upstream_subscription);
                         if old_upstream_subscription != fresh_upstream_subscription {
                             group.upstream_subscription = fresh_upstream_subscription;
                             debug_assert_eq!(
@@ -1257,7 +1275,11 @@ where
                 }
             }
             self.relay_upstream_subscription_owners.borrow_mut().insert(
-                (fresh_upstream_subscription, connection_epoch),
+                (
+                    fresh_upstream_subscription,
+                    connection_epoch,
+                    coverage.opts.read_view_key(),
+                ),
                 RelayUpstreamSubscriptionOwner {
                     downstream_connection_epoch: connection_epoch,
                     coverage,
@@ -2613,7 +2635,7 @@ where
                                         .relay_upstream_subscription_owners
                                         .borrow()
                                         .iter()
-                                        .find(|((candidate, _), _)| *candidate == subscription)
+                                        .find(|((candidate, _, _), _)| *candidate == subscription)
                                         .map(|(_, owner)| owner.policy_binding.clone())
                                         .ok_or_else(|| Error::new(
                                             ErrorCode::Protocol,
@@ -4110,8 +4132,8 @@ where
                             // own a duplicate predecessor sequence.
                             let shared_upstream = if scope_relay {
                                 self.relay_upstream_subscription_owners.borrow().iter()
-                                    .find(|(_, owner)| owner.coverage == coverage && owner.policy_binding == subscription_policy_binding)
-                                    .map(|((subscription, _), _)| *subscription)
+                                    .find(|(_, owner)| relay_authority_coverage_key(&owner.coverage) == relay_authority_coverage_key(&coverage) && owner.policy_binding == subscription_policy_binding)
+                                    .map(|((subscription, _, _), _)| *subscription)
                             } else {
                                 None
                             };
@@ -4371,7 +4393,7 @@ where
                                 };
                                 self.relay_upstream_subscription_owners
                                     .borrow_mut()
-                                    .entry((group.upstream_subscription, connection_epoch))
+                                    .entry((group.upstream_subscription, connection_epoch, coverage.opts.read_view_key()))
                                     .and_modify(|existing| {
                                         debug_assert_eq!(
                                             existing.downstream_connection_epoch,
@@ -4495,7 +4517,7 @@ where
                                         if let Some(owner) = self
                                             .relay_upstream_subscription_owners
                                             .borrow_mut()
-                                            .get_mut(&(group.upstream_subscription, connection_epoch))
+                                            .get_mut(&(group.upstream_subscription, connection_epoch, coverage.opts.read_view_key()))
                                             && owner.downstream_connection_epoch == connection_epoch
                                             && owner.coverage == coverage
                                         {
@@ -6231,10 +6253,11 @@ fn rollback_rejected_subscriber_admission<S>(
     group.subscribers.remove(&subscription);
     group.pending_initial_subscribers.remove(&subscription);
     if group.upstream_opts.propagate_upstream {
-        if let Some(owner) = relay_upstream_subscription_owners
-            .borrow_mut()
-            .get_mut(&(group.upstream_subscription, connection_epoch))
-            && owner.downstream_connection_epoch == connection_epoch
+        if let Some(owner) = relay_upstream_subscription_owners.borrow_mut().get_mut(&(
+            group.upstream_subscription,
+            connection_epoch,
+            coverage.opts.read_view_key(),
+        )) && owner.downstream_connection_epoch == connection_epoch
             && owner.coverage == coverage
         {
             owner.downstream_subscriptions.remove(&subscription);

@@ -1539,9 +1539,11 @@ type UpstreamSubscriptionOwners =
 /// Relay-owned upstream usage sites are distinct from public `SubscriptionStream`
 /// owners. A served connection can disappear without dropping a public stream,
 /// so each connection retains its own pin on a possibly shared upstream handle.
-/// The tuple key separates wire identity from connection lifetime.
+/// The tuple key separates upstream wire identity, connection lifetime, and
+/// downstream read semantics. Local and remote readers on the same connection
+/// can pin one authority stream without sharing their local evaluator.
 type RelayUpstreamSubscriptionOwners =
-    Rc<RefCell<BTreeMap<(SubscriptionKey, u64), RelayUpstreamSubscriptionOwner>>>;
+    Rc<RefCell<BTreeMap<(SubscriptionKey, u64, ReadViewKey), RelayUpstreamSubscriptionOwner>>>;
 type PendingRelaySubscriptionRejections =
     Rc<RefCell<BTreeMap<u64, VecDeque<RelaySubscriptionRejection>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;

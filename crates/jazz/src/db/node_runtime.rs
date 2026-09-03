@@ -747,6 +747,7 @@ where
 
     /// Restore complete accepted authority publications, without waiting for
     /// the originating clients to reconnect. Only an edge host calls this.
+    #[cfg(any(test, feature = "runtime"))]
     pub(super) async fn restore_edge_authority_uploads(&self) -> Result<(), Error> {
         let mut node = self.node.lock().await;
         let pending = node.pending_edge_authority_transaction_ids().await?;
@@ -1850,8 +1851,11 @@ where
                         .coverage_groups
                         .iter()
                         .filter_map(|(coverage, group)| {
-                            let owner = owners
-                                .get(&(group.upstream_subscription, connection.connection_epoch))?;
+                            let owner = owners.get(&(
+                                group.upstream_subscription,
+                                connection.connection_epoch,
+                                coverage.opts.read_view_key(),
+                            ))?;
                             (group.upstream_opts.propagate_upstream
                                 && owner.downstream_connection_epoch == connection.connection_epoch
                                 && owner.coverage == *coverage)
@@ -3797,7 +3801,11 @@ pub(super) fn retire_relay_upstream_subscription(
     coverage: &CoverageKey,
 ) -> Option<RelayUpstreamSubscriptionOwner> {
     let mut owners = owners.borrow_mut();
-    let key = (subscription, downstream_connection_epoch);
+    let key = (
+        subscription,
+        downstream_connection_epoch,
+        coverage.opts.read_view_key(),
+    );
     let owner = owners.get(&key)?;
     if owner.downstream_connection_epoch != downstream_connection_epoch
         || owner.coverage != *coverage
@@ -3809,7 +3817,7 @@ pub(super) fn retire_relay_upstream_subscription(
     // shared stream. Only the last pin authorizes wire/local retirement.
     (!owners
         .keys()
-        .any(|(candidate, _)| *candidate == subscription))
+        .any(|(candidate, _, _)| *candidate == subscription))
     .then_some(removed)
 }
 
@@ -3824,7 +3832,7 @@ pub(super) fn take_relay_upstream_subscription_owner(
     let mut owners = owners.borrow_mut();
     let keys = owners
         .keys()
-        .filter(|(candidate, _)| *candidate == subscription)
+        .filter(|(candidate, _, _)| *candidate == subscription)
         .copied()
         .collect::<Vec<_>>();
     keys.into_iter()
@@ -3851,7 +3859,7 @@ pub(super) fn retire_relay_upstream_subscriptions_for_connection(
         .into_iter()
         .filter_map(|key| {
             let owner = owners.remove(&key)?;
-            (!owners.keys().any(|(candidate, _)| *candidate == key.0)).then_some((key.0, owner))
+            (!owners.keys().any(|(candidate, _, _)| *candidate == key.0)).then_some((key.0, owner))
         })
         .collect()
 }

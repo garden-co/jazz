@@ -14,6 +14,158 @@ fn schema_with_explicit_public_read() -> JazzSchema {
     )
 }
 
+/// Alice inserts after both clients settle empty reads; Bob must receive the
+/// update through his separate scope-isolated relay, including after a transient
+/// read joins and releases the same query.
+/// Alice foreground -> relay -> core -> relay -> Bob foreground.
+#[test]
+fn scope_relays_forward_new_rows_after_empty_subscription_settlement() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb5; 16]);
+    let core = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let alice_relay = open_db(0x61, alice, &schema);
+    let bob_relay = open_db(0x62, bob, &schema);
+    let alice_fg = open_db(0x63, alice, &schema);
+    let bob_fg = open_db(0x64, bob, &schema);
+    for (relay, foreground, author) in
+        [(&alice_relay, &alice_fg, alice), (&bob_relay, &bob_fg, bob)]
+    {
+        relay.set_relay_authority_session_owner_for_test();
+        foreground.set_non_durable_client();
+        let (up, down) = duplex();
+        block_on(relay.connect_upstream(up));
+        core.accept_scope_isolated_relay_subscriber(down, author, BTreeMap::new(), 1);
+        let (up, down) = duplex();
+        block_on(foreground.connect_upstream(up));
+        relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    }
+    let local = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let query = Query::from("todos");
+    let filtered = query.clone().filter(eq(col("done"), lit(false)));
+    let mut streams = Vec::new();
+    for foreground in [&alice_fg, &bob_fg] {
+        for (query, opts) in [
+            (&query, local.clone()),
+            (&filtered, local.clone()),
+            (&query, global_subscribe_opts()),
+        ] {
+            streams.push(prepared_subscribe(foreground, query, opts).unwrap());
+        }
+    }
+    let drive = || {
+        for _ in 0..32 {
+            alice_fg.tick().unwrap();
+            bob_fg.tick().unwrap();
+            alice_relay.tick().unwrap();
+            bob_relay.tick().unwrap();
+            core.tick().unwrap();
+        }
+    };
+    drive();
+    for foreground in [&alice_fg, &bob_fg] {
+        assert!(prepared_all(foreground, &query, local.clone()).is_empty());
+        assert!(prepared_all(foreground, &query, global_subscribe_opts()).is_empty());
+    }
+    drive();
+    // Inspect internal ownership because equal result rows alone cannot prove
+    // that Local and remote have one upstream predecessor sequence.
+    for relay in [&alice_relay, &bob_relay] {
+        let owners = relay.node.relay_upstream_subscription_owners.borrow();
+        assert_eq!(
+            owners.len(),
+            3,
+            "three independent downstream evaluator pins"
+        );
+        assert_eq!(
+            owners
+                .keys()
+                .map(|(subscription, _, _)| *subscription)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2,
+            "two query bindings, not three tier-specific upstream streams"
+        );
+    }
+    let inserted = row(0x65);
+    let write = alice_fg
+        .insert_with_id_attributed(alice, "todos", inserted, cells("new", false, alice))
+        .unwrap();
+    drive();
+    assert_eq!(
+        block_on(write.write_state()).unwrap().durability,
+        DurabilityTier::Global
+    );
+    let mut observed = Vec::new();
+    for stream in &mut streams {
+        let mut saw_insert = false;
+        while let Some(event) = stream.try_next_event() {
+            assert!(
+                !matches!(event, SubscriptionEvent::Rejected { .. }),
+                "{event:?}"
+            );
+            if let SubscriptionEvent::Delta { added, .. } = event {
+                saw_insert |= added.iter().any(|row| row.row.row_uuid() == inserted);
+            }
+        }
+        observed.push(saw_insert);
+    }
+    assert_eq!(
+        observed,
+        vec![true; 6],
+        "every live subscription must receive the new row"
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&bob_fg, &query, local.clone())),
+        vec![inserted]
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&bob_fg, &query, global_subscribe_opts())),
+        vec![inserted]
+    );
+    // Retiring remote readers must not retire their Local siblings' shared
+    // authority stream, even when both pins belong to the same connection.
+    for index in [5, 2] {
+        let mut remote = streams.remove(index);
+        block_on(remote.close()).unwrap();
+    }
+    drive();
+    let second = row(0x66);
+    alice_fg
+        .insert_with_id_attributed(alice, "todos", second, cells("second", false, alice))
+        .unwrap();
+    drive();
+    for stream in &mut streams {
+        let mut saw_second = false;
+        while let Some(event) = stream.try_next_event() {
+            assert!(
+                !matches!(event, SubscriptionEvent::Rejected { .. }),
+                "{event:?}"
+            );
+            if let SubscriptionEvent::Delta { added, .. } = event {
+                saw_second |= added.iter().any(|row| row.row.row_uuid() == second);
+            }
+        }
+        assert!(saw_second, "a sibling close must preserve live delivery");
+    }
+}
+
 /// Peer updates disclose the exact authority-approved source closure. A client
 /// derives result membership locally, so protocol-facing tests inspect source
 /// inputs rather than the retired authority-rendered member payload.
@@ -1630,7 +1782,7 @@ fn scope_relay_shares_upstream_across_foregrounds_until_final_detach() {
         assert_eq!(
             owners
                 .keys()
-                .map(|(subscription, _)| *subscription)
+                .map(|(subscription, _, _)| *subscription)
                 .collect::<BTreeSet<_>>()
                 .len(),
             1

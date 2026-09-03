@@ -249,6 +249,13 @@ Only final-pin release retires the stream. A subsequent usage opens a new wire
 identity; a retired stream's late reply cannot satisfy it. The receiver validates
 one ordered predecessor sequence, not duplicate sequences per local listener.
 
+Sharing is determined by the lowered authority request, including its query,
+binding, read view, and policy scope. Downstream local-first and remote reads
+that lower to the same authority request share one upstream stream, despite
+their different local overlay behavior. Each downstream connection and read
+mode holds its own ownership pin. Closing one mode must not retire a stream
+still needed by another; claims refresh must preserve the same sharing rule.
+
 Settlement is downstream of local evaluation. A receiver may report a
 generation settled only after the complete exact closure has been staged, all
 referenced content witnesses are present, the corresponding local Groove tick
