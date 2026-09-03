@@ -16,6 +16,10 @@ vi.mock("./contexts/host-link", () => ({
   readInspectorHostConfig: readHostConfigMock,
 }));
 
+vi.mock("jazz-tools/react", () => ({
+  JazzProvider: ({ children }: { children: ReactNode }) => children,
+}));
+
 vi.mock("./contexts/devtools-context", () => ({
   DevtoolsProvider: ({ children }: { children: ReactNode }) => children,
 }));
@@ -63,5 +67,29 @@ describe("defaultRuntimeContextKey", () => {
         runtimeSources: { inspectorHostPhysicalDbName: localFirstPhysicalDbName },
       }),
     ).toBe("external-first");
+  });
+});
+
+describe("InspectorApp", () => {
+  it("retries host discovery until the 15 second deadline", async () => {
+    vi.useFakeTimers();
+    openSessionMock.mockReset();
+    readHostConfigMock.mockReset();
+    openSessionMock.mockResolvedValue(null);
+    readHostConfigMock.mockReturnValue(null);
+    try {
+      const view = render(createElement(InspectorApp));
+      expect(view.getByText("Connecting…")).toBeDefined();
+
+      await act(() => vi.advanceTimersByTimeAsync(14_999));
+      expect(view.queryByText(/no host connection found/)).toBeNull();
+
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(view.getByText(/no host connection found/)).toBeDefined();
+      expect(openSessionMock.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 });

@@ -64,24 +64,169 @@ export function readInspectorHostSchema(): WasmSchema | null {
   }
 }
 
-export async function openInspectorRuntimeSession(): Promise<InspectorRuntimeSession | null> {
+export interface InspectorRuntimeSessionOptions {
+  /** Cancel opening before the host has returned a control port. */
+  signal?: AbortSignal;
+  /** Absolute epoch deadline shared by opening and the first request. */
+  deadline?: number;
+}
+
+const CONTROL_REQUEST_TIMEOUT_MS = 5_000;
+
+function abortError(): Error {
+  return new Error("Inspector control session opening was cancelled");
+}
+
+function sessionClosedError(): Error {
+  return new Error("Inspector control session is closed");
+}
+
+const closedRemotePorts = new WeakSet<MessagePort>();
+
+function closeRemotePort(port: MessagePort): void {
+  if (closedRemotePorts.has(port)) return;
+  closedRemotePorts.add(port);
+  try {
+    port.postMessage({ type: "close" });
+  } catch {
+    // The remote endpoint may already have torn down its side of the channel.
+  }
+  try {
+    port.close();
+  } catch {
+    // Closing an already unusable local endpoint is best effort.
+  }
+}
+
+export async function openInspectorRuntimeSession(
+  options: InspectorRuntimeSessionOptions = {},
+): Promise<InspectorRuntimeSession | null> {
   const host = readHost();
   if (!host) return null;
-  const control = await host.handle.openControlPort();
+
+  const { signal, deadline } = options;
+  if (signal?.aborted || (deadline !== undefined && deadline <= Date.now())) {
+    throw abortError();
+  }
+
+  const opening = Promise.resolve().then(() => host.handle.openControlPort());
+  let openingSettled = false;
+  let openingTimer: ReturnType<typeof setTimeout> | undefined;
+  let removeAbortListener: (() => void) | undefined;
+  const control = await new Promise<MessagePort>((resolve, reject) => {
+    const finish = (error?: unknown, port?: MessagePort) => {
+      if (openingSettled) {
+        if (port) closeRemotePort(port);
+        return;
+      }
+
+      openingSettled = true;
+      clearTimeout(openingTimer);
+      openingTimer = undefined;
+      removeAbortListener?.();
+      if (error !== undefined) reject(error);
+      else resolve(port!);
+    };
+
+    opening.then(
+      (port) => finish(undefined, port),
+      (error) => finish(error),
+    );
+    const remaining = deadline === undefined ? undefined : deadline - Date.now();
+    if (remaining !== undefined) {
+      openingTimer = setTimeout(() => finish(abortError()), Math.max(0, remaining));
+    }
+    if (signal) {
+      const onAbort = () => finish(abortError());
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }
+  });
+
   control.start();
   let nextId = 1;
+  let closed = false;
+  let requestDeadline = deadline;
+  type PendingRequest = {
+    resolve: (value: unknown) => void;
+    reject: (error: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  const pending = new Map<number, PendingRequest>();
+  const attachedPorts = new Set<MessagePort>();
+  const onMessage = (event: MessageEvent) => {
+    const message = event.data as { id?: unknown; error?: unknown } | null;
+    if (!message || typeof message.id !== "number") return;
+    const entry = pending.get(message.id);
+    if (!entry) return;
+    pending.delete(message.id);
+    clearTimeout(entry.timer);
+    if (message.error) entry.reject(new Error(String(message.error)));
+    else entry.resolve(message);
+  };
 
+  // The control channel has one dispatcher for the lifetime of the session.
+  // Requests only add entries to the pending map, so unrelated responses cannot
+  // accumulate event listeners.
+  let removeSessionAbortListener: (() => void) | undefined;
+  control.addEventListener("message", onMessage);
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    removeSessionAbortListener?.();
+    control.removeEventListener("message", onMessage);
+    const error = sessionClosedError();
+    for (const [id, entry] of pending) {
+      pending.delete(id);
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    for (const port of attachedPorts) closeRemotePort(port);
+    attachedPorts.clear();
+    closeRemotePort(control);
+  };
+  if (signal?.aborted) {
+    close();
+  } else if (signal) {
+    const onSessionAbort = () => close();
+    signal.addEventListener("abort", onSessionAbort, { once: true });
+    removeSessionAbortListener = () => signal.removeEventListener("abort", onSessionAbort);
+  }
   const request = <T>(message: Record<string, unknown>, transfer: Transferable[] = []) =>
     new Promise<T>((resolve, reject) => {
+      if (closed) {
+        reject(sessionClosedError());
+        return;
+      }
       const id = nextId++;
-      const onMessage = (event: MessageEvent) => {
-        if (event.data?.id !== id) return;
-        control.removeEventListener("message", onMessage);
-        if (event.data.error) reject(new Error(event.data.error));
-        else resolve(event.data);
-      };
-      control.addEventListener("message", onMessage);
-      control.postMessage({ ...message, id }, transfer);
+      const timer = setTimeout(
+        () => {
+          if (!pending.delete(id)) return;
+          reject(new Error("Inspector control request timed out"));
+        },
+        Math.max(
+          0,
+          Math.min(
+            CONTROL_REQUEST_TIMEOUT_MS,
+            requestDeadline === undefined
+              ? CONTROL_REQUEST_TIMEOUT_MS
+              : requestDeadline - Date.now(),
+          ),
+        ),
+      );
+      pending.set(id, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      });
+      try {
+        control.postMessage({ ...message, id }, transfer);
+      } catch (error) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
 
   const listContexts = async () =>
@@ -90,27 +235,48 @@ export async function openInspectorRuntimeSession(): Promise<InspectorRuntimeSes
         type: "list-contexts",
       })
     ).contexts;
-  const contexts = await listContexts();
+
+  let contexts: InspectorRuntimeContext[];
+  try {
+    contexts = await listContexts();
+  } catch (error) {
+    close();
+    throw error;
+  }
+  requestDeadline = undefined;
+  if (closed) throw sessionClosedError();
+  removeSessionAbortListener?.();
+  removeSessionAbortListener = undefined;
   return {
     contexts,
     listContexts,
     async attach(contextKey) {
       const channel = new MessageChannel();
-      await request(
-        {
-          type: "attach-context",
-          contextKey,
-          tabId: crypto.randomUUID(),
-          port: channel.port2,
-        },
-        [channel.port2],
-      );
-      return channel.port1;
+      const attachedPort = channel.port1;
+      attachedPorts.add(attachedPort);
+      try {
+        await request(
+          {
+            type: "attach-context",
+            contextKey,
+            tabId: crypto.randomUUID(),
+            port: channel.port2,
+          },
+          [channel.port2],
+        );
+        attachedPorts.delete(attachedPort);
+        if (closed) {
+          closeRemotePort(attachedPort);
+          throw sessionClosedError();
+        }
+        return attachedPort;
+      } catch (error) {
+        attachedPorts.delete(attachedPort);
+        closeRemotePort(attachedPort);
+        throw error;
+      }
     },
-    close() {
-      control.postMessage({ type: "close" });
-      control.close();
-    },
+    close,
   };
 }
 

@@ -17,6 +17,23 @@ import { InspectorRoutes } from "./routes";
 // mounted the loader, or its schema getter keeps throwing).
 const HOST_POLL_INTERVAL_MS = 200;
 const HOST_POLL_TIMEOUT_MS = 15_000;
+const CONTEXT_REFRESH_INTERVAL_MS = 1_000;
+
+function waitForDelay(delay: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delay);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 function runtimeContextsEqual(
   left: InspectorRuntimeContext[],
@@ -79,13 +96,17 @@ export function InspectorApp() {
   const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     let active = true;
     let activeSession: InspectorRuntimeSession | null = null;
     const deadline = Date.now() + HOST_POLL_TIMEOUT_MS;
     const connect = async () => {
       while (active && Date.now() < deadline) {
         try {
-          const next = await openInspectorRuntimeSession();
+          const next = await openInspectorRuntimeSession({
+            signal: controller.signal,
+            deadline,
+          });
           if (next && next.contexts.length > 0) {
             if (!active) {
               next.close();
@@ -99,32 +120,48 @@ export function InspectorApp() {
           }
           next?.close();
         } catch {
+          if (!active) return;
           // The host runtime may still be starting. Retry until the deadline.
         }
-        await new Promise((resolve) => setTimeout(resolve, HOST_POLL_INTERVAL_MS));
+        if (!active) return;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await waitForDelay(Math.min(HOST_POLL_INTERVAL_MS, remaining), controller.signal);
       }
       if (active) setHostTimedOut(true);
     };
     void connect();
     return () => {
       active = false;
+      controller.abort();
       activeSession?.close();
     };
   }, []);
 
   useEffect(() => {
     if (!session) return;
-    const timer = setInterval(() => {
-      void session.listContexts().then((next) => {
-        setContexts((current) => (runtimeContextsEqual(current, next) ? current : next));
-        setSelectedKey((current) =>
-          current && next.some((context) => context.key === current)
-            ? current
-            : defaultRuntimeContextKey(next, readInspectorHostConfig()),
-        );
-      });
-    }, 1_000);
-    return () => clearInterval(timer);
+    const controller = new AbortController();
+    const refresh = async () => {
+      while (!controller.signal.aborted) {
+        await waitForDelay(CONTEXT_REFRESH_INTERVAL_MS, controller.signal);
+        if (controller.signal.aborted) return;
+        try {
+          const next = await session.listContexts();
+          if (controller.signal.aborted) return;
+          setContexts((current) => (runtimeContextsEqual(current, next) ? current : next));
+          setSelectedKey((current) =>
+            current && next.some((context) => context.key === current)
+              ? current
+              : defaultRuntimeContextKey(next, readInspectorHostConfig()),
+          );
+        } catch {
+          // A transient control-port failure should not create an unhandled
+          // rejection or stop future refreshes.
+        }
+      }
+    };
+    void refresh();
+    return () => controller.abort();
   }, [session]);
 
   useEffect(() => {

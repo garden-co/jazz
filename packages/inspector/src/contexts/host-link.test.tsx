@@ -164,12 +164,20 @@ describe("host-link", () => {
         () => ({ kind: "resolved" as const }),
         (error: unknown) => ({ kind: "rejected" as const, error }),
       );
-      const deadline = new Promise<{ kind: "deadline" }>((resolve) => {
-        setTimeout(() => resolve({ kind: "deadline" }), 60_000);
-      });
+      let settled = false;
+      void opening.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
 
-      await vi.advanceTimersByTimeAsync(60_000);
-      const result = await Promise.race([opening, deadline]);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await opening;
       expect(result.kind).toBe("rejected");
       if (result.kind === "rejected") expect(result.error).toBeInstanceOf(Error);
       expect(control.port.removeEventListener).toHaveBeenCalledOnce();

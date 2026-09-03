@@ -1,6 +1,8 @@
 import type { Mock } from "vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  BrowserInspectorControlEvent,
+  BrowserInspectorControlRequest,
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
   BrowserSharedWorkerConnectRequest,
@@ -219,6 +221,29 @@ class TestPort {
 
   hasEvent(predicate: (event: BrowserFollowerPortEvent) => boolean): boolean {
     return this.events.some(predicate);
+  }
+}
+
+class InspectorControlTestPort {
+  readonly close = vi.fn();
+  readonly start = vi.fn();
+  readonly messages: BrowserInspectorControlEvent[] = [];
+  private readonly listeners = new Set<(event: MessageEvent) => void>();
+
+  addEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    if (type === "message") this.listeners.add(listener);
+  }
+
+  removeEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    if (type === "message") this.listeners.delete(listener);
+  }
+
+  postMessage(message: BrowserInspectorControlEvent): void {
+    this.messages.push(message);
+  }
+
+  emitMessage(message: BrowserInspectorControlRequest): void {
+    for (const listener of this.listeners) listener({ data: message } as MessageEvent);
   }
 }
 
@@ -741,5 +766,34 @@ describe("broker worker context initialization", () => {
     await owner.port.waitForEvent((event) => event.type === "result" && event.id === 3);
     await Promise.resolve();
     expect(editor.port.hasEvent((event) => event.type === "result" && event.id === 2)).toBe(false);
+  });
+
+  it("closes an attachment port when its context is unavailable", async () => {
+    const owner = await connect(options("inspector-control"), "owner-tab");
+    await initializeFollower(owner.port, 1);
+    const control = new InspectorControlTestPort();
+    const opened = owner.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    owner.port.emitMessage({
+      type: "open-inspector-control",
+      id: 2,
+      port: control as unknown as MessagePort,
+    });
+    await opened;
+
+    const attachment = new InspectorControlTestPort();
+    control.emitMessage({
+      type: "attach-context",
+      id: 3,
+      contextKey: "missing",
+      tabId: "inspector-tab",
+      port: attachment as unknown as MessagePort,
+    });
+
+    expect(attachment.close).toHaveBeenCalledOnce();
+    expect(control.messages).toContainEqual({
+      type: "result",
+      id: 3,
+      error: "Inspector context is no longer available",
+    });
   });
 });

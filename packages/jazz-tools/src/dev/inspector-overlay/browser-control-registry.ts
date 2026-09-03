@@ -106,6 +106,7 @@ export async function openAggregatedBrowserInspectorControlPort(
       );
       port.postMessage({ type: "result", id: message.id });
     } catch (error) {
+      if (message.type === "attach-context") message.port.close();
       port.postMessage({
         type: "result",
         id: "id" in message ? message.id : 0,
