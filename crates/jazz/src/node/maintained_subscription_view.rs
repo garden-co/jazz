@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
-use groove::ivm::{MultisinkDeltas, RecordDeltas, TerminalEdit, TerminalOperation};
+use groove::ivm::{
+    MultisinkDeltas, RecordDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment,
+};
 use groove::records::{
     BorrowedRecord, EnumValue, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
     encode_record_descriptor,
@@ -1370,8 +1372,9 @@ fn covered_input_for_version(
 /// inner proof.  That is not an alternate public layout: the prepared layout
 /// is the subscription's immutable decoding contract.  Re-encode only a
 /// root-level payload into that contract, preserving the source value as a
-/// present nullable cell.  Nested edits remain byte-addressed by their root
-/// descriptor, so they must already agree exactly.
+/// present nullable cell. Nested edits address named collections and stable
+/// keys. An unrelated root field may tighten without changing those edits,
+/// but the addressed collection's complete subtree layout must agree exactly.
 fn rebind_terminal_operation_to_layout(
     operation: &TerminalOperation,
     layout: &TerminalRootLayout,
@@ -1382,7 +1385,7 @@ fn rebind_terminal_operation_to_layout(
     if !terminal_descriptor_can_rebind_to_layout(
         &operation.root_descriptor,
         &layout.root_descriptor,
-    ) || (!operation.path.is_empty() && operation.root_descriptor != layout.root_descriptor)
+    ) || !terminal_nested_collection_layout_agrees(operation, &layout.root_descriptor)
     {
         return Err(super::Error::InvalidStoredValue(
             "structured terminal operation descriptor disagrees with prepared root layout",
@@ -1391,17 +1394,40 @@ fn rebind_terminal_operation_to_layout(
 
     let mut rebound = operation.clone();
     match &mut rebound.edit {
-        TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
+        TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. }
+            if operation.path.is_empty() =>
+        {
             *value = reencode_terminal_root_record(
                 operation.root_descriptor,
                 &layout.root_descriptor,
                 value,
             )?;
         }
-        TerminalEdit::Remove { .. } | TerminalEdit::Move { .. } => {}
+        _ => {}
     }
     rebound.root_descriptor = layout.root_descriptor;
     Ok(rebound)
+}
+
+fn terminal_nested_collection_layout_agrees(
+    operation: &TerminalOperation,
+    target: &RecordDescriptor,
+) -> bool {
+    let Some(first) = operation.path.first() else {
+        return true;
+    };
+    let TerminalPathSegment::Collection(name) = first else {
+        return false;
+    };
+    let (Some(source_index), Some(target_index)) = (
+        operation.root_descriptor.field_index(name),
+        target.field_index(name),
+    ) else {
+        return false;
+    };
+    let source_type = &operation.root_descriptor.fields()[source_index].value_type;
+    matches!(source_type, ValueType::Array(element) if matches!(element.as_ref(), ValueType::Record(_)))
+        && source_type == &target.fields()[target_index].value_type
 }
 
 fn terminal_descriptor_can_rebind_to_layout(
@@ -3492,6 +3518,115 @@ mod tests {
                 "structured terminal operation descriptor disagrees with prepared root layout"
             ))
         ));
+    }
+
+    /// Internal descriptor-boundary test: public queries cannot manufacture
+    /// arbitrary terminal edits. A nullable sibling must not alter any child
+    /// edit bytes, keys, or positions when the child layout is unchanged.
+    #[test]
+    fn nested_terminal_edits_preserve_payload_when_only_root_sibling_tightens() {
+        let child =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("name", ValueType::String)]);
+        let collection = ValueType::Array(Box::new(ValueType::Record(Box::new(child))));
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("member_ids", ValueType::Array(Box::new(ValueType::Uuid))),
+            ("members", collection.clone()),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            (
+                "member_ids",
+                ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::Uuid)))),
+            ),
+            ("members", collection),
+        ]);
+        let key = row(0x72).0.as_bytes().to_vec();
+        let value = child
+            .create(&[Value::Uuid(row(0x72).0), Value::String("Alice".to_owned())])
+            .unwrap();
+        let edits = [
+            TerminalEdit::Insert {
+                index: 1,
+                key: key.clone(),
+                value: value.clone(),
+            },
+            TerminalEdit::Update {
+                key: key.clone(),
+                value,
+            },
+            TerminalEdit::Move {
+                key: key.clone(),
+                index: 0,
+            },
+            TerminalEdit::Remove { key },
+        ];
+        for edit in edits {
+            let operation = TerminalOperation {
+                root_descriptor: source,
+                root_key: row(0x71).0.as_bytes().to_vec(),
+                path: vec![TerminalPathSegment::Collection("members".to_owned())],
+                edit,
+            };
+            let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+            assert_eq!(rebound.root_descriptor, target);
+            assert_eq!(rebound.root_key, operation.root_key);
+            assert_eq!(rebound.path, operation.path);
+            assert_eq!(rebound.edit, operation.edit);
+        }
+    }
+
+    /// Malformed paths and differing child layouts cannot be produced through
+    /// the public query builder, so exercise their rejection at this boundary.
+    #[test]
+    fn nested_terminal_rebind_rejects_unknown_paths_and_changed_child_layouts() {
+        let child = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("flag", ValueType::Bool),
+            (
+                "members",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+            ),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("flag", ValueType::Nullable(Box::new(ValueType::Bool))),
+            (
+                "members",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+            ),
+        ]);
+        for path in [
+            vec![TerminalPathSegment::Key(vec![1])],
+            vec![TerminalPathSegment::Collection("missing".to_owned())],
+            vec![TerminalPathSegment::Collection("flag".to_owned())],
+        ] {
+            let operation = TerminalOperation {
+                root_descriptor: source,
+                root_key: row(0x71).0.as_bytes().to_vec(),
+                path,
+                edit: TerminalEdit::Remove { key: vec![1] },
+            };
+            assert!(rebind_terminal_operation_to_layout(&operation, &layout(target)).is_err());
+        }
+        let other_child =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("name", ValueType::String)]);
+        let changed_target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("flag", ValueType::Nullable(Box::new(ValueType::Bool))),
+            (
+                "members",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(other_child)))),
+            ),
+        ]);
+        let operation = TerminalOperation {
+            root_descriptor: source,
+            root_key: row(0x71).0.as_bytes().to_vec(),
+            path: vec![TerminalPathSegment::Collection("members".to_owned())],
+            edit: TerminalEdit::Remove { key: vec![1] },
+        };
+        assert!(rebind_terminal_operation_to_layout(&operation, &layout(changed_target)).is_err());
     }
 
     fn witness_schema() -> VersionWitnessSchema {

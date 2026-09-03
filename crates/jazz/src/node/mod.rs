@@ -1540,6 +1540,7 @@ impl CurrentRow {
         })
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn provenance_value(&self, column: &str) -> Result<Option<Value>, Error> {
         let Some(index) = self.provenance_field_index(column) else {
             return Ok(None);
