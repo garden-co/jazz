@@ -2477,18 +2477,20 @@ fn route_literal_project_field_for_domain(
 ) -> Result<ProjectField, UnsupportedReason> {
     if let Some(path) = claim_path_from_param_field(route_field) {
         let value = claim_value(&path, &request.policy)?;
-        let literal: LiteralValue = domain
-            .claim_params
-            .get(route_field)
+        return Ok(match domain.claim_params.get(route_field) {
             // Prepared subscriptions compare routes against the same
             // descriptor-coerced binding record used at bind time. In
             // particular, a UUID session claim can be represented as a
             // string parameter by the schema; use the shared coercion rather
             // than the raw claim encoding so literal-only terminals (such as
             // source completeness) have the identical route value.
-            .map(|claim| coerce_prepared_binding_value(value.clone(), &claim.ty).into())
-            .unwrap_or_else(|| value.into());
-        return Ok(ProjectField::literal(route_field.to_owned(), literal));
+            Some(claim) => ProjectField::literal_typed(
+                route_field.to_owned(),
+                coerce_prepared_binding_value(value, &claim.ty),
+                claim.ty.clone(),
+            ),
+            None => ProjectField::literal(route_field.to_owned(), value),
+        });
     }
     let Some(param) = route_param_from_field(route_field) else {
         return Err(UnsupportedReason::Runtime(format!(
@@ -2500,12 +2502,18 @@ fn route_literal_project_field_for_domain(
             "authorization route field '{route_field}' refers to unbound parameter '{param}'"
         )));
     };
-    let literal: LiteralValue = domain
-        .user_params
-        .get(param)
-        .map(|ty| coerce_prepared_binding_value(value.clone(), ty).into())
-        .unwrap_or_else(|| value.clone().into());
-    Ok(ProjectField::literal(route_field.to_owned(), literal))
+    // The binding descriptor owns the type, not the literal's payload. An
+    // enum tag alone cannot reconstruct its registry; likewise null cannot
+    // reconstruct its nullable element type. Keep the route's descriptor
+    // identical to the prepared binding source, including on empty results.
+    Ok(match domain.user_params.get(param) {
+        Some(ty) => ProjectField::literal_typed(
+            route_field.to_owned(),
+            coerce_prepared_binding_value(value.clone(), ty),
+            ty.clone(),
+        ),
+        None => ProjectField::literal(route_field.to_owned(), value.clone()),
+    })
 }
 
 fn relation_edge_graph(

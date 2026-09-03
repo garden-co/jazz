@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
 
+use groove::ivm::SubscriptionEvent as GrooveSubscriptionEvent;
 use groove::ivm::{
     InputSourceId, InputSourceReplacement, LiteralValue, PreparedShapeId, RoutedMultisinkTerminal,
     StaticScanSpec,
@@ -3775,8 +3776,11 @@ where
         // this call returns. Keep Stream A unpublished until the first
         // complete Stream B snapshot arrives; publication drains this same
         // subscription and gates ViewUpdate on `initial_received`.
-        let initial_received = match subscription.try_recv() {
-            Ok(snapshot) => {
+        let mut receiver_cx =
+            std::task::Context::from_waker(progress_waker.unwrap_or(std::task::Waker::noop()));
+        let initial_received = match subscription.poll_next_event(&mut receiver_cx) {
+            std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
+                let snapshot = update.deltas;
                 if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_snapshot");
                 }
@@ -3818,20 +3822,19 @@ where
                     .extend(snapshot_transitions.terminal_operations);
                 true
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            std::task::Poll::Pending => false,
+            std::task::Poll::Ready(GrooveSubscriptionEvent::Error(error)) => {
                 self.database.unsubscribe(subscription.id());
                 self.retire_covered_input_sources(&covered_input_sources)
                     .await?;
-                return Err(Error::InvalidStoredValue(
-                    "seeded maintained subscription disconnected",
-                ));
+                return Err(Error::Groove(error.into()));
             }
         };
         if initial_received {
             loop {
-                match subscription.try_recv() {
-                    Ok(deltas) => {
+                match subscription.poll_next_event(&mut receiver_cx) {
+                    std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
+                        let deltas = update.deltas;
                         let delta_transitions = match maintained.apply_multisink_deltas(
                             deltas,
                             &terminal_schemas,
@@ -3864,14 +3867,12 @@ where
                             .terminal_operations
                             .extend(delta_transitions.terminal_operations);
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    std::task::Poll::Pending => break,
+                    std::task::Poll::Ready(GrooveSubscriptionEvent::Error(error)) => {
                         self.database.unsubscribe(subscription.id());
                         self.retire_covered_input_sources(&covered_input_sources)
                             .await?;
-                        return Err(Error::InvalidStoredValue(
-                            "seeded maintained subscription disconnected",
-                        ));
+                        return Err(Error::Groove(error.into()));
                     }
                 }
             }
