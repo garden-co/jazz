@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -61,38 +60,13 @@ const recordPlayerConfig = "examples/record-player/apps/next-betterauth/vitest.c
 const recordPlayerProviderConfig =
   "examples/record-player/apps/next-betterauth/vitest.config.provider.ts";
 const recordPlayerUnitConfig = "examples/record-player/apps/next-betterauth/vitest.config.unit.ts";
-const recordPlayerPort = 63318;
-const recordPlayerApiPort = new RegExp(`api:\\s*\\{\\s*port:\\s*${recordPlayerPort}\\b`);
-
-function trackedVitestConfigs() {
-  return execFileSync("git", ["ls-files", "--", "*vitest.config.*"], {
-    cwd: root,
-    encoding: "utf8",
-  })
-    .trim()
-    .split("\n")
-    .filter(Boolean);
-}
-
-function assertRecordPlayerPortIsUnique(configs, load = read) {
-  for (const path of configs) {
-    if (path === recordPlayerConfig) continue;
-    assert.doesNotMatch(
-      load(path),
-      recordPlayerApiPort,
-      `${path} aliases RecordPlayer's registry-owned browser port`,
-    );
-  }
-}
-
-test("parallel RecordPlayer browser topology owns a unique strict Vitest API port", () => {
+test("parallel RecordPlayer browser topology retries occupied Vitest API ports", () => {
   const config = read(recordPlayerConfig);
   assert.match(
     config,
-    /api:\s*\{\s*port:\s*63318,\s*strictPort:\s*true\s*\}/,
-    "RecordPlayer must reserve its browser API port instead of probing the workspace default range",
+    /api:\s*\{\s*port:\s*63318,\s*strictPort:\s*false\s*\}/,
+    "a preferred port cannot be reserved against other projects probing the default range",
   );
-  assertRecordPlayerPortIsUnique(trackedVitestConfigs());
 });
 
 test("parallel RecordPlayer Vitest projects own disjoint Vite caches", () => {
@@ -104,19 +78,6 @@ test("parallel RecordPlayer Vitest projects own disjoint Vite caches", () => {
   assert.match(unit, /cacheDir:\s*["']node_modules\/.vite-record-player-unit["']/);
   const packageJson = JSON.parse(read("examples/record-player/apps/next-betterauth/package.json"));
   assert.match(packageJson.scripts["test:unit"], /--config vitest\.config\.unit\.ts/);
-});
-
-test("the uniqueness check rejects a duplicate in a non-browser Vitest config", () => {
-  const nonBrowserConfig = recordPlayerProviderConfig;
-  assert.throws(
-    () =>
-      assertRecordPlayerPortIsUnique([recordPlayerConfig, nonBrowserConfig], (path) =>
-        path === nonBrowserConfig
-          ? `${read(path)}\napi: { port: ${recordPlayerPort}, strictPort: true }`
-          : read(path),
-      ),
-    /aliases RecordPlayer's registry-owned browser port/,
-  );
 });
 
 test("sealed consumers select content-addressed artifact paths rather than worktree pointers", () => {
