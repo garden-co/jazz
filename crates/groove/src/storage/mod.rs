@@ -1494,6 +1494,12 @@ pub struct StagedWriteOverlay<'a, S> {
     staged_writes: OverlayHandle<'a, RefCell<StagedWriteState>>,
 }
 
+pub(crate) enum StagedPointValue {
+    Miss,
+    Set(Value),
+    Delete,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StagedWriteState {
     operations: Vec<OwnedWriteOperation>,
@@ -1633,6 +1639,20 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
         StagedWriteOverlay {
             base: OverlayHandle::Owned(base),
             staged_writes: OverlayHandle::Owned(staged_writes),
+        }
+    }
+
+    pub(crate) fn staged_point_value(&self, cf: &ColumnFamilyName, key: &Key) -> StagedPointValue {
+        let mut staged_writes = self.staged_writes.borrow_mut();
+        if staged_writes.is_empty() {
+            return StagedPointValue::Miss;
+        }
+        let Some(index) = staged_writes.latest_index(cf, key) else {
+            return StagedPointValue::Miss;
+        };
+        match &staged_writes.operations[index] {
+            OwnedWriteOperation::Set { value, .. } => StagedPointValue::Set(value.clone()),
+            OwnedWriteOperation::Delete { .. } => StagedPointValue::Delete,
         }
     }
 
@@ -1858,22 +1878,10 @@ where
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-        let mut staged_writes = self.staged_writes.borrow_mut();
-        if staged_writes.is_empty() {
-            drop(staged_writes);
-            return self.base.get(cf, key);
-        }
-
-        let Some(index) = staged_writes.latest_index(&cf, &key) else {
-            drop(staged_writes);
-            return self.base.get(cf, key);
-        };
-        match &staged_writes.operations[index] {
-            OwnedWriteOperation::Set { value, .. } => {
-                let value = value.clone();
-                Box::pin(async move { Ok(Some(value)) })
-            }
-            OwnedWriteOperation::Delete { .. } => Box::pin(async { Ok(None) }),
+        match self.staged_point_value(&cf, &key) {
+            StagedPointValue::Miss => self.base.get(cf, key),
+            StagedPointValue::Set(value) => Box::pin(async move { Ok(Some(value)) }),
+            StagedPointValue::Delete => Box::pin(async { Ok(None) }),
         }
     }
 

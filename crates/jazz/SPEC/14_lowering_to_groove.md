@@ -93,6 +93,19 @@ the semantic identity of a case is its authority-allocated identity:
 GlobalPhysicalEnumVariantId(UUID)
 ```
 
+`GlobalEnumCaseId` stores the introducing authored ordinal as `u32`, which matches
+payload-enum tags. Payload enums are not limited to 256 cases. Scalar enums keep
+their `u8` discriminants: lowering must reject a physical scalar registry or
+scalar remap position that does not fit in `u8`. Widening the qualified identity
+must not relax that scalar encoding boundary.
+
+The scalar limit is a catalogue-admission invariant, not a late storage error.
+Before a lineage reserves a pending/staged record, activates a schema, or consumes
+physical ids, the node MUST compute the union of root and nested scalar case
+identities for every reused physical occurrence. A union of 257 or more cases
+MUST reject atomically; reopening the store MUST reveal neither the rejected
+schema nor pending/staged residue.
+
 An inherited case retains the UUID allocated by its introducing publication.
 For example, if a base schema declares `draft` and `published`, concurrent
 children A and B may both declare authored ordinal `2`, respectively `archived`
@@ -129,6 +142,17 @@ its case tag. Same-name cases from independent schemas are distinct identities;
 incompatible payload layouts reject rather than merge. The same translation
 recurs at nested enum occurrences.
 
+The `u32` payload tag is preserved by schema defaults and by every production
+row boundary: history/current/ahead-current writes, current and query projection,
+lens remapping, and durable reopen. These paths MUST accept authored and physical
+case ordinal 256 (including recursively nested payload values); no intermediate
+representation may narrow it to the scalar enum's `u8` width.
+
+The public payload-enum v1 boundary MUST continue to admit only scalar payload
+fields; arrays, rows, and nested enums remain unsupported. Recursive ordinal
+translation is an internal physical/catalogue invariant and does not expand the
+public schema surface.
+
 Projection from a physical case back into an authored schema is non-total. If a
 query does not read, filter, join, order, group, authorize, or otherwise require
 that occurrence, the row remains usable without decoding it. If a query
@@ -145,8 +169,9 @@ _Further invariant._ `INV-LOWER-27` — local enum tags are only interned
 representations of permanent global enum-variant UUIDs; simultaneous sibling ordinal
 allocations cannot alias one another.
 
-_Further invariant._ `INV-LOWER-29` — durable physical mappings use the
-versioned canonical binary codec described in ch. 10. Local physical aliases are
+_Further invariant._ `INV-LOWER-29` — durable physical mappings use the sole
+v1 canonical binary codec described in ch. 10, whose payload-enum introduction
+ordinals are always `u32`. Local physical aliases are
 opaque storage handles, while every table, column, scalar, payload, and nested
 enum occurrence resolves a permanent authority-allocated UUID;
 recovery rejects malformed, non-canonical, trailing, or unknown-reference
@@ -379,11 +404,25 @@ the patch is subordinate to the root occurrence and must reduce to the same
 terminal relation. It must not create a separately authoritative
 `relation_delta`, row/edge snapshot, or high-level assembler state.
 
+That carrier boundary is local to one Groove execution and its application
+consumer. A serving authority does not send its collector's terminal row or
+structural patch to another peer. It sends the exact safe source closure and
+the identity of the authorized residual program; the receiver projects those
+inputs through catalogue lineage and runs the same lowered graph locally. The
+receiver's collector is therefore the sole owner of ordering after local and
+authority inputs have been reconciled (`INV-SYNC-36`, ch. 16). This is required
+even when the authority and receiver currently have equal source state: an
+eligible local pending write can make an authority-computed child index false.
+
 During migration, relation facts remain permitted as internal sync coverage and
 authorization evidence. They are not public query output and consumers must
 not combine them with a root-row delta to reconstruct application values. A
-protocol revision that carries terminal rows advertises that output mode
-explicitly; receivers must not infer it from query syntax or descriptor shape.
+relation fact carries every source/correlation dimension required by the local
+lowered program. Query ordering comes from explicit query terms, the specified
+implicit stable order, or ordinary stored ordering data; it is never recovered
+from an authority collector position. A shape whose safe closure cannot let the
+receiver reproduce its terminal is outside the synchronized query surface and
+must be rejected rather than tunneled as authority output.
 
 Sync view maintenance shares the same lowered query machinery as ordinary reads.
 The target peer-serving path consumes maintained terminal facts for result

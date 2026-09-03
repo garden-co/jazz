@@ -3,6 +3,10 @@ import type {
   BrowserInspectorControlEvent,
   BrowserInspectorControlRequest,
 } from "../../runtime/native-runtime/browser-worker-protocol.js";
+import {
+  deserializeBrowserRelayError,
+  serializeBrowserRelayError,
+} from "../../runtime/native-runtime/browser-worker-protocol.js";
 
 type ControlPortFactory = () => Promise<MessagePort>;
 type ControlRequestWithoutId = BrowserInspectorControlRequest extends infer Request
@@ -50,7 +54,8 @@ export async function openAggregatedBrowserInspectorControlPort(
       const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
         if (event.data.id !== id) return;
         control.port.removeEventListener("message", onMessage);
-        if ("error" in event.data && event.data.error) reject(new Error(event.data.error));
+        if ("error" in event.data && event.data.error)
+          reject(deserializeBrowserRelayError(event.data.error));
         else resolve(event.data as T);
       };
       control.port.addEventListener("message", onMessage);
@@ -91,6 +96,11 @@ export async function openAggregatedBrowserInspectorControlPort(
       if (message.type === "terminate-worker") {
         throw new Error("Worker termination is only available on a direct browser control port");
       }
+      if (message.type === "lifecycle-trace") {
+        throw new Error(
+          "Worker lifecycle trace is only available on a direct browser control port",
+        );
+      }
       const route = routes.get(message.contextKey);
       if (!route) throw new Error("Inspector context is no longer available");
       const control = controls.find((candidate) => candidate.port === route.port)!;
@@ -109,7 +119,7 @@ export async function openAggregatedBrowserInspectorControlPort(
       port.postMessage({
         type: "result",
         id: "id" in message ? message.id : 0,
-        error: error instanceof Error ? error.message : String(error),
+        error: serializeBrowserRelayError(error),
       });
     }
   };

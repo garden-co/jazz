@@ -8,7 +8,7 @@ use std::{
 
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::ivm::{FrontierName, NodeId};
+use crate::ivm::{BindingSourceKey, FrontierName, NodeId};
 
 use super::{IvmRuntimeError, RecordDeltas, record_deltas_digest};
 
@@ -259,7 +259,7 @@ impl EvalMemoEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct NodeInputSignature {
     pub(super) tables: Arc<[String]>,
-    pub(super) bindings: Arc<[String]>,
+    pub(super) bindings: Arc<[BindingSourceKey]>,
     pub(super) frontier_bindings: Arc<[FrontierName]>,
     pub(super) hash: u64,
 }
@@ -267,7 +267,7 @@ pub(super) struct NodeInputSignature {
 impl NodeInputSignature {
     pub(super) fn from_sets(
         tables: BTreeSet<String>,
-        bindings: BTreeSet<String>,
+        bindings: BTreeSet<BindingSourceKey>,
         frontier_bindings: BTreeSet<FrontierName>,
     ) -> Self {
         let tables = tables.into_iter().collect::<Arc<[_]>>();

@@ -955,6 +955,7 @@ mod tests {
                     protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                     features: jazz::wire::FEATURE_NONE,
                     session_context: None,
+                    permits_delegated_sessions: false,
                     terminal,
                 })
             })
@@ -983,6 +984,7 @@ mod tests {
                     protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                     features: jazz::wire::FEATURE_NONE,
                     session_context: None,
+                    permits_delegated_sessions: false,
                     terminal: Box::pin(std::future::ready(NativeTransportTerminal::OwnerDropped)),
                 })
             })
@@ -1011,6 +1013,7 @@ mod tests {
                     protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                     features: jazz::wire::FEATURE_NONE,
                     session_context: None,
+                    permits_delegated_sessions: false,
                     terminal: Box::pin(std::future::pending()),
                 })
             })
@@ -1058,6 +1061,7 @@ mod tests {
                     protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                     features: jazz::wire::FEATURE_NONE,
                     session_context: None,
+                    permits_delegated_sessions: false,
                     terminal: Box::pin(std::future::pending()),
                 })
             })

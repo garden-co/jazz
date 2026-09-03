@@ -1,4 +1,5 @@
 use crate::tx::{
+    BranchViewCopyBase, BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation,
     ContributionComponent, ContributionCoordinate, ContributionDot, ContributionMergeProvenance,
     ContributionSubstitution,
 };
@@ -252,6 +253,92 @@ fn contribution_merge_provenance_survives_reopen() {
             .contribution_merge,
         Some(provenance)
     );
+}
+
+/// Storage-format corpus for the v1 branch-view copy evidence carried in the
+/// existing non-causal provenance column. This stays at the codec boundary:
+/// public mutation APIs intentionally cannot hand-author physical evidence.
+#[test]
+fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
+    let schema = schema();
+    let (_dir, core) = open_node_with_schema(node(0x31), schema.clone());
+    let source = TxId::new(TxTime::from(31), node(0x32));
+    let head = BranchKey {
+        values: vec![(
+            "branch".to_owned(),
+            crate::protocol::BranchColumnValue::from(Value::String("draft".to_owned())),
+        )],
+    };
+    let evidence = BranchViewCopyEvidence {
+        version: 1,
+        head: head.clone(),
+        base: BranchViewCopyBase::Current(BranchKey::default()),
+        table: "todos".to_owned(),
+        row_uuid: row(0x33),
+        source_version: source,
+    };
+    let mut provenance = ContributionMergeProvenance::branch_view_copy(evidence.clone());
+    provenance.branch_write_intents = vec![BranchWriteIntent {
+        version: 1,
+        physical_table_id: crate::ids::PhysicalTableId(1),
+        authored_schema: schema.version_id(),
+        row_uuid: row(0x33),
+        head,
+        operation: BranchWriteOperation::ViewUpdateCopy(evidence.clone()),
+    }];
+    let stored = core
+        .contribution_merge_storage_value(Some(&provenance))
+        .unwrap();
+    let Value::Nullable(Some(record)) = stored else {
+        panic!("branch-view evidence must use the optional contribution record");
+    };
+    let Value::Record(record) = *record else {
+        panic!("contribution provenance must be a normal Groove record");
+    };
+    let decoded = core.contribution_merge_from_storage_record(record).unwrap();
+    assert_eq!(decoded, provenance);
+    assert!(decoded.substitutions.is_empty());
+
+    // The enum's index may only point at the exact evidence admitted by the
+    // intent. A same-coordinate payload with a different source must fail
+    // before storage, rather than being silently substituted on reopen.
+    let mut mismatched = provenance.clone();
+    let BranchWriteOperation::ViewUpdateCopy(intent_evidence) =
+        &mut mismatched.branch_write_intents[0].operation
+    else {
+        unreachable!("fixture has a view-copy operation");
+    };
+    intent_evidence.source_version = TxId::new(TxTime::from(99), node(0x32));
+    assert!(core
+        .contribution_merge_storage_value(Some(&mismatched))
+        .is_err());
+}
+
+#[test]
+fn branch_view_evidence_rejects_noncanonical_branch_keys_without_codec_panic() {
+    let schema = schema();
+    let (_dir, core) = open_node_with_schema(node(0x31), schema);
+    let malformed = BranchViewCopyEvidence {
+        version: 1,
+        // A raw client can supply an unknown/reordered component. The durable
+        // boundary must surface malformed input through `Result`, rather than
+        // calling `BranchKey::canonical_bytes` and panicking.
+        head: BranchKey {
+            values: vec![
+                ("z".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+                ("a".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+            ],
+        },
+        base: BranchViewCopyBase::Current(BranchKey::default()),
+        table: "todos".to_owned(),
+        row_uuid: row(0x33),
+        source_version: TxId::new(TxTime::from(31), node(0x32)),
+    };
+    assert!(core
+        .contribution_merge_storage_value(Some(
+            &ContributionMergeProvenance::branch_view_copy(malformed),
+        ))
+        .is_err());
 }
 
 #[test]
@@ -532,6 +619,33 @@ fn operation_version(schema: &JazzSchema, column: &str, value: Value) -> Version
     .unwrap()
 }
 
+fn assert_operation_rejection_retains_only_the_terminal_fate(
+    core: &mut NodeState<RocksDbStorage>,
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+    expected_validation_error: &str,
+) {
+    // Keep the precise validator diagnostic pinned as well as the externally
+    // observable terminal rejection. Invalid metadata must not become durable
+    // merely because the authority retains the transaction's rejected fate.
+    let error = core.validate_contribution_merge_operation_identities(&tx).unwrap_err();
+    assert!(matches!(error, Error::InvalidStoredValue(message) if message == expected_validation_error),
+        "unexpected operation-identity validation error: {error:?}");
+    let tx_id = tx.tx_id;
+    let fate = Fate::Rejected(RejectionReason::MalformedCommit("invalid contribution provenance".to_owned()));
+    let receipts = core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS).unwrap();
+    assert_eq!(receipts, vec![SyncMessage::FateUpdate {
+        tx_id,
+        fate: fate.clone(),
+        global_time: None,
+        durability: None,
+    }]);
+    let stored = core.query_transaction(tx_id).unwrap().expect("terminal fate is retained");
+    assert_eq!(stored.fate, fate);
+    assert!(stored.tx.contribution_merge.is_none(), "invalid provenance must never be stored");
+    assert!(core.query_versions_for_tx(tx_id).unwrap().is_empty(), "rejected input must not store any row versions");
+}
+
 #[test]
 fn ingress_rejects_noncanonical_and_wrong_strategy_operation_identities_before_persistence() {
     let schema = contribution_operation_schema();
@@ -552,20 +666,11 @@ fn ingress_rejects_noncanonical_and_wrong_strategy_operation_identities_before_p
     ];
     for (index, (column, identity, value, expected)) in invalid_cases.into_iter().enumerate() {
         let tx_id = TxId::new(TxTime::from(20 + index as u64), node(0x31));
-        let error = core
-            .ingest_commit_unit_settled(
-                operation_transaction(tx_id, operation_provenance(tx_id, column, identity)),
-                vec![operation_version(&schema, column, value)],
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::InvalidStoredValue(message) if message == expected
-        ), "unexpected operation-identity admission error: {error:?}");
-        assert!(
-            core.query_transaction(tx_id).unwrap().is_none(),
-            "invalid operation identity must be rejected before it reaches durable transaction state"
+        assert_operation_rejection_retains_only_the_terminal_fate(
+            &mut core,
+            operation_transaction(tx_id, operation_provenance(tx_id, column, identity)),
+            vec![operation_version(&schema, column, value)],
+            expected,
         );
     }
 }
@@ -668,18 +773,12 @@ fn ingress_rejects_operation_coordinates_outside_the_content_layer() {
     ) {
         coordinate.layer = MergeAspect::Deletion;
     }
-    let error = core
-        .ingest_commit_unit_settled(
-            operation_transaction(tx_id, provenance),
-            vec![operation_version(&schema, "count", Value::U64(1))],
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::InvalidStoredValue("contribution operation must belong to the content layer")
-    ));
-    assert!(core.query_transaction(tx_id).unwrap().is_none());
+    assert_operation_rejection_retains_only_the_terminal_fate(
+        &mut core,
+        operation_transaction(tx_id, provenance),
+        vec![operation_version(&schema, "count", Value::U64(1))],
+        "contribution operation must belong to the content layer",
+    );
 }
 
 #[test]
@@ -845,6 +944,8 @@ fn with_stored_contribution_coordinate_ids(
         record.source().unwrap(),
         record.target().unwrap(),
         substitutions,
+        Vec::new(),
+        Vec::new(),
     )
     .unwrap()
     .record()

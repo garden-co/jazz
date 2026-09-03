@@ -140,7 +140,12 @@ fn main() {
 
 #[allow(dead_code)]
 pub(crate) fn correctness_smoke() {
-    assert!(run(1).ok, "route curve correctness gate failed");
+    let receipt = run(1);
+    assert!(
+        receipt.ok,
+        "route curve correctness gate failed: {}",
+        serde_json::to_string(&receipt).expect("serialize route curve failure")
+    );
 }
 
 const ROUTE_BENCH_BINDINGS: usize = 100;

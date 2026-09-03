@@ -258,7 +258,7 @@ describe("Db runtime schema order", () => {
     ]);
     const client = {
       getSchema: () => new Map(Object.entries(runtimeSchema)),
-      query,
+      queryInternal: query,
     } as unknown as JazzClient;
     const db = new TestDb(client);
     const builder = {
@@ -316,7 +316,7 @@ describe("Db runtime schema order", () => {
     );
     const client = {
       getSchema: () => new Map(Object.entries(generatedSchema)),
-      query,
+      queryInternal: query,
     } as unknown as JazzClient;
     const db = new TestDb(client, { session });
     const builder = {
@@ -681,7 +681,7 @@ describe("Db runtime schema order", () => {
     ]);
     const client = {
       getSchema: () => new Map(),
-      query,
+      queryInternal: query,
     } as unknown as JazzClient;
     const db = new TestDb(client);
     const builder = {

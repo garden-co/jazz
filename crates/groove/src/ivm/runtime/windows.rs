@@ -50,32 +50,47 @@ pub(super) enum ArgByDirection {
     Max,
 }
 
+pub(super) fn arg_by_candidate_replaces(
+    candidate_key: &[u8],
+    candidate_record: &[u8],
+    winner_key: &[u8],
+    winner_record: &[u8],
+    direction: ArgByDirection,
+) -> bool {
+    match candidate_key.cmp(winner_key) {
+        std::cmp::Ordering::Less => matches!(direction, ArgByDirection::Min),
+        std::cmp::Ordering::Greater => matches!(direction, ArgByDirection::Max),
+        std::cmp::Ordering::Equal => candidate_record < winner_record,
+    }
+}
+
 pub(super) struct ArgBySpec<'a> {
     pub(super) group_fields: &'a [String],
     pub(super) group_field_indices: &'a [usize],
-    pub(super) primary_key_field_indices: &'a [usize],
+    pub(super) comparison_field_indices: &'a [usize],
     pub(super) direction: ArgByDirection,
 }
 
 pub(super) fn arg_by_winner_from_records(
     descriptor: RecordDescriptor,
-    primary_key_field_indices: &[usize],
+    comparison_field_indices: &[usize],
     records: Vec<(Bytes, i64)>,
     direction: ArgByDirection,
 ) -> Result<Option<SourceRecord>, IvmRuntimeError> {
+    // Match TopBy's total-order convention: declared fields decide the rank
+    // under the operator direction, while encoded record bytes break exact
+    // comparison-key ties ascending for both ArgMinBy and ArgMaxBy.
     let mut winner = None;
     for (record, weight) in records {
         if weight <= 0 {
             continue;
         }
-        let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
-        let replaces =
-            winner
-                .as_ref()
-                .is_none_or(|(winner_key, _): &SourceRecord| match direction {
-                    ArgByDirection::Min => key < *winner_key,
-                    ArgByDirection::Max => key > *winner_key,
-                });
+        let key = encoded_record_key_part(descriptor, &record, comparison_field_indices)?;
+        let replaces = winner
+            .as_ref()
+            .is_none_or(|(winner_key, winner_record): &SourceRecord| {
+                arg_by_candidate_replaces(&key, &record, winner_key, winner_record, direction)
+            });
         if replaces {
             winner = Some((key, record));
         }
@@ -85,30 +100,17 @@ pub(super) fn arg_by_winner_from_records(
 
 pub(super) fn arg_by_winner_before_from_deltas(
     descriptor: RecordDescriptor,
-    primary_key_field_indices: &[usize],
+    comparison_field_indices: &[usize],
     after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
     direction: ArgByDirection,
 ) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
-    for (record, weight) in after_records {
-        let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
-        records.insert(key, (record, weight));
-    }
-    for delta in deltas {
-        let key = encoded_record_key_part(descriptor, delta.raw(), primary_key_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
-    }
-    let mut positive = records
-        .into_iter()
-        .filter_map(|(key, (record, weight))| (weight > 0).then_some((key, record)));
-    Ok(match direction {
-        ArgByDirection::Min => positive.next(),
-        ArgByDirection::Max => positive.next_back(),
-    })
+    arg_by_winner_from_records(
+        descriptor,
+        comparison_field_indices,
+        records_before_deltas(after_records, &deltas),
+        direction,
+    )
 }
 
 #[cfg(test)]
@@ -559,8 +561,11 @@ fn update_collect_by_root_terminal_state(
     if !emit {
         state.groups.clear();
         state.roots.clear();
+        state.emitted_root_order.clear();
+        state.emitted_root_keys.clear();
     }
     let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
+    let mut before_order = BTreeMap::<Vec<u8>, Option<CollectByOrderKey>>::new();
     for delta in deltas {
         let group_key =
             encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
@@ -574,9 +579,18 @@ fn update_collect_by_root_terminal_state(
             })?;
             before.insert(group_key.clone(), rendered);
         }
+        if !before_order.contains_key(&group_key) {
+            before_order.insert(
+                group_key.clone(),
+                state
+                    .groups
+                    .get(&group_key)
+                    .and_then(collect_by_root_order_key),
+            );
+        }
         let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
         let state_key = (sort_key, delta.record.clone());
-        let group = state.groups.entry(group_key).or_default();
+        let group = state.groups.entry(group_key.clone()).or_default();
         let weight = group.get(&state_key).copied().unwrap_or_default() + delta.weight;
         if weight == 0 {
             group.remove(&state_key);
@@ -589,8 +603,194 @@ fn update_collect_by_root_terminal_state(
         return Ok(Vec::new());
     }
 
+    // Capture the actual public sequence once before replacing changed sort
+    // keys below. Terminal edits are applied sequentially, so final ranks
+    // alone are insufficient for a batch that mixes moves and inserts.
+    let mut public_sequence = state
+        .emitted_root_order
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // `groups` also retains join-maintenance state that may never be exposed
+    // as a root terminal. Keep the public rank index in sync only for roots
+    // which were actually materialized, so an internal group cannot shift a
+    // subscriber-visible Insert or Move position.
+    for (root_key, before_key) in &before_order {
+        if !state.emitted_root_keys.contains(root_key) {
+            continue;
+        }
+        if let Some(before_key) = before_key {
+            state.emitted_root_order.remove(before_key);
+        }
+        if let Some(after_key) = state
+            .groups
+            .get(root_key)
+            .and_then(collect_by_root_order_key)
+        {
+            state.emitted_root_order.insert(after_key, root_key.clone());
+        }
+    }
+
     let mut operations = Vec::new();
+    // Remove first so the later positional inserts/moves index the final
+    // retained sequence rather than an opaque-key snapshot. A group with no
+    // positive occurrence is no more terminal-visible than a missing group:
+    // a reset/revoke can retain its negative maintenance delta until a later
+    // hydration replaces that state. In particular, do not leave a previously
+    // emitted facade occurrence live merely because its internal group is
+    // non-empty.
+    for root_key in before_order.keys() {
+        if state.emitted_root_keys.contains(root_key)
+            && state
+                .groups
+                .get(root_key)
+                .and_then(collect_by_root_order_key)
+                .is_none()
+        {
+            operations.push(TerminalOperation {
+                root_descriptor: output_desc,
+                root_key: root_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Remove {
+                    key: root_key.clone(),
+                },
+            });
+            state.emitted_root_keys.remove(root_key);
+            public_sequence.retain(|key| key != root_key);
+        }
+    }
+
+    // `emitted_root_order` is already the compiled total order. Snapshot its
+    // retained entries once per batch so changed roots can find their target
+    // positions without re-scanning the whole result for every Move or
+    // Insert.
+    let retained_final_order = state
+        .emitted_root_order
+        .iter()
+        .filter(|(_, root_key)| state.emitted_root_keys.contains(*root_key))
+        .map(|(order_key, root_key)| (order_key.clone(), root_key.clone()))
+        .collect::<Vec<_>>();
+    let retained_final_positions = retained_final_order
+        .iter()
+        .enumerate()
+        .map(|(index, (_, root_key))| (root_key.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+
+    // Reposition retained occurrences before inserting new ones. Their target
+    // index is their rank among retained public roots only; inserting first
+    // would make a final absolute rank address the wrong mutable sequence.
+    let mut moves = Vec::new();
+    for (root_key, before_key) in &before_order {
+        let Some(before_key) = before_key else {
+            continue;
+        };
+        if !before.get(root_key).is_some_and(Option::is_some)
+            || !state.emitted_root_keys.contains(root_key)
+        {
+            continue;
+        }
+        let Some(after_key) = state
+            .groups
+            .get(root_key)
+            .and_then(collect_by_root_order_key)
+        else {
+            continue;
+        };
+        if *before_key != after_key {
+            moves.push((after_key, root_key.clone()));
+        }
+    }
+    moves.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (_, root_key) in moves {
+        let index = *retained_final_positions
+            .get(&root_key)
+            .expect("moved root has a final retained position");
+        let current_index = public_sequence
+            .iter()
+            .position(|key| key == &root_key)
+            .expect("emitted root is present in the public sequence");
+        if current_index == index {
+            continue;
+        }
+        let root_key = public_sequence.remove(current_index);
+        public_sequence.insert(index, root_key.clone());
+        operations.push(TerminalOperation {
+            root_descriptor: output_desc,
+            root_key: root_key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Move {
+                key: root_key,
+                index,
+            },
+        });
+    }
+
+    let mut inserts = Vec::new();
+    for (root_key, before_key) in &before_order {
+        if before_key.is_some() {
+            continue;
+        }
+        let Some(order_key) = state
+            .groups
+            .get(root_key)
+            .and_then(collect_by_root_order_key)
+        else {
+            // Retractions can reach a freshly reset collector before its
+            // replacement hydration. Keep their negative maintenance state,
+            // but do not manufacture a public occurrence without a positive
+            // order key (or panic while attempting to rank it).
+            continue;
+        };
+        let record = state
+            .groups
+            .get(root_key)
+            .map(|group| {
+                let records = group
+                    .iter()
+                    .map(|((_, record), weight)| (record.clone(), *weight))
+                    .collect::<Vec<_>>();
+                collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+            })
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| {
+                IvmRuntimeError::InvalidCollectBy(
+                    "new root collector group did not render a terminal row".into(),
+                )
+            })?;
+        inserts.push((order_key, root_key.clone(), record));
+    }
+    inserts.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+    for (new_roots_before, (order_key, root_key, record)) in inserts.into_iter().enumerate() {
+        // Insert lower-ranked new occurrences first. Each insertion joins the
+        // mutable sequence before the next rank is computed. Existing roots
+        // come from the one batch snapshot above; earlier new roots all sort
+        // before this one because `inserts` is ordered by the same total key.
+        let index = retained_final_order.partition_point(|(candidate, _)| candidate < &order_key)
+            + new_roots_before;
+        state.emitted_root_order.insert(order_key, root_key.clone());
+        state.emitted_root_keys.insert(root_key.clone());
+        public_sequence.insert(index, root_key.clone());
+        operations.push(TerminalOperation {
+            root_descriptor: output_desc,
+            root_key: root_key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Insert {
+                index,
+                key: root_key,
+                value: record.to_vec(),
+            },
+        });
+    }
+
     for (root_key, before_record) in before {
+        // `groups` can retain a root-collector maintenance group before it
+        // has ever been presented to this terminal consumer. Without a prior
+        // Insert, an Update would address no facade occurrence.
+        if !state.emitted_root_keys.contains(&root_key) {
+            continue;
+        }
         let after_record = state.groups.get(&root_key).map_or(Ok(None), |group| {
             let records = group
                 .iter()
@@ -602,22 +802,14 @@ fn update_collect_by_root_terminal_state(
             continue;
         }
         let edit = match (before_record, after_record) {
-            (None, Some(record)) => TerminalEdit::Insert {
-                index: state
-                    .groups
-                    .keys()
-                    .take_while(|key| *key < &root_key)
-                    .count(),
-                key: root_key.clone(),
-                value: record.to_vec(),
-            },
+            // New roots were inserted above in final collector order.
+            (None, Some(_)) => continue,
             (Some(_), Some(record)) => TerminalEdit::Update {
                 key: root_key.clone(),
                 value: record.to_vec(),
             },
-            (Some(_), None) => TerminalEdit::Remove {
-                key: root_key.clone(),
-            },
+            // Removed roots were retracted before inserts/moves above.
+            (Some(_), None) => continue,
             (None, None) => continue,
         };
         operations.push(TerminalOperation {
@@ -628,6 +820,15 @@ fn update_collect_by_root_terminal_state(
         });
     }
     Ok(operations)
+}
+
+fn collect_by_root_order_key(
+    group: &BTreeMap<CollectByOrderKey, i64>,
+) -> Option<CollectByOrderKey> {
+    group
+        .iter()
+        .find(|(_, weight)| **weight > 0)
+        .map(|(order_key, _)| order_key.clone())
 }
 
 pub(super) fn collect_by_root_from_records(
@@ -1203,4 +1404,389 @@ fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     }
     key.push(0);
     key.push(0);
+}
+
+#[cfg(test)]
+mod root_terminal_tests {
+    use super::*;
+
+    fn record_descriptor() -> RecordDescriptor {
+        RecordDescriptor::new([
+            ("root", ValueType::Uuid),
+            ("joined", ValueType::Uuid),
+            ("rank", ValueType::String),
+        ])
+    }
+
+    fn collector() -> CollectByOp {
+        let projection = |field: &str, field_idx| CollectByProjection {
+            field: field.to_owned(),
+            field_idx,
+            output_name: field.to_owned(),
+            unwrap_nullable: false,
+        };
+        CollectByOp {
+            mode: CollectByMode::Root,
+            group_fields: vec!["root".to_owned(), "joined".to_owned()],
+            group_field_indices: vec![0, 1],
+            parent_fields: vec![
+                projection("root", 0),
+                projection("joined", 1),
+                projection("rank", 2),
+            ],
+            child_fields: Vec::new(),
+            child_descriptor: RecordDescriptor::default(),
+            collection_field: String::new(),
+            collection_field_index: 0,
+            slots: Vec::new(),
+            tuple_fields: Vec::new(),
+            occurrence_id_fields: vec!["root".to_owned(), "joined".to_owned()],
+            occurrence_id_field_indices: vec![0, 1],
+            order_fields: vec![TopByOrderField {
+                field: "rank".to_owned(),
+                direction: TopByDirection::Desc,
+            }],
+            tie_fields: vec!["root".to_owned(), "joined".to_owned()],
+            sort_field_indices: vec![2, 0, 1],
+            sort_directions: vec![
+                TopByDirection::Desc,
+                TopByDirection::Asc,
+                TopByDirection::Asc,
+            ],
+            offset: 0,
+            limit: TopByLimit::Unbounded,
+        }
+    }
+
+    fn record(root: u8, joined: u8, rank: &str) -> Bytes {
+        record_descriptor()
+            .create(&[
+                Value::Uuid(uuid::Uuid::from_bytes([root; 16])),
+                Value::Uuid(uuid::Uuid::from_bytes([joined; 16])),
+                Value::String(rank.to_owned()),
+            ])
+            .unwrap()
+            .into()
+    }
+
+    fn delta(root: u8, joined: u8, rank: &str, weight: i64) -> RecordDelta {
+        RecordDelta {
+            record: record(root, joined, rank),
+            weight,
+        }
+    }
+
+    fn root_key(root: u8, joined: u8) -> Vec<u8> {
+        encoded_record_key_part(record_descriptor(), &record(root, joined, "key"), &[0, 1]).unwrap()
+    }
+
+    fn apply_root_operations(roots: &mut Vec<(Vec<u8>, String)>, operations: &[TerminalOperation]) {
+        let rank = |value: &[u8]| {
+            let Value::String(rank) = BorrowedRecord::new(value, &record_descriptor())
+                .get_idx(2)
+                .unwrap()
+            else {
+                panic!("root terminal rank must decode as text");
+            };
+            rank
+        };
+        for operation in operations {
+            assert!(operation.path.is_empty());
+            match &operation.edit {
+                TerminalEdit::Insert { index, key, value } => {
+                    roots.insert(*index, (key.clone(), rank(value)));
+                }
+                TerminalEdit::Remove { key } => {
+                    let index = roots.iter().position(|(root, _)| root == key).unwrap();
+                    roots.remove(index);
+                }
+                TerminalEdit::Move { key, index } => {
+                    let current = roots.iter().position(|(root, _)| root == key).unwrap();
+                    let root = roots.remove(current);
+                    roots.insert(*index, root);
+                }
+                TerminalEdit::Update { key, value } => {
+                    let (_, existing_rank) = roots
+                        .iter_mut()
+                        .find(|(root, _)| root == key)
+                        .expect("terminal root update addresses a present occurrence");
+                    *existing_rank = rank(value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn root_terminal_order_excludes_non_emitted_groups_and_moves_exact_occurrences() {
+        let input = record_descriptor();
+        let output = record_descriptor();
+        let collect_by = collector();
+        let mut state = CollectByIncrementalState::default();
+
+        // A prior maintenance-only group ranks before every public root, but
+        // was installed with `emit = false` and therefore has no facade
+        // occurrence. It must not offset later public positions.
+        assert!(
+            update_collect_by_root_terminal_state(
+                input.clone(),
+                output.clone(),
+                &collect_by,
+                &mut state,
+                &[delta(0xf0, 0xf1, "zzzz", 1)],
+                false,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            update_collect_by_root_terminal_state(
+                input.clone(),
+                output.clone(),
+                &collect_by,
+                &mut state,
+                &[delta(0xf0, 0xf1, "zzzz", -1), delta(0xf0, 0xf1, "zzzzz", 1),],
+                true,
+            )
+            .unwrap()
+            .is_empty(),
+            "a non-emitted maintenance group cannot leak an unaddressable Update"
+        );
+
+        let opened = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[
+                delta(0xa1, 0x11, "alpha", 1),
+                delta(0xb1, 0x22, "maria", 1),
+                delta(0xc1, 0x33, "zoe", 1),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            opened
+                .iter()
+                .filter_map(|operation| match operation.edit {
+                    TerminalEdit::Insert { index, .. } => Some(index),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the non-emitted zzzz maintenance group cannot shift public inserts"
+        );
+
+        // Two simultaneous sort changes exercise final-index computation for
+        // more than one Move. The keys remain root+joined occurrences rather
+        // than collapsing to the shared public root UUID.
+        let moved = update_collect_by_root_terminal_state(
+            input,
+            output,
+            &collect_by,
+            &mut state,
+            &[
+                delta(0xa1, 0x11, "alpha", -1),
+                delta(0xa1, 0x11, "yyyy", 1),
+                delta(0xc1, 0x33, "zoe", -1),
+                delta(0xc1, 0x33, "aaaa", 1),
+            ],
+            true,
+        )
+        .unwrap();
+        let moves = moved
+            .iter()
+            .filter_map(|operation| match operation.edit {
+                TerminalEdit::Move { index, .. } => Some((operation.root_key.clone(), index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(moves.len(), 2);
+        assert_eq!(moves[0].1, 0);
+        assert_eq!(moves[1].1, 2);
+        assert_ne!(moves[0].0, moves[1].0);
+        assert!(moves.iter().all(|(key, _)| key.len() > 17));
+    }
+
+    #[test]
+    fn root_terminal_reset_revoke_does_not_rank_negative_maintenance_state() {
+        let input = record_descriptor();
+        let output = record_descriptor();
+        let collect_by = collector();
+        let mut state = CollectByIncrementalState::default();
+
+        // A reset can discard the prior facade sequence before a delayed
+        // revoke reaches the new collector state. The negative group is
+        // retained for differential accounting, but it is not a public root
+        // and therefore has neither an opaque terminal key nor a rank.
+        let revoked = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", -1)],
+            true,
+        )
+        .unwrap();
+        assert!(revoked.is_empty());
+        assert!(state.emitted_root_order.is_empty());
+        assert!(state.emitted_root_keys.is_empty());
+
+        // A matching replacement only reconciles the negative accounting; a
+        // zero-weight group never gets a terminal occurrence.
+        let reconciled = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(reconciled.is_empty());
+        assert!(state.emitted_root_order.is_empty());
+        assert!(state.emitted_root_keys.is_empty());
+
+        // Only a further positive replacement emits one real occurrence.
+        let reopened = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            reopened.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Insert { index: 0, .. },
+                ..
+            }]
+        ));
+
+        // Once public, a revoke that crosses zero must remove the facade
+        // occurrence even though its signed maintenance group remains. A
+        // subsequent replacement then re-enters through a fresh Insert,
+        // never an Update or Move against the discarded terminal key.
+        let removed = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", -2)],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            removed.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Remove { .. },
+                ..
+            }]
+        ));
+        assert!(state.emitted_root_order.is_empty());
+        assert!(state.emitted_root_keys.is_empty());
+
+        let neutral_reentry = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(neutral_reentry.is_empty());
+
+        let reentered = update_collect_by_root_terminal_state(
+            input,
+            output,
+            &collect_by,
+            &mut state,
+            &[delta(0xa1, 0x11, "alpha", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            reentered.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Insert { index: 0, .. },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn root_terminal_mixed_remove_move_insert_mutates_to_final_public_order() {
+        let input = record_descriptor();
+        let output = record_descriptor();
+        let collect_by = collector();
+        let mut state = CollectByIncrementalState::default();
+        let opened = update_collect_by_root_terminal_state(
+            input.clone(),
+            output.clone(),
+            &collect_by,
+            &mut state,
+            &[
+                delta(0xa1, 0x11, "zoe", 1),
+                delta(0xb1, 0x22, "maria", 1),
+                delta(0xd1, 0x44, "beta", 1),
+            ],
+            true,
+        )
+        .unwrap();
+        let mut roots = Vec::new();
+        apply_root_operations(&mut roots, &opened);
+        assert_eq!(
+            roots,
+            vec![
+                (root_key(0xa1, 0x11), "zoe".to_owned()),
+                (root_key(0xb1, 0x22), "maria".to_owned()),
+                (root_key(0xd1, 0x44), "beta".to_owned()),
+            ]
+        );
+
+        // The batch retracts D, lowers A below B, and inserts C between them.
+        // Applying the terminal stream itself must reach B,C,A; final ranks
+        // emitted independently would instead produce C,B,A.
+        let mixed = update_collect_by_root_terminal_state(
+            input,
+            output,
+            &collect_by,
+            &mut state,
+            &[
+                delta(0xd1, 0x44, "beta", -1),
+                delta(0xa1, 0x11, "zoe", -1),
+                delta(0xa1, 0x11, "alpha", 1),
+                delta(0xc1, 0x33, "lima", 1),
+            ],
+            true,
+        )
+        .unwrap();
+        assert!(
+            mixed
+                .iter()
+                .any(|operation| matches!(operation.edit, TerminalEdit::Remove { .. }))
+        );
+        assert!(
+            mixed
+                .iter()
+                .any(|operation| matches!(operation.edit, TerminalEdit::Move { .. }))
+        );
+        assert!(
+            mixed
+                .iter()
+                .any(|operation| matches!(operation.edit, TerminalEdit::Insert { .. }))
+        );
+        apply_root_operations(&mut roots, &mixed);
+        assert_eq!(
+            roots,
+            vec![
+                (root_key(0xb1, 0x22), "maria".to_owned()),
+                (root_key(0xc1, 0x33), "lima".to_owned()),
+                (root_key(0xa1, 0x11), "alpha".to_owned()),
+            ]
+        );
+    }
 }
