@@ -485,6 +485,69 @@ where
     settle_outcome(node, outcome)
 }
 
+/// Install the receiving half of an ordinary direct-peer query subscription.
+/// Transport-driven Db fixtures must use their real subscribe handshake instead.
+/// Direct NodeState fixtures still need the exact shape, view, and claim scope
+/// before applying the peer's covered-input updates; a row bundle is not a
+/// substitute for that registration.
+pub fn register_query_receiver<S>(
+    node: &mut NodeState<S>,
+    shape: &jazz::query::ValidatedQuery,
+    binding: &jazz::query::Binding,
+    opts: jazz::protocol::RegisterShapeOptions,
+    session: jazz::protocol::DelegatedSessionBinding,
+) -> Result<jazz::protocol::SubscriptionKey, NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let subscription = jazz::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    register_query_receiver_for_subscription(node, subscription, shape, binding, opts, session)?;
+    Ok(subscription)
+}
+
+/// Register an explicit usage-site handle, keeping upstream and downstream
+/// registrations distinct when a direct fixture both receives and serves.
+pub fn register_query_receiver_for_subscription<S>(
+    node: &mut NodeState<S>,
+    subscription: jazz::protocol::SubscriptionKey,
+    shape: &jazz::query::ValidatedQuery,
+    binding: &jazz::query::Binding,
+    opts: jazz::protocol::RegisterShapeOptions,
+    session: jazz::protocol::DelegatedSessionBinding,
+) -> Result<(), NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    apply_sync_message_settled(
+        node,
+        SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: jazz::protocol::ShapeAst::from_validated(shape),
+            opts,
+        },
+    )?;
+    let values = shape
+        .params()
+        .keys()
+        .map(|name| binding.values()[name].clone())
+        .collect();
+    apply_sync_message_settled(
+        node,
+        SyncMessage::Subscribe(jazz::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values,
+            known_state: None,
+            delegated_session: Some(session),
+        }),
+    )?;
+    Ok(())
+}
+
 /// Ingest, persist, and settle one authority commit unit.
 pub fn ingest_commit_unit_settled<S>(
     node: &mut NodeState<S>,
