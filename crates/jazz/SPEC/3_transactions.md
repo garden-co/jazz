@@ -72,6 +72,15 @@ transaction kinds sync _only at commit_, as one idempotent
 `SyncMessage::FateUpdate { tx_id, fate, global_time, durability }` (ch. 8).
 Nothing partial travels upstream, and the core holds no open-transaction state.
 
+Every admitted remote transaction payload advances the receiver's transaction-clock
+high-water, including transactions loaded by an optimized bulk snapshot. A
+subsequent local commit must sort after those observed transactions even if
+the local wall clock lags. Host bindings sample Unix milliseconds when reserving
+the committed identity; they must not substitute a process-relative counter.
+This reservation rule also applies when transaction staging is still waiting
+on asynchronous storage. Per-row provenance timestamps remain separate from
+the transaction's HLC and do not substitute for the commit-time clock sample.
+
 The API transition is exactly `commit(OpenTransactionId) -> TransactionId`. Opening rejects
 a duplicate live `OpenTransactionId`; commit and rollback consume it, and every later
 use fails as a closed or unknown open transaction. `TransactionId` does not exist before a

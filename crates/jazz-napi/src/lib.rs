@@ -5014,12 +5014,21 @@ fn finish_immediate_promise(
     let _ = unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
 }
 
+fn commit_timestamp_ms() -> napi::Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| napi::Error::from_reason("commit clock precedes Unix epoch"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("commit clock exceeds u64 milliseconds"))
+}
+
 fn core_commit_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
-        .enqueue_commit_mergeable_handle(open_tx)
+        .enqueue_commit_mergeable_handle_at_ms(open_tx, commit_timestamp_ms()?)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     db.drive_queued_mutation_once();
     core_write_memory(Rc::clone(db), write)
@@ -5030,7 +5039,7 @@ fn core_commit_tx_persistent(
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
-        .enqueue_commit_mergeable_handle(open_tx)
+        .enqueue_commit_mergeable_handle_at_ms(open_tx, commit_timestamp_ms()?)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     core_write_persistent(Rc::clone(db), write)
 }
@@ -5040,7 +5049,7 @@ fn core_commit_exclusive_tx_memory(
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
-        .enqueue_commit_exclusive_handle(open_tx)
+        .enqueue_commit_exclusive_handle_at_ms(open_tx, commit_timestamp_ms()?)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     db.drive_queued_mutation_once();
     core_write_memory(Rc::clone(db), write)
@@ -5051,7 +5060,7 @@ fn core_commit_exclusive_tx_persistent(
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
-        .enqueue_commit_exclusive_handle(open_tx)
+        .enqueue_commit_exclusive_handle_at_ms(open_tx, commit_timestamp_ms()?)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     core_write_persistent(Rc::clone(db), write)
 }

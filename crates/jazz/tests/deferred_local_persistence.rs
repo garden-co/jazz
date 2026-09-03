@@ -1256,3 +1256,70 @@ fn queued_transaction_stage_failure_poison_prevents_partial_commit() {
         "a later valid stage must not survive an earlier terminal stage error",
     );
 }
+
+#[test]
+fn queued_commit_uses_host_clock_before_staging_runs() {
+    for exclusive in [false, true] {
+        let schema = schema();
+        let families = schema.column_families();
+        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = jazz::groove::storage::MemoryStorage::new(&family_refs).unwrap();
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x5b; 16]),
+                author: AuthorSubject::for_test_bytes([0x6b; 16]),
+            },
+        )))
+        .unwrap();
+        let open_tx = OpenTransactionId::new();
+        if exclusive {
+            db.enqueue_begin_exclusive(open_tx, None).unwrap();
+        } else {
+            db.enqueue_begin_mergeable(open_tx, None, None).unwrap();
+        }
+        db.enqueue_transaction_insert(
+            open_tx,
+            exclusive,
+            "todos".to_owned(),
+            row! { title: "queued" },
+            jazz::db::InsertOptions {
+                updated_at_ms: Some(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let host_now = 1_800_000_000_000;
+        let write = if exclusive {
+            db.enqueue_commit_exclusive_handle_at_ms(open_tx, host_now)
+        } else {
+            db.enqueue_commit_mergeable_handle_at_ms(open_tx, host_now)
+        }
+        .unwrap();
+        let reserved = write.mergeable_tx_id();
+        assert_eq!(reserved.physical_ms(), host_now);
+        // No owner work ran before reservation. Open/stage/commit now drain
+        // through the same queue, retaining that exact returned identity.
+        for _ in 0..8 {
+            block_on(db.tick()).unwrap();
+        }
+        assert_eq!(
+            block_on(write.wait(DurabilityTier::Local)).unwrap(),
+            reserved
+        );
+        let query = db.prepare_query(&db.table("todos")).unwrap();
+        let rows = block_on(db.all(&query, ReadOpts::default())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell_at(0), Some("queued".into()));
+        assert_eq!(
+            db.row_provenance(&rows[0]).unwrap().unwrap().updated_at,
+            100,
+            "row provenance is not the transaction HLC clock sample",
+        );
+        assert!(
+            db.reserve_transaction_id_at_ms(1).unwrap().time > reserved.time,
+            "a subsequent backward clock sample must not reuse the reserved identity",
+        );
+    }
+}

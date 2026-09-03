@@ -937,7 +937,7 @@ impl WasmDbInner {
         match self {
             Self::Memory(db) => {
                 let write = db
-                    .enqueue_commit_exclusive_handle(open_tx_id)
+                    .enqueue_commit_exclusive_handle_at_ms(open_tx_id, current_timestamp())
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
                 wasm_write_memory(Rc::clone(db), write)
@@ -945,7 +945,7 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.enqueue_commit_exclusive_handle(open_tx_id)
+                db.enqueue_commit_exclusive_handle_at_ms(open_tx_id, current_timestamp())
                     .map_err(to_js_error)?,
             ),
             Self::Closed => Err(JsValue::from_str("WasmDb is closed")),
@@ -956,7 +956,7 @@ impl WasmDbInner {
         match self {
             Self::Memory(db) => {
                 let write = db
-                    .enqueue_commit_mergeable_handle(open_tx_id)
+                    .enqueue_commit_mergeable_handle_at_ms(open_tx_id, current_timestamp())
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
                 wasm_write_memory(Rc::clone(db), write)
@@ -964,7 +964,7 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.enqueue_commit_mergeable_handle(open_tx_id)
+                db.enqueue_commit_mergeable_handle_at_ms(open_tx_id, current_timestamp())
                     .map_err(to_js_error)?,
             ),
             Self::Closed => Err(JsValue::from_str("WasmDb is closed")),
