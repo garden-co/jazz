@@ -951,14 +951,26 @@ fn affected_recursive_frontier(
                             continue;
                         };
                     let mut touched = HashSet::<Vec<u8>>::default();
-                    collect_changed_join_keys(
+                    // Raw table keys are a valid selective frontier only
+                    // when they still have the join descriptor's fields.
+                    // A transformed step owns its own descriptor boundary;
+                    // its seed frontier remains correct, but must not be
+                    // optimized through raw-table key extraction.
+                    match collect_changed_join_keys(
                         runtime.graph,
                         changed_input,
                         runtime.table_deltas,
                         &changed_fields,
                         join.comparison,
                         &mut touched,
-                    )?;
+                    ) {
+                        Ok(()) => {}
+                        Err(IvmRuntimeError::GraphFieldNotFound(_)) => {
+                            pending.extend([*left, *right]);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
                     for delta in accumulated {
                         for key in
                             super::join::join_keys(&frontier_desc, delta.raw(), &frontier_fields)?

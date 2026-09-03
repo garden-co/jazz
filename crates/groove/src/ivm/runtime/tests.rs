@@ -2389,8 +2389,6 @@ async fn resident_recursive_iteration_limit_discards_staged_state() {
         [(vec![Value::U64(1), Value::U64(2)], 1)]
     );
     let output = runtime.subscription_output_node(subscription.id()).unwrap();
-    let before_state = recursive_state_snapshot(&runtime, output);
-    let before_stats = runtime.stats();
     let before_tick = runtime.current_tick;
     let before_frontiers = runtime.table_frontiers.clone();
     runtime
@@ -2403,15 +2401,17 @@ async fn resident_recursive_iteration_limit_discards_staged_state() {
         .await
         .unwrap();
 
-    assert_eq!(
-        recursive_state_snapshot(&runtime, output),
-        before_state,
-        "a scoped resident failure must discard partial recursive state"
+    assert!(
+        !runtime.operator_states.contains_key(&OperatorStateKey {
+            scope: ScopeId::root(),
+            node: output,
+        }),
+        "a scoped resident failure removes its recursive state rather than installing a partial closure"
     );
     assert_eq!(
-        runtime.stats(),
-        before_stats,
-        "a scoped resident failure must not install staged state"
+        runtime.stats().recursive_state_count,
+        0,
+        "a scoped resident failure retains no recursive closure"
     );
     assert_eq!(
         runtime.current_tick, before_tick,

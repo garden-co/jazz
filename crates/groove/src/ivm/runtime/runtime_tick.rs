@@ -86,6 +86,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
     pending_binding_retractions: usize,
     pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
+    /// No independent root remains after a scoped failure, so this tick must
+    /// not publish its staged globals.
+    discarded: bool,
 }
 
 #[derive(Clone)]
@@ -617,6 +620,11 @@ impl EvaluationWorkQueue {
 
 impl IncrementalEvaluation<'_> {
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
+        self.discarded = self
+            .work_queue
+            .roots
+            .iter()
+            .all(|root| nodes.contains(root));
         self.work_queue.abandon(nodes);
         // A scoped failure owns only its downstream slice. Keep evaluating
         // disjoint roots in this tick; their prepared state and notifications
@@ -645,6 +653,9 @@ impl IncrementalEvaluation<'_> {
     }
 
     fn install(&mut self, runtime: &mut IvmRuntime) {
+        if self.discarded {
+            return;
+        }
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
@@ -719,6 +730,9 @@ impl IncrementalEvaluation<'_> {
         runtime: &mut IvmRuntime,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), EvaluationFailure>> {
+        if self.discarded {
+            return Poll::Ready(Ok(()));
+        }
         let ready = self.requests.poll(cx);
         if ready == 0 {
             self.requests.poll_eager_retry(cx);
@@ -2282,6 +2296,7 @@ impl IvmRuntime {
             node_meta,
             pending_binding_retractions,
             pending_notifications: Vec::new(),
+            discarded: false,
         })
     }
 
