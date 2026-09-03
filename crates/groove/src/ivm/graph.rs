@@ -157,6 +157,12 @@ pub enum GraphBuilder {
         output: RecordDescriptor,
         records: Vec<Vec<u8>>,
     },
+    /// Runtime-owned mutable records. The input identity is local to the owning
+    /// runtime and receives record replacement batches through its API.
+    InputSource {
+        id: InputSourceId,
+        output: RecordDescriptor,
+    },
     Index {
         table: String,
         index: String,
@@ -180,8 +186,22 @@ pub enum GraphBuilder {
     Recursive {
         seed: Arc<GraphBuilder>,
         step: Arc<GraphBuilder>,
+        /// Optional generic side output evaluated once for each actual
+        /// recursive step, with the exact frontier and depth used by `step`.
+        /// It does not participate in the public recursive fixed point.
+        step_witness: Option<Arc<GraphBuilder>>,
         frontier: FrontierName,
         max_iters: usize,
+        /// A semantic depth bound truncates the next frontier; a fixpoint
+        /// safety limit reports non-convergence instead.
+        truncate_at_max_iters: bool,
+    },
+    /// The generic side output of a [`Self::Recursive`] builder that was
+    /// explicitly constructed with `step_witness`. This is deliberately a
+    /// separate graph value: callers may subscribe to it without changing the
+    /// recursive relation's public set semantics.
+    RecursiveStepWitness {
+        recursive: Arc<GraphBuilder>,
     },
     Filter {
         input: Arc<GraphBuilder>,
@@ -264,6 +284,56 @@ pub enum GraphBuilder {
         group_cols: Vec<FieldRef>,
         aggregates: Vec<AggregateExpr>,
     },
+}
+
+/// Opaque identity of one mutable input owned by a single IVM runtime.
+///
+/// It is neither durable nor wire-facing. Callers obtain it from
+/// [`crate::ivm::IvmRuntime::allocate_input_source`] and use it only with that
+/// runtime's graph and replacement APIs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InputSourceId {
+    runtime_namespace: u64,
+    local: u64,
+}
+
+impl InputSourceId {
+    pub(crate) fn new(runtime_namespace: u64, local: u64) -> Self {
+        Self {
+            runtime_namespace,
+            local,
+        }
+    }
+
+    pub(crate) fn belongs_to(self, runtime_namespace: u64) -> bool {
+        self.runtime_namespace == runtime_namespace
+    }
+
+    pub(crate) fn was_allocated_by(self, runtime_namespace: u64, next_local: u64) -> bool {
+        self.belongs_to(runtime_namespace) && self.local < next_local
+    }
+
+    pub(crate) fn binding_key(self) -> BindingSourceKey {
+        BindingSourceKey::RuntimeInput {
+            runtime_namespace: self.runtime_namespace,
+            local: self.local,
+        }
+    }
+
+    pub(crate) fn diagnostic_name(self) -> String {
+        format!(
+            "runtime input source {}:{}",
+            self.runtime_namespace, self.local
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_binding_shape(self) -> String {
+        format!(
+            "__groove_input_source_{}_{}",
+            self.runtime_namespace, self.local
+        )
+    }
 }
 
 /// Public builder payload for a terminal [`GraphBuilder::CollectBy`] node.
@@ -448,6 +518,11 @@ impl GraphBuilder {
         }
     }
 
+    /// Build a runtime-owned mutable source with a fixed output descriptor.
+    pub fn input_source(id: InputSourceId, output: RecordDescriptor) -> Self {
+        Self::InputSource { id, output }
+    }
+
     pub fn values(
         output: RecordDescriptor,
         rows: impl IntoIterator<Item = impl AsRef<[Value]>>,
@@ -538,11 +613,69 @@ impl GraphBuilder {
         frontier: impl Into<String>,
         max_iters: usize,
     ) -> Self {
+        Self::recursive_with_limit(seed, step, frontier, max_iters, false)
+    }
+
+    /// Build recursion whose iteration count is an observable depth cutoff.
+    ///
+    /// Unlike [`Self::recursive`]'s non-convergence guard, reaching this bound
+    /// discards the next frontier and returns every fact accumulated through
+    /// `max_iters` recursive steps. A zero bound returns only the seed.
+    pub fn recursive_bounded(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+    ) -> Self {
+        Self::recursive_with_limit(seed, step, frontier, max_iters, true)
+    }
+
+    fn recursive_with_limit(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+        truncate_at_max_iters: bool,
+    ) -> Self {
         Self::Recursive {
             seed: Arc::new(seed),
             step: Arc::new(step),
+            step_witness: None,
             frontier: FrontierName(frontier.into()),
             max_iters,
+            truncate_at_max_iters,
+        }
+    }
+
+    /// Build a recursive relation with a generic, recursion-owned side
+    /// output. The witness is evaluated at each actual step using the same
+    /// frontier and semantic depth as `step`; it is never fed back into the
+    /// public fixed point.
+    pub fn recursive_with_step_witness(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        step_witness: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+        truncate_at_max_iters: bool,
+    ) -> Self {
+        Self::Recursive {
+            seed: Arc::new(seed),
+            step: Arc::new(step),
+            step_witness: Some(Arc::new(step_witness)),
+            frontier: FrontierName(frontier.into()),
+            max_iters,
+            truncate_at_max_iters,
+        }
+    }
+
+    /// Expose the side output of a recursive graph constructed with
+    /// [`Self::recursive_with_step_witness`]. Compilation rejects an ordinary
+    /// recursive graph here, making a missing witness unrepresentable at the
+    /// graph boundary.
+    pub fn recursive_step_witness(recursive: GraphBuilder) -> Self {
+        Self::RecursiveStepWitness {
+            recursive: Arc::new(recursive),
         }
     }
 
@@ -585,12 +718,22 @@ impl GraphBuilder {
                     pending.push((right, false));
                     pending.push((left, false));
                 }
-                Self::Recursive { seed, step, .. } => {
+                Self::Recursive {
+                    seed,
+                    step,
+                    step_witness,
+                    ..
+                } => {
+                    if let Some(witness) = step_witness {
+                        pending.push((witness, false));
+                    }
                     pending.push((step, false));
                     pending.push((seed, false));
                 }
+                Self::RecursiveStepWitness { recursive } => pending.push((recursive, false)),
                 Self::Table { .. }
                 | Self::InlineRecords { .. }
+                | Self::InputSource { .. }
                 | Self::Index { .. }
                 | Self::FrontierSource { .. }
                 | Self::BindingSource { .. } => {}
@@ -1248,7 +1391,8 @@ pub struct IvmGraph {
     /// descriptor, and insertion asserts that collisions do not merge specs.
     nodes: HashMap<NodeId, GraphNode>,
     table_sources: HashMap<String, HashSet<NodeId>>,
-    binding_sources: HashMap<String, HashSet<NodeId>>,
+    binding_sources: HashMap<BindingSourceKey, HashSet<NodeId>>,
+    frontier_sources: HashMap<String, HashSet<NodeId>>,
 }
 
 impl IvmGraph {
@@ -1290,12 +1434,12 @@ impl IvmGraph {
             }
             OpType::BindingSource(source) => {
                 self.binding_sources
-                    .entry(source.shape.clone())
+                    .entry(source.key.clone())
                     .or_default()
                     .insert(id);
             }
             OpType::FrontierSource(source) => {
-                self.binding_sources
+                self.frontier_sources
                     .entry(source.binding.0.clone())
                     .or_default()
                     .insert(id);
@@ -1345,17 +1489,19 @@ impl IvmGraph {
     pub(crate) fn affected_nodes<'a>(
         &self,
         tables: impl IntoIterator<Item = &'a str>,
-        bindings: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
     ) -> std::collections::HashSet<NodeId> {
         let mut affected = std::collections::HashSet::new();
         let mut pending = tables
             .into_iter()
             .filter_map(|table| self.table_sources.get(table))
-            .chain(
-                bindings
-                    .into_iter()
-                    .filter_map(|binding| self.binding_sources.get(binding)),
-            )
+            .chain(bindings.into_iter().flat_map(|binding| {
+                self.binding_sources.get(binding).into_iter().chain(
+                    binding
+                        .prepared_name()
+                        .and_then(|name| self.frontier_sources.get(name)),
+                )
+            }))
             .flat_map(|nodes| nodes.iter().copied())
             .collect::<Vec<_>>();
         while let Some(node) = pending.pop() {
@@ -1402,17 +1548,20 @@ impl IvmGraph {
                 remove_source_node(&mut self.table_sources, &source.table, id);
             }
             OpType::BindingSource(source) => {
-                remove_source_node(&mut self.binding_sources, &source.shape, id);
+                remove_source_node(&mut self.binding_sources, &source.key, id);
             }
             OpType::FrontierSource(source) => {
-                remove_source_node(&mut self.binding_sources, &source.binding.0, id);
+                remove_source_node(&mut self.frontier_sources, &source.binding.0, id);
             }
             _ => {}
         }
     }
 }
 
-fn remove_source_node(sources: &mut HashMap<String, HashSet<NodeId>>, source: &str, node: NodeId) {
+fn remove_source_node<K>(sources: &mut HashMap<K, HashSet<NodeId>>, source: &K, node: NodeId)
+where
+    K: Eq + std::hash::Hash,
+{
     let remove_source = sources.get_mut(source).is_some_and(|nodes| {
         nodes.remove(&node);
         nodes.is_empty()
@@ -1577,7 +1726,7 @@ impl NodeDescriptor {
                 for &field_idx in arg_max_by
                     .group_field_indices
                     .iter()
-                    .chain(&arg_max_by.primary_key_field_indices)
+                    .chain(&arg_max_by.comparison_field_indices)
                 {
                     if field_idx >= input_outputs[0].fields().len() {
                         return Err(GraphValidationError::FieldIndexOutOfBounds {
@@ -1595,7 +1744,7 @@ impl NodeDescriptor {
                 for &field_idx in arg_min_by
                     .group_field_indices
                     .iter()
-                    .chain(&arg_min_by.primary_key_field_indices)
+                    .chain(&arg_min_by.comparison_field_indices)
                 {
                     if field_idx >= input_outputs[0].fields().len() {
                         return Err(GraphValidationError::FieldIndexOutOfBounds {
@@ -2009,7 +2158,15 @@ impl NodeDescriptor {
                 }
                 Ok(())
             }
-            OpType::Recursive(_) => expect_arity(&self.inputs, 2),
+            OpType::Recursive(recursive) => expect_arity(
+                &self.inputs,
+                if recursive.step_witness_output.is_some() {
+                    3
+                } else {
+                    2
+                },
+            ),
+            OpType::RecursiveStepWitness(_) => expect_arity(&self.inputs, 1),
         }
     }
 }
@@ -2090,6 +2247,7 @@ pub enum OpType {
     /// inflate every recursive graph-compilation frame.
     CollectBy(Box<CollectByOp>),
     Recursive(RecursiveOp),
+    RecursiveStepWitness(RecursiveStepWitnessOp),
     Persist(PersistOp),
     Filter(FilterOp),
     MapProject(MapProjectOp),

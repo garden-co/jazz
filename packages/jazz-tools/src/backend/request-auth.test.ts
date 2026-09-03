@@ -193,7 +193,9 @@ describe("backend request auth", () => {
     ).resolves.toEqual({
       issuer: "urn:jazz:local-first",
       user_id: userId,
-      claims: {},
+      // Supported custom JWT fields are policy inputs for reserved issuers
+      // too; authMode is derived separately from verified issuer admission.
+      claims: { auth_mode: "local-first" },
       authMode: "local-first",
     });
   });

@@ -445,8 +445,12 @@ test("alpha verification preserves a reusable preview's sealed source commit acr
   // The release workflow has already established that these commits have the
   // same source tree. Their identities intentionally differ: the latter is a
   // merge commit, while the former is what the preview manifest sealed.
-  assert.equal(select(true), previewCommit);
-  assert.equal(select(false), mergeCommit);
+  for (const [reuse, expected] of [
+    [true, previewCommit],
+    [false, mergeCommit],
+  ]) {
+    assert.equal(select(reuse), expected, `reuse=${reuse} selects the sealed source revision`);
+  }
   assert.throws(
     () =>
       execFileSync(process.execPath, [selector.pathname], {
@@ -460,6 +464,45 @@ test("alpha verification preserves a reusable preview's sealed source commit acr
         },
       }),
     (error) => error?.status === 1,
+  );
+});
+
+test("both alpha jazz-rn verifiers use the shared release source-revision contract", async () => {
+  const workflowText = await readFile(
+    new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
+    "utf8",
+  );
+  const workflow = parse(workflowText);
+  const steps = workflow.jobs["publish-npm"].steps;
+  const staged = steps.find((step) => step.name === "Verify staged jazz-rn relay artifacts");
+  const packed = steps.find((step) => step.name === "Verify packed jazz-rn relay payload");
+
+  assert.ok(staged, "the staged relay verifier must remain in the alpha release workflow");
+  assert.ok(packed, "the packed relay verifier must remain in the alpha release workflow");
+  assert.deepEqual(
+    packed.env,
+    staged.env,
+    "the packed verifier must receive the same reuse-aware source selector inputs as staged verification",
+  );
+  for (const [name, step] of [
+    ["staged", staged],
+    ["packed", packed],
+  ]) {
+    assert.match(
+      step.run,
+      /JAZZ_NATIVE_RELAY_SOURCE_REVISION="\$\(node dev\/artifacts\/release-artifact-source-revision\.mjs\)"/,
+      `${name} verification must use the authoritative release source selector`,
+    );
+  }
+  assert.doesNotMatch(
+    packed.run,
+    /git rev-parse HEAD/,
+    "packed verification must not replace a reusable preview's sealed revision with the merge SHA",
+  );
+  assert.match(
+    workflowText,
+    /env: &release-artifact-source-revision-env[\s\S]*env: \*release-artifact-source-revision-env/,
+    "the two verifier sites must share one env definition so their reuse inputs cannot drift",
   );
 });
 

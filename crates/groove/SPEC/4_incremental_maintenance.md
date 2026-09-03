@@ -36,12 +36,12 @@ Invariant digest:
 - `INV-TICK-10`: Inner join output deltas MUST multiply input delta weight by stored opposite-side weight and MUST subtract one copy of the same-tick left/right cross term.
 - `INV-TICK-11`: Anti-join output deltas MUST represent the visibility diff of left records for keys whose left or right inputs changed.
 - `INV-TICK-12`: Snapshot and shape hydration MUST rebuild arrangements with `ArrangementUpdateMode::Replace` rather than accumulating a snapshot over existing arrangement contents.
-- `INV-TICK-13`: A `Persist` node MUST consolidate all same-tick deltas by durable key before writing storage, and a unique persist target MUST reject a positive delta that conflicts with another stored record for the same key; same-tick reads MUST see staged durable writes through the tick overlay.
+- `INV-TICK-13`: A `Persist` node MUST consolidate all same-tick deltas by durable key before writing storage. A unique persist target MAY replace a stored owner only when that owner's net weight is fully retracted in the same tick and MUST reject the write unless at most one positive owner remains; same-tick reads MUST see staged durable writes through the tick overlay.
 - `INV-TICK-14`: Prepared-shape output routing MUST update per-binding materialized weights and MUST send each output delta only to active subscriptions whose `BindingKey` equals the projected output key.
 - `INV-TICK-15`: A recursive positive incremental tick MUST emit each newly discovered recursive fact at weight `+1` at most once and MUST collapse duplicate derivations.
 - `INV-TICK-16`: The reference implementation selects recompute for negative table deltas, cached recursive state with table deltas, empty unbound state, or unhydrated step arrangements. This trigger set is broader than the minimum necessary; the contractual result is the minimal diff required by INV-REC-8.
 - `INV-TICK-17`: Recursive recompute and incremental recursion MUST reject non-positive recursive frontier facts instead of assigning bag-recursive semantics.
-- `INV-TICK-18`: Recursive evaluation MUST stop with `RecursiveIterationLimit` when the frontier remains non-empty after `RecursiveOp.max_iters`.
+- `INV-TICK-18`: Fixpoint recursion MUST stop with `RecursiveIterationLimit` when the frontier remains non-empty after its safety `max_iters`; semantic depth bounds MUST truncate instead.
 - `INV-TICK-19`: Hydrating or querying a graph MUST NOT perturb an existing subscription stream's future tick deltas.
 - `INV-TICK-20`: Contextual recursive child state MUST NOT be persisted in `operator_states` after recursive recompute; retained child operator state outside `FrontierSource` context remains root-scoped.
 
@@ -185,10 +185,12 @@ outputs are evaluated after direct subscriptions, and those outputs are routed
 by `BindingKey`. Chapter 5 specifies that behavior.
 
 _Further invariants._ `INV-TICK-13` — a `Persist` node consolidates same-tick
-deltas by durable key before writing storage; a unique target rejects a
-conflicting positive delta. Same-tick durable reads observe staged `Persist`
-writes through the tick storage overlay before falling through to committed
-storage. `INV-TICK-14` — prepared-shape routing updates per-binding materialized
+deltas by durable key before writing storage. A unique target permits an atomic
+owner replacement only when the stored owner's net weight is fully retracted
+and at most one positive owner remains; otherwise it rejects the write.
+Same-tick durable reads observe staged `Persist` writes through the tick storage
+overlay before falling through to committed storage.
+`INV-TICK-14` — prepared-shape routing updates per-binding materialized
 weights and delivers each output delta only to subscriptions whose `BindingKey`
 matches (ch. 5).
 
@@ -216,8 +218,9 @@ is the minimal diff required by `INV-REC-8`. The behavior is covered by
 
 _Further invariants._ `INV-TICK-17` — recursion rejects non-positive frontier
 facts rather than assigning bag-recursive semantics (ch. 6). `INV-TICK-18` —
-recursive evaluation stops with `RecursiveIterationLimit` when the frontier is
-still non-empty after `max_iters` (ch. 6). `INV-TICK-20` — contextual recursive
+fixpoint recursion stops with `RecursiveIterationLimit` when the frontier is
+still non-empty after its safety `max_iters`, while semantic depth bounds
+truncate the out-of-range frontier (ch. 6). `INV-TICK-20` — contextual recursive
 child state is not persisted in `operator_states` after recompute (ch. 6).
 
 ### 4.6 The unified arrangement model

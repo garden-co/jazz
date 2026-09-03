@@ -13,13 +13,13 @@ pub(super) fn collect_layout(
     let explicit_root_projection = matches!(projection.fields, FieldProjection::Fields(_));
     let mut selected_root = BTreeSet::from([root_source.row_shape.row_uuid_field.clone()]);
     match &projection.fields {
-        FieldProjection::All => selected_root.extend(
-            root_source
-                .table_schema
-                .columns
-                .iter()
-                .map(|column| user_column_field(&column.name)),
-        ),
+        // Shape-default app rows are `CurrentRow`s, not a user-column-only
+        // projection. Retain the same canonical magic provenance and current
+        // version fields that one-shot materialization exposes, so opening,
+        // reset, and incremental collector output share one descriptor.
+        FieldProjection::All => {
+            selected_root.extend(current_row_field_names(&root_source.table_schema))
+        }
         FieldProjection::Fields(fields) => selected_root.extend(
             fields
                 .iter()

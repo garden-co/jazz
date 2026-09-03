@@ -19,10 +19,48 @@ use super::{
 };
 
 #[derive(Default)]
+struct UniqueRecordDeltas {
+    first: Option<(Bytes, i64)>,
+    additional: Option<HashMap<Bytes, i64>>,
+}
+
+impl UniqueRecordDeltas {
+    fn add(&mut self, record: &Bytes, weight: i64) {
+        match &mut self.first {
+            Some((first_record, first_weight)) if first_record == record => {
+                *first_weight += weight;
+            }
+            Some(_) => {
+                let additional = self.additional.get_or_insert_default();
+                *additional.entry(record.clone()).or_default() += weight;
+            }
+            None => self.first = Some((record.clone(), weight)),
+        }
+    }
+
+    fn remove(&mut self, record: &[u8]) -> Option<i64> {
+        if self
+            .first
+            .as_ref()
+            .is_some_and(|(first_record, _)| first_record.as_ref() == record)
+        {
+            return self.first.take().map(|(_, weight)| weight);
+        }
+        self.additional.as_mut()?.remove(record)
+    }
+
+    fn into_iter(self) -> impl Iterator<Item = (Bytes, i64)> {
+        self.first
+            .into_iter()
+            .chain(self.additional.into_iter().flatten())
+    }
+}
+
+#[derive(Default)]
 struct PendingPersistKey {
     weight: i64,
     positive_record: Option<Vec<u8>>,
-    unique_record_deltas: HashMap<Bytes, i64>,
+    unique_record_deltas: UniqueRecordDeltas,
 }
 
 pub(super) async fn apply_persist_delta(
@@ -164,11 +202,7 @@ fn add_pending_delta(entry: &mut PendingPersistKey, record: &Bytes, weight: i64,
     }
     entry.weight += weight;
     if unique {
-        if let Some(current_weight) = entry.unique_record_deltas.get_mut(record) {
-            *current_weight += weight;
-        } else {
-            entry.unique_record_deltas.insert(record.clone(), weight);
-        }
+        entry.unique_record_deltas.add(record, weight);
     } else if weight > 0 {
         entry.positive_record = Some(record.to_vec());
     }
@@ -216,7 +250,7 @@ where
         .is_some_and(|record| record_deltas.remove(record.as_slice()).unwrap_or_default() >= 0);
     let mut owner = durable_owner.filter(|_| durable_owner_survives);
 
-    for (record, delta) in record_deltas {
+    for (record, delta) in record_deltas.into_iter() {
         if delta <= 0 {
             continue;
         }

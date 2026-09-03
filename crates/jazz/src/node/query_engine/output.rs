@@ -125,8 +125,8 @@ pub(crate) enum ProgramFactKey {
     RelationEdges,
     /// Per-path correlation/cardinality coverage rows.
     PathCorrelationCoverage,
-    /// Source/table coverage facts for a scope.
-    SourceCoverage(CoverageScope),
+    /// Complete source-closure receipts for a scope.
+    ProgramSourceCoverage(CoverageScope),
     /// Settled read-frontier signal for a concrete scope/frontier.
     ReadFrontierSettled(CoverageFrontier),
     /// Full transaction payload coverage for one concrete batch/transaction.

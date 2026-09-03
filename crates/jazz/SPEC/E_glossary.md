@@ -97,7 +97,8 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   `RegisterShape`, `Subscribe`, `Unsubscribe`, `ViewUpdate`, catalogue + content
   messages).
 - **`PeerState` / `PeerRole::{Relay, ClientLink}`** — link-local sync state and
-  role; **relay** (uses `AuthorSubject::SYSTEM`, no fate), **edge** (terminates a
+  role; **relay** (explicit transport capability, no permission subject or
+  fate), **edge** (terminates a
   client identity; mergeable fate authority), **core** (exclusive authority,
   history-complete), **client**. The sync participant type is `Node`: a local
   `NodeState` engine plus connections and serving. Relay, edge, and core are
@@ -105,6 +106,11 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   **Implementation status (verified).**
   `edge_defers_mergeable_fate_until_permission_scope_settles` verifies that the
   edge assigns mergeable fate after its permission scope settles.
+- **scope-isolated client relay** — a non-authority persistent relay whose store
+  and attached foreground runtimes belong to exactly one app/environment/auth
+  scope. It serves retained authorized knowledge to those foregrounds without
+  re-evaluating policy; upstream authorities still narrow delegated requests
+  under topology-admitted immutable session bindings (ch. 9).
 - **payload coverage / peer payload inventory** — the sync vocabulary for what
   payload bytes a peer can safely reference instead of resending. Inventory facts
   are deliberately narrow today: **complete-tx payload dedup / complete tx
@@ -120,8 +126,8 @@ Restored}`) · **global-current overwrite table** — node-local derived current
 - **`Db` / `DbIdentity`** — the client-side application facade: no role, always
   a synced client over a `NodeState`. **`NodeState`** (local engine) / **`Node`**
   (sync participant) are the node-level types beneath it.
-- **`read` / `one` / `all` / `subscribe`** · **`ReadOpts` / `LocalUpdates` /
-  `Propagation`** · **`WriteHandle` / Rust `WatchHandle` / binding
+- **`read` / `one` / `all` / `subscribe`** · **`ReadOpts` / internal
+  `LocalUpdates` / `Propagation`** · **`WriteHandle` / Rust `WatchHandle` / binding
   subscription stream** · **`RowIdSource`**
   (`Production` / `Seeded`).
 - **branch column** · **branch key** · **branch-local row** ·

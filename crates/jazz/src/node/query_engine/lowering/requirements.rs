@@ -151,7 +151,7 @@ pub(super) fn source_requirements(
                         .insert(SourceMetadataRequirement::DeletionMarkers);
                 }
             }
-            ProgramFactKey::SourceCoverage(scope) => match scope {
+            ProgramFactKey::ProgramSourceCoverage(scope) => match scope {
                 CoverageScope::Program => {
                     for source_requirements in requirements.values_mut() {
                         source_requirements

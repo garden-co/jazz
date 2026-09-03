@@ -19,7 +19,11 @@ import { attachSubscriptionStore } from "../../src/subscription-store-internal.j
 import type { AuthState } from "../../src/runtime/auth-state.js";
 import { canonicalAuthorSubject } from "../../src/runtime/author-id.js";
 import type { PublicSession, Session } from "../../src/runtime/context.js";
-import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
+import type {
+  DbDeltaSubscriptionCallbacks,
+  QueryBuilder,
+  QueryOptions,
+} from "../../src/runtime/db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 
 type Todo = {
@@ -349,12 +353,15 @@ describe("react-core provider/hooks browser coverage", () => {
       data: [{ id: "a", title: "Edge" }],
       error: null,
     });
-    manager.register(BASE_QUERY, entry, { tier: "edge", propagation: "local-only" });
+    manager.register(BASE_QUERY, entry, {
+      tier: "edge",
+      branch: "draft",
+    });
     const client = makeClient({ manager });
 
     render(
       <JazzProvider client={client}>
-        <UseAllView query={BASE_QUERY} options={{ tier: "edge", propagation: "local-only" }} />
+        <UseAllView query={BASE_QUERY} options={{ tier: "edge", branch: "draft" }} />
       </JazzProvider>,
     );
 
@@ -390,14 +397,14 @@ describe("react-core provider/hooks browser coverage", () => {
   it("RCB-B09: useAllSuspense accepts QueryOptions without changing suspense behavior", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
-    manager.register(BASE_QUERY, entry, { localUpdates: "deferred" });
+    manager.register(BASE_QUERY, entry, { branch: "draft" });
     const client = makeClient({ manager });
 
     render(
       <CaptureErrorBoundary>
         <React.Suspense fallback={<div data-testid="rows-fallback">loading-rows</div>}>
           <JazzProvider client={client}>
-            <UseAllSuspenseView query={BASE_QUERY} options={{ localUpdates: "deferred" }} />
+            <UseAllSuspenseView query={BASE_QUERY} options={{ branch: "draft" }} />
           </JazzProvider>
         </React.Suspense>
       </CaptureErrorBoundary>,
@@ -427,7 +434,7 @@ describe("react-core provider/hooks browser coverage", () => {
         data: [{ id: "b", title: "Deferred" }],
         error: null,
       }),
-      { localUpdates: "deferred" },
+      { branch: "draft" },
     );
     const client = makeClient({ manager });
 
@@ -441,7 +448,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
     render(
       <JazzProvider client={client}>
-        <UseAllView query={BASE_QUERY} options={{ localUpdates: "deferred" }} />
+        <UseAllView query={BASE_QUERY} options={{ branch: "draft" }} />
       </JazzProvider>,
     );
 
@@ -556,7 +563,7 @@ describe("react-core provider/hooks browser coverage", () => {
       },
       subscribeDelta(
         _query: QueryBuilder<Todo>,
-        callback: (delta: SubscriptionDelta<Todo>) => void,
+        callbacks: DbDeltaSubscriptionCallbacks<Todo>,
         _options?: QueryOptions,
         session?: Session,
       ) {
@@ -564,7 +571,7 @@ describe("react-core provider/hooks browser coverage", () => {
           session: session
             ? canonicalAuthorSubject(session.issuer, session.user_id)
             : (liveSession?.user ?? "anon"),
-          callback,
+          callback: callbacks.onDelta,
         });
         return () => {};
       },

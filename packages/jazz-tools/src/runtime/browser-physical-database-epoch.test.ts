@@ -35,11 +35,12 @@ describe("browser physical database epoch", () => {
       BrowserPhysicalDatabaseBusyError,
     );
 
-    first.release();
-    // The Web Locks callback relinquishes after its release continuation.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // A caller that needs to reopen immediately must wait for the browser's
+    // lock callback to have actually returned, not merely for the release
+    // request to be queued.
+    await first.release();
     const successor = await acquireBrowserPhysicalDatabaseEpoch("same-root", locks);
     expect(successor.id).not.toBe(first.id);
-    successor.release();
+    await successor.release();
   });
 });

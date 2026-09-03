@@ -1698,6 +1698,7 @@ impl WasmDb {
         page_store: JsValue,
         schema: Vec<u8>,
         config: Vec<u8>,
+        storage_owner: String,
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
@@ -1707,7 +1708,7 @@ impl WasmDb {
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config)
+        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
             .await
             .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
@@ -1729,6 +1730,7 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
+        storage_owner: String,
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, mut config) = decode_open_args(&schema, &config)?;
@@ -1739,7 +1741,7 @@ impl WasmDb {
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config)
+        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
             .await
             .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
@@ -1925,6 +1927,31 @@ impl WasmDb {
         }))
     }
 
+    /// Authority read capability minted only by an explicit backend open.
+    /// No caller-supplied identity can select SYSTEM through this boundary.
+    #[wasm_bindgen(js_name = allForBackend)]
+    pub fn all_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        let inner = self.open_inner()?;
+        let query = query.inner.clone();
+        let opts = read_opts_from_js(opts)?;
+        Ok(future_to_promise(async move {
+            let mut rows = inner
+                .all_for_identity_async(&query, opts, AuthorSubject::SYSTEM)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_rows_for_binding(&mut rows)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_rows(&rows).map_err(to_js_error)?)
+        }))
+    }
+
     #[wasm_bindgen(js_name = one)]
     pub fn one(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<Vec<u8>, JsValue> {
         let opts = read_opts_from_js(opts)?;
@@ -1956,6 +1983,24 @@ impl WasmDb {
     ) -> Result<js_sys::Promise, JsValue> {
         let author = author_id_from_bytes(&author)?;
         transaction_rows_promise(&self.open_inner()?, query, tx, Some(author), opts, false)
+    }
+
+    #[wasm_bindgen(js_name = allInTransactionForBackend)]
+    pub fn all_in_transaction_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        tx: &WasmTx,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        transaction_rows_promise(
+            &self.open_inner()?,
+            query,
+            tx,
+            Some(AuthorSubject::SYSTEM),
+            opts,
+            false,
+        )
     }
 
     #[wasm_bindgen(js_name = oneInTransaction)]
@@ -2008,6 +2053,23 @@ impl WasmDb {
         let claims = claims_from_js(author, claims)?;
         self.open_inner()?.set_identity_claims(author, claims);
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = allRelationSnapshotInTransactionForBackend)]
+    pub fn all_relation_snapshot_in_transaction_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        tx: &WasmTx,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        transaction_relation_snapshot_promise(
+            &self.open_inner()?,
+            query,
+            tx,
+            Some(AuthorSubject::SYSTEM),
+            opts,
+        )
     }
 
     #[wasm_bindgen(js_name = allForIdentity)]
@@ -2097,6 +2159,29 @@ impl WasmDb {
         }))
     }
 
+    #[wasm_bindgen(js_name = allRelationQueryForBackend)]
+    pub fn all_relation_query_for_backend(
+        &self,
+        query_json: String,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        let inner = self.open_inner()?;
+        let opts = read_opts_from_js(opts)?;
+        let query = relation_query_from_json(&query_json)?;
+        Ok(future_to_promise(async move {
+            let mut snapshot = inner
+                .all_relation_query_for_identity(&query, opts, AuthorSubject::SYSTEM)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_rows(&snapshot.rows).map_err(to_js_error)?)
+        }))
+    }
+
     #[wasm_bindgen(js_name = allRelationSnapshot)]
     pub fn all_relation_snapshot(
         &self,
@@ -2141,6 +2226,44 @@ impl WasmDb {
                 .map_err(to_js_error)?;
             bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
         }))
+    }
+
+    #[wasm_bindgen(js_name = allRelationSnapshotForBackend)]
+    pub fn all_relation_snapshot_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        let inner = self.open_inner()?;
+        let opts = read_opts_from_js(opts)?;
+        let query = query.inner.clone();
+        Ok(future_to_promise(async move {
+            let mut snapshot = inner
+                .all_relation_snapshot_for_identity(&query, opts, AuthorSubject::SYSTEM)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
+        }))
+    }
+
+    #[wasm_bindgen(js_name = subscribeForBackend)]
+    pub fn subscribe_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        self.require_trusted_backend()?;
+        let opts = read_opts_from_js(opts)?;
+        let inner = self.open_inner()?;
+        let stream = inner
+            .subscribe_for_identity(&query.inner, opts, AuthorSubject::SYSTEM)
+            .map_err(to_js_error)?;
+        subscription_stream_to_js(inner, stream)
     }
 
     #[wasm_bindgen(js_name = subscribe)]
@@ -2197,6 +2320,38 @@ impl WasmDb {
             .subscribe_relation_query_for_identity(&query, opts, author)
             .map_err(to_js_error)?;
         subscription_stream_to_js(inner, stream)
+    }
+
+    #[wasm_bindgen(js_name = subscribeRelationQueryForBackend)]
+    pub fn subscribe_relation_query_for_backend(
+        &self,
+        query_json: String,
+        opts: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        self.require_trusted_backend()?;
+        let opts = read_opts_from_js(opts)?;
+        let query = relation_query_from_json(&query_json)?;
+        let inner = self.open_inner()?;
+        let stream = inner
+            .subscribe_relation_query_for_identity(&query, opts, AuthorSubject::SYSTEM)
+            .map_err(to_js_error)?;
+        subscription_stream_to_js(inner, stream)
+    }
+
+    #[wasm_bindgen(js_name = attachQueryForBackend)]
+    pub fn attach_query_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<WasmQueryAttachment, JsValue> {
+        self.require_trusted_backend()?;
+        let opts = read_opts_from_js(opts)?;
+        Ok(WasmQueryAttachment {
+            inner: self
+                .open_inner()?
+                .attach_query_for_identity(&query.inner, opts, AuthorSubject::SYSTEM)
+                .map_err(to_js_error)?,
+        })
     }
 
     #[wasm_bindgen(js_name = attachQuery)]
@@ -2740,18 +2895,6 @@ impl WasmDb {
             WasmDbInner::Memory(db) => block_on(db.seed_foreground_tx_time_high_water(high_water)),
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => block_on(db.seed_foreground_tx_time_high_water(high_water)),
-            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = setRelayAuthoritySessionOwner)]
-    pub fn set_relay_authority_session_owner(&self) -> Result<(), JsValue> {
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => db.set_relay_authority_session_owner(),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => db.set_relay_authority_session_owner(),
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
         Ok(())
@@ -3463,6 +3606,21 @@ fn write_option(options: &JsValue, name: &str) -> Result<Option<JsValue>, JsValu
     Ok((!value.is_null() && !value.is_undefined()).then_some(value))
 }
 
+/// Whether a JavaScript write-options object *contains* a property.
+///
+/// This deliberately differs from [`write_option`]: for ordinary optional
+/// fields, `undefined` and `null` mean "no value".  Removed fields must be
+/// rejected by presence, though, so untyped callers cannot smuggle the old
+/// `{ branch: undefined }` shape through to a root-target upsert.  `Reflect`
+/// also gives proxies their normal JavaScript `has` semantics and propagates a
+/// throwing trap instead of silently choosing a target.
+fn has_write_option(options: &JsValue, name: &str) -> Result<bool, JsValue> {
+    if options.is_null() || options.is_undefined() {
+        return Ok(false);
+    }
+    js_sys::Reflect::has(options, &JsValue::from_str(name))
+}
+
 fn write_identity_option(options: &JsValue) -> Result<jazz::db::WriteIdentity, JsValue> {
     write_option(options, "author")?
         .map(|author| {
@@ -3527,16 +3685,30 @@ fn update_options_from_js(options: JsValue) -> Result<jazz::db::UpdateOptions, J
 }
 
 fn upsert_options_from_js(options: JsValue) -> Result<jazz::db::UpsertOptions, JsValue> {
+    if has_write_option(&options, "branch")? {
+        return Err(JsValue::from_str(
+            "upsert option `branch` is not supported; use `head` (and optional `base`) for a branch view",
+        ));
+    }
+    let head = write_option(&options, "head")?;
+    let base = write_option(&options, "base")?;
+    let target = match (head, base) {
+        (Some(head), base) => jazz::db::WriteTarget::BranchView {
+            head: serde_wasm_bindgen::from_value(head).map_err(to_js_error)?,
+            base: base
+                .map(|base| serde_wasm_bindgen::from_value(base).map_err(to_js_error))
+                .transpose()?,
+        },
+        (None, None) => Default::default(),
+        (None, Some(_)) => {
+            return Err(JsValue::from_str(
+                "branch view base requires a head selector",
+            ));
+        }
+    };
     Ok(jazz::db::UpsertOptions {
         identity: write_identity_option(&options)?,
-        target: write_option(&options, "branch")?
-            .map(|branch| {
-                serde_wasm_bindgen::from_value(branch)
-                    .map(jazz::db::ExactWriteTarget::Branch)
-                    .map_err(to_js_error)
-            })
-            .transpose()?
-            .unwrap_or_default(),
+        target,
         updated_at_ms: write_timestamp_option(&options)?,
     })
 }
@@ -3551,11 +3723,17 @@ fn delete_options_from_js(options: JsValue) -> Result<jazz::db::DeleteOptions, J
 }
 
 fn restore_options_from_js(options: JsValue) -> Result<jazz::db::RestoreOptions, JsValue> {
-    let options = upsert_options_from_js(options)?;
     Ok(jazz::db::RestoreOptions {
-        identity: options.identity,
-        target: options.target,
-        updated_at_ms: options.updated_at_ms,
+        identity: write_identity_option(&options)?,
+        target: write_option(&options, "branch")?
+            .map(|branch| {
+                serde_wasm_bindgen::from_value(branch)
+                    .map(jazz::db::ExactWriteTarget::Branch)
+                    .map_err(to_js_error)
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        updated_at_ms: write_timestamp_option(&options)?,
     })
 }
 
@@ -3607,6 +3785,37 @@ where
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     }
+}
+
+/// Browser page stores are opened only after the worker has admitted their
+/// durable ownership marker. Bind the relay capability during construction so
+/// application-facing `WasmDb` instances never gain a post-open toggle for
+/// authority-result serving.
+#[cfg(target_arch = "wasm32")]
+async fn open_scope_isolated_relay_db(
+    schema: JazzSchema,
+    storage: BrowserStorage,
+    config: WasmOpenDbConfig,
+    storage_owner: String,
+) -> Result<Db<BrowserStorage>, jazz::db::Error> {
+    let mut db_config = DbConfig::new(schema, storage, config.identity.into());
+    if let Some(seed) = config.row_id_seed {
+        db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
+    }
+    let initial_sync_flush_every = config.initial_sync_flush_every;
+    // SAFETY: this helper is reachable only from the worker-owned Browser
+    // open path after its physical auth-scope owner marker is admitted.
+    // SAFETY: `storage_owner` is produced by the worker's durable ownership
+    // admission before it enters this host-only constructor.
+    let scope = unsafe {
+        jazz::db::ClientRelayScope::from_admitted_storage_owner(
+            storage_owner,
+            config.identity.author,
+        )
+    };
+    let db = unsafe { Db::open_scope_isolated_client_relay(db_config, scope).await? };
+    configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+    Ok(db)
 }
 
 async fn open_backend_db<S>(
@@ -3809,37 +4018,7 @@ fn admit_binding_claims(
     author: AuthorSubject,
     claims: BTreeMap<String, Value>,
 ) -> BTreeMap<String, Value> {
-    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
-        .expect("author subjects always have canonical issuer/subject JSON");
-    let mut admitted = claims
-        .into_iter()
-        .map(|(name, value)| (jazz::query::provider_claim_key(&name), value))
-        .collect::<BTreeMap<_, _>>();
-    admitted.insert(
-        jazz::query::provider_claim_key("iss"),
-        Value::String(issuer.clone()),
-    );
-    admitted.insert(
-        jazz::query::provider_claim_key("sub"),
-        Value::String(subject),
-    );
-    admitted.insert(
-        "user".to_owned(),
-        Value::String(author.canonical().to_owned()),
-    );
-    admitted.insert(
-        "authMode".to_owned(),
-        Value::String(auth_mode_for_author(&issuer).to_owned()),
-    );
-    admitted
-}
-
-fn auth_mode_for_author(issuer: &str) -> &'static str {
-    match issuer {
-        AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
-        AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
-        _ => "external",
-    }
+    jazz::tools::policy_claims::canonical_policy_binding_claims(&author, claims, Value::String)
 }
 
 fn claim_value_from_json(value: serde_json::Value) -> Result<Value, JsValue> {
@@ -4269,6 +4448,16 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
                         JsValue::from_str(&format!("{code:?}")),
                     )?;
                 }
+                jazz::protocol::SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                    transition,
+                } => {
+                    set_prop(
+                        &reason_object,
+                        "type",
+                        JsValue::from_str("InvalidAuthoritySourceClosure"),
+                    )?;
+                    set_prop(&reason_object, "transition", JsValue::from_str(&transition))?;
+                }
             }
             set_prop(&object, "type", JsValue::from_str("rejected"))?;
             set_prop(&object, "reason", reason_object.into())?;
@@ -4533,6 +4722,114 @@ mod dynamic_schema_view_tests {
             assert!(delete_options_from_js(options(invalid)).is_err());
             assert!(restore_options_from_js(options(invalid)).is_err());
         }
+    }
+
+    /// Untyped callers cannot silently reinterpret the removed `{ branch }`
+    /// upsert shape as a branch-view head.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn javascript_upsert_rejects_removed_branch_selector() {
+        let selector = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &selector,
+            &JsValue::from_str("branch"),
+            &JsValue::from_str("draft"),
+        )
+        .expect("setting selector succeeds");
+        let options = js_sys::Object::new();
+        js_sys::Reflect::set(&options, &JsValue::from_str("branch"), &selector)
+            .expect("setting removed branch shape succeeds before validation");
+
+        let error = upsert_options_from_js(options.clone().into())
+            .expect_err("the removed branch selector must not be reinterpreted as a head");
+        assert!(error
+            .as_string()
+            .expect("parser errors are strings")
+            .contains("option `branch` is not supported; use `head`"));
+
+        // Presence—not the property's value—is the compatibility boundary.
+        // Untyped JavaScript often carries `undefined` through object spreads,
+        // and `null` must not turn that removed shape into a Root upsert.
+        for value in [JsValue::UNDEFINED, JsValue::NULL] {
+            let options = js_sys::Object::new();
+            js_sys::Reflect::set(&options, &JsValue::from_str("branch"), &value)
+                .expect("setting removed branch property succeeds before validation");
+            let error = upsert_options_from_js(options.into())
+                .expect_err("a present nullish removed property must be rejected");
+            assert!(error
+                .as_string()
+                .expect("parser errors are strings")
+                .contains("option `branch` is not supported; use `head`"));
+        }
+
+        // An inherited legacy key is still observable to JavaScript callers and
+        // must not bypass the removed-option guard.  `Reflect::has` handles
+        // the analogous Proxy `has` path and propagates a throwing trap.
+        let inherited = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &inherited,
+            &JsValue::from_str("branch"),
+            &JsValue::UNDEFINED,
+        )
+        .expect("setting inherited branch succeeds");
+        let options = js_sys::Object::create(&inherited);
+        let error = upsert_options_from_js(options.into())
+            .expect_err("an inherited removed property must be rejected");
+        assert!(error
+            .as_string()
+            .expect("parser errors are strings")
+            .contains("option `branch` is not supported; use `head`"));
+
+        let proxy_handler = js_sys::Object::new();
+        let has_branch = wasm_bindgen::closure::Closure::<dyn FnMut(JsValue, JsValue) -> bool>::new(
+            |_target: JsValue, key: JsValue| key.as_string().as_deref() == Some("branch"),
+        );
+        js_sys::Reflect::set(
+            &proxy_handler,
+            &JsValue::from_str("has"),
+            has_branch.as_ref().unchecked_ref(),
+        )
+        .expect("installing a Proxy has trap succeeds");
+        let proxy = js_sys::Proxy::new(&js_sys::Object::new(), &proxy_handler);
+        let error = upsert_options_from_js(proxy.into())
+            .expect_err("a Proxy-visible removed property must be rejected");
+        assert!(error
+            .as_string()
+            .expect("parser errors are strings")
+            .contains("option `branch` is not supported; use `head`"));
+
+        let canonical_head = serde_wasm_bindgen::to_value(&BranchSelector::new([(
+            "branch",
+            Value::String("draft".to_owned()),
+        )]))
+        .expect("branch selector serializes for the binding boundary");
+        let mixed_options = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &mixed_options,
+            &JsValue::from_str("branch"),
+            &JsValue::UNDEFINED,
+        )
+        .expect("setting removed branch succeeds");
+        js_sys::Reflect::set(&mixed_options, &JsValue::from_str("head"), &canonical_head)
+            .expect("setting canonical head succeeds");
+        assert!(
+            upsert_options_from_js(mixed_options.into()).is_err(),
+            "mixed canonical and removed shapes must reject before target selection"
+        );
+
+        let canonical_options = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &canonical_options,
+            &JsValue::from_str("head"),
+            &canonical_head,
+        )
+        .expect("setting canonical head succeeds");
+        assert!(matches!(
+            upsert_options_from_js(canonical_options.into())
+                .expect("head selector remains accepted")
+                .target,
+            jazz::db::WriteTarget::BranchView { .. }
+        ));
     }
 
     /// Binding read choices lower to the existing core tiers.

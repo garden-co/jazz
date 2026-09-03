@@ -248,11 +248,22 @@ impl ObservedSubscription {
     }
 
     fn values(&self) -> Vec<Vec<Value>> {
-        // Maintained aggregate delivery preserves the compiler record rather
-        // than reserializing a public row. Its fixed prefix carries the
-        // synthetic membership identity; the query fields follow it under
-        // their physical names. Decode that real wire shape, then expose only
-        // the public query columns to assertions below.
+        // The public subscription boundary attaches the query-decoded fields
+        // in testing builds. Prefer that same API representation the caller
+        // receives instead of reconstructing a compiler record descriptor:
+        // aggregate records own their physical layout, including variable
+        // field ordering, and a test-side copy can silently drift.
+        if !self.rows.is_empty() {
+            let mut values = self
+                .rows
+                .iter()
+                .map(|row| row.fields.iter().map(|field| field.value.clone()).collect())
+                .collect::<Vec<Vec<Value>>>();
+            values.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+            return values;
+        }
+        // Keep the raw compiler-record fallback for non-testing consumers
+        // that do not attach decoded public fields.
         let query_fields = self.descriptor.fields();
         let output_wire_type = |field: &jazz::groove::records::DescriptorField,
                                 function: AggregateFunction| {
@@ -370,6 +381,13 @@ impl ObservedSubscription {
                     self.apply_delta(delta);
                     self.observed_initial_delta = true;
                     self.delivered_deltas += 1;
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=aggregate_subscription_delta label={label} deliveries={} values={:?} expected={expected:?}",
+                            self.delivered_deltas,
+                            self.values(),
+                        );
+                    }
                 }
                 SubscriptionStreamItem::Rejected { reason } => {
                     panic!("{label}: subscription rejected: {reason:?}")
@@ -433,6 +451,11 @@ async fn wait_for_one_shot_values(
                 .map(|(_, values)| values.clone())
                 .collect::<Vec<_>>();
             actual.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=aggregate_one_shot_values label={label} actual={actual:?} expected={expected:?}"
+                );
+            }
             (actual == expected).then_some(())
         },
     )
@@ -562,8 +585,14 @@ fn aggregate_query(
 async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
     tokio::task::LocalSet::new()
         .run_until(async {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_start");
+            }
             let schema = metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_server_started");
+            }
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa1",
@@ -587,6 +616,9 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 &count_query,
                 aggregate_descriptor([("count", ValueType::U64)]),
             );
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_count_subscribed");
+            }
             let mut sum_stream = ObservedSubscription::new(
                 client
                     .subscribe(grouped_sum_query.clone())
@@ -598,9 +630,15 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                     ("sum_score", ValueType::I32),
                 ]),
             );
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_sum_subscribed");
+            }
 
             count_stream
-                .wait_for_values(Vec::new(), "initial empty count")
+                .wait_for_values(
+                    vec![vec![Value::Timestamp(0)]],
+                    "initial empty count identity",
+                )
                 .await;
             wait_for_one_shot_values(
                 &client,
@@ -609,6 +647,9 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 "one-shot initial empty count",
             )
             .await;
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_initial_one_shot_done");
+            }
 
             let (a1, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "a", "score" => 10))
@@ -618,15 +659,24 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 &[tx.expect("ordinary mutation commits immediately")],
             )
             .await;
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_a1_edge_done");
+            }
             count_stream
                 .wait_for_values(vec![vec![Value::Timestamp(1)]], "count after a1")
                 .await;
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_a1_count_done");
+            }
             sum_stream
                 .wait_for_values(
                     vec![vec![Value::Text("a".to_owned()), Value::Integer(10)]],
                     "sum after a1",
                 )
                 .await;
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_a1_sum_done");
+            }
 
             let (b1, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "b", "score" => 7))
@@ -814,10 +864,10 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
                 .wait_for_values(
                     vec![vec![
                         Value::Text("group".to_owned()),
-                        Value::Double(2.0),
                         Value::Timestamp(2),
                         Value::BigInt(15),
                         Value::Integer(4),
+                        Value::Double(2.0),
                     ]],
                     "mixed aggregate replacement keeps canonical output order",
                 )
@@ -952,18 +1002,18 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                     vec![
                         vec![
                             Value::Text("changed".to_owned()),
-                            Value::Timestamp(1),
                             Value::Null,
+                            Value::Timestamp(1),
                         ],
                         vec![
                             Value::Text("gone".to_owned()),
-                            Value::Timestamp(1),
                             Value::Null,
+                            Value::Timestamp(1),
                         ],
                         vec![
                             Value::Text("null".to_owned()),
-                            Value::Timestamp(2),
                             Value::Null,
+                            Value::Timestamp(2),
                         ],
                     ],
                     "all-null groups remain delivered",
@@ -981,13 +1031,13 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                     vec![
                         vec![
                             Value::Text("changed".to_owned()),
-                            Value::Timestamp(1),
                             Value::Null,
+                            Value::Timestamp(1),
                         ],
                         vec![
                             Value::Text("null".to_owned()),
-                            Value::Timestamp(2),
                             Value::Null,
+                            Value::Timestamp(2),
                         ],
                     ],
                     "absent group is retracted without losing all-null group",
@@ -1010,13 +1060,13 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                     vec![
                         vec![
                             Value::Text("changed".to_owned()),
-                            Value::Timestamp(2),
                             Value::Null,
+                            Value::Timestamp(2),
                         ],
                         vec![
                             Value::Text("null".to_owned()),
-                            Value::Timestamp(2),
                             Value::Null,
+                            Value::Timestamp(2),
                         ],
                     ],
                     "present-null group can change after another group disappears",
@@ -1841,16 +1891,21 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             let server = JazzServer::start_with_schema(schema.clone()).await;
             let admin_id = test_user_id("aggregate-admin");
             let spy_id = test_user_id("aggregate-spy");
-            let admin = jazz_testkit::connect(
-                server.make_client_context_for_user(schema.clone(), admin_id.clone()),
-            )
-            .await
-            .expect("connect admin");
-            let spy = jazz_testkit::connect(
-                server.make_client_context_for_user(schema.clone(), spy_id.clone()),
-            )
-            .await
-            .expect("connect spy");
+            let mut admin_context =
+                server.make_client_context_for_user(schema.clone(), admin_id.clone());
+            // Exercise the authenticated-reader boundary, rather than the
+            // test helper's trusted-backend shortcut.  A backend secret makes
+            // this direct link's actual reader SYSTEM by design.
+            admin_context.backend_secret = None;
+            let admin = jazz_testkit::connect(admin_context)
+                .await
+                .expect("connect admin");
+            let mut spy_context =
+                server.make_client_context_for_user(schema.clone(), spy_id.clone());
+            spy_context.backend_secret = None;
+            let spy = jazz_testkit::connect(spy_context)
+                .await
+                .expect("connect spy");
             let count_query = jazz::query::Query::from("metrics").count();
             let mut spy_stream = ObservedSubscription::new(
                 spy.subscribe(count_query.clone())
@@ -1861,7 +1916,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             );
 
             spy_stream
-                .wait_for_values(Vec::new(), "spy initial count")
+                .wait_for_values(vec![vec![Value::Timestamp(0)]], "spy initial count")
                 .await;
             wait_for_one_shot_values(
                 &spy,
@@ -1884,7 +1939,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             .await;
             spy_stream
                 .assert_values_remain(
-                    Vec::new(),
+                    vec![vec![Value::Timestamp(0)]],
                     Duration::from_millis(250),
                     "spy count ignores admin row",
                 )
@@ -1905,7 +1960,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             .await;
             spy_stream
                 .assert_values_remain(
-                    Vec::new(),
+                    vec![vec![Value::Timestamp(0)]],
                     Duration::from_millis(250),
                     "spy count remains empty after invisible delete",
                 )

@@ -134,6 +134,7 @@ pub enum PolicyExpr {
         /// Optional recursion depth override for recursive INHERITS evaluation.
         ///
         /// If omitted, the core policy evaluator uses its default recursion depth.
+        /// Zero performs no inheritance hop and therefore cannot grant access.
         max_depth: Option<usize>,
     },
 
@@ -149,6 +150,7 @@ pub enum PolicyExpr {
         /// Optional recursion depth override for recursive INHERITS evaluation.
         ///
         /// If omitted, the core policy evaluator uses its default recursion depth.
+        /// Zero performs no inheritance hop and therefore cannot grant access.
         max_depth: Option<usize>,
     },
 

@@ -468,9 +468,24 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
         &mut core,
         MergeableCommit::new("todos", row(0x6c), 1_005).cells(title_cells("view payload")),
     );
-    let update = PeerState::new()
-        .current_rows_update(&mut core, "todos")
-        .unwrap();
+    // The first covered-input closure is a reset by contract. Advance the
+    // same publication once so this test exercises the intended incremental
+    // receiver-batch path rather than relying on the retired first-frame
+    // behavior.
+    let mut peer = PeerState::new();
+    let initial = peer.current_rows_update(&mut core, "todos").unwrap();
+    assert!(matches!(
+        initial,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            reset_result_set: true,
+            ..
+        })
+    ));
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x6d), 1_006).cells(title_cells("later payload")),
+    );
+    let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let mut bundles = version_bundles_for_update(&update);
     assert_eq!(bundles.len(), 1);
     let version = bundles[0].versions[0].clone();
@@ -482,7 +497,6 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -506,15 +520,13 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])
         .expect_err("malformed ViewUpdate must not stage a row");
     match error {
-        Error::MalformedViewUpdate(
-            "row version does not carry the complete descriptor of its authored schema",
-        ) => {}
+        Error::InvalidAuthoritySourceClosure { subscription: rejected, transition }
+            if rejected == subscription && transition == "authority source-closure payload failed validation: row version does not carry the complete descriptor of its authored schema" => {}
         other => panic!("expected malformed ViewUpdate, got {other:?}"),
     }
     assert!(reader.query_all_versions().unwrap().is_empty());
@@ -543,7 +555,6 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -563,13 +574,11 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         })),
-        Err(Error::MalformedViewUpdate(
-            "row version does not carry the complete descriptor of its authored schema"
-        ))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: row version does not carry the complete descriptor of its authored schema"
     ));
     assert!(reader.query_all_versions().unwrap().is_empty());
 }
@@ -598,7 +607,6 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -622,7 +630,6 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
                 opening_pending: false,
                 result_member_adds,
                 result_member_removes,
-                terminal_operations,
                 program_fact_adds,
                 program_fact_removes,
             })
@@ -631,7 +638,8 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
     assert!(result.is_ok(), "malformed direct ingress must not panic");
     assert!(matches!(
         result.unwrap(),
-        Err(Error::MalformedViewUpdate("malformed version receipt"))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: malformed version receipt"
     ));
     assert!(reader.query_all_versions().unwrap().is_empty());
 }
@@ -693,7 +701,6 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -719,14 +726,12 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])
         .resolve(),
-        Err(Error::MalformedViewUpdate(
-            "row version does not carry the complete descriptor of its authored schema"
-        ))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: row version does not carry the complete descriptor of its authored schema"
     ));
     assert!(!reader.initial_sync_flush_active);
     assert!(!reader.initial_sync_flush_completed);
@@ -762,7 +767,6 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -795,12 +799,12 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])
         .resolve(),
-        Err(Error::MalformedViewUpdate("malformed version receipt"))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: malformed version receipt"
     ));
     assert_eq!(
         (

@@ -22,7 +22,6 @@ fn view_updates_drop_unknown_usage_site_bindings() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -34,6 +33,488 @@ fn view_updates_drop_unknown_usage_site_bindings() {
     );
     assert!(reader.query.settled_result_sets.is_empty());
     assert!(reader.query.settled_program_facts.is_empty());
+}
+
+/// Build receipts only from a real authority maintained program. The empty
+/// rehydration is the planted positive: it supplies whatever completeness and
+/// frontier facts the authority currently defines, rather than a hand-built
+/// approximation. The returned successor frame likewise supplies frozen
+/// source identities and version carriers from the authority itself.
+fn covered_input_receiver_fixture() -> (
+    tempfile::TempDir,
+    NodeState<RocksDbStorage>,
+    crate::protocol::AuthorityResultKey,
+    crate::protocol::CoveredInputEntry,
+    crate::protocol::ViewUpdatePayload,
+) {
+    let (_core_dir, mut core) = open_node_with_uuid(node(0x36));
+    let (receiver_dir, mut receiver) = open_node_with_uuid(node(0x37));
+    // The two sources deliberately scan the same table. A receiver must not
+    // route an authority fact by table name or result member.
+    let shape = Query::from(crate::query::table("todos").alias("root"))
+        .flat_join(
+            crate::query::table("todos").alias("peer"),
+            "root.title",
+            "peer.title",
+        )
+        .validate(&schema())
+        .expect("validated same-table self join");
+    let binding = shape.bind(BTreeMap::new()).expect("empty binding");
+    register_shape_binding(&mut receiver, &shape, &binding);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let authority_result = receiver
+        .authority_result_key_for_subscription(subscription)
+        .expect("registered remote usage has an authority receipt key");
+    let mut authority = PeerState::new();
+
+    let empty = authority
+        .rehydrate_query(&mut core, &shape, &binding)
+        .expect("authority builds empty exact closure");
+    receiver
+        .apply_sync_message_settled(empty)
+        .expect("receiver accepts the authority's empty exact closure");
+    assert!(
+        receiver.has_settled_authority_result(&authority_result),
+        "the real authority empty closure establishes a live receipt"
+    );
+
+    let row_uuid = row(0x38);
+    let initial_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("initial")),
+        )
+        .expect("author initial source version");
+    core.accept_global_for_test(initial_tx)
+        .expect("settle initial source version globally");
+    let initial = crate::protocol::ViewUpdatePayload::from_view_update(
+        authority
+            .query_update(&mut core, &shape, &binding)
+            .expect("authority builds first populated closure"),
+    )
+    .expect("ordinary authority update");
+    let initial_input = initial
+        .program_fact_adds
+        .iter()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == row_uuid =>
+            {
+                Some(input.clone())
+            }
+            _ => None,
+        })
+        .expect("real self-join closure names a frozen source occurrence");
+    receiver
+        .apply_sync_message_settled(initial.into_view_update())
+        .expect("receiver accepts complete populated closure");
+
+    let successor_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("successor")),
+        )
+        .expect("author successor source version");
+    core.accept_global_for_test(successor_tx)
+        .expect("settle successor source version globally");
+    let successor = crate::protocol::ViewUpdatePayload::from_view_update(
+        authority
+            .query_update(&mut core, &shape, &binding)
+            .expect("authority builds successor closure"),
+    )
+    .expect("ordinary authority update");
+    assert!(
+        successor.program_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source == initial_input.source
+                        && input.source_row == initial_input.source_row
+                        && input.version != initial_input.version
+            )
+        }),
+        "the real successor must advance the same exact source occurrence"
+    );
+    (receiver_dir, receiver, authority_result, initial_input, successor)
+}
+
+// Receiver-side covered-input validation has no public call boundary: malformed
+// authority frames normally appear only as subscriptions that never settle.
+// These ingress receipts intentionally assert the atomic protocol behavior.
+fn assert_covered_input_rejected_atomically(
+    receiver: &mut NodeState<RocksDbStorage>,
+    authority_result: &crate::protocol::AuthorityResultKey,
+    update: crate::protocol::ViewUpdatePayload,
+) {
+    let generation = receiver.applied_authority_result_generation(authority_result);
+    assert!(receiver.has_settled_authority_result(authority_result));
+    assert!(
+        receiver
+            .apply_sync_message_settled(update.into_view_update())
+            .is_err(),
+        "malformed covered-input closure must reject before settlement"
+    );
+    assert_eq!(
+        receiver.applied_authority_result_generation(authority_result),
+        generation,
+        "rejected closure must not advance the authority receipt"
+    );
+    assert!(
+        receiver.has_settled_authority_result(authority_result),
+        "rejected closure must not clear or replace the prior live receipt"
+    );
+}
+
+fn payload_view_update_parts(
+    payload: crate::protocol::ViewUpdatePayload,
+) -> crate::node::ViewUpdateParts {
+    crate::node::ViewUpdateParts {
+        subscription: payload.subscription,
+        settled_through: payload.settled_through,
+        defer_settlement: false,
+        reset_result_set: payload.reset_result_set,
+        version_carriers: payload.version_carriers,
+        peer_complete_tx_payload_refs: payload.peer_payload_inventory.complete_tx_payloads,
+        authorization_progress: payload.peer_payload_inventory.authorization_progress,
+        opening_pending: payload.peer_payload_inventory.opening_pending,
+        result_member_adds: payload.result_member_adds,
+        result_member_removes: payload.result_member_removes,
+        program_fact_adds: payload.program_fact_adds,
+        program_fact_removes: payload.program_fact_removes,
+    }
+}
+
+fn covered_input_tx_for_row(message: &SyncMessage, row_uuid: RowUuid) -> TxId {
+    let SyncMessage::ViewUpdate(update) = message else {
+        panic!("expected authority view update");
+    };
+    update
+        .program_fact_adds
+        .iter()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == row_uuid =>
+            {
+                Some(input.version.tx)
+            }
+            _ => None,
+        })
+        .expect("authority update must add an exact source witness for the changed row")
+}
+
+#[test]
+fn authority_covered_input_rejects_unknown_same_table_source_role() {
+    let (_dir, mut receiver, authority_result, _initial, mut successor) =
+        covered_input_receiver_fixture();
+    let input = successor
+        .program_fact_adds
+        .iter_mut()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+            _ => None,
+        })
+        .expect("real successor has a covered input");
+    // Derive the malformed role from an authority-produced exact id; appending
+    // a valid alias makes it syntactically valid but impossible for this fixed
+    // compiled self-join program to resolve by complete equality.
+    input
+        .source
+        .path
+        .push(crate::protocol::ProgramSourceRole::Alias(
+            "unrecognized-same-table-role".to_owned(),
+        ));
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+fn forged_source_reset(order_coverage_first: bool) -> (
+    NodeState<RocksDbStorage>,
+    crate::protocol::AuthorityResultKey,
+    crate::protocol::ViewUpdatePayload,
+) {
+    let (_dir, receiver, authority_result, _initial, mut successor) =
+        covered_input_receiver_fixture();
+    successor.reset_result_set = true;
+    successor.program_fact_removes.clear();
+    let input = successor
+        .program_fact_adds
+        .iter_mut()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+            _ => None,
+        })
+        .expect("successor has input");
+    let original_source = input.source.clone();
+    input.source.path.push(crate::protocol::ProgramSourceRole::Alias(
+        "forged-source-role".to_owned(),
+    ));
+    let forged = input.source.clone();
+    let sources = receiver.query.authority_results[&authority_result]
+        .covered_input_sources
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let coverage = sources.into_iter().map(|source| {
+        crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+            crate::protocol::ProgramSourceCoverageEntry {
+                source: if source == original_source {
+                    forged.clone()
+                } else {
+                    source
+                },
+                complete: true,
+            },
+        )
+    });
+    if order_coverage_first {
+        successor.program_fact_adds.splice(0..0, coverage);
+    } else {
+        successor.program_fact_adds.extend(coverage);
+    }
+    (receiver, authority_result, successor)
+}
+
+#[test]
+fn authority_rejects_forged_source_coverage_before_matching_input() {
+    let (mut receiver, authority_result, update) = forged_source_reset(true);
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, update);
+}
+
+#[test]
+fn authority_rejects_forged_source_coverage_after_matching_input() {
+    let (mut receiver, authority_result, update) = forged_source_reset(false);
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, update);
+}
+
+#[test]
+fn authority_covered_input_rejects_missing_carrier_before_settlement() {
+    let (_dir, mut receiver, authority_result, _initial, mut successor) =
+        covered_input_receiver_fixture();
+    assert!(
+        !successor.version_carriers.is_empty(),
+        "real successor closure carries its referenced immutable versions"
+    );
+    successor.version_carriers.clear();
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+#[test]
+fn authority_covered_input_rejects_conflicting_retained_source_version_atomically() {
+    let (_dir, mut receiver, authority_result, initial, mut successor) =
+        covered_input_receiver_fixture();
+    // The first closure already carried and installed `initial`, while this
+    // real successor carries the replacement version. Keep the old fact out
+    // of the successor's removal set and add it to the closure so both exact
+    // witnesses exist yet the same source occurrence claims two versions.
+    successor
+        .program_fact_removes
+        .retain(|fact| fact != &crate::protocol::ProgramFactEntry::CoveredInput(initial.clone()));
+    successor
+        .program_fact_adds
+        .push(crate::protocol::ProgramFactEntry::CoveredInput(initial));
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+#[test]
+fn authority_covered_input_rejects_duplicate_and_impossible_live_deltas_atomically() {
+    let (_dir, mut receiver, authority_result, _initial, mut successor) =
+        covered_input_receiver_fixture();
+    let duplicate = successor
+        .program_fact_adds
+        .iter()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+            _ => None,
+        })
+        .expect("real successor has a covered input");
+    successor
+        .program_fact_adds
+        .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+
+    let (_dir, mut receiver, authority_result, initial, mut successor) =
+        covered_input_receiver_fixture();
+    let mut impossible_remove = initial;
+    impossible_remove.version.tx = TxId::new(TxTime(0x7a), node(0x7a));
+    successor
+        .program_fact_removes
+        .push(crate::protocol::ProgramFactEntry::CoveredInput(impossible_remove));
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+#[test]
+fn authority_covered_input_rejects_live_coverage_changes_atomically() {
+    let (_dir, mut receiver, authority_result, initial, mut successor) =
+        covered_input_receiver_fixture();
+    successor.program_fact_removes.push(
+        crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+            crate::protocol::ProgramSourceCoverageEntry {
+                source: initial.source,
+                complete: true,
+            },
+        ),
+    );
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+#[test]
+fn authority_batch_rejects_later_malformed_closure_without_advancing_receipt() {
+    let (_dir, mut receiver, authority_result, _initial, successor) =
+        covered_input_receiver_fixture();
+    let subscription = successor.subscription;
+    let generation = receiver.applied_authority_result_generation(&authority_result);
+    let mut malformed = successor.clone();
+    let duplicate = malformed
+        .program_fact_adds
+        .iter()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+            _ => None,
+        })
+        .expect("successor has covered input");
+    malformed
+        .program_fact_adds
+        .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+    let error = crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
+        payload_view_update_parts(successor),
+        payload_view_update_parts(malformed),
+    ]))
+    .expect_err("later malformed closure rejects the entire receiver batch");
+    assert!(matches!(
+        error,
+        Error::InvalidAuthoritySourceClosure { subscription: rejected, .. }
+            if rejected == subscription
+    ));
+    assert_eq!(
+        receiver.applied_authority_result_generation(&authority_result),
+        generation,
+        "the preceding valid frame must not advance before the batch validates"
+    );
+}
+
+#[test]
+fn authority_covered_input_rejects_reset_with_incomplete_source_manifest_atomically() {
+    let (_dir, mut receiver, authority_result, _initial, mut successor) =
+        covered_input_receiver_fixture();
+    let sources = receiver
+        .query
+        .authority_results
+        .get(&authority_result)
+        .expect("fixture installed authority closure")
+        .covered_input_sources
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(sources.len() > 1, "self-join fixture has multiple source occurrences");
+    successor.reset_result_set = true;
+    successor.program_fact_removes.clear();
+    successor.program_fact_adds.extend(sources.iter().skip(1).cloned().map(
+        |source| {
+            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source,
+                    complete: true,
+                },
+            )
+        },
+    ));
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+}
+
+/// This is an internal ingress receipt because the public API intentionally
+/// hides covered-source maps.  It protects the replacement contract that lets
+/// an authority send a successor closure without accumulating one retained
+/// source version per update.
+#[test]
+fn successor_authority_closure_replaces_covered_input_and_detach_retires_it() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(0x41));
+    let (_core_dir, mut core) = open_node_with_uuid(node(0x42));
+    let (_receiver_dir, mut receiver) = open_node_with_uuid(node(0x43));
+    let row_uuid = row(0x44);
+    let initial_tx = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("initial")),
+    );
+
+    let (shape, binding) = receiver.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut receiver, &shape, &binding);
+    let subscription = receiver.whole_table_subscription_key("todos").unwrap();
+    let authority_result = receiver
+        .authority_result_key_for_subscription(subscription)
+        .expect("registered usage owns an authority receipt");
+    let mut authority = PeerState::new();
+    let initial_update = authority
+        .rehydrate_query(&mut core, &shape, &binding)
+        .expect("initial covered closure");
+    let initial_covered_tx = covered_input_tx_for_row(&initial_update, row_uuid);
+    assert!(
+        initial_covered_tx == initial_tx || initial_covered_tx.node == core.node_uuid,
+        "the initial source witness must be either the uploader's admitted version or an explicit authority materialization"
+    );
+    receiver
+        .apply_sync_message_settled(initial_update)
+        .expect("receive initial covered closure");
+
+    let successor_tx = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("successor")),
+    );
+    let successor_update = authority
+        .query_update(&mut core, &shape, &binding)
+        .expect("successor covered closure");
+    let successor_covered_tx = covered_input_tx_for_row(&successor_update, row_uuid);
+    assert_ne!(
+        successor_covered_tx, initial_covered_tx,
+        "the authority must advance the exact source witness after the uploader's accepted successor"
+    );
+    assert!(
+        successor_covered_tx == successor_tx || successor_covered_tx.node == core.node_uuid,
+        "the source witness must be either the uploader's admitted version or an explicit authority materialization"
+    );
+    receiver
+        .apply_sync_message_settled(successor_update)
+        .expect("receive successor covered closure");
+
+    let covered_versions = receiver.query.authority_results[&authority_result]
+        .settled_program_facts
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source_row == row_uuid =>
+            {
+                Some(input.version.tx)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        covered_versions.contains(&successor_covered_tx),
+        "the successor closure must retain the new exact source version: {covered_versions:?}"
+    );
+    assert!(
+        !covered_versions.contains(&initial_covered_tx),
+        "the successor closure must retract the absent old source version instead of retaining both: {covered_versions:?}"
+    );
+    assert_eq!(
+        receiver
+            .current_rows("todos", DurabilityTier::Global)
+            .expect("materialize settled source")
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("successor"))]),
+        "the retained covered input must materialize the successor body"
+    );
+
+    receiver.apply_unsubscribe(subscription);
+    assert_eq!(
+        receiver.settled_authoritative_receipt_counts_for_test(),
+        (0, 0),
+        "detaching the sole usage retires the successor source map as well as its receipt"
+    );
 }
 
 #[test]
@@ -82,6 +563,7 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
     let (client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema.clone());
+    register_whole_table_receiver(&mut reader, "todos");
     let mut peer = PeerState::new();
 
     let (lost_a, _lost_a_unit) = client
@@ -218,6 +700,7 @@ fn reopened_core_continues_sync_after_restart() {
     let update = peer
         .current_rows_update(&mut reopened_core, "todos")
         .unwrap();
+    register_whole_table_receiver(&mut reader, "todos");
     reader.apply_sync_message_settled(update).unwrap();
 
     assert_eq!(
@@ -515,6 +998,7 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
 #[test]
 fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let (_temp_dir, mut receiver) = open_node();
+    register_whole_table_receiver(&mut receiver, "todos");
     let bad_tx = TxId::new(TxTime::from(10), node(8));
     let subscription = receiver.whole_table_subscription_key("todos").unwrap();
     receiver
@@ -529,16 +1013,15 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             },
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
-    let binding_view = receiver
-        .binding_view_key_for_subscription(subscription)
+    let authority_result_key = receiver
+        .authority_result_key_for_subscription(subscription)
         .unwrap();
-    let before_generation = receiver.applied_view_update_generation(binding_view);
-    assert!(receiver.opening_pending_for_binding_view(binding_view));
+    let before_generation = receiver.applied_authority_result_generation(&authority_result_key);
+    assert!(receiver.opening_pending_for_authority_result(&authority_result_key));
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         receiver.apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
@@ -570,7 +1053,6 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             },
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }))
@@ -578,14 +1060,13 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     assert!(received.is_ok(), "a peer view must not panic the receiver");
     assert!(matches!(
         received.unwrap(),
-        Err(Error::MalformedViewUpdate(
-            "global timestamp requires Global durability"
-        ))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: global timestamp requires Global durability"
     ));
     assert!(receiver.transaction_state_settled(bad_tx).is_none());
-    assert!(receiver.opening_pending_for_binding_view(binding_view));
+    assert!(receiver.opening_pending_for_authority_result(&authority_result_key));
     assert_eq!(
-        receiver.applied_view_update_generation(binding_view),
+        receiver.applied_authority_result_generation(&authority_result_key),
         before_generation
     );
     receiver
@@ -597,14 +1078,13 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: vec![todos_source_coverage()],
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
-    assert!(!receiver.opening_pending_for_binding_view(binding_view));
+    assert!(!receiver.opening_pending_for_authority_result(&authority_result_key));
     assert_eq!(
-        receiver.applied_view_update_generation(binding_view),
+        receiver.applied_authority_result_generation(&authority_result_key),
         before_generation + 1
     );
     assert!(receiver

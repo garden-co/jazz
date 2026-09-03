@@ -1,5 +1,6 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createServer } from "vite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { jazzPlugin } from "./vite.js";
 import * as devServer from "./dev-server.js";
@@ -12,6 +13,10 @@ const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
 const originalJazzTelemetryCollectorUrl = process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
 const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
+const customEnvKeys = ["JAZZ_BUG_121_SHARED_SECRET", "JAZZ_BUG_121_ENV_FILE_DISABLED"] as const;
+const originalCustomEnvValues = Object.fromEntries(
+  customEnvKeys.map((key) => [key, process.env[key]]),
+);
 
 function deployed(hash = "abc123def4567890") {
   return {
@@ -29,6 +34,7 @@ beforeEach(() => {
   delete process.env.VITE_JAZZ_SERVER_URL;
   delete process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
+  for (const key of customEnvKeys) delete process.env[key];
 });
 
 afterEach(async () => {
@@ -57,6 +63,12 @@ afterEach(async () => {
     delete process.env.JAZZ_ADMIN_SECRET;
   } else {
     process.env.JAZZ_ADMIN_SECRET = originalAdminSecret;
+  }
+
+  for (const key of customEnvKeys) {
+    const original = originalCustomEnvValues[key];
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
   }
 });
 
@@ -101,6 +113,138 @@ describe("jazzPlugin", () => {
     expect(envContent).toMatch(
       /^VITE_JAZZ_APP_ID=[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/m,
     );
+  });
+
+  it("uses the resolved development mode when loading env files", async () => {
+    const appId = "00000000-0000-0000-0000-000000000121";
+    const root = await tempRoots.create("jazz-vite-mode-env-test-");
+    await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(
+      join(root, ".env.development.local"),
+      [
+        `VITE_JAZZ_APP_ID=${appId}`,
+        "VITE_JAZZ_SERVER_URL=http://development.example",
+        "JAZZ_ADMIN_SECRET=development-admin",
+        "",
+      ].join("\n"),
+    );
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId,
+      port: 19879,
+      url: "http://127.0.0.1:19879",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const plugin = jazzPlugin({ schemaDir: root });
+    const config = plugin.config as (
+      config: Record<string, unknown>,
+      env: { command: string; mode: string },
+    ) => unknown;
+    await config({ root }, { command: "serve", mode: "development" });
+
+    const closeHandlers: (() => Promise<void> | void)[] = [];
+    const viteServer = {
+      config: {
+        root,
+        command: "serve" as const,
+        mode: "development",
+        env: {} as Record<string, string>,
+      },
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          closeHandlers.push(cb);
+        },
+      },
+      ws: { send() {} },
+    };
+    await (plugin.configureServer as (server: typeof viteServer) => Promise<void>)(viteServer);
+
+    expect(startSpy).not.toHaveBeenCalled();
+    expect(viteServer.config.env.VITE_JAZZ_APP_ID).toBe(appId);
+    expect(viteServer.config.env.VITE_JAZZ_SERVER_URL).toBe("http://development.example");
+
+    for (const handler of closeHandlers) await handler();
+  });
+
+  it("uses Vite's resolved shared envDir without exposing unprefixed secrets", async () => {
+    const appId = "00000000-0000-0000-0000-000000000123";
+    const monorepoRoot = await tempRoots.create("jazz-vite-monorepo-env-test-");
+    const root = join(monorepoRoot, "apps", "web");
+    const sharedEnvDir = join(monorepoRoot, "env");
+    await mkdir(root, { recursive: true });
+    await mkdir(sharedEnvDir, { recursive: true });
+    await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(
+      join(sharedEnvDir, ".env.production.local"),
+      [
+        `VITE_JAZZ_APP_ID=${appId}`,
+        "VITE_JAZZ_SERVER_URL=http://shared-env.example",
+        "JAZZ_ADMIN_SECRET=shared-admin",
+        "JAZZ_BUG_121_SHARED_SECRET=server-only",
+        "",
+      ].join("\n"),
+    );
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const viteServer = await createServer({
+      root,
+      envDir: "../../env",
+      mode: "production",
+      plugins: [jazzPlugin({ schemaDir: root })],
+    });
+
+    expect(viteServer.config.envDir).toBe(sharedEnvDir);
+    expect(process.env.VITE_JAZZ_APP_ID).toBe(appId);
+    expect(process.env.VITE_JAZZ_SERVER_URL).toBe("http://shared-env.example");
+    expect(process.env.JAZZ_BUG_121_SHARED_SECRET).toBe("server-only");
+    expect(viteServer.config.env.JAZZ_BUG_121_SHARED_SECRET).toBeUndefined();
+
+    await viteServer.close();
+  });
+
+  it("does not load env files when Vite is created with envFile:false", async () => {
+    const root = await tempRoots.create("jazz-vite-env-file-disabled-test-");
+    await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(
+      join(root, ".env"),
+      [
+        "VITE_JAZZ_APP_ID=00000000-0000-0000-0000-000000000124",
+        "VITE_JAZZ_SERVER_URL=http://should-not-load.example",
+        "JAZZ_ADMIN_SECRET=should-not-load",
+        "JAZZ_BUG_121_ENV_FILE_DISABLED=server-only",
+        "",
+      ].join("\n"),
+    );
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000125",
+      port: 19883,
+      url: "http://127.0.0.1:19883",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const viteServer = await createServer({
+      root,
+      envFile: false,
+      plugins: [jazzPlugin({ schemaDir: root })],
+    });
+
+    expect(viteServer.config.envDir).toBe(false);
+    expect(startSpy).toHaveBeenCalledOnce();
+    expect(process.env.JAZZ_BUG_121_ENV_FILE_DISABLED).toBeUndefined();
+    expect(viteServer.config.env.JAZZ_BUG_121_ENV_FILE_DISABLED).toBeUndefined();
+
+    await viteServer.close();
   });
 
   // Without this alias, a Vite consumer installed via pnpm hits

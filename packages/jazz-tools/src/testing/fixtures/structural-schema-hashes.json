@@ -1,0 +1,188 @@
+{
+  "schemaLayoutVersion": 11,
+  "columnTypeCases": [
+    {
+      "name": "integer",
+      "columnType": { "type": "Integer" },
+      "nullable": false,
+      "hash": "0891ce37936c69d11b46f3403fd7c44e63822c9fde9ce4bff1566af64560c84f"
+    },
+    {
+      "name": "bigint",
+      "columnType": { "type": "BigInt" },
+      "nullable": false,
+      "hash": "070b3f469fe220a17555cfbad95c39483237cc915dfb7f628ca17d46acd0d751"
+    },
+    {
+      "name": "double",
+      "columnType": { "type": "Double" },
+      "nullable": false,
+      "hash": "c2587617ebd2f3ecc51a3306401dda33a028d3c1d5e06512e4c9d74066ba2d03"
+    },
+    {
+      "name": "boolean",
+      "columnType": { "type": "Boolean" },
+      "nullable": false,
+      "hash": "53ca87b3b8eef71d3bf6aa83a422f771b79dad63be16cb999b971d0f54f94a20"
+    },
+    {
+      "name": "text",
+      "columnType": { "type": "Text" },
+      "nullable": false,
+      "hash": "9da9085d13c72df3665d499aa39ac57ce97cb11a505c21dc8c81bfb19b27c3ec"
+    },
+    {
+      "name": "json",
+      "columnType": { "type": "Json" },
+      "nullable": false,
+      "hash": "996449b66ec60ad1d01b3e1cb865081e359dacca5d6d4da4d1cb357f8eaa3aaa"
+    },
+    {
+      "name": "enum",
+      "columnType": { "type": "Enum", "variants": ["draft", "active", "archived"] },
+      "nullable": false,
+      "hash": "00f576e4b61f7d1a0075ba0c90712bdaf4ca1f5175997da1cb25e7d2c360e633"
+    },
+    {
+      "name": "enum-reordered",
+      "columnType": { "type": "Enum", "variants": ["active", "draft", "archived"] },
+      "nullable": false,
+      "hash": "26c5a9a07bf9c5bcc199ef19850965cda792d7abf5a814744e000f3c09be27b4"
+    },
+    {
+      "name": "enum-payload",
+      "columnType": {
+        "type": "EnumPayload",
+        "cases": [
+          {
+            "name": "created",
+            "fields": [{ "name": "title", "column_type": { "type": "Text" }, "nullable": false }]
+          },
+          { "name": "deleted", "fields": [] }
+        ]
+      },
+      "nullable": false,
+      "hash": "adca3e6c8923e02112ce53eefe05f80b58380910e919499401414e668a465175"
+    },
+    {
+      "name": "enum-payload-reordered",
+      "columnType": {
+        "type": "EnumPayload",
+        "cases": [
+          { "name": "deleted", "fields": [] },
+          {
+            "name": "created",
+            "fields": [{ "name": "title", "column_type": { "type": "Text" }, "nullable": false }]
+          }
+        ]
+      },
+      "nullable": false,
+      "hash": "b5e9d9601c99e799deb73fa880195cf304360f2ebe41d0f27288c2c14866b6b8"
+    },
+    {
+      "name": "enum-payload-nullable-field",
+      "columnType": {
+        "type": "EnumPayload",
+        "cases": [
+          {
+            "name": "created",
+            "fields": [{ "name": "title", "column_type": { "type": "Text" }, "nullable": true }]
+          },
+          { "name": "deleted", "fields": [] }
+        ]
+      },
+      "nullable": false,
+      "hash": "25cdaca37175d33de7238e8818b2c1b8a51fbc61625cf6bb59bdd75f6d6f2271"
+    },
+    {
+      "name": "timestamp",
+      "columnType": { "type": "Timestamp" },
+      "nullable": false,
+      "hash": "05ed5bb54a538d12e4ceb34b67959874b8b2f34c7adb3665abec2484886f13ae"
+    },
+    {
+      "name": "uuid",
+      "columnType": { "type": "Uuid" },
+      "nullable": false,
+      "hash": "1a62903cadf9823d9881eaf69ab00c404b9aef8de011d7603e6a6c727d71e6ca"
+    },
+    {
+      "name": "bytea",
+      "columnType": { "type": "Bytea" },
+      "nullable": false,
+      "hash": "5d4d1d4364ac6972a5aa65196fb259f3f4d2486fc66ad62b905e61ef63159eb2"
+    },
+    {
+      "name": "array",
+      "columnType": { "type": "Array", "element": { "type": "Uuid" } },
+      "nullable": false,
+      "hash": "3c59c880bb81fbff2695aa4a23b87f0f0135679da685825d53ed54411f8025cb"
+    },
+    {
+      "name": "row",
+      "columnType": {
+        "type": "Row",
+        "columns": [
+          { "name": "count", "column_type": { "type": "Integer" }, "nullable": false },
+          { "name": "note", "column_type": { "type": "Text" }, "nullable": true }
+        ]
+      },
+      "nullable": false,
+      "hash": "16e4938f28824dd6526cbea32f6836c42d21b2caaef9bdae219730bc7cb6ef4c"
+    },
+    {
+      "name": "nullable-text",
+      "columnType": { "type": "Text" },
+      "nullable": true,
+      "hash": "b538ab7ca774cdf97c4bccce8270bda486e9d0f8ab6d04cea86200fc12bdd0bf"
+    },
+    {
+      "name": "nested-composite",
+      "columnType": {
+        "type": "Array",
+        "element": {
+          "type": "Row",
+          "columns": [
+            { "name": "path", "column_type": { "type": "Text" }, "nullable": false },
+            {
+              "name": "entries",
+              "column_type": {
+                "type": "Array",
+                "element": {
+                  "type": "Row",
+                  "columns": [
+                    { "name": "score", "column_type": { "type": "Double" }, "nullable": false },
+                    {
+                      "name": "kind",
+                      "column_type": { "type": "Enum", "variants": ["a", "b"] },
+                      "nullable": true
+                    }
+                  ]
+                }
+              },
+              "nullable": false
+            },
+            {
+              "name": "event",
+              "column_type": {
+                "type": "EnumPayload",
+                "cases": [
+                  {
+                    "name": "changed",
+                    "fields": [
+                      { "name": "by", "column_type": { "type": "Uuid" }, "nullable": false },
+                      { "name": "diff", "column_type": { "type": "Bytea" }, "nullable": true }
+                    ]
+                  }
+                ]
+              },
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "nullable": false,
+      "hash": "dd622416483432dbc37d09a7894d1af286b3c7a404bd337dc358343f3be4a630"
+    }
+  ]
+}
