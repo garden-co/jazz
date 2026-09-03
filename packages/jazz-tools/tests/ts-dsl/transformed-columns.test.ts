@@ -83,6 +83,7 @@ function applyRelatedPermissions(permissions: CompiledPermissions): s.App<Relate
   );
 
   return {
+    ...relatedApp,
     parents: new TypedTableQueryBuilder(
       "parents",
       wasmSchema,
@@ -96,7 +97,7 @@ function applyRelatedPermissions(permissions: CompiledPermissions): s.App<Relate
       relatedApp.items._columnTransformsByTable,
     ),
     wasmSchema,
-  } as s.App<RelatedAppSchema>;
+  };
 }
 
 describe("TS transformed columns", () => {
