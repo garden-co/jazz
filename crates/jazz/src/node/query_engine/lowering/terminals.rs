@@ -50,6 +50,7 @@ pub(super) fn lowered_terminals(
     let initial_closure = lower_closure_membership(
         graph.clone(),
         request,
+        plan,
         source,
         resolved_sources,
         &initial_root_route_fields,
@@ -79,6 +80,7 @@ pub(super) fn lowered_terminals(
         lower_closure_membership(
             graph.clone(),
             request,
+            plan,
             source,
             resolved_sources,
             &root_route_fields,
@@ -2756,6 +2758,29 @@ fn content_version_witness_graph(
         event_kind,
         &BTreeSet::new(),
     )
+}
+
+/// Recover source-shaped rows from a visible relation which may be a flat
+/// joined output. Keep the exact version and prepared-binding route: looking
+/// up only the row UUID would allow a different version or route to contribute.
+pub(super) fn source_rows_for_visible_graph(
+    source: &ResolvedSource,
+    visible: GraphBuilder,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
+    let version = version_witness_fields(&source.row_shape)?;
+    let mut keys = vec![
+        source.row_shape.row_uuid_field.clone(),
+        version.tx_time_field,
+        version.tx_node_field,
+    ];
+    keys.extend(route_fields.iter().cloned());
+    Ok(GraphBuilder::semi_join(
+        source.graph.clone(),
+        visible,
+        keys.clone(),
+        keys,
+    ))
 }
 
 /// Attach immutable version evidence to rows that have already passed the
