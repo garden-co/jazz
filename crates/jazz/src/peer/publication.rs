@@ -897,6 +897,33 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.query_update_inner_for_subscription_with_metadata(
+            node,
+            subscription,
+            shape,
+            binding,
+            opts,
+            progress_waker,
+        )
+        .await
+        .map(|update| update.map(|update| update.update))
+    }
+
+    // Normal delivery and late-usage cloning must share runtime recovery.
+    // A clone can arrive just after catalogue activation invalidates the
+    // canonical handle; draining that missing handle alone cannot reopen it.
+    async fn query_update_inner_for_subscription_with_metadata<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<Option<MaintainedCanonicalUpdate>, Error>
+    where
+        S: OrderedKvStorage,
+    {
         // Losing the Groove runtime also loses the maintained source frontier.
         // Its replacement is necessarily a complete successor closure: an
         // incremental add list cannot retract source facts that belonged to
@@ -917,17 +944,20 @@ impl PeerState {
             &policy_binding,
         )?;
         let Some(_) = self.publication_states.get(&subscription) else {
-            return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                subscription,
-                settled_through: self.binding_settlement_time(node, subscription, shape, binding),
-                reset_result_set: false,
-                version_carriers: Vec::new(),
-                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
-            })));
+            return Ok(Some(MaintainedCanonicalUpdate {
+                update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    settled_through: self.binding_settlement_time(node, subscription, shape, binding),
+                    reset_result_set: false,
+                    version_carriers: Vec::new(),
+                    peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                    result_member_adds: Vec::new(),
+                    result_member_removes: Vec::new(),
+                    program_fact_adds: Vec::new(),
+                    program_fact_removes: Vec::new(),
+                }),
+                allow_storage_witness_fallback: false,
+            }));
         };
         if self.requires_selected_authority_source(subscription, RehydratePurpose::Query)
             && let Some(source) = self.selected_authority_source(subscription)
@@ -939,7 +969,7 @@ impl PeerState {
             .get(&subscription)
             .is_some_and(|state| state.maintained_subscription_view.is_some())
         {
-            return self.query_update_maintained_subscription_view(
+            return self.query_update_maintained_subscription_view_with_metadata(
                 node,
                 shape,
                 binding,
@@ -994,6 +1024,12 @@ impl PeerState {
             progress_waker,
         )
         .await
+        .map(|update| {
+            update.map(|update| MaintainedCanonicalUpdate {
+                update,
+                allow_storage_witness_fallback: false,
+            })
+        })
     }
 
     async fn query_update_maintained_subscription_view<S>(
@@ -2420,20 +2456,19 @@ impl PeerState {
         maintained_subscription: SubscriptionKey,
         shape: &ValidatedQuery,
         binding: &Binding,
-        _opts: &RegisterShapeOptions,
+        opts: &RegisterShapeOptions,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<Option<ReconciledMaintainedSubscriptionClone>, Error>
     where
         S: OrderedKvStorage,
     {
-        self.clear_stale_groove_runtime_handles(node, maintained_subscription);
         let Some(canonical) = self
-            .query_update_maintained_subscription_view_with_metadata(
+            .query_update_inner_for_subscription_with_metadata(
                 node,
+                maintained_subscription,
                 shape,
                 binding,
-                maintained_subscription,
-                None,
+                opts.clone(),
                 progress_waker,
             )
             .await?

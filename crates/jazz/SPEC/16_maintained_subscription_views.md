@@ -69,6 +69,13 @@ one complete replacement context, and every continuation uses that retained
 context; reconciliation MUST NOT substitute the default read view or reconstruct
 selectors from the opaque `ReadViewKey`.
 
+Late-usage cloning and ordinary incremental publication MUST use the same
+canonical runtime recovery path. If catalogue activation invalidates a
+maintained handle, reopening restores the retained read and policy context
+before either path drains it. Existing usages receive the recovered complete
+source closure before the new usage receives its reset; a missing handle is
+not an indefinitely pending clone.
+
 `groove/SPEC/INVARIANTS.md::INV-INC-1` is the mechanism law for this chapter:
 maintained-view ingestion, application, publication, snapshot assembly, diffing,
 and subscriber delivery are bounded by the size of the change and affected keys,
