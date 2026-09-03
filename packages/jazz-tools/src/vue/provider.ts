@@ -18,6 +18,7 @@ import {
 import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
+import { serializeClientConfig } from "../runtime/client-config-key.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 import { assertNoClassicProviderProps } from "../classic-api.js";
@@ -147,6 +148,45 @@ export const LegacyJazzProvider = defineComponent({
     let lifecycle = Promise.resolve();
     let runId = 0;
     let stopConfigWatch: (() => void) | null = null;
+    const noConfigKey = Symbol("no config key");
+    let lastRequestedConfigKey: string | typeof noConfigKey = noConfigKey;
+
+    const queueConfigRequest = (createClient: () => Promise<CreatedJazzClient>) => {
+      const activeRunId = ++runId;
+      clientRef.value = null;
+      errorRef.value = null;
+
+      lifecycle = lifecycle
+        .then(async () => {
+          if (activeClient) {
+            const previousClient = activeClient;
+            activeClient = null;
+            await previousClient.shutdown();
+          }
+          if (activeRunId !== runId) return;
+          assertNoClassicProviderProps("JazzProvider", attrs);
+
+          const client = await createClient();
+          if (activeRunId !== runId) {
+            await client.shutdown();
+            return;
+          }
+          try {
+            assertNoClassicProviderProps("JazzProvider", attrs);
+          } catch (reason) {
+            await client.shutdown();
+            throw reason;
+          }
+
+          activeClient = client;
+          clientRef.value = client;
+        })
+        .catch((reason) => {
+          if (activeRunId === runId) {
+            errorRef.value = reason instanceof Error ? reason : new Error(String(reason));
+          }
+        });
+    };
 
     // A config-owned client touches browser-only storage.  Do not begin creating
     // it during SSR: rendering the fallback on the server must be side-effect
@@ -155,41 +195,23 @@ export const LegacyJazzProvider = defineComponent({
       stopConfigWatch = watch(
         () => props.config,
         (config) => {
-          const activeRunId = ++runId;
           const configSnapshot = { ...config } as DbConfig;
-          clientRef.value = null;
-          errorRef.value = null;
-
-          lifecycle = lifecycle
-            .then(async () => {
-              if (activeClient) {
-                const previousClient = activeClient;
-                activeClient = null;
-                await previousClient.shutdown();
-              }
-              if (activeRunId !== runId) return;
-              assertNoClassicProviderProps("JazzProvider", attrs);
-
-              const client = await createJazzClient(configSnapshot);
-              if (activeRunId !== runId) {
-                await client.shutdown();
-                return;
-              }
-              try {
-                assertNoClassicProviderProps("JazzProvider", attrs);
-              } catch (reason) {
-                await client.shutdown();
-                throw reason;
-              }
-
-              activeClient = client;
-              clientRef.value = client;
-            })
-            .catch((reason) => {
-              if (activeRunId === runId) {
-                errorRef.value = reason instanceof Error ? reason : new Error(String(reason));
-              }
+          let configKey: string;
+          try {
+            configKey = serializeClientConfig(configSnapshot);
+          } catch (reason) {
+            lastRequestedConfigKey = noConfigKey;
+            queueConfigRequest(async () => {
+              throw reason;
             });
+            return;
+          }
+
+          if (configKey === lastRequestedConfigKey) return;
+          // Record the request before changing lifecycle state so a re-entrant
+          // watcher observes this request as the latest one.
+          lastRequestedConfigKey = configKey;
+          queueConfigRequest(() => createJazzClient(configSnapshot));
         },
         { deep: true, immediate: true },
       );
