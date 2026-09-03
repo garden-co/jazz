@@ -866,57 +866,13 @@ where
             // reject a sound exact closure before the descriptor boundary.
             let source_table =
                 self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
-            let tx_alias = self
-                .node_aliases
-                .get(&input.version.tx.node)
-                .copied()
-                .ok_or(Error::MissingTransaction(input.version.tx))?;
-            let layer = match input.version.layer {
-                ResultRowLayer::Content => VersionLayer::Content,
-                // A covered input closure contains the current content
-                // carrier for each compiled source. A deletion witness proves
-                // why a former content carrier is absent; it is not itself a
-                // tuple accepted by the source's content descriptor. Validate
-                // that exact witness below, then leave this source's staged
-                // input without that row so the atomic replacement retracts
-                // the old contributor.
-                ResultRowLayer::Deletion => VersionLayer::Deletion,
-                ResultRowLayer::ContentOrDeletion => {
-                    return Err(Error::InvalidStoredValue(
-                        "covered input must name one concrete version layer",
-                    ));
-                }
-            };
-            let branch_key = input
-                .version
-                .branch_or_prefix
-                .as_deref()
-                .map(BranchKey::from_canonical_bytes)
-                .transpose()
-                .map_err(|_| {
-                    Error::InvalidStoredValue("covered input branch witness is malformed")
-                })?
-                .unwrap_or_default();
             let version = self
-                .query_version_by_alias_in_branch(
-                    result_schema_version,
-                    input.version_table.as_str(),
-                    &branch_key,
-                    input.source_row,
-                    layer,
-                    input.version.tx.time,
-                    tx_alias,
-                )
-                .await?;
-            let version = version.ok_or(Error::MissingTransaction(input.version.tx))?;
-            if version.branch_key().canonical_bytes()
-                != input.version.branch_or_prefix.clone().unwrap_or_default()
-            {
-                return Err(Error::InvalidStoredValue(
-                    "authority covered input branch witness disagrees with stored version",
-                ));
-            }
-            if layer == VersionLayer::Deletion {
+                .covered_input_version(&input, result_schema_version)
+                .await?
+                .ok_or(Error::MissingTransaction(input.version.tx))?;
+            // Deletion evidence retracts a content tuple; it never becomes a
+            // row accepted by this source's content descriptor.
+            if version.layer() == VersionLayer::Deletion {
                 continue;
             }
             let row = self
@@ -1001,48 +957,11 @@ where
     ) -> Result<Option<Vec<u8>>, Error> {
         let source_table =
             self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
-        let tx_alias = self
-            .node_aliases
-            .get(&input.version.tx.node)
-            .copied()
-            .ok_or(Error::MissingTransaction(input.version.tx))?;
-        let layer = match input.version.layer {
-            ResultRowLayer::Content => VersionLayer::Content,
-            ResultRowLayer::Deletion => VersionLayer::Deletion,
-            ResultRowLayer::ContentOrDeletion => {
-                return Err(Error::InvalidStoredValue(
-                    "covered input must name one concrete version layer",
-                ));
-            }
-        };
-        let branch_key = input
-            .version
-            .branch_or_prefix
-            .as_deref()
-            .map(BranchKey::from_canonical_bytes)
-            .transpose()
-            .map_err(|_| Error::InvalidStoredValue("covered input branch witness is malformed"))?
-            .unwrap_or_default();
         let version = self
-            .query_version_by_alias_in_branch(
-                result_schema_version,
-                input.version_table.as_str(),
-                &branch_key,
-                input.source_row,
-                layer,
-                input.version.tx.time,
-                tx_alias,
-            )
+            .covered_input_version(input, result_schema_version)
             .await?
             .ok_or(Error::MissingTransaction(input.version.tx))?;
-        if version.branch_key().canonical_bytes()
-            != input.version.branch_or_prefix.clone().unwrap_or_default()
-        {
-            return Err(Error::InvalidStoredValue(
-                "authority covered input branch witness disagrees with stored version",
-            ));
-        }
-        if layer == VersionLayer::Deletion {
+        if version.layer() == VersionLayer::Deletion {
             return Ok(None);
         }
         let row = self

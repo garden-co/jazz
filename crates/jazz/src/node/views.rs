@@ -258,7 +258,10 @@ fn covered_input_version_rows_for_bundle(
         .iter()
         .filter_map(|fact| match fact {
             ProgramFactEntry::CoveredInput(input) => Some((
-                input.version_table.to_string(),
+                // Maintained witnesses are indexed by the logical source
+                // name. Bundle serialization normalizes that witness to its
+                // authored physical identity, matching `version_table`.
+                input.source.table.to_string(),
                 input.source_row,
                 input.version.tx,
             )),
@@ -1753,7 +1756,16 @@ where
                 let resident_body_witness = if staged_body_witness {
                     false
                 } else {
-                    self.covered_input_has_resident_body(input).await?
+                    let read_schema = self
+                        .query
+                        .registered_shapes
+                        .get(&update.subscription.shape_id)
+                        .ok_or(Error::InvalidStoredValue(
+                            "covered input shape is not registered",
+                        ))?
+                        .schema_version();
+                    self.covered_input_has_resident_body(input, read_schema)
+                        .await?
                 };
                 if input.version.batch != Some(input.version.tx)
                     || (!staged_body_witness && !resident_body_witness)
@@ -1771,21 +1783,50 @@ where
     async fn covered_input_has_resident_body(
         &mut self,
         input: &crate::protocol::CoveredInputEntry,
+        read_schema: SchemaVersionId,
     ) -> Result<bool, Error> {
-        let Some(tx_node_alias) = self.node_aliases.get(&input.version.tx.node).copied() else {
-            return Ok(false);
-        };
         if self.query_transaction(input.version.tx).await?.is_none() {
             return Ok(false);
         }
+        Ok(self
+            .covered_input_version(input, read_schema)
+            .await?
+            .is_some())
+    }
+
+    /// Resolve an exact immutable witness using the receiver source's physical
+    /// table, then verify its authored name. A rename changes the name, not
+    /// the physical table, row, layer, branch, or transaction being requested.
+    pub(super) async fn covered_input_version(
+        &mut self,
+        input: &crate::protocol::CoveredInputEntry,
+        read_schema: SchemaVersionId,
+    ) -> Result<Option<VersionRow>, Error> {
+        let Some(tx_node_alias) = self.node_aliases.get(&input.version.tx.node).copied() else {
+            return Ok(None);
+        };
         let layer = match input.version.layer {
             crate::protocol::ResultRowLayer::Content => VersionLayer::Content,
             crate::protocol::ResultRowLayer::Deletion => VersionLayer::Deletion,
-            crate::protocol::ResultRowLayer::ContentOrDeletion => return Ok(false),
+            crate::protocol::ResultRowLayer::ContentOrDeletion => {
+                return Err(Error::InvalidStoredValue(
+                    "covered input must name one concrete version layer",
+                ));
+            }
         };
+        let branch_key = input
+            .version
+            .branch_or_prefix
+            .as_deref()
+            .map(BranchKey::from_canonical_bytes)
+            .transpose()
+            .map_err(|_| Error::InvalidStoredValue("covered input branch witness is malformed"))?
+            .unwrap_or_default();
         let Some(version) = self
-            .query_version_by_alias(
-                input.version_table.as_str(),
+            .query_version_by_alias_in_branch(
+                read_schema,
+                input.source.table.as_str(),
+                &branch_key,
                 input.source_row,
                 layer,
                 input.version.tx.time,
@@ -1793,10 +1834,21 @@ where
             )
             .await?
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        Ok(version.branch_key().canonical_bytes()
-            == input.version.branch_or_prefix.clone().unwrap_or_default())
+        if version.table() != input.version_table.as_str() {
+            return Err(Error::InvalidStoredValue(
+                "authority covered input authored table disagrees with stored version",
+            ));
+        }
+        if version.branch_key().canonical_bytes()
+            != input.version.branch_or_prefix.clone().unwrap_or_default()
+        {
+            return Err(Error::InvalidStoredValue(
+                "authority covered input branch witness disagrees with stored version",
+            ));
+        }
+        Ok(Some(version))
     }
 
     async fn apply_view_update_inner(

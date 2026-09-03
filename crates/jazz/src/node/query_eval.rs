@@ -3743,6 +3743,27 @@ where
         }
         let mut maintained = MaintainedSubscriptionView::default();
         maintained.set_read_view(read_view_key);
+        // Resolve names from permanent physical catalogue identities, never
+        // from equal row UUIDs or a search for the first matching table label.
+        // Keep logical source identity unchanged: only the immutable payload
+        // coordinate follows the row's authored schema across a table rename.
+        let mut witness_table_names = BTreeMap::new();
+        for logical_name in tables.keys() {
+            let table_id =
+                self.physical_table_id_for_schema(shape.schema_version(), logical_name)?;
+            for (schema_id, mapping) in &self.catalogue.physical_mappings {
+                let Some(alias) = self.catalogue.schema_version_aliases.get(schema_id) else {
+                    continue;
+                };
+                for (authored_name, table_mapping) in &mapping.tables {
+                    if table_mapping.table_id == table_id && authored_name != logical_name {
+                        witness_table_names
+                            .insert((logical_name.clone(), *alias), authored_name.clone());
+                    }
+                }
+            }
+        }
+        maintained.set_witness_table_names(witness_table_names);
         if storage_backed_result_materialization {
             maintained.enable_storage_backed_result_materialization();
         }

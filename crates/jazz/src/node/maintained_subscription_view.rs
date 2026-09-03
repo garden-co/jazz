@@ -20,7 +20,7 @@ use super::query_engine::{
     VersionedRowRefSchema, logical_user_column,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
-use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid};
+use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias};
 use crate::protocol::{
     BranchKey, CoveredInputEntry, ProgramFactEntry, ProgramSourceId, RealRowMemberEntry,
     RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer,
@@ -117,6 +117,9 @@ pub(crate) struct MaintainedSubscriptionView {
     /// Terminal row members must retain it so distinct branch views never
     /// collapse when their source row and transaction coincide.
     read_view: crate::protocol::ReadViewKey,
+    /// The graph uses read-schema names; immutable payload coordinates use
+    /// the name of that same physical table in the authored schema.
+    witness_table_names: BTreeMap<(String, SchemaVersionAlias), String>,
     result_weights: BTreeMap<ResultMemberEntry, i64>,
     /// Result memberships already exposed to the subscription consumer. A
     /// result-current terminal can advance before the companion content
@@ -167,6 +170,7 @@ impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
             read_view: Default::default(),
+            witness_table_names: BTreeMap::new(),
             result_weights: BTreeMap::new(),
             published_result_members: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
@@ -380,6 +384,29 @@ fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
 impl MaintainedSubscriptionView {
     pub(crate) fn set_read_view(&mut self, read_view: crate::protocol::ReadViewKey) {
         self.read_view = read_view;
+    }
+
+    pub(crate) fn set_witness_table_names(
+        &mut self,
+        names: BTreeMap<(String, SchemaVersionAlias), String>,
+    ) {
+        self.witness_table_names = names;
+    }
+
+    fn covered_input_for_version(
+        &self,
+        source: ProgramSourceId,
+        row: &VersionRow,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<CoveredInputEntry, super::Error> {
+        let mut input = covered_input_for_version(source, row, node_aliases)?;
+        if let Some(authored_name) = self
+            .witness_table_names
+            .get(&(row.table().to_owned(), row.schema_version_alias()))
+        {
+            input.version_table = authored_name.clone().into();
+        }
+        Ok(input)
     }
     pub(crate) fn uses_storage_backed_result_materialization(&self) -> bool {
         self.storage_backed_result_materialization
@@ -674,7 +701,8 @@ impl MaintainedSubscriptionView {
                     )?;
                 }
                 NetEvent::Version(source, identity, row) => {
-                    let covered_input = covered_input_for_version(source, &row, node_aliases)?;
+                    let covered_input =
+                        self.covered_input_for_version(source, &row, node_aliases)?;
                     self.versions
                         .apply_delta(identity, row, weight, node_aliases)?;
                     if let Some(is_present) = self.apply_source_fact_delta(
@@ -690,7 +718,8 @@ impl MaintainedSubscriptionView {
                     }
                 }
                 NetEvent::Replacement(source, key, identity, row) => {
-                    let covered_input = covered_input_for_version(source, &row, node_aliases)?;
+                    let covered_input =
+                        self.covered_input_for_version(source, &row, node_aliases)?;
                     self.replacements
                         .apply_delta(key, identity, row, weight, node_aliases)?;
                     if let Some(is_present) = self.apply_source_fact_delta(
@@ -820,6 +849,17 @@ impl MaintainedSubscriptionView {
                 .sum::<usize>();
         let versions_bytes = self.versions.footprint_bytes();
         let replacements_bytes = self.replacements.footprint_bytes();
+        let witness_table_names_bytes = btree_map_bytes(self.witness_table_names.len())
+            + self
+                .witness_table_names
+                .iter()
+                .map(|((logical, _), authored)| {
+                    logical.len()
+                        + authored.len()
+                        + 2 * mem::size_of::<String>()
+                        + mem::size_of::<SchemaVersionAlias>()
+                })
+                .sum::<usize>();
         let structured_app_rows_bytes = self
             .structured_app_rows
             .values()
@@ -863,7 +903,8 @@ impl MaintainedSubscriptionView {
                 + result_payloads_bytes
                 + structured_app_rows_bytes
                 + versions_bytes
-                + replacements_bytes,
+                + replacements_bytes
+                + witness_table_names_bytes,
         }
     }
 

@@ -143,6 +143,16 @@ values. Implicit root references use a `reference:<column>` alias, separate
 from explicit `include:<include-index>:<segment-index>` aliases; both are
 root-relative identities under the query's schema.
 
+A source occurrence retains its logical name in the query's read schema; its
+version witness names the immutable row under its authored schema. For example,
+after `users` is renamed to `people`, a `people` source may admit a version
+authored in `users`. The catalogue's permanent physical table ID connects the
+two names. The authority MUST emit the authored coordinate, and the receiver
+MUST resolve the source's physical table and verify the exact authored name,
+row ID, transaction, branch, and layer. Initial, incremental, and resident-body
+recovery paths use the same identity checks. Equal row IDs or similar table
+names alone are never sufficient evidence.
+
 A deletion-register witness is not authorization by itself. Its source
 occurrence MUST also be admitted by the same current policy-filtered
 `IncludeDeleted` preimage, matched to the exact deleted row and deletion
