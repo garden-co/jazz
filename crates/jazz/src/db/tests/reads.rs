@@ -1807,7 +1807,7 @@ fn relation_query_pagination_composes_windows_for_reads_and_subscriptions() {
 }
 
 #[test]
-fn relation_query_gather_pagination_composes_windows_for_reads() {
+fn relation_query_gather_pagination_composes_windows_for_reads_and_subscriptions() {
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("teams")
@@ -1843,6 +1843,17 @@ fn relation_query_gather_pagination_composes_windows_for_reads() {
         )
         .unwrap();
     }
+    let query = RelationQuery {
+        rel: windowed_relation_expr(
+            ordered_relation_expr(teams_gather_relation_query().rel, "teams"),
+            RelationWindowCase::OffsetOutsideLimit,
+        ),
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), row_ids(&snapshot.rows));
 
     for (case, expected) in relation_window_cases() {
         let query = RelationQuery {
