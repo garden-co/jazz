@@ -16,6 +16,29 @@ struct RelationFacadeJoin {
     right_scope: String,
     right_column: String,
 }
+#[derive(Clone, Copy)]
+enum RelationOutputStep {
+    Offset(usize),
+    Limit(usize),
+}
+
+/// Compose one output window around an already-composed inner window.
+fn fold_relation_output_step(
+    (offset, limit): (usize, Option<usize>),
+    step: RelationOutputStep,
+) -> (usize, Option<usize>) {
+    match step {
+        RelationOutputStep::Offset(value) => {
+            let offset = offset.saturating_add(value);
+            let limit = limit.map(|remaining| remaining.saturating_sub(value));
+            (offset, limit)
+        }
+        RelationOutputStep::Limit(value) => {
+            let limit = Some(limit.map_or(value, |remaining| remaining.min(value)));
+            (offset, limit)
+        }
+    }
+}
 
 /// Normalize the currently-supported relation facade subset into the ordinary
 /// query shape used by one-shot and maintained execution.
@@ -327,8 +350,7 @@ fn peel_relation_output_steps(
 > {
     let mut filters = Vec::new();
     let mut order_by = Vec::new();
-    let mut offset = 0;
-    let mut limit = None;
+    let mut output_steps = Vec::new();
     let mut current = expr;
     loop {
         if !filters.is_empty()
@@ -354,20 +376,24 @@ fn peel_relation_output_steps(
                 input,
                 offset: value,
             } => {
-                offset = *value;
+                output_steps.push(RelationOutputStep::Offset(*value));
                 current = input;
             }
             RelationExpr::Limit {
                 input,
                 limit: value,
             } => {
-                limit = Some(*value);
+                output_steps.push(RelationOutputStep::Limit(*value));
                 current = input;
             }
             _ => break,
         }
     }
 
+    let (offset, limit) = output_steps.into_iter().rev().fold(
+        (0, None),
+        fold_relation_output_step,
+    );
     Ok((current, filters, order_by, offset, limit))
 }
 
@@ -782,12 +808,18 @@ fn collect_relation_facade(
         }
         RelationExpr::Offset { input, offset } => {
             collect_relation_facade(input, plan)?;
-            plan.offset = *offset;
+            (plan.offset, plan.limit) = fold_relation_output_step(
+                (plan.offset, plan.limit),
+                RelationOutputStep::Offset(*offset),
+            );
             Ok(())
         }
         RelationExpr::Limit { input, limit } => {
             collect_relation_facade(input, plan)?;
-            plan.limit = Some(*limit);
+            (plan.offset, plan.limit) = fold_relation_output_step(
+                (plan.offset, plan.limit),
+                RelationOutputStep::Limit(*limit),
+            );
             Ok(())
         }
         RelationExpr::Union { .. }
