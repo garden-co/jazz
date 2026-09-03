@@ -1,10 +1,11 @@
 import { existsSync } from "fs";
-import { access, rm } from "fs/promises";
-import { basename, dirname, join, resolve } from "path";
+import { access, mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { basename, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { build, type Plugin } from "esbuild";
 import { schemaToWasm } from "./codegen/schema-reader.js";
-import { getCollectedSchema, resetCollectedState } from "./dsl.js";
+import type { SchemaDefinition } from "./typed-app.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
 import type {
   ColumnDescriptor,
@@ -17,11 +18,21 @@ import { schemaDefinitionToAst } from "./migrations.js";
 import type { CompiledPermissionsMap } from "./schema-permissions.js";
 import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
 
-let importCounter = 0;
 const localJazzToolsSourceEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
 const localJazzToolsEntry = existsSync(localJazzToolsSourceEntry)
   ? localJazzToolsSourceEntry
   : fileURLToPath(new URL("./index.js", import.meta.url));
+const schemaLoaderEnvelopeExport = "__jazzSchemaLoaderEnvelope";
+
+async function removeTempDirectory(tempDir: string): Promise<void> {
+  await rm(tempDir, { force: true, recursive: true });
+}
+
+export const schemaLoaderTestHooks: {
+  removeTempDirectory: (tempDir: string) => Promise<void>;
+} = {
+  removeTempDirectory,
+};
 
 export interface LoadedSchemaProject {
   rootDir: string;
@@ -32,12 +43,28 @@ export interface LoadedSchemaProject {
   wasmSchema: WasmSchema;
 }
 
-async function bundleToTempFile(filePath: string): Promise<string> {
-  const sourceDir = dirname(resolve(filePath));
-  const outFile = join(sourceDir, `.jazz-schema-${++importCounter}.mjs`);
+type LoadedTsModule = {
+  module: Record<string, unknown>;
+  collectedSchema: Schema;
+};
+
+async function bundleToTempFile(filePath: string, tempDir: string): Promise<string> {
+  const outFile = join(tempDir, "schema.mjs");
+  const entryFile = join(tempDir, "entry.mjs");
+  const sourceUrl = pathToFileURL(resolve(filePath)).href;
+
+  await writeFile(
+    entryFile,
+    [
+      `import * as module from ${JSON.stringify(sourceUrl)};`,
+      `import { getCollectedSchema } from "jazz-tools";`,
+      `export const ${schemaLoaderEnvelopeExport} = { module, collectedSchema: getCollectedSchema() };`,
+      "",
+    ].join("\n"),
+  );
 
   await build({
-    entryPoints: [resolve(filePath)],
+    entryPoints: [entryFile],
     bundle: true,
     format: "esm",
     platform: "node",
@@ -62,13 +89,46 @@ function localJazzToolsPlugin(): Plugin {
   };
 }
 
-async function loadTsModule(filePath: string): Promise<Record<string, unknown>> {
-  resetCollectedState();
-  const outFile = await bundleToTempFile(filePath);
+async function loadTsModule(filePath: string): Promise<LoadedTsModule> {
+  const tempDir = await mkdtemp(join(tmpdir(), "jazz-schema-loader-"));
+  let loadFailed = false;
   try {
-    return (await import(pathToFileURL(outFile).href)) as Record<string, unknown>;
+    const outFile = await bundleToTempFile(filePath, tempDir);
+    // The output path is unique per load, so runtime import caching cannot
+    // cross-contaminate concurrent schema loads.
+    const loaded = (await import(pathToFileURL(outFile).href)) as Record<string, unknown>;
+    const envelope = loaded[schemaLoaderEnvelopeExport];
+    if (typeof envelope !== "object" || envelope === null) {
+      throw new Error("Schema loader bundle did not return its private result envelope.");
+    }
+    const { module, collectedSchema } = envelope as {
+      module?: unknown;
+      collectedSchema?: unknown;
+    };
+    if (
+      typeof module !== "object" ||
+      module === null ||
+      typeof collectedSchema !== "object" ||
+      collectedSchema === null ||
+      Array.isArray(collectedSchema)
+    ) {
+      throw new Error("Schema loader bundle returned an invalid private result envelope.");
+    }
+    return {
+      module: module as Record<string, unknown>,
+      collectedSchema: collectedSchema as Schema,
+    };
+  } catch (error) {
+    loadFailed = true;
+    throw error;
   } finally {
-    await rm(outFile, { force: true }).catch(() => undefined);
+    try {
+      await schemaLoaderTestHooks.removeTempDirectory(tempDir);
+    } catch (cleanupError) {
+      if (!loadFailed) {
+        throw cleanupError;
+      }
+    }
   }
 }
 
@@ -212,7 +272,10 @@ type LoadedSchemaInput = {
   wasmSchema?: WasmSchema;
 };
 
-function schemaFromLoadedModule(loaded: Record<string, unknown>): LoadedSchemaInput | null {
+function schemaFromLoadedModule(
+  loaded: Record<string, unknown>,
+  collected: Schema,
+): LoadedSchemaInput | null {
   const candidates = [loaded.schema, loaded.schemaDef, loaded.default, loaded.app].filter(
     (candidate): candidate is Record<string, unknown> =>
       typeof candidate === "object" && candidate !== null,
@@ -229,13 +292,12 @@ function schemaFromLoadedModule(loaded: Record<string, unknown>): LoadedSchemaIn
 
   for (const candidate of candidates) {
     try {
-      return { schema: schemaDefinitionToAst(candidate as any) };
+      return { schema: schemaDefinitionToAst(candidate as SchemaDefinition) };
     } catch {
       // Try the next supported export shape.
     }
   }
 
-  const collected = getCollectedSchema();
   if (collected.tables.length > 0) {
     return { schema: collected };
   }
@@ -245,7 +307,7 @@ function schemaFromLoadedModule(loaded: Record<string, unknown>): LoadedSchemaIn
 
 async function loadSchemaInput(filePath: string): Promise<LoadedSchemaInput> {
   const loaded = await loadTsModule(filePath);
-  const directSchema = schemaFromLoadedModule(loaded);
+  const directSchema = schemaFromLoadedModule(loaded.module, loaded.collectedSchema);
   if (directSchema) {
     return directSchema;
   }
@@ -289,7 +351,7 @@ function isPermissionsMap(input: unknown): input is Record<string, TablePolicies
 }
 
 async function loadPermissionsModule(filePath: string): Promise<Record<string, TablePolicies>> {
-  const module = await loadTsModule(filePath);
+  const { module } = await loadTsModule(filePath);
   const candidate = module.default ?? module.permissions ?? null;
   if (!candidate) {
     throw new Error(
@@ -308,7 +370,7 @@ async function loadPermissionsModule(filePath: string): Promise<Record<string, T
 async function tryLoadPermissionsFromSchemaModule(
   filePath: string,
 ): Promise<Record<string, TablePolicies> | undefined> {
-  const module = await loadTsModule(filePath);
+  const { module } = await loadTsModule(filePath);
   const candidate = module.permissions ?? null;
   if (!candidate) {
     return undefined;

@@ -1,12 +1,18 @@
-import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { describe, expect, it, afterEach } from "vitest";
 import { schemaToWasm } from "./codegen/schema-reader.js";
-import { loadCompiledSchema } from "./schema-loader.js";
+import { loadCompiledSchema, schemaLoaderTestHooks } from "./schema-loader.js";
 
 const WITH_DEFAULTS_DIR = fileURLToPath(
   new URL("./testing/fixtures/with-defaults", import.meta.url),
 );
 const WITH_BIGINT_DIR = fileURLToPath(new URL("./testing/fixtures/with-bigint", import.meta.url));
+
+const defaultRemoveTempDirectory = schemaLoaderTestHooks.removeTempDirectory;
+afterEach(() => {
+  schemaLoaderTestHooks.removeTempDirectory = defaultRemoveTempDirectory;
+});
 
 describe("loadCompiledSchema", () => {
   it("keeps typed-app schema and wasm schema losslessly aligned", async () => {
@@ -76,14 +82,63 @@ describe("bundled DSL schema loading", () => {
   });
 
   it("cleans failed bundle state so a retry can load the schema", async () => {
-    process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = "1";
-    await expect(loadCompiledSchema(fixtureDir("retry-after-failure"))).rejects.toThrow(
-      "intentional schema fixture failure",
-    );
+    const previous = process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+    try {
+      process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = "1";
+      await expect(loadCompiledSchema(fixtureDir("retry-after-failure"))).rejects.toThrow(
+        "intentional schema fixture failure",
+      );
 
-    delete process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
-    const loaded = await loadCompiledSchema(fixtureDir("retry-after-failure"));
-    expect(loaded.schema.tables.map((table) => table.name)).toEqual(["retry_tasks"]);
+      delete process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+      const loaded = await loadCompiledSchema(fixtureDir("retry-after-failure"));
+      expect(loaded.schema.tables.map((table) => table.name)).toEqual(["retry_tasks"]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+      } else {
+        process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = previous;
+      }
+    }
+  });
+
+  it("cleans temporary bundles and preserves the original load error", async () => {
+    const cleaned: string[] = [];
+    let failCleanup = false;
+    schemaLoaderTestHooks.removeTempDirectory = async (tempDir) => {
+      cleaned.push(tempDir);
+      await defaultRemoveTempDirectory(tempDir);
+      if (failCleanup) throw new Error("intentional cleanup failure");
+    };
+    await loadCompiledSchema(fixtureDir("side-effect-only"));
+
+    const previous = process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+    try {
+      failCleanup = true;
+      process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = "1";
+      await expect(loadCompiledSchema(fixtureDir("retry-after-failure"))).rejects.toThrow(
+        "intentional schema fixture failure",
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+      } else {
+        process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = previous;
+      }
+    }
+
+    expect(cleaned).toHaveLength(3);
+    expect(new Set(cleaned).size).toBe(3);
+  });
+
+  it("propagates a cleanup failure after a successful load", async () => {
+    schemaLoaderTestHooks.removeTempDirectory = async (tempDir) => {
+      await defaultRemoveTempDirectory(tempDir);
+      throw new Error("intentional cleanup failure");
+    };
+
+    await expect(loadCompiledSchema(fixtureDir("side-effect-only"))).rejects.toThrow(
+      "intentional cleanup failure",
+    );
   });
 
   it("isolates parallel top-level-await bundles deterministically", async () => {
@@ -96,3 +151,18 @@ describe("bundled DSL schema loading", () => {
     expect(b.schema.tables.map((table) => table.name)).toEqual(["parallel_b"]);
   });
 });
+
+const DIST_SCHEMA_LOADER = fileURLToPath(new URL("../dist/schema-loader.js", import.meta.url).href);
+
+it.skipIf(!existsSync(DIST_SCHEMA_LOADER))(
+  "loads a public bare jazz-tools schema through the built distribution",
+  async () => {
+    // The loader path is runtime-selected because this canary targets the built artifact.
+    const { loadCompiledSchema: loadBuiltSchema } = (await import(
+      pathToFileURL(DIST_SCHEMA_LOADER).href
+    )) as typeof import("./schema-loader.js");
+    const loaded = await loadBuiltSchema(fixtureDir("side-effect-only"));
+
+    expect(loaded.schema.tables.map((table) => table.name)).toEqual(["side_effect_tasks"]);
+  },
+);
