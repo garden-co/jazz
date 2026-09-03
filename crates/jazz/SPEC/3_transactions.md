@@ -143,6 +143,19 @@ refresh failure without causing the sender to retry an already-published unit.
 
 ### 3.3 Durability is not fate
 
+An accepted local publication's persistence continuation belongs to the runtime,
+not to an individual `tick()` waiter. Cancelling a tick does not cancel or
+restart that storage operation: later owner turns resume the same continuation
+in publication order. Actual failure or abandonment of an already-started
+persistence operation remains fail-closed and requires reopening the runtime.
+
+A bounded tick may return while a later queued mutation waits for cold storage.
+That later preparation must not prevent an earlier publication's storage write
+from progressing; final receipt settlement may still need the shared node lock.
+Hosts must retain a wakeup route for storage readiness after the tick returns,
+and continue driving owner turns. Durability is established by the write's
+durability receipt, not by the number of tick polls or a tick returning ready.
+
 Fate and durability answer different questions. Fate records whether an
 authority has accepted or rejected a transaction. Durability records how far the
 transaction has settled. Because those questions are independent, the two axes

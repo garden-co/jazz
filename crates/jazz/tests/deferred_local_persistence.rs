@@ -11,7 +11,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, MergeableTxOps, ReadOpts, StreamingMutationKind,
     SubscriptionEvent,
 };
-use jazz::groove::storage::{ReopenableStorage, TestStorage, TestStorageOperation};
+use jazz::groove::storage::{MemoryStorage, ReopenableStorage, TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::row;
 use jazz::schema::JazzSchema;
@@ -126,8 +126,13 @@ fn deferred_local_persistence_publishes_insert_then_delete_before_persistence() 
     );
 }
 
+/// Alice's cancelled tick leaves the runtime-owned write alive, not retried.
+/// alice -> resident insert/delete/restore -> paused storage -> drop tick
+///       -> resume owner -> reopen -> restored row
+/// Controlled storage is required to distinguish tick cancellation from
+/// abandonment of the actual atomic storage operation.
 #[test]
-fn cancelled_started_deferred_persistence_poison_requires_reopen() {
+fn cancelled_tick_retains_started_deferred_persistence() {
     let schema = schema();
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0x51; 16]),
@@ -223,51 +228,50 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
             .contains(&TestStorageOperation::WriteMany)
     );
 
-    // This poll has started the atomic write. Host teardown therefore cannot
-    // safely retry the resident publication: it may already be durable.
+    // Cancelling the waiter is not host teardown: the runtime still owns the
+    // original storage future and must neither abandon nor restart it.
     drop(tick);
-    let error = match block_on(db.insert(
+    control.take_observed();
+    let fresh = block_on(db.insert(
         "todos",
-        row! { title: "must require reopen" },
+        row! { title: "accepted after tick cancellation" },
         Default::default(),
-    )) {
-        Ok(_) => panic!("a started persistence cancellation poisons the live database"),
-        Err(error) => error,
-    };
-    assert_eq!(error.code, ErrorCode::Storage);
+    ))
+    .expect("tick cancellation does not poison a retained storage operation");
+    let mut resumed_tick = Box::pin(db.tick());
+    assert!(resumed_tick.as_mut().poll(&mut context).is_pending());
     assert!(
-        error.message.contains("poisoned"),
-        "the public error must identify the fail-closed local database state: {error}"
+        !control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany),
+        "resuming must not start a second atomic write while the original is paused"
     );
-
-    // The poison belongs to this live instance; it is not a durable marker.
-    // Resume the test backend, discard the abandoned facade, and reopen from
-    // the same bytes. The abandoned resident publication is never retried.
+    drop(resumed_tick);
     control.resume_operation(TestStorageOperation::WriteMany);
+    block_on(db.tick()).expect("drain retained writes in publication order");
+    block_on(write.wait(DurabilityTier::Local)).expect("original write became durable");
+    block_on(fresh.wait(DurabilityTier::Local)).expect("following write became durable");
     drop(db);
     let reopened = block_on(Db::open(DbConfig::new(
         schema,
         storage_for_reopen,
         identity,
     )))
-    .expect("fresh facade may reopen after an ambiguous in-flight write");
+    .expect("reopen completed storage");
     let reopened_query = reopened
         .prepare_query(&reopened.table("todos"))
         .expect("prepare reopened query");
-    let durable_rows = block_on(reopened.all(&reopened_query, ReadOpts::default()))
-        .expect("reopened facade reads existing durable state");
-    assert_eq!(durable_rows.len(), 1);
-    assert_eq!(durable_rows[0].row_uuid(), durable_seed.row_uuid());
-    let fresh = block_on(reopened.insert(
-        "todos",
-        row! { title: "fresh after reopen" },
-        Default::default(),
-    ))
-    .expect("fresh write is usable after reopen");
-    block_on(fresh.wait(DurabilityTier::Local)).expect("fresh write is locally durable");
     let rows = block_on(reopened.all(&reopened_query, ReadOpts::default()))
         .expect("fresh facade reads durable state");
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.row_uuid() == write.row_uuid())
+            .unwrap()
+            .cell_at(0),
+        Some("restored now".into()),
+        "insert, delete, and restore persist in order"
+    );
     assert!(
         rows.iter()
             .any(|row| row.row_uuid() == durable_seed.row_uuid())
@@ -278,14 +282,33 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
 /// A cold queued preparation must not indefinitely prevent persistence of an
 /// earlier resident publication.  The two owner responsibilities are ordered
 /// by publication, not by later preparation work.
+/// Alice -> earlier insert -> persistence; Bob -> later update -> cold read.
+/// Controlled storage keeps Bob's read paused while Alice's bytes are checked
+/// through an independently reopened database.
 #[test]
 fn cold_queued_preparation_does_not_starve_earlier_deferred_persistence() {
+    struct OwnerWake(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for OwnerWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    struct OwnerScheduler(std::sync::Arc<OwnerWake>);
+    impl jazz::db::TickScheduler for OwnerScheduler {
+        fn schedule_tick(&self, _: jazz::db::TickUrgency) {}
+        fn schedule_tick_after(&self, _: u64) {}
+        fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+            Some(std::task::Waker::from(self.0.clone()))
+        }
+    }
     let schema = schema();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let (storage, control) = TestStorage::controlled(&family_refs);
+    let durable_storage = MemoryStorage::new(&family_refs).expect("durable backing");
+    let storage = TestStorage::wrap(durable_storage.clone());
+    let control = storage.control();
     let db = block_on(Db::open(DbConfig::new(
-        schema,
+        schema.clone(),
         storage.clone(),
         DbIdentity {
             node: NodeUuid::from_bytes([0x5d; 16]),
@@ -293,6 +316,8 @@ fn cold_queued_preparation_does_not_starve_earlier_deferred_persistence() {
         },
     )))
     .expect("open yielding database");
+    let owner_wake = std::sync::Arc::new(OwnerWake(std::sync::atomic::AtomicUsize::new(0)));
+    db.set_tick_scheduler(Some(Rc::new(OwnerScheduler(owner_wake.clone()))));
     let seeded = block_on(db.insert("todos", row! { title: "seed" }, Default::default()))
         .expect("seed durable row");
     block_on(seeded.wait(DurabilityTier::Local)).expect("seed is durable");
@@ -311,28 +336,94 @@ fn cold_queued_preparation_does_not_starve_earlier_deferred_persistence() {
     control.take_observed();
     control.pause_on(TestStorageOperation::Get);
     control.pause_on(TestStorageOperation::ScanOpen);
-    db.enqueue_update(
-        "todos".to_owned(),
-        seeded.row_uuid(),
-        row! { title: "later cold preparation" },
-        Default::default(),
-    )
-    .expect("queue later cold mutation");
+    let later = db
+        .enqueue_update(
+            "todos".to_owned(),
+            seeded.row_uuid(),
+            row! { title: "later cold preparation" },
+            Default::default(),
+        )
+        .expect("queue later cold mutation");
 
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    let mut tick = Box::pin(db.tick());
-    assert!(matches!(tick.as_mut().poll(&mut context), Poll::Pending));
+    for _ in 0..16 {
+        let mut tick = Box::pin(db.tick());
+        let result = tick.as_mut().poll(&mut context);
+        assert!(
+            !matches!(result, Poll::Ready(Err(_))),
+            "owner turn failed: {result:?}"
+        );
+    }
     assert!(
         control
             .observed()
             .contains(&TestStorageOperation::WriteMany),
         "an earlier resident publication must start persistence even while a later queued preparation is cold",
     );
-    assert!(matches!(
-        tick.as_mut().poll(&mut context),
-        Poll::Ready(Ok(()))
-    ));
+    assert!(
+        control.observed().iter().any(|operation| matches!(
+            operation,
+            TestStorageOperation::Get | TestStorageOperation::ScanOpen
+        )),
+        "later preparation must actually reach a paused cold read"
+    );
+    // Use a separate resident cache/controller over the same durable bytes;
+    // reading through the original facade could merely see its local overlay.
+    let durable = block_on(Db::open(DbConfig::new(
+        schema,
+        durable_storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorSubject::for_test_bytes([0x6d; 16]),
+        },
+    )))
+    .expect("inspect durable state while the later read remains paused");
+    let query = durable.prepare_query(&durable.table("todos")).unwrap();
+    let rows = block_on(durable.all(&query, ReadOpts::default())).unwrap();
+    assert!(
+        rows.iter().any(|row| row.row_uuid() == earlier.row_uuid()),
+        "earlier publication must persist independently of later preparation"
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.row_uuid() == seeded.row_uuid())
+            .unwrap()
+            .cell_at(0),
+        Some("seed".into())
+    );
+
+    owner_wake.0.store(0, std::sync::atomic::Ordering::SeqCst);
+    control.resume();
+    assert!(
+        owner_wake.0.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "storage readiness must wake the runtime after its tick has returned"
+    );
+    for _ in 0..4096 {
+        let mut tick = Box::pin(db.tick());
+        let result = tick.as_mut().poll(&mut context);
+        assert!(
+            !matches!(result, Poll::Ready(Err(_))),
+            "owner turn failed: {result:?}"
+        );
+        drop(tick);
+        if block_on(later.write_state())
+            .is_ok_and(|state| state.durability >= DurabilityTier::Local)
+        {
+            break;
+        }
+    }
+    block_on(earlier.wait(DurabilityTier::Local)).expect("earlier durability settles");
+    block_on(later.wait(DurabilityTier::Local)).expect("later mutation resumes and persists");
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let rows = block_on(db.all(&query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.row_uuid() == seeded.row_uuid())
+            .unwrap()
+            .cell_at(0),
+        Some("later cold preparation".into())
+    );
 }
 
 #[test]
