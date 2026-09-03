@@ -181,15 +181,11 @@ pub(super) fn query_read_set_for_read_view(
     read_view: &ReadViewSpec,
     settled_binding_view: Option<BindingViewKey>,
     settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
-    aggregate_query: bool,
     schema: &JazzSchema,
 ) -> Result<RequestedReadSet, Error> {
-    // A settled binding view stores aggregate output as synthetic result
-    // members, not source-table rows. Re-feeding it through the source graph
-    // would turn an aggregate replacement into an empty source and retract
-    // the public row. Its authoritative result is materialized directly by
-    // the subscription facade instead.
-    let settled_binding_view = (!aggregate_query).then_some(settled_binding_view).flatten();
+    // All receiver programs, including aggregates, consume the authority's
+    // exact source closure. Aggregate results are computed by the ordinary
+    // local graph; they are not a separate authority-provided result payload.
     if settled_binding_view.is_some() {
         // Settled rows are already the authority's effective result for the
         // exact BindingViewKey, whose identity includes the normalized read
