@@ -35,12 +35,13 @@ Invariant digest:
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may suppress a reset for a pre-cursor membership difference only when its server-stamped authorization-progress token matches the serving peer's current token for that reader and canonical binding view. `crates/jazz/src/peer.rs::tests::fast_authorization_progress_bounds_membership_resets` enforces both bounds.
 - `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
-- `INV-SYNC-28`: Before the reconstruction cut, structured-output wire v6 carries terminal resets and typed root/path edits atomically. At the cut it is retired; reconstruction and post-cut local publication are governed by target `INV-SYNC-31..35`.
+- `INV-SYNC-28`: The pre-reconstruction terminal carrier is historical scaffolding and is retired by `INV-SYNC-36`; it is not an authority-output compatibility contract.
 - `INV-SYNC-31`: A downstream subscription MUST synchronize canonical authored facts and their identity-preserving witness closure under an exact manifest/epoch/digest, never an application-projected row as replicated truth.
 - `INV-SYNC-32`: A receiver MUST select branch-key-qualified authored-history winners before projection, decode each synchronized fact in its authored schema, project it through the ordered catalogue lineage into the subscription read schema, and derive terminal output with its local IVM without supplementing unrelated local history.
 - `INV-SYNC-33`: The serving authority MUST decide visibility, membership, and settlement and ship only the safe, complete canonical closure plus identified authorized residual program from which the receiver can reproduce that authorized view; opaque admissions MUST be non-replayable across every authority/view/reader/branch-source/residual identity axis and their protected occurrence plus concrete version/layer witnesses.
 - `INV-SYNC-34`: A subscription is settled only when its receiver has verified every class of the complete reproducible input closure for the authority's declared manifest/epoch; reconnect, repair, reset, and recovery must re-establish that closure before reporting settlement.
 - `INV-SYNC-35`: A receiver MUST atomically and durably install a complete manifest, its facts, local IVM state/terminal, and any fast-known-state receipt before publication; it MUST expose neither a partial closure nor a fast receipt across a crash boundary.
+- `INV-SYNC-36`: Peer sync carries an exact authorized input closure, never authority-produced application terminal rows or ordered terminal operations. The receiver reconciles admitted authority inputs with tier-eligible local inputs and derives the only application terminal by running its local copy of the identified maintained Groove program.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
@@ -58,9 +59,18 @@ determined by its role, not by a separate wire language (ch. 1, principle 2).
 Roles include relay links (`PeerRole::Relay`), edge-client links
 (`PeerRole::ClientLink { identity }`), fate authority, durability, and eviction.
 
-A relay link represents the system author (`AuthorSubject::SYSTEM`) and performs no
-read narrowing. An edge-client link carries the terminated peer identity and
-narrows reads under that identity (ch. 7, ch. 9).
+A relay link is an authenticated transport capability with no permission
+subject. It neither implies `AuthorSubject::SYSTEM` nor independently narrows
+reads. An edge-client link carries the terminated peer identity and narrows
+reads under that identity. A scope-isolated client relay may carry only the
+foreground binding admitted for that exact relay scope and attachment; the
+upstream authority, not the relay, evaluates policy under that binding (ch. 7,
+ch. 9).
+
+A browser's scope-isolated client relay authenticates with its foreground
+session, not an administrative credential incidentally present in application
+configuration. Administrative admission must not replace that session or
+silently change the relay's transport capability.
 
 **Implementation status (2026-07-27).** Relay aggregation onto a shared upstream
 shape is intended, but the current implementation does not guarantee it. Its
@@ -101,15 +111,25 @@ derived on decode), replacing postcard's former field-by-field representation.
 **Decision, 2026-08-31 — relay-delegated policy snapshots are v1 fields.**
 `Subscribe` now ends with `delegated_session` and `FetchRowVersions` ends with
 `delegated_session`; each is an optional `(identity, claims)` snapshot. `None`
-is the ordinary direct-session form. `Some` is accepted only on an admitted
-`TrustedBackend` link whose authenticated transport identity is `SYSTEM`; a
-session/client link carrying it is rejected before shape admission or repair
-serving. A relay sends this immutable snapshot for each upstream coverage or
-repair request it owns, so two sessions with equal query bindings but distinct
-claims cannot share an evaluator or repair authorization. The receiver scopes
-both initial evaluation and row-version repair to that snapshot. `SYSTEM` is
-never a delegated subject. This is a deliberate redefinition of the sole,
-unreleased v1 layout: there is no old-shape decoder or compatibility path.
+is the ordinary direct-session form. `Some` has two admitted sources:
+
+- an admitted `TrustedBackend` link may deliberately attribute work to an
+  explicit backend session; or
+- a scope-isolated client-relay link may carry the immutable foreground binding
+  issued for its exact durable authentication scope and current admission
+  epoch.
+
+The receiver validates the snapshot against the link's server-issued
+capability before shape admission or repair serving. An ordinary session/client
+link, an unscoped relay, a mismatched scope, a stale admission epoch, or a raw
+client-supplied binding MUST be rejected. A scope-isolated relay sends the
+validated immutable snapshot for each upstream coverage or repair request it
+owns, so two sessions with equal query bindings but distinct claims cannot
+share an evaluator or repair authorization. The upstream authority scopes both
+initial evaluation and row-version repair to that snapshot; the relay does not
+evaluate policy. `SYSTEM` is never a relay transport identity or delegated
+subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
+there is no old-shape decoder or compatibility path.
 
 ### 8.1.1 Frozen wire-protocol v1 byte contract
 
@@ -144,13 +164,13 @@ sequence and the remaining Hello fields are otherwise well formed.
 Postcard enum ordinals are wire data. The wire-protocol v1 baseline freezes these permanent
 discriminants (decimal):
 
-| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `WirePeerRole`  | `Client=0`, `Core=1`, `Edge=2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `SetCurrentWriteSchema=12`, `CatalogueAck=13`, `ViewUpdate=14`, `FetchRowVersions=15`, `RowVersionPayloads=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29` |
+| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `WirePeerRole`  | `Client=0`, `Core=1`, `Edge=2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `SetCurrentWriteSchema=12`, `CatalogueAck=13`, `ViewUpdate=14`, `FetchRowVersions=15`, `RowVersionPayloads=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29`, `AuthorityPublication=30` |
 
 Future variants MUST append after these values; existing variants, fields, and
 their field order MUST NOT be reordered, inserted before, reused, or decoded
@@ -158,11 +178,47 @@ through a migration path. A new optional semantic variant additionally needs a
 new negotiated feature bit. Wire-protocol v1 intentionally provides neither
 old-version decoding nor migration.
 
+`AuthorityPublication` has the postcard field order `tx_id`, `commits`. `tx_id`
+is the upload/acknowledgement anchor and must occur among the members. `commits`
+is a length-prefixed sequence in strictly increasing `TxId` order; each member
+has field order `tx`, `versions`, using exactly the ordinary `CommitUnit`
+transaction and complete-version encodings. It is not a new transaction or a
+persistent storage format. Compression and fragmentation preserve the complete
+logical publication; a receiver never admits a physical fragment or parks one
+member for independent admission.
+
+Only a host-authenticated authority control-plane connection may submit this
+message to core. An admin-authenticated catalogue bootstrap connection also
+possesses that authority capability. A wire role, `SYSTEM` author, ordinary
+backend credential, or delegated session does not establish it. Normal
+`CommitUnit` messages on the authority link still undergo their normal policy
+checks; the prior-edge-admission privilege belongs to this publication only.
+
+Before changing transaction state, core validates the whole publication's
+structure, schema availability, replay identities, and parent closure. Members
+include all not-yet-globally-acknowledged parents; omitted parents must already
+be globally accepted at core. Missing catalogue/dependency context fails the
+whole attempt without acknowledging or separately parking members. The sender
+retains/reconstructs the complete publication for retry after context repair.
+The members' canonical transaction, history, and current-state records are
+persisted in one ordinary Groove batch. A crash or cancellation cannot expose
+only an accepted prefix after reopen; process-local alias allocations may
+precede this batch but are not admitted transactions. After all members are
+durable, core reconciles residual cross-edge heads using
+the shared merge machinery (ch. 4), then emits ordinary per-transaction fates.
+The edge retains a publication until every member has a selected-authority
+Global receipt, not merely its anchor. Partial acknowledgements never remove
+the remaining members' authority binding or their reconnect replay obligation.
+Edge recovery reconstructs unacknowledged publications from accepted history,
+including other clients' writes and edge merges, without requiring those
+clients to reconnect. It stops ancestry traversal at Global acknowledgements.
+
 Feature bits are also permanent: `SyncMessagePayload=1<<0`,
 `SessionFrame=1<<1`, `StructuredErrors=1<<2`, `PayloadLz4=1<<3`,
 `PayloadZstd=1<<4`, `MessageFragmentation=1<<5`,
 `AuthorizationScopeReceipts=1<<6`, `AuthorizationScopeViews=1<<7`, and
-`AuxiliaryChunks=1<<8`. `Hello` negotiates only the intersection. A message
+`AuxiliaryChunks=1<<8`, `ScopeIsolatedClientRelay=1<<9`, and
+`AuthorityPublications=1<<10`. `Hello` negotiates only the intersection. A message
 envelope or fragment MUST NOT declare a bit outside that intersection. Feature
 masks are postcard `u64` values and MUST be decoded and compared across all 64
 bits; a binding language MUST NOT apply a narrowing 32-bit bitwise operation.
@@ -410,6 +466,35 @@ membership decision authoritative while still allowing deterministic local IVM.
 
 ### 8.4.2 Atomic closure installation, transition, and publication
 
+**Live delivery contract (2026-09-02).** Within one active subscription on a
+live connection, `ViewUpdate`s form an ordered, nonduplicated stream. Transport
+backpressure retries only messages that have not been accepted for delivery;
+an internal queue/retry bug must not be normalized into application-level
+at-least-once delivery. Reconnect establishes fresh subscription coverage rather
+than replaying old incremental transitions against a new receiver. This contract
+does not require introducing wire sequence numbers. Commit-unit idempotency
+(§8.2) and resource-idempotent `Subscribe` (§8.5) do not imply idempotent
+`ViewUpdate` deltas.
+
+An incremental update must describe a possible transition from the exact state
+already received for that subscription. Removing an absent fact, removing the
+wrong version, adding an already-present exact fact, or retaining conflicting
+versions of one source row is a protocol error, not a harmless no-op. Facts
+inside one update are an unordered set transition: a valid remove-old/add-new
+replacement is checked against the predecessor and final state, not arbitrary
+vector order. A full reset explicitly replaces the closure and is validated as
+such, including coverage for required sources with no rows. Late frames for a
+detached subscription remain subject to the separate lifecycle/drop rules; they
+must never be applied to a replacement subscription.
+
+Reject an impossible transition atomically, before changing retained facts,
+durable state, settlement, or application output. Surface an actionable protocol
+error to the affected client read/subscription, with safe subscription/source
+identity and the failed transition check, not row contents or private claims.
+Do not silently discard the inconsistency, quietly convert it into a reset, or
+leave the client waiting until a timeout. The error must expose the broken
+producer/transport assumption so it can be fixed at its source.
+
 The receiver stages incoming closure members under an **inactive** manifest id.
 Staging validates identity, class, manifest inventory, catalogue order, and
 residual-program identity, but it does not change an active view, publish a
@@ -460,11 +545,13 @@ terminal delta. This is the manifest form of
 `groove/SPEC/INVARIANTS.md::INV-INC-1`: neither normal updates nor manifest
 bookkeeping permit a full terminal/cache rebuild.
 
-If the predecessor is absent, any count/root/add/remove check fails, or an
-incoming member belongs to another epoch, the receiver stages nothing into the
-active view and requests the exact missing predecessor/member. If exact repair
-cannot restore that predecessor, the authority sends a full reset manifest. It
-is never valid to infer a successor from a projected terminal cache.
+If a live transition contradicts its received predecessor or any
+count/root/add/remove check fails, the receiver leaves the active view unchanged
+and surfaces the protocol error described above. Missing payload bytes during
+an explicitly negotiated initial/reconnect repair can still request the exact
+missing member or a full reset; that repair mechanism must not hide an impossible
+live transition. It is never valid to infer a successor from a projected terminal
+cache.
 
 The required crash-point ladder covers: each inactive class member staged; IVM
 precomputation before the durable swap; after the durable swap but before local
@@ -512,12 +599,27 @@ projected-row repair. A missing manifest member of **any** fact class is repaire
 by its stable fact identity and class; if exact repair cannot prove the same
 manifest/epoch, the authority sends a new reset closure with a new manifest.
 
-`ViewUpdate` v6 terminal operations are legacy compatibility scaffolding, not
-the target replication contract. Reconstruction receivers never use them as an
-input to correctness, repair, or settlement; they may compare them only as
-diagnostics while the carrier is retired. They are never authoritative, and the
-compatibility path must be removed rather than generalized into a second sync
-engine.
+Authority-produced terminal operations are not part of the replication
+contract. They cannot be an input to correctness, repair, settlement, or
+application publication and MUST NOT appear in a post-cut `ViewUpdate`. The
+pre-cut `terminal_operations` carrier and terminal-reset cache are retired by
+`INV-SYNC-36`; implementations remove them rather than retaining an empty,
+diagnostic, compatibility, or facade-side application path. Ordered terminal
+operations remain an internal output of the receiver's own Groove graph and may
+cross the local Rust-to-host binding ABI, which is not peer sync.
+
+Each post-cut `ViewUpdate` instead carries typed covered-input facts scoped by
+its exact authority result and subscription. A covered input names the
+canonical normalized source path (including aliases, recursive, correlated, and
+policy roles), its logical source table and row occurrence, plus the logical
+table, concrete content/deletion version, transaction, and branch identity of
+the version body; the ordinary
+`VersionBundle` path carries the corresponding version body. A retained result therefore emits a covered-input
+remove/add when its nested child, deletion witness, or order-key source changes,
+even when result membership and relation facts do not. An idempotent authority
+tick emits neither fact transition nor body. This is the only publication seam
+needed by receiver-local reconciliation; it neither exposes collector output
+nor creates an authority ordering/index path.
 
 **Hard aggregate boundary; exceptions require a new protocol decision.** An
 ordinary aggregate is reconstructible only when its entire admitted canonical
@@ -574,22 +676,15 @@ and `cold_reset_bulk_ingest_matches_incremental_ingest`
 The remaining reset-specific bypass and the move to an `OrderedKvStorage`
 transaction are implementation work, not protocol invariants.
 
-**Structured-output delivery (v6 and reconstruction cut).** Before the
-reconstruction cut, a legacy v6 terminal reset replaces the receiver's complete
-cached terminal state before any following FIFO edit. Incremental updates carry
-typed, stable-keyed root/path `Insert`, `Update`, `Remove`, and `Move`
-operations emitted by the Groove terminal; they do not carry relation edges,
-row batches for facade-side assembly, or whole-result replacements.
-`SyncMessage::ViewUpdate` carries those terminal operations as one logical
-message, and generic transport fragmentation publishes no partial semantic
-update.
-
-At the reconstruction cut, `INV-SYNC-28` is retired: a received terminal reset
-is not a source of truth and cannot settle a view. The post-cut atomic local
-publication rule is target `INV-SYNC-35`, after the receiver has atomically
-installed a verified closure and run local IVM. Bindings then see one complete
-local terminal reset/edit sequence, never a partial publication. Row/version
-payload references and dedup remain separate from local terminal delivery.
+**Structured-output delivery after the reconstruction cut.** `INV-SYNC-28` is
+retired. Peer sync carries no terminal reset or root/path `Insert`, `Update`,
+`Remove`, or `Move`. The receiver atomically installs the verified covered
+inputs, runs its local maintained program, and publishes the resulting local
+terminal reset/edit sequence only after that graph quiesces (`INV-SYNC-35..36`).
+Bindings therefore see one receiver-local sequence, never a partial authority
+sequence or a mixture of authority indices and local-overlay indices.
+Row/version payload references and peer payload dedup remain separate from
+local terminal delivery.
 
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
@@ -966,5 +1061,6 @@ network wire-frame batches.
 
 ## Open Questions
 
+- 🔶 [#2503](https://github.com/garden-co/jazz/issues/2503) — Bound restart-recovered authority publications without exposing an original write separately from its edge-generated merges.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Protocol parking, transport state, materialization options, coverage/subsumption, retention, and version tags.
 - 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Catalogue admission and synchronization.

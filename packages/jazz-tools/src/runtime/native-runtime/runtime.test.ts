@@ -300,6 +300,50 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(read).resolves.toEqual([]);
   });
 
+  it("normalizes direct backend transport auth on connect and refresh", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemoryAsBackend: () =>
+          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+        openMemory: () => {
+          throw new Error("ordinary open must not be selected for a backend runtime");
+        },
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+    const auth = JSON.stringify({ backend_secret: "backend", jwt_token: "incidental.jwt" });
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", auth);
+    await runtime.waitForUpstreamServerConnection();
+    await runtime.updateAuth(auth);
+    await runtime.waitForUpstreamServerConnection();
+
+    expect(sockets).toHaveLength(2);
+    for (const socket of sockets) {
+      const prelude = JSON.parse(socket.sent[0] as string) as {
+        peer_identity: string;
+        auth: Record<string, unknown>;
+      };
+      expect(prelude.peer_identity).toBe('["urn:jazz:system","system"]');
+      expect(prelude.auth).toEqual({ backend_secret: "backend", sub: "system" });
+    }
+  });
+
   it("waits for server admission before running a strict relation query", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const calls: unknown[][] = [];
@@ -3023,6 +3067,146 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(detached).toEqual([]);
   });
 
+  it("selects one backend authority context for plain, relation, subscription, and transaction reads", async () => {
+    const calls: string[] = [];
+    const nativeDb = fakeDb({
+      prepareQuery: () => ({}),
+      all: () => {
+        throw new Error("backend read must not use client-local ABI");
+      },
+      allForBackend: () => {
+        calls.push("plain");
+        return encodeRows([]);
+      },
+      allRelationQueryForBackend: () => {
+        calls.push("relation");
+        return encodeRows([]);
+      },
+      allRelationSnapshotForBackend: () => {
+        calls.push("snapshot");
+        return encodeRelationSnapshot([]);
+      },
+      allRelationSnapshotInTransactionForBackend: () => {
+        calls.push("transaction-snapshot");
+        return encodeRelationSnapshot([]);
+      },
+      subscribeForBackend: () => {
+        calls.push("subscription");
+        return new ReadableStream();
+      },
+      subscribeRelationQueryForBackend: () => {
+        calls.push("relation-subscription");
+        return new ReadableStream();
+      },
+      allInTransactionForBackend: () => {
+        calls.push("transaction");
+        return encodeRows([]);
+      },
+      tick: () => undefined,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => {
+          throw new Error("ordinary open must not be selected for a backend runtime");
+        },
+        openMemoryAsBackend: () => nativeDb,
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+
+    await runtime.query(JSON.stringify({ table: "todos" }));
+    await runtime.query(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }));
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          {
+            column_name: "children",
+            table: "todos",
+            inner_column: "id",
+            outer_column: "todos.id",
+          },
+        ],
+      }),
+    );
+    runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    runtime.createSubscription(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }));
+    runtime.beginTransaction("mergeable", "backend-read-tx" as never);
+    await runtime.query(
+      JSON.stringify({ table: "todos" }),
+      null,
+      null,
+      JSON.stringify({ transaction_id: "backend-read-tx" }),
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          {
+            column_name: "children",
+            table: "todos",
+            inner_column: "id",
+            outer_column: "todos.id",
+          },
+        ],
+      }),
+      null,
+      null,
+      JSON.stringify({ transaction_id: "backend-read-tx" }),
+    );
+
+    expect(calls).toEqual([
+      "plain",
+      "relation",
+      "snapshot",
+      "subscription",
+      "relation-subscription",
+      "transaction",
+      "transaction-snapshot",
+    ]);
+  });
+
+  it("keeps backend authority when registering a schema view", async () => {
+    const allForBackend = vi.fn(() => encodeRows([]));
+    let nativeDb: ReturnType<typeof fakeDb>;
+    nativeDb = fakeDb({
+      prepareQuery: () => ({}),
+      allForBackend,
+      registerSchema: () => nativeDb,
+      tick: () => undefined,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemoryAsBackend: () => nativeDb,
+        openMemory: () => {
+          throw new Error("ordinary open must not be selected for a backend runtime");
+        },
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+
+    await runtime.registerSchemaView(testSchema).query(JSON.stringify({ table: "todos" }));
+
+    expect(allForBackend).toHaveBeenCalledOnce();
+  });
+
   it("hydrates broad Edge members through its attached Edge receipt, never a nested exact read", async () => {
     const attachments: unknown[] = [];
     const readOptions: unknown[] = [];
@@ -3488,6 +3672,65 @@ describe("NativeRuntimeAdapter server transport", () => {
       await vi.advanceTimersByTimeAsync(10);
       await second;
       expect(secondSettled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for the persistent owner's local answer without requiring a server", async () => {
+    vi.useFakeTimers();
+    try {
+      let ownerAnswered = false;
+      const attachedOptions: unknown[] = [];
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              all: () => new Uint8Array([0]),
+              connectUpstream: () => new FakeTransport([]),
+              prepareQuery: () => ({}),
+              attachQuery: (_query: unknown, opts: unknown) => {
+                attachedOptions.push(opts);
+                return {};
+              },
+              queryAttachmentIsCovered: () => ownerAnswered,
+              detachQuery: () => undefined,
+              setNonDurableClient: () => undefined,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.setNonDurableClient();
+      runtime.connectUpstreamPeer();
+      let settled = false;
+      const pending = runtime
+        .query(JSON.stringify({ table: "todos" }), null, "local")
+        .then((rows) => {
+          settled = true;
+          return rows;
+        });
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(false);
+      // An unrelated owner frame cannot acknowledge this exact query.
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(false);
+      ownerAnswered = true;
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(pending).resolves.toEqual([]);
+      expect(attachedOptions).toEqual([{ tier: "local" }]);
+      expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }

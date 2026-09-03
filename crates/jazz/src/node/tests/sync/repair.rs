@@ -165,6 +165,526 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
     ));
 }
 
+/// Internal boundary test: the public browser topology tests exercise the
+/// admitted foreground link. Here we prove the lower serving capability cannot
+/// fall back to a fresh policy evaluation or live result membership. Alice's
+/// authority-delivered row remains repairable after policy would reject Bob;
+/// a never-recorded physical version remains hidden.
+#[test]
+fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    relay_node.set_relay_authority_session_owner_for_test();
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    install_test_uuid_sub_claim(&mut relay_node, bob);
+    let row_uuid = row(0x29);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", row_uuid, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "retained authority delivery")),
+    );
+    let request = crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id);
+    let hidden_row = row(0x2a);
+    let hidden_tx = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", hidden_row, 11)
+            .made_by(alice)
+            .cells(owner_cells(alice, "not delivered to this scope")),
+    );
+    let update = relay_node.view_update_for_current_rows("todos").unwrap();
+    let SyncMessage::ViewUpdate(payload) = update else {
+        panic!("expected authority view update");
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let bundles = bundles
+        .into_iter()
+        .filter(|bundle| bundle.tx.tx_id == tx_id)
+        .collect::<Vec<_>>();
+    assert_eq!(bundles.len(), 1, "test setup must retain one delivered body");
+    relay_node
+        .record_scope_relay_authoritative_bundles(&bundles)
+        .resolve()
+        .unwrap();
+
+    assert!(
+        !relay_node
+            .dry_run_read_current_allows("todos", row_uuid, bob)
+            .unwrap(),
+        "planted control: a fresh Bob authority evaluation rejects this row"
+    );
+    let mut relay = PeerState::relay();
+    let retained_response = relay
+        .serve_row_versions(
+            &mut relay_node,
+            std::slice::from_ref(&request),
+            crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+        )
+        .resolve()
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = retained_response.as_slice()
+    else {
+        panic!("expected retained same-scope repair response");
+    };
+    assert_eq!(version_bundles.len(), 1);
+
+    let hidden = crate::protocol::RowVersionRef::new("todos", hidden_row, hidden_tx);
+    let hidden_response = relay
+        .serve_row_versions(
+            &mut relay_node,
+            &[hidden],
+            crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+        )
+        .resolve()
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = hidden_response.as_slice()
+    else {
+        panic!("expected retained same-scope repair response");
+    };
+    assert!(version_bundles.is_empty(), "unrecorded ref stays hidden");
+
+    // A matching digest alone is not a capability. Corrupting the retained
+    // scope value must fail closed rather than serve the row under a guessed
+    // scope key.
+    let scope_digest = relay_node.client_relay_scope().unwrap().durable_digest();
+    let table_id = relay_node
+        .physical_table_id_for_schema(bundles[0].versions[0].schema_version(), "todos")
+        .unwrap();
+    {
+        let store = relay_node
+            .database
+            .direct_record_store(crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE)
+            .unwrap();
+        store
+            .set(
+            &[
+                Value::Bytes(scope_digest.to_vec()),
+                Value::U64(table_id.0),
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_id.time.0),
+                Value::Uuid(tx_id.node.0),
+            ],
+            &[
+                Value::U64(1),
+                Value::String("wrong scope".to_owned()),
+                Value::Nullable(None),
+            ],
+            )
+            .resolve()
+            .unwrap();
+    }
+    assert!(matches!(
+        relay
+            .serve_row_versions(
+                &mut relay_node,
+                std::slice::from_ref(&request),
+                crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+            )
+            .resolve(),
+        Err(Error::InvalidStoredValue("scope relay ledger value does not match admitted scope"))
+    ));
+    {
+        let store = relay_node
+            .database
+            .direct_record_store(crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE)
+            .unwrap();
+        store
+            .set(
+            &[
+                Value::Bytes(scope_digest.to_vec()),
+                Value::U64(table_id.0),
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_id.time.0),
+                Value::Uuid(tx_id.node.0),
+            ],
+            &[
+                Value::U64(2),
+                Value::String("wrong scope".to_owned()),
+                Value::Nullable(None),
+            ],
+            )
+            .resolve()
+            .unwrap();
+    }
+    assert!(matches!(
+        relay
+            .serve_row_versions(
+                &mut relay_node,
+                std::slice::from_ref(&request),
+                crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+            )
+            .resolve(),
+        Err(Error::InvalidStoredValue("unknown scope relay ledger format"))
+    ));
+}
+
+/// The durable ledger is not a general replacement for authority policy.
+/// A relay without a live host-attached scope must fail closed even if it has
+/// the row locally; a generic relay must forward the repair to its authority.
+#[test]
+fn scope_relay_repair_requires_a_live_scope_capability() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    let row_uuid = row(0x2b);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", row_uuid, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "locally cached but no capability")),
+    );
+    let response = PeerState::relay()
+        .serve_row_versions(
+            &mut relay_node,
+            &[crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)],
+            crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+        )
+        .resolve()
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = response.as_slice() else {
+        panic!("expected one row-version payload response");
+    };
+    assert!(version_bundles.is_empty());
+}
+
+/// A stale repair payload may legitimately fill the relay's local history,
+/// but it was not selected authority evidence and must not become durable
+/// same-scope disclosure authority.
+#[test]
+fn stale_repair_payload_is_cached_without_granting_scope_ledger_access() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    relay_node.set_relay_authority_session_owner_for_test();
+    let alice = user(0xa1);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    let row_uuid = row(0x30);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", row_uuid, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "stale repair payload")),
+    );
+    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+        panic!("expected authority view update");
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let bundle = bundles.into_iter().find(|bundle| bundle.tx.tx_id == tx_id).unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(bundle.versions[0].schema_version(), "todos")
+        .unwrap();
+    relay_node
+        .record_scope_relay_authoritative_repair_payloads(&[bundle], false)
+        .resolve()
+        .unwrap();
+    assert!(
+        !relay_node.row_history("todos", row_uuid).unwrap().is_empty(),
+        "stale payload may still leave a locally cached row version"
+    );
+    assert!(
+        !relay_node
+            .scope_relay_repair_ledger_contains(
+                table_id,
+                &crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id),
+            )
+            .resolve()
+            .unwrap(),
+        "stale payload never grants future same-scope repair"
+    );
+}
+
+/// A repair frame may contain a valid but unsolicited version. It can even be
+/// locally resident already; only the exact requested-and-applied subset may
+/// enter the durable disclosure ledger.
+#[test]
+fn repair_ledger_ignores_unsolicited_resident_payload_versions() {
+    let schema = schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(3), schema);
+    relay_node.set_relay_authority_session_owner_for_test();
+    let requested_row = row(0x31);
+    let requested_tx = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", requested_row, 10).cells(title_cells("requested")),
+    );
+    let unsolicited_row = row(0x32);
+    let unsolicited_tx = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", unsolicited_row, 11).cells(title_cells("unsolicited")),
+    );
+    let requested = crate::protocol::RowVersionRef::new("todos", requested_row, requested_tx);
+    let unsolicited =
+        crate::protocol::RowVersionRef::new("todos", unsolicited_row, unsolicited_tx);
+    let response = PeerState::client_link(AuthorSubject::SYSTEM)
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: vec![requested.clone(), unsolicited.clone()],
+                delegated_session: None,
+            },
+        )
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = response.as_slice()
+    else {
+        panic!("expected repair payload frame");
+    };
+    let table_id = relay_node
+        .physical_table_id_for_schema(version_bundles[0].versions[0].schema_version(), "todos")
+        .unwrap();
+    // First cache B through a legitimate one-ref repair without granting it
+    // durable authority. The next frame carries B again but requests only A.
+    relay_node
+        .apply_row_version_payloads_for_requests(
+            std::slice::from_ref(&unsolicited),
+            version_bundles.clone(),
+        )
+        .resolve()
+        .unwrap();
+    assert!(
+        !relay_node.row_history("todos", unsolicited_row).unwrap().is_empty(),
+        "setup: unsolicited version is locally resident"
+    );
+    let applied = relay_node
+        .apply_row_version_payloads_for_requests(
+            std::slice::from_ref(&requested),
+            version_bundles.clone(),
+        )
+        .resolve()
+        .unwrap();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].tx.tx_id, requested_tx);
+    relay_node
+        .record_scope_relay_authoritative_repair_payloads(&applied, true)
+        .resolve()
+        .unwrap();
+    assert!(
+        relay_node
+            .scope_relay_repair_ledger_contains(table_id, &requested)
+            .resolve()
+            .unwrap()
+    );
+    assert!(
+        !relay_node
+            .scope_relay_repair_ledger_contains(table_id, &unsolicited)
+            .resolve()
+            .unwrap(),
+        "unsolicited locally resident B never becomes repairable"
+    );
+}
+
+/// A repaired version is durable knowledge for exactly the host-attested
+/// scope that received it. Reopening that scope retains the closure; opening
+/// the same physical database under a different admitted subject does not.
+#[test]
+fn scope_relay_repair_ledger_survives_reopen_only_for_exact_scope() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (relay_dir, mut relay_node) = open_node_with_schema(node(9), schema.clone());
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    install_test_uuid_sub_claim(&mut relay_node, bob);
+    let alice_scope = unsafe {
+        crate::db::ClientRelayScope::from_admitted_storage_owner(
+            "relay-storage-owner".to_owned(),
+            alice,
+        )
+    };
+    relay_node
+        .configure_scope_isolated_client_relay(alice_scope.clone())
+        .unwrap();
+    let row_uuid = row(0x2c);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", row_uuid, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "reopen retained authority delivery")),
+    );
+    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+        panic!("expected authority view update");
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(bundles[0].versions[0].schema_version(), "todos")
+        .unwrap();
+    relay_node
+        .record_scope_relay_authoritative_bundles(&bundles)
+        .resolve()
+        .unwrap();
+    let request = crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id);
+    drop(relay_node);
+
+    let mut reopened = reopen_node_at(&relay_dir, node(9), schema.clone());
+    reopened
+        .configure_scope_isolated_client_relay(alice_scope)
+        .unwrap();
+    assert!(
+        reopened
+            .scope_relay_repair_ledger_contains(table_id, &request)
+            .resolve()
+            .unwrap(),
+        "same durable scope retains delivered closure"
+    );
+    drop(reopened);
+
+    let mut wrong_scope = reopen_node_at(&relay_dir, node(9), schema);
+    wrong_scope
+        .configure_scope_isolated_client_relay(unsafe {
+            crate::db::ClientRelayScope::from_admitted_storage_owner(
+                "relay-storage-owner".to_owned(),
+                bob,
+            )
+        })
+        .unwrap();
+    assert!(
+        !wrong_scope
+            .scope_relay_repair_ledger_contains(table_id, &request)
+            .resolve()
+            .unwrap(),
+        "different admitted scope cannot reuse ledger"
+    );
+}
+
+/// Foreground pending writes can repair their own versions before upstream
+/// receipt, but only when the admitted foreground session is their author.
+#[test]
+fn scope_relay_authored_pending_repairs_require_exact_author_scope() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    install_test_uuid_sub_claim(&mut relay_node, bob);
+    relay_node
+        .configure_scope_isolated_client_relay(unsafe {
+            crate::db::ClientRelayScope::from_admitted_storage_owner(
+                "relay-storage-owner".to_owned(),
+                alice,
+            )
+        })
+        .unwrap();
+    let alice_row = row(0x2d);
+    let alice_tx = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", alice_row, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "pending own write")),
+    );
+    let bob_row = row(0x2e);
+    let bob_tx = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", bob_row, 11)
+            .made_by(bob)
+            .cells(owner_cells(bob, "pending foreign write")),
+    );
+    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+        panic!("expected authority view update");
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let alice_bundle = bundles.iter().find(|bundle| bundle.tx.tx_id == alice_tx).unwrap();
+    let bob_bundle = bundles.iter().find(|bundle| bundle.tx.tx_id == bob_tx).unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(alice_bundle.versions[0].schema_version(), "todos")
+        .unwrap();
+    relay_node
+        .record_scope_relay_authored_pending_versions(
+            &alice_bundle.tx,
+            &alice_bundle.versions,
+            alice,
+        )
+        .resolve()
+        .unwrap();
+    relay_node
+        .record_scope_relay_authored_pending_versions(&bob_bundle.tx, &bob_bundle.versions, alice)
+        .resolve()
+        .unwrap();
+    assert!(
+        relay_node
+            .scope_relay_repair_ledger_contains(
+                table_id,
+                &crate::protocol::RowVersionRef::new("todos", alice_row, alice_tx),
+            )
+            .resolve()
+            .unwrap()
+    );
+    assert!(
+        !relay_node
+            .scope_relay_repair_ledger_contains(
+                table_id,
+                &crate::protocol::RowVersionRef::new("todos", bob_row, bob_tx),
+            )
+            .resolve()
+            .unwrap(),
+        "a mismatched transaction author never acquires same-scope repair authority"
+    );
+}
+
+/// Ledger admission follows physical version carriers, not live rows: a
+/// deletion version remains repairable after it leaves the current result.
+#[test]
+fn scope_relay_ledger_records_deletion_history_version_carriers() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    relay_node.set_relay_authority_session_owner_for_test();
+    let row_uuid = row(0x2f);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .made_by(alice)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected deletion commit unit");
+    };
+    relay_node
+        .ingest_relay_commit_unit(tx.clone(), versions.clone())
+        .resolve()
+        .unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(versions[0].schema_version(), "todos")
+        .unwrap();
+    relay_node
+        .record_scope_relay_authoritative_bundles(&[VersionBundle {
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+            tx,
+            versions,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: DurabilityTier::Local,
+        }])
+        .resolve()
+        .unwrap();
+    assert!(
+        relay_node
+            .scope_relay_repair_ledger_contains(
+                table_id,
+                &crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id),
+            )
+            .resolve()
+            .unwrap(),
+        "deletion/history carrier is a durable exact repair ref"
+    );
+}
+
 #[test]
 fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
@@ -194,20 +714,23 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         )
         .unwrap();
 
-    let mut update = core.view_update_for_current_rows("todos").unwrap();
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
-        result_member_adds,
+        program_fact_adds,
         ..
     }) = &mut update
     else {
         panic!("expected view update");
     };
     version_carriers.clear();
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row_uuid, tx_id)]
-    );
+    assert!(program_fact_adds.iter().any(|fact| {
+        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(input)
+            if input.version_table.as_str() == "todos"
+                && input.source_row == row_uuid
+                && input.version.tx == tx_id)
+    }));
 
     let missing = reader
         .missing_known_state_row_version_refs(&update)
@@ -352,42 +875,37 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     let (shape, binding) = core.whole_table_shape_binding("tasks").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
 
-    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        subscription: crate::protocol::SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
-        },
-        settled_through: GlobalTime(1),
-        reset_result_set: false,
-        version_carriers: Vec::new(),
-        peer_payload_inventory: Default::default(),
-        result_member_adds: vec![("tasks".to_owned().into(), row_uuid, tx_id).into()],
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    });
+    let subscription = crate::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
+        version_carriers,
+        program_fact_adds,
         ..
-    }) = &update
+    }) = &mut update
     else {
         panic!("expected view update");
     };
-    assert_eq!(
-        result_member_adds,
-        &vec![("tasks".to_owned().into(), row_uuid, tx_id)],
-        "the pending update names the receiver's projected table"
-    );
+    assert!(program_fact_adds.iter().any(|fact| matches!(
+        fact,
+        crate::protocol::ProgramFactEntry::CoveredInput(input)
+            if input.source.table.as_str() == "tasks"
+                && input.version_table.as_str() == "todos"
+                && input.source_row == row_uuid
+                && input.version.tx == tx_id
+    )), "the exact closure names the receiver's projected source row");
+    version_carriers.clear();
 
     let requests = reader
         .missing_known_state_row_version_refs(&update)
         .unwrap();
     assert_eq!(
         requests,
-        vec![crate::protocol::RowVersionRef::new("tasks", row_uuid, tx_id)],
-        "with no carrier, the update must issue FetchRowVersions"
+        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)],
+        "with no carrier, fetch the authored coordinate, not the projected source name"
     );
     let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let messages = peer
@@ -511,7 +1029,10 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     // payload is considered: logical-name matching must fail closed.
     let unknown = crate::protocol::RowVersionRef::new("unknown", row_uuid, tx_id);
     assert!(
-        core.row_version_payloads_for_refs(std::slice::from_ref(&unknown), AuthorSubject::SYSTEM)
+        core.row_version_payloads_for_refs(
+            std::slice::from_ref(&unknown),
+            crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(AuthorSubject::SYSTEM),
+        )
             .is_err(),
         "the serving repair path must reject an unknown projected table too"
     );
@@ -644,10 +1165,26 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        result_member_adds: vec![("tasks".to_owned().into(), task_row, tx_id).into()],
+        result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
+        program_fact_adds: vec![crate::protocol::ProgramFactEntry::CoveredInput(
+            crate::protocol::CoveredInputEntry {
+                source: crate::protocol::ProgramSourceId {
+                    table: "tasks".to_owned().into(),
+                    path: vec![crate::protocol::ProgramSourceRole::Root],
+                },
+                version_table: "tasks".to_owned().into(),
+                source_row: task_row,
+                version: crate::protocol::RowVersionRefEntry {
+                    tx: tx_id,
+                    schema_version: Some(reintroduced.version_id()),
+                    layer: crate::protocol::ResultRowLayer::Content,
+                    batch: Some(tx_id),
+                    branch_or_prefix: None,
+                    row_digest: None,
+                },
+            },
+        )],
         program_fact_removes: Vec::new(),
     });
     assert_eq!(

@@ -46,8 +46,6 @@ use crate::node::{
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
-#[cfg(feature = "sync-autopsy")]
-use crate::protocol::expand_version_carriers;
 use crate::protocol::{
     AuthorizationScopeReceipt, BindingSource, BindingViewKey, BranchSelector, BranchViewBase,
     ChunkRequestBatch, ChunkRequestEntry, ChunkResponse, ChunkResponseBatch, ChunkResponseEntry,
@@ -701,6 +699,8 @@ pub struct PeerIoPump {
     local_chunks: groove::chunks::LocalChunkReader,
     connection: u64,
     role: PeerIoPumpRole,
+    wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
+    wire_outbound_frame: Option<Rc<RefCell<crate::wire::WireFrame>>>,
 }
 
 /// One encoded auxiliary frame whose source obligation remains owned by this
@@ -742,14 +742,34 @@ impl PeerIoPump {
         local_chunks: groove::chunks::LocalChunkReader,
         connection: u64,
         role: PeerIoPumpRole,
+        wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
     ) -> Self {
         resolver.register_connection(connection, matches!(role, PeerIoPumpRole::Upstream));
+        let wire_outbound_frame = wire_inbound_context.as_ref().map(|context| {
+            let mut envelope = crate::wire::WireEnvelope::new(
+                context.expected_protocol_version(),
+                crate::wire::FEATURE_NONE,
+                Vec::new(),
+            );
+            if let Some(session) = context.expected_session().cloned() {
+                envelope = envelope.with_session(session);
+            }
+            Rc::new(RefCell::new(crate::wire::WireFrame::Message(envelope)))
+        });
         Self {
             resolver,
             local_chunks,
             connection,
             role,
+            wire_inbound_context,
+            wire_outbound_frame,
         }
+    }
+
+    fn wire_inbound_context(&self) -> Result<&crate::wire::WireInboundContext, String> {
+        self.wire_inbound_context.as_deref().ok_or_else(|| {
+            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
+        })
     }
 
     /// Route an auxiliary message received by the binding. Returns `false` for
@@ -893,17 +913,17 @@ impl PeerIoPump {
     pub async fn route_incoming_wire_frame(
         &self,
         frame: Vec<u8>,
-        negotiated_features: crate::wire::WireFeatures,
     ) -> Result<Option<Vec<u8>>, String> {
         let decoded = crate::wire::decode_frame(&frame)
             .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
         let crate::wire::WireFrame::Message(envelope) = decoded else {
             return Ok(Some(frame));
         };
-        let payload = crate::wire::decompress_sync_payload(&envelope.payload, envelope.features)
-            .map_err(|error| format!("malformed auxiliary wire payload: {error}"))?;
-        let message = crate::wire::decode_sync_message_for_features(&payload, negotiated_features)
-            .map_err(|error| format!("malformed auxiliary sync payload: {error:?}"))?;
+        let context = self.wire_inbound_context()?;
+        let mut decoder = crate::wire::WireStreamDecoder::new(context.negotiated_features())
+            .map_err(|error| format!("invalid auxiliary wire context: {error}"))?;
+        let message = crate::wire::admit_complete_envelope(context, &mut decoder, envelope)
+            .map_err(|error| format!("malformed auxiliary wire envelope: {error:?}"))?;
         match self.route_incoming(message).await {
             Ok(()) => Ok(None),
             Err(_) => Ok(Some(frame)),
@@ -913,15 +933,8 @@ impl PeerIoPump {
     /// Encode one bounded auxiliary batch as an ordinary complete wire frame.
     /// Bindings request one chunk per frame, keeping the maximum 256 KiB node
     /// response below the non-fragmented wire-frame bound.
-    pub fn take_outbound_wire_frame(
-        &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let Some(mut reservation) =
-            self.reserve_outbound_wire_frame(protocol_version, negotiated_features, session)?
-        else {
+    pub fn take_outbound_wire_frame(&self) -> Result<Option<Vec<u8>>, String> {
+        let Some(mut reservation) = self.reserve_outbound_wire_frame()? else {
             return Ok(None);
         };
         let frame = reservation.take_frame();
@@ -934,19 +947,12 @@ impl PeerIoPump {
     /// it after a rejected send; dropping it also restores the original batch.
     pub(crate) fn reserve_outbound_wire_frame(
         &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
     ) -> Result<Option<ReservedOutboundWireFrame>, String> {
+        let context = self.wire_inbound_context()?;
         let Some(message) = self.take_outbound(1) else {
             return Ok(None);
         };
-        let frame = match Self::encode_outbound_wire_frame(
-            message.clone(),
-            protocol_version,
-            negotiated_features,
-            session,
-        ) {
+        let frame = match self.encode_outbound_wire_frame(message.clone(), context) {
             Ok(frame) => frame,
             Err(error) => {
                 self.restore_outbound(message);
@@ -966,27 +972,20 @@ impl PeerIoPump {
     /// transport chooses a smaller batch boundary.
     pub fn take_outbound_wire_frames(
         &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
         max_frames: usize,
         max_bytes: usize,
     ) -> Result<Vec<Vec<u8>>, String> {
         if max_frames == 0 || max_bytes == 0 {
             return Ok(Vec::new());
         }
+        let context = self.wire_inbound_context()?;
         let mut frames = Vec::new();
         let mut total_bytes: usize = 0;
         while frames.len() < max_frames {
             let Some(message) = self.take_outbound(1) else {
                 break;
             };
-            let frame = Self::encode_outbound_wire_frame(
-                message.clone(),
-                protocol_version,
-                negotiated_features,
-                session.clone(),
-            );
+            let frame = self.encode_outbound_wire_frame(message.clone(), context);
             let frame = match frame {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -1016,22 +1015,34 @@ impl PeerIoPump {
     }
 
     fn encode_outbound_wire_frame(
+        &self,
         message: SyncMessage,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
+        context: &crate::wire::WireInboundContext,
     ) -> Result<Vec<u8>, String> {
+        let negotiated_features = context.negotiated_features();
         let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
             .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
         let active_features = negotiated_features
             & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD);
-        let mut envelope =
-            crate::wire::WireEnvelope::new(protocol_version, active_features, payload);
-        if let Some(session) = session {
-            envelope = envelope.with_session(session);
+        let wire_outbound_frame = self.wire_outbound_frame.as_ref().ok_or_else(|| {
+            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
+        })?;
+        let mut frame = wire_outbound_frame.borrow_mut();
+        {
+            let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
+                unreachable!("auxiliary outbound template is always a message frame");
+            };
+            envelope.protocol_version = context.expected_protocol_version();
+            envelope.features = active_features;
+            envelope.payload = payload;
         }
-        crate::wire::encode_frame(&crate::wire::WireFrame::Message(envelope))
-            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"))
+        let encoded = crate::wire::encode_frame(&frame)
+            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"));
+        let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
+            unreachable!("auxiliary outbound template is always a message frame");
+        };
+        envelope.payload = Vec::new();
+        encoded
     }
 
     /// Drain one bounded auxiliary batch for immediate transmission.
@@ -1540,9 +1551,12 @@ type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 /// Relay-owned upstream usage sites are distinct from public `SubscriptionStream`
 /// owners. A served connection can disappear without dropping a public stream,
-/// so relay lifecycle has to retain its own connection-scoped ownership record.
+/// so each connection retains its own pin on a possibly shared upstream handle.
+/// The tuple key separates upstream wire identity, connection lifetime, and
+/// downstream read semantics. Local and remote readers on the same connection
+/// can pin one authority stream without sharing their local evaluator.
 type RelayUpstreamSubscriptionOwners =
-    Rc<RefCell<BTreeMap<SubscriptionKey, RelayUpstreamSubscriptionOwner>>>;
+    Rc<RefCell<BTreeMap<(SubscriptionKey, u64, ReadViewKey), RelayUpstreamSubscriptionOwner>>>;
 type PendingRelaySubscriptionRejections =
     Rc<RefCell<BTreeMap<u64, VecDeque<RelaySubscriptionRejection>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
@@ -1617,6 +1631,7 @@ type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
 struct PendingLocalPublication {
     published: Rc<PublishedTransaction>,
     upload_unit: Option<SyncMessage>,
+    settlement: Pin<Box<dyn Future<Output = Result<TxId, Error>> + 'static>>,
 }
 
 type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;
@@ -2085,7 +2100,6 @@ struct PendingUpstreamSubscription {
 struct QueryCoverageRegistration {
     coverage: CoverageKey,
     subscription: PendingUpstreamSubscription,
-    owns_subscription: bool,
     ref_count: usize,
 }
 
@@ -2133,7 +2147,16 @@ struct CoverageGroup {
     policy_binding_origin: CoveragePolicyBindingOrigin,
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
+    /// Claim revision whose replacement opening reset is currently being
+    /// delivered. A retry of that same revision resumes this per-subscriber
+    /// cursor; a newer admission revision starts every live usage over.
+    pending_claim_refresh_revision: Option<u64>,
     initialized: bool,
+    /// The usage-site subscription whose authority result supplies this
+    /// group's membership. An authoritative server evaluates the incoming
+    /// downstream subscription directly; a relay that must ask its upstream
+    /// instead uses its separately allocated upstream usage handle.
+    authority_result_subscription: SubscriptionKey,
     upstream_subscription: SubscriptionKey,
     upstream_opts: RegisterShapeOptions,
     awaiting_upstream_settlement: bool,
@@ -2145,12 +2168,11 @@ enum CoveragePolicyBindingOrigin {
     Delegated,
 }
 
-/// One propagated coverage group owned by one downstream relay connection.
+/// One downstream connection's pin on a propagated coverage stream.
 ///
 /// `upstream_subscription` is a usage-site wire handle, while `coverage`
-/// identifies the local shared evaluator that must be retired with it. Keeping
-/// both prevents a dropped connection from removing an unrelated sibling's
-/// logically identical coverage.
+/// identifies this connection's local evaluator. Only releasing the final pin
+/// retires the upstream handle; local evaluator cleanup remains per connection.
 struct RelayUpstreamSubscriptionOwner {
     downstream_connection_epoch: u64,
     coverage: CoverageKey,
@@ -2162,6 +2184,10 @@ struct RelayUpstreamSubscriptionOwner {
 /// connection before that connection's served coverage is retired.
 struct RelaySubscriptionRejection {
     coverage: CoverageKey,
+    /// Exact authenticated policy scope that admitted the downstream usages.
+    /// Teardown must use this scope rather than a bare wire key, which is
+    /// ambiguous when one relay multiplexes the same shape across readers.
+    policy_binding: (AuthorSubject, BTreeMap<String, Value>),
     downstream_subscriptions: BTreeSet<SubscriptionKey>,
     reason: SubscribeRejectReason,
 }
@@ -2241,12 +2267,18 @@ type Outbox = Rc<RefCell<UploadOutbox>>;
 struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
+    authority_members: HashSet<TxId>,
+    authority_receipts: HashSet<TxId>,
 }
 
 impl UploadOutbox {
     fn push(&mut self, pending: PendingUpload) -> bool {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;
+        }
+        if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
+            self.authority_members
+                .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
         }
         self.entries.push_back(pending);
         true
@@ -2265,9 +2297,46 @@ impl UploadOutbox {
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
+        self.reindex_authority_members();
     }
 
-    fn remove_released(&mut self, released: &mut HashSet<TxId>) {
+    fn reindex_authority_members(&mut self) {
+        self.authority_members.clear();
+        for pending in &self.entries {
+            if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
+                self.authority_members
+                    .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
+            }
+        }
+        self.authority_receipts
+            .retain(|tx_id| self.authority_members.contains(tx_id));
+    }
+
+    fn remove_released(&mut self, released: &mut HashSet<TxId>) -> HashSet<TxId> {
+        if !self.authority_members.is_empty() {
+            self.authority_receipts.extend(
+                released
+                    .iter()
+                    .filter(|tx_id| self.authority_members.contains(tx_id))
+                    .copied(),
+            );
+            let completed = self
+                .entries
+                .iter()
+                .filter(|pending| match &pending.unit {
+                    Some(SyncMessage::AuthorityPublication(publication)) => publication
+                        .commits
+                        .iter()
+                        .all(|unit| self.authority_receipts.contains(&unit.tx.tx_id)),
+                    _ => released.contains(&pending.tx_id),
+                })
+                .map(|pending| pending.tx_id)
+                .collect::<HashSet<_>>();
+            self.retain(|pending| !completed.contains(&pending.tx_id));
+            return completed;
+        }
+        // Ordinary single-transaction uploads retain their prefix fast path.
+        let completed = released.clone();
         while self
             .entries
             .front()
@@ -2280,9 +2349,10 @@ impl UploadOutbox {
             self.tx_ids.remove(&pending.tx_id);
         }
         if released.is_empty() {
-            return;
+            return completed;
         }
         self.retain(|pending| !released.contains(&pending.tx_id));
+        completed
     }
 }
 
@@ -2311,6 +2381,7 @@ fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessag
         // but before subscriber ingest queues the exact inbound unit. The
         // canonical payload must win even when both entries have a body.
         pending.unit = Some(unit);
+        outbox.reindex_authority_members();
         return true;
     }
     outbox.push(PendingUpload { tx_id, unit });
@@ -2375,6 +2446,9 @@ impl InitialSyncFlushCadence {
 pub struct QueryAttachment {
     subscriptions: Vec<SubscriptionKey>,
     required_after: Vec<(BindingViewKey, u64)>,
+    /// A memory-only foreground reads local state from its durable owner.
+    /// That delivery is required independently of any remote authority receipt.
+    requires_delivery_receipt: bool,
     /// Edge/Global coverage is live authority evidence, not merely a newer
     /// durable view generation.
     requires_current_authority_receipt: bool,
@@ -2469,6 +2543,7 @@ mod reads;
 #[doc(hidden)]
 pub use reads::BindingHydrationError;
 mod subscriptions;
+pub(crate) mod terminal_record;
 mod transactions;
 
 /// Counts produced while servicing non-blocking database connection work.
@@ -2508,7 +2583,9 @@ mod peer_connection;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
 mod config;
-pub use config::{DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource};
+pub use config::{
+    ClientRelayScope, DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource,
+};
 
 /// One-shot read options.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2728,21 +2805,6 @@ fn effective_read_tier(opts: &ReadOpts) -> DurabilityTier {
     }
 }
 
-fn supports_pending_overlay_reconciliation(query: &Query) -> bool {
-    // ponytail: row-key reconciliation currently covers flat root results;
-    // add contributor provenance before enabling structured or aggregate shapes.
-    query.aggregate.is_none()
-        && query.flat_join.is_none()
-        && query.array_subqueries.is_empty()
-        && query.includes.is_empty()
-        && query.joins.is_empty()
-        && query.policy_branches.is_empty()
-        && query.inherits.is_empty()
-        && query.reachable.is_empty()
-        && query.limit.is_none()
-        && query.offset == 0
-}
-
 fn upstream_register_shape_options(
     tier: DurabilityTier,
     read_view: ReadViewSpec,
@@ -2809,15 +2871,14 @@ fn ensure_supported_register_shape_options(
     opts: &RegisterShapeOptions,
     local_receiver: bool,
     peer_role: PeerRole,
-    relay_authority_session_admitted: bool,
+    delegated_session_capability: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
-    if opts.binding_source == BindingSource::RelayAuthoritySession
-        && !relay_authority_session_admitted
+    if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
             ErrorCode::Query,
-            "relay authority-session bindings may only be registered by an admitted upstream relay",
+            "relay authority-session bindings require a live server-admitted scope-isolated relay capability",
         ));
     }
     let supported = match (local_receiver, peer_role) {
@@ -2949,7 +3010,8 @@ fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust)
 /// the direction or authenticated link role after dispatch.
 fn subscriber_inbound_message_is_authority_only(
     message: &SyncMessage,
-    trust: CommitUnitTrust,
+    ingest: CommitUnitIngestContext,
+    peer: &crate::peer::PeerState,
 ) -> bool {
     matches!(
         message,
@@ -2965,13 +3027,61 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
             | SyncMessage::AuthorizationScopeUnavailable { .. }
             | SyncMessage::AuthorizationScopeDecision { .. }
-    ) || (trust == CommitUnitTrust::Session && matches!(message, SyncMessage::SessionClaims { .. }))
+    ) || (matches!(message, SyncMessage::SessionClaims { .. })
+        && (peer.rejects_raw_session_claims()
+            // A trusted backend is the one non-relay transport allowed to
+            // assert a session snapshot. It needs that snapshot to submit a
+            // user-attributed write whose policy reads session claims. The
+            // authenticated server admission selected its trust level; this
+            // must not turn an ordinary client or a subjectless relay into a
+            // claim issuer.
+            || (!ingest.trust.is_trusted()
+                && !delegated_session_capability(ingest, peer.role()))))
 }
 
-fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorSubject {
+/// Only the host-admitted core-facing relay may carry another session's
+/// immutable policy binding.  This is a connection capability, not a field a
+/// wire caller can grant itself by choosing a registration option or message
+/// variant.
+fn delegated_session_capability(ingest: CommitUnitIngestContext, peer_role: PeerRole) -> bool {
+    ingest.trust == CommitUnitTrust::Relay && peer_role == PeerRole::Relay
+}
+
+/// Select the immutable session snapshot permitted for one request. Direct
+/// links use their host-admitted session; only a scope-isolated relay with an
+/// exact server-issued binding can carry a delegated snapshot. A generic
+/// multiplexed relay has no per-binding capability yet, so it must forward
+/// rather than select a user policy subject. Keeping Subscribe and repair on
+/// this one admission rule prevents one path from accidentally treating a
+/// relay's transport identity as a permission subject.
+fn admitted_request_policy_binding(
+    ingest: CommitUnitIngestContext,
+    peer: &crate::peer::PeerState,
+    direct: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    delegated: Option<crate::protocol::DelegatedSessionBinding>,
+) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+    match delegated {
+        // A relay transport is deliberately unbound. Its connection context
+        // may contain an opaque host identity for lifecycle purposes, but it
+        // is never a fallback permission subject for an application query or
+        // repair.
+        None if peer.role() == PeerRole::Relay => None,
+        None => direct,
+        Some(delegated) if delegated_session_capability(ingest, peer.role()) => {
+            let binding = (delegated.identity, delegated.claims);
+            peer.admits_relay_binding(&binding).then_some(binding)
+        }
+        Some(_) => None,
+    }
+}
+
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> Option<AuthorSubject> {
     match ingest.trust {
-        CommitUnitTrust::Session => ingest.identity,
-        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorSubject::SYSTEM,
+        CommitUnitTrust::Session => Some(ingest.identity),
+        CommitUnitTrust::Relay => None,
+        CommitUnitTrust::TrustedBackend
+        | CommitUnitTrust::TrustedAuthority
+        | CommitUnitTrust::TrustedAdmin => Some(AuthorSubject::SYSTEM),
     }
 }
 
@@ -3252,7 +3362,7 @@ where
             WriteTarget::Root => {
                 let exists = self
                     .db()
-                    .require_mergeable_transaction_upsert_visibility(self.tx_id(), table, row)
+                    .mergeable_transaction_upsert_exists(self.tx_id(), table, row)
                     .await?;
                 if exists {
                     self.db()
@@ -4074,6 +4184,8 @@ struct SubscriptionState {
     author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
+    /// Online remote-if-possible overlays pending changes on scoped inputs.
+    pending_overlay: bool,
     remote_read_tier: Option<DurabilityTier>,
     /// Once this stream has an upstream, cached durable state needs a receipt
     /// from each replacement connection before it can be settled again.
@@ -4093,6 +4205,9 @@ struct RelationSnapshotIndex {
     roots: BTreeMap<OutputOccurrenceId, usize>,
     related: BTreeMap<(String, RowUuid), usize>,
     edges: BTreeSet<RelationEdge>,
+    /// Decoded descendants supersede the encoded root seed until a complete
+    /// snapshot is requested. Ordinary delta delivery must not re-encode it.
+    terminal_records: BTreeMap<OutputOccurrenceId, terminal_record::TerminalRecordState>,
 }
 
 impl RelationSnapshotIndex {
@@ -4373,6 +4488,35 @@ impl SubscriptionStream {
         }
     }
 
+    /// Return the receiver-local maintained snapshot after a settled event.
+    ///
+    /// This is intentionally crate-private: it is the one-shot counterpart to
+    /// consuming a public subscription stream, not another query evaluator.
+    /// A remote one-shot first owns a transient subscription, waits for its
+    /// exact authority-covered inputs to drive the local maintained graph to
+    /// settlement, then takes this snapshot before finalizing that owner.
+    ///
+    /// The authority may never provide a link/result snapshot here.  Its role
+    /// is limited to admitting the covered source closure; the receiver's
+    /// maintained graph remains the sole producer of application output.
+    #[allow(dead_code)] // The native public facade is feature-gated in the core-only build.
+    pub(crate) fn settled_receiver_local_snapshot(&self) -> Result<RelationSnapshot, Error> {
+        let state = self._state.borrow();
+        if !state.settled {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "remote one-shot attempted to materialize before subscription settlement",
+            ));
+        }
+        if state.snapshot_source != SubscriptionSnapshotSource::LocalMaintained {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "remote one-shot attempted to materialize a non-local maintained snapshot",
+            ));
+        }
+        materialized_subscription_snapshot(&state.snapshot, &state.snapshot_index)
+    }
+
     /// Return the next queued materialized subscription event without waiting.
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         if self.terminated {
@@ -4497,10 +4641,56 @@ fn subscription_delta_event(
     subscription_delta_event_with_reset(tier, settled, previous, current, false, terminal_rows)
 }
 
+/// Retire authority settlement without disturbing the receiver-local terminal
+/// snapshot. A stale/nonselected authority update invalidates only the receipt:
+/// the same local collector continues to own the visible rows until a fresh
+/// exact closure arrives.
+pub(in crate::db) fn demote_authority_receipt_subscriptions(
+    subscriptions: &SubscriptionList,
+    publishing_subscriptions: &BTreeSet<SubscriptionKey>,
+) {
+    let mut retained = Vec::new();
+    for weak in subscriptions.borrow().iter() {
+        let Some(state) = weak.upgrade() else {
+            continue;
+        };
+        {
+            let mut state_ref = state.borrow_mut();
+            if state_ref.propagates_upstream {
+                state_ref.requires_authority_receipt = true;
+                if state_ref.settled {
+                    state_ref.settled = false;
+                    // The named receiver will publish the same demotion while
+                    // applying its frame. Other subscriptions share the
+                    // authority receipt but have no terminal frame of their
+                    // own, so publish only their receipt-only transition.
+                    let frame_will_publish = state_ref
+                        .upstream_subscription_handles
+                        .iter()
+                        .any(|handle| publishing_subscriptions.contains(&handle.subscription));
+                    if !frame_will_publish {
+                        let event = subscription_delta_event(
+                            state_ref.read_tier,
+                            false,
+                            &state_ref.snapshot,
+                            &state_ref.snapshot,
+                            state_ref.terminal_rows,
+                        );
+                        let _ = state_ref.sender.unbounded_send(event);
+                    }
+                }
+            }
+        }
+        retained.push(Rc::downgrade(&state));
+    }
+    *subscriptions.borrow_mut() = retained;
+}
+
 /// Publishes an ordered terminal as explicit root placements.
 ///
 /// Every changed occurrence carries its previous and final position, so
 /// consumers never reconstruct ordering from a suffix convention.
+#[cfg(test)]
 fn subscription_terminal_delta_event(
     tier: DurabilityTier,
     settled: bool,
@@ -4690,22 +4880,26 @@ fn apply_maintained_update_to_snapshot(
     settled: bool,
     terminal_layout: Option<&TerminalRootLayout>,
 ) -> Result<SubscriptionEvent, Error> {
+    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        let update_kind = match &update {
+            LocalMaintainedViewSubscriptionUpdate::Structured {
+                terminal_operations,
+            } => format!("structured:{}", terminal_operations.len()),
+            LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } => {
+                format!("flat:add={} remove={}", added.len(), removed.len())
+            }
+        };
+        eprintln!(
+            "JAZZ_COVERED_INPUT_TRACE stage=apply_maintained_snapshot roots={} update={update_kind}",
+            snapshot.root_count,
+        );
+    }
     match update {
         LocalMaintainedViewSubscriptionUpdate::Flat {
             authoritative_membership_changed: _,
             added,
             removed,
-            terminal_operations,
         } => {
-            if terminal_operations
-                .iter()
-                .any(|operation| !operation.path.is_empty())
-            {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "flat maintained update emitted a descendant terminal operation",
-                ));
-            }
             let mut event = apply_maintained_membership_update_to_snapshot(
                 snapshot,
                 snapshot_index,
@@ -4714,10 +4908,6 @@ fn apply_maintained_update_to_snapshot(
                 tier,
                 settled,
             );
-            // A flat join can have several public occurrences for one root
-            // even though Groove addresses that root only once. Membership
-            // owns the rows; terminal root edits order the occurrence groups.
-            apply_membership_terminal_root_order(snapshot, snapshot_index, &terminal_operations)?;
             let SubscriptionEvent::Delta { added, updated, .. } = &mut event else {
                 unreachable!("maintained updates always emit deltas")
             };
@@ -4798,92 +4988,6 @@ fn apply_maintained_update_to_snapshot(
     }
 }
 
-/// Apply Groove's root order to membership-owned output occurrences.
-///
-/// Groove app rows are keyed by root row, while flat joins can expose several
-/// occurrences of that root. Treat those occurrences as one ordered group and
-/// keep their exact identities in deterministic order within the group.
-fn apply_membership_terminal_root_order(
-    snapshot: &mut RelationSnapshot,
-    snapshot_index: &mut RelationSnapshotIndex,
-    operations: &[groove::ivm::TerminalOperation],
-) -> Result<(), Error> {
-    let occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
-    let roots = snapshot.rows[..snapshot.root_count].to_vec();
-    let mut groups = Vec::<([u8; 16], Vec<(OutputOccurrenceId, CurrentRow)>)>::new();
-    let mut group_positions = BTreeMap::<[u8; 16], usize>::new();
-    for (occurrence, row) in occurrences.into_iter().zip(roots) {
-        let root = occurrence_root_bytes(&occurrence);
-        if let Some(position) = group_positions.get(&root).copied() {
-            groups[position].1.push((occurrence, row));
-        } else {
-            group_positions.insert(root, groups.len());
-            groups.push((root, vec![(occurrence, row)]));
-        }
-    }
-    for (_, entries) in &mut groups {
-        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-    }
-
-    for operation in operations {
-        let root = terminal_occurrence_root_bytes(&operation.root_key)?;
-        let Some(previous_index) = groups.iter().position(|(candidate, _)| *candidate == root)
-        else {
-            // Membership may have filtered an operation emitted for another
-            // binding sharing the maintained graph.
-            continue;
-        };
-        let target_index = match operation.edit {
-            groove::ivm::TerminalEdit::Insert { index, .. }
-            | groove::ivm::TerminalEdit::Move { index, .. } => index,
-            groove::ivm::TerminalEdit::Update { .. } | groove::ivm::TerminalEdit::Remove { .. } => {
-                continue;
-            }
-        };
-        let group = groups.remove(previous_index);
-        groups.insert(target_index.min(groups.len()), group);
-    }
-
-    let mut ordered_occurrences = Vec::with_capacity(snapshot.root_count);
-    let mut ordered_roots = Vec::with_capacity(snapshot.root_count);
-    for (_, entries) in groups {
-        for (occurrence, row) in entries {
-            ordered_occurrences.push(occurrence);
-            ordered_roots.push(row);
-        }
-    }
-    snapshot.rows[..snapshot.root_count].clone_from_slice(&ordered_roots);
-    snapshot_index.roots = root_occurrence_positions(&ordered_occurrences);
-    Ok(())
-}
-
-fn occurrence_root_bytes(occurrence: &OutputOccurrenceId) -> [u8; 16] {
-    occurrence.canonical_bytes()[..16]
-        .try_into()
-        .expect("an output occurrence always begins with its root UUID")
-}
-
-/// Read only the public root UUID from a flat terminal key. Groove may append
-/// hidden binding-route fields (for example an explicit identity claim), while
-/// membership owns the exact public occurrence identity for this path.
-fn terminal_occurrence_root_bytes(encoded: &[u8]) -> Result<[u8; 16], Error> {
-    if encoded.first().copied() != Some(10) {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal root key must begin with a UUID",
-        ));
-    }
-    encoded
-        .get(1..17)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::Protocol,
-                "terminal root key contains a truncated UUID",
-            )
-        })
-}
-
 fn apply_maintained_membership_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
@@ -4934,7 +5038,14 @@ fn apply_maintained_membership_update_to_snapshot(
 
     for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
-            if !snapshot.rows[position].subscription_equivalent(row) {
+            let equivalent = snapshot.rows[position].subscription_equivalent(row);
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=flat_snapshot_replace occurrence={key:?} position={position} equivalent={equivalent} old={:?} new={:?}",
+                    snapshot.rows[position], row,
+                );
+            }
+            if !equivalent {
                 snapshot.rows[position] = row.clone();
                 updated.push(SubscriptionOutputRow {
                     occurrence_id: key.clone(),
@@ -5085,6 +5196,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
         .iter()
         .map(|(occurrence_id, _)| occurrence_id.clone())
         .collect::<BTreeSet<_>>();
+    for occurrence in &affected {
+        materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
+    }
     let before = affected
         .iter()
         .filter_map(|occurrence_id| {
@@ -5094,6 +5208,46 @@ fn apply_terminal_operations_to_subscription_snapshot(
             Some((occurrence_id.clone(), (index, snapshot.rows[index].clone())))
         })
         .collect::<BTreeMap<_, _>>();
+
+    let inserted = root_operations
+        .iter()
+        .filter_map(|(occurrence, operation)| match operation.edit {
+            groove::ivm::TerminalEdit::Insert { .. } => Some((occurrence.clone(), true)),
+            groove::ivm::TerminalEdit::Remove { .. } => Some((occurrence.clone(), false)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .filter_map(|(key, present)| present.then_some(key))
+        .collect::<BTreeSet<_>>();
+    let replaced = root_operations
+        .iter()
+        .filter_map(|(occurrence, operation)| {
+            (matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
+                && inserted.contains(occurrence))
+            .then_some(occurrence.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    for (occurrence, operation) in &root_operations {
+        if replaced.contains(occurrence) {
+            if let groove::ivm::TerminalEdit::Insert { value, .. } = &operation.edit {
+                if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
+                    state.update_record(OwnedRecord::new(
+                        value.clone(),
+                        operation.root_descriptor,
+                    ))?;
+                }
+            }
+            continue;
+        }
+        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
+            if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
+                state.update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
+            }
+        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
+            snapshot_index.terminal_records.remove(occurrence);
+        }
+    }
 
     for (occurrence_id, operation) in root_operations {
         match operation.edit {
@@ -5173,8 +5327,28 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
+    // The facade retains the exact collector tree by folding the same
+    // root/descendant terminal stream it exposes to consumers.  This is not
+    // a second materializer: a later reset is simply a snapshot of this
+    // receiver-local reducer after the ordered operations below have been
+    // applied.  In particular, an authority-covered receiver must never
+    // reconstruct nested children from result membership or authority facts.
+    apply_descendant_terminal_operations_to_snapshot(
+        snapshot,
+        snapshot_index,
+        &occurrences,
+        &affected,
+        &descendant_operations,
+    )?;
+
+    let terminal_records = std::mem::take(&mut snapshot_index.terminal_records);
     *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+    snapshot_index.terminal_records = terminal_records;
     snapshot_index.roots = root_occurrence_positions(&occurrences);
+
+    for occurrence in &affected {
+        materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
+    }
 
     let mut added = Vec::new();
     let mut updated = Vec::new();
@@ -5222,6 +5396,134 @@ fn apply_terminal_operations_to_subscription_snapshot(
         settled,
         tier,
     })
+}
+
+/// Fold descendant edits into the private receiver snapshot while preserving
+/// the original operations for public incremental delivery.  A terminal path
+/// names only compiler-owned collection fields and source-row UUID keys, so a
+/// malformed path or non-canonical child identity is a protocol error rather
+/// than a reason to search a table/result relation for a plausible match.
+fn apply_descendant_terminal_operations_to_snapshot(
+    snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
+    occurrences: &[OutputOccurrenceId],
+    roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
+    operations: &[groove::ivm::TerminalOperation],
+) -> Result<(), Error> {
+    for operation in operations {
+        if operation.path.is_empty() {
+            continue;
+        }
+        let occurrence = terminal_root_occurrence_id(&operation.root_key)?;
+        let Some(root_index) = occurrences
+            .iter()
+            .position(|candidate| candidate == &occurrence)
+        else {
+            // A collector can emit the child retractions belonging to a root
+            // it retracts in the same terminal batch.  The public operation
+            // remains useful to a consumer which folds its child state before
+            // the root removal, but the receiver snapshot has already
+            // dropped that root in the root-edit phase above.
+            if roots_changed_in_batch.contains(&occurrence) {
+                continue;
+            }
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "terminal descendant operation addressed a missing root",
+            ));
+        };
+        let root = snapshot.rows.get_mut(root_index).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "terminal root position is outside the receiver snapshot",
+            )
+        })?;
+        if !snapshot_index.terminal_records.contains_key(&occurrence) {
+            let (descriptor, raw) = root.encoded_record();
+            snapshot_index.terminal_records.insert(
+                occurrence.clone(),
+                terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                    raw.to_vec(),
+                    *descriptor,
+                ))?,
+            );
+        }
+        snapshot_index
+            .terminal_records
+            .get_mut(&occurrence)
+            .expect("initialized above")
+            .apply(operation)?;
+    }
+    Ok(())
+}
+
+/// Materialize the retained terminal state only at a full-snapshot boundary.
+/// Delta consumers receive the original child operations, not a rebuilt root.
+fn materialized_subscription_snapshot(
+    snapshot: &RelationSnapshot,
+    index: &RelationSnapshotIndex,
+) -> Result<RelationSnapshot, Error> {
+    let mut snapshot = snapshot.clone();
+    materialize_subscription_terminal_records(&mut snapshot, index)?;
+    Ok(snapshot)
+}
+
+fn materialize_subscription_terminal_records(
+    snapshot: &mut RelationSnapshot,
+    index: &RelationSnapshotIndex,
+) -> Result<(), Error> {
+    for occurrence in index.terminal_records.keys() {
+        materialize_subscription_terminal_record(snapshot, index, occurrence)?;
+    }
+    Ok(())
+}
+
+fn materialize_subscription_terminal_record(
+    snapshot: &mut RelationSnapshot,
+    index: &RelationSnapshotIndex,
+    occurrence: &OutputOccurrenceId,
+) -> Result<(), Error> {
+    if let Some(record) = index.terminal_records.get(occurrence) {
+        let position = index.roots.get(occurrence).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "retained terminal record has no root occurrence",
+            )
+        })?;
+        let root = snapshot.rows.get_mut(*position).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "retained terminal root position is outside snapshot",
+            )
+        })?;
+        *root = CurrentRow::new(root.table().to_owned(), record.record()?);
+    }
+    Ok(())
+}
+
+fn terminal_child_key(value: &Value) -> Result<Vec<u8>, Error> {
+    let Value::Record(record) = value else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant collection contains a non-record child",
+        ));
+    };
+    let Value::Uuid(row_uuid) = record.get_idx(0).map_err(|error| {
+        Error::new(
+            ErrorCode::Protocol,
+            format!("cannot decode terminal child key: {error}"),
+        )
+    })?
+    else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant child key must be its physical row UUID",
+        ));
+    };
+    let mut key = Vec::with_capacity(17);
+    key.push(10);
+    key.extend_from_slice(row_uuid.as_bytes());
+    Ok(key)
 }
 
 fn terminal_subscription_output_row(
@@ -5306,7 +5608,7 @@ fn terminal_subscription_output_row(
 /// Decode the Groove ordered key used to address one root output occurrence.
 /// Plain joins are UUID sequences. A union-derived joined source is preceded
 /// by its ordered UTF-8 discriminator.
-fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId, Error> {
+pub(crate) fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId, Error> {
     fn uuid_at(encoded: &[u8], cursor: &mut usize) -> Option<ObjectId> {
         if encoded.get(*cursor).copied() != Some(10) {
             return None;
@@ -5388,27 +5690,6 @@ fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId, Err
             )
         })
     }
-}
-
-/// Restore the query's observable root order after applying a maintained
-/// membership transition. Groove owns membership/windowing, while this helper
-/// only orders the selected roots before their row-only delta is bridged to an
-/// application subscription.
-fn order_maintained_snapshot_roots<S>(
-    node: &NodeState<S>,
-    query: &crate::query::Query,
-    snapshot: &mut RelationSnapshot,
-    snapshot_index: &mut RelationSnapshotIndex,
-) -> Result<(), Error>
-where
-    S: OrderedKvStorage,
-{
-    let mut roots = snapshot.rows[..snapshot.root_count].to_vec();
-    let mut occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
-    node.apply_query_order_with_occurrences(query, &mut roots, &mut occurrences)?;
-    snapshot.rows[..snapshot.root_count].clone_from_slice(&roots);
-    snapshot_index.roots = root_occurrence_positions(&occurrences);
-    Ok(())
 }
 
 fn snapshot_root_occurrences(
@@ -5527,6 +5808,7 @@ fn subscription_is_settled<S>(
     read_view: ReadViewSpec,
     propagate_upstream: bool,
     requires_authority_receipt: bool,
+    authority_result_key: Option<&crate::protocol::AuthorityResultKey>,
 ) -> bool
 where
     S: OrderedKvStorage,
@@ -5545,8 +5827,13 @@ where
         }
         .read_view_key(),
     };
-    node.has_settled_result_set(binding_view_key)
-        && !node.opening_pending_for_binding_view(binding_view_key)
+    // Callers without a registered usage-site key are direct/unscoped paths;
+    // they may inspect only that explicit unscoped receipt. They must never
+    // select a unique scoped receipt by binding view.
+    let fallback_unscoped = crate::protocol::AuthorityResultKey::unscoped(binding_view_key);
+    let authority_result_key = authority_result_key.unwrap_or(&fallback_unscoped);
+    node.has_settled_authority_result(authority_result_key)
+        && !node.opening_pending_for_authority_result(authority_result_key)
         && (!requires_authority_receipt
             || active_authority_view_receipts
                 .borrow()

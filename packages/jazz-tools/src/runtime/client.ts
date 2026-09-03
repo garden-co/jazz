@@ -352,8 +352,11 @@ export interface AuthConfig {
 export type DurabilityTier = "local" | "edge" | "global";
 /** Product-facing policy for reads. It deliberately does not change write durability. */
 export const ReadTier = {
+  /** Cached local knowledge and pending writes; still syncs while connected. */
   LocalFirst: "local-first",
+  /** Current remote query scope, without pending local writes; waits offline. */
   Remote: "remote",
+  /** Remote scope plus pending scoped edits/new inserts online; local knowledge after explicit disconnect. */
   RemoteIfPossible: "remote-if-possible",
 } as const;
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
@@ -901,8 +904,12 @@ export class JazzClient {
       admin_secret?: string;
       backend_secret?: string;
       backend_session?: Session;
-    } = { jwt_token: this.context.jwtToken ?? null };
-    if (this.context.adminSecret) {
+    } = { jwt_token: this.context.backendSecret ? null : (this.context.jwtToken ?? null) };
+    // A backend open is a separate trusted-serving credential. Do not send an
+    // incidental admin secret alongside it: server admission gives admin
+    // precedence, which would turn this runtime's SYSTEM backend authority
+    // into its adapter fallback wire identity.
+    if (this.context.adminSecret && !this.context.backendSecret) {
       payload.admin_secret = this.context.adminSecret;
     }
     if (this.context.backendSecret) {

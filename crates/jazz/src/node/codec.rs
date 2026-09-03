@@ -8,16 +8,20 @@
 use super::query_engine::{left_field, user_column_field};
 use super::*;
 use crate::protocol::{
-    CompleteTxPayloadCoverageEntry, ContributingMembersEntry, PathCorrelationCoverageEntry,
-    PathHoleState, PointReadEntry, PolicyDecisionEntry, PolicyDecisionOutcomeEntry,
-    PolicyWitnessEntry, PredicateOutputSetEntry, PredicateOutputSetRoleEntry, PredicateReadEntry,
-    ReadFrontierSettledEntry, RelationEdgeEntry, RelationEdgeKind, RelationEdgeRole,
-    ResultMemberPayloadEntry, ResultRowLayer, ResultRowSource, RowVersionRefEntry, SnapshotRef,
-    SourceCoverageEntry, SyntheticReplacementToken, VersionWitnessEntry,
+    CompleteTxPayloadCoverageEntry, ContributingMembersEntry, CoveredInputEntry,
+    PathCorrelationCoverageEntry, PathHoleState, PointReadEntry, PolicyDecisionEntry,
+    PolicyDecisionOutcomeEntry, PolicyWitnessEntry, PredicateOutputSetEntry,
+    PredicateOutputSetRoleEntry, PredicateReadEntry, ProgramSourceCoverageEntry, ProgramSourceId,
+    ProgramSourceRole, ReadFrontierSettledEntry, RelationEdgeEntry, RelationEdgeKind,
+    RelationEdgeRole, ResultMemberPayloadEntry, ResultRowLayer, ResultRowSource,
+    RowVersionRefEntry, SnapshotRef, SyntheticReplacementToken, VersionWitnessEntry,
     ViewCompleteExclusiveCoverageEntry,
 };
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
+use crate::tx::{
+    BranchViewCopyBase, BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation,
+};
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
@@ -266,10 +270,58 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    pub(super) struct ContributionMergeStorageRecord {
+pub(super) struct ContributionMergeStorageRecord {
         0 => source: Vec<u8>,
         1 => target: Vec<u8>,
         2 => substitutions: Vec<Value>,
+        3 => branch_view_copy_v1: Vec<Value>,
+        4 => branch_write_intent_v1: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchWriteIntentStorageRecord {
+        0 => version: u8,
+        1 => physical_table_id: u64,
+        2 => authored_schema: uuid::Uuid,
+        3 => row_uuid: uuid::Uuid,
+        4 => head: Vec<u8>,
+        5 => operation: records::EnumValue,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchViewCopyStorageRecord {
+        0 => version: u8,
+        1 => head: Vec<u8>,
+        2 => base: records::EnumValue,
+        3 => table: String,
+        4 => row_uuid: uuid::Uuid,
+        5 => source_time: u64,
+        6 => source_node: uuid::Uuid,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchViewCopyCurrentBaseStorageRecord {
+        0 => branch: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchViewCopySnapshotBaseStorageRecord {
+        0 => branch: Vec<u8>,
+        1 => owner: uuid::Uuid,
+        2 => global_base: u64,
+        3 => local_base: u64,
+        4 => dots: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct BranchViewCopyDotStorageRecord {
+        0 => time: u64,
+        1 => node: uuid::Uuid,
     }
 }
 
@@ -2622,6 +2674,275 @@ fn contribution_merge_descriptor() -> &'static records::RecordDescriptor {
     &DESCRIPTOR
 }
 
+fn branch_view_copy_descriptor() -> &'static records::RecordDescriptor {
+    let descriptor = contribution_merge_descriptor();
+    let records::ValueType::Array(inner) = record_field_type(descriptor, 3) else {
+        unreachable!("branch-view copy is an array")
+    };
+    let records::ValueType::Record(descriptor) = &**inner else {
+        unreachable!("branch-view copy is a record")
+    };
+    descriptor
+}
+
+fn branch_write_intent_descriptor() -> &'static records::RecordDescriptor {
+    let descriptor = contribution_merge_descriptor();
+    let records::ValueType::Array(inner) = record_field_type(descriptor, 4) else {
+        unreachable!("branch write intent is an array")
+    };
+    let records::ValueType::Record(descriptor) = &**inner else {
+        unreachable!("branch write intent is a record")
+    };
+    descriptor
+}
+
+fn branch_write_operation_schema() -> &'static records::EnumSchema {
+    let records::ValueType::Enum(schema) = record_field_type(branch_write_intent_descriptor(), 5)
+    else {
+        unreachable!("branch write operation is an enum")
+    };
+    schema
+}
+
+fn branch_write_intent_storage_record(
+    intent: &BranchWriteIntent,
+    evidence_index: Option<u32>,
+) -> Result<OwnedRecord, Error> {
+    let schema = branch_write_operation_schema();
+    let (name, values): (&str, Vec<Value>) = match (&intent.operation, evidence_index) {
+        (BranchWriteOperation::ExactHeadInsert, None) => ("exact_head_insert", Vec::new()),
+        (BranchWriteOperation::ExactHeadUpdate, None) => ("exact_head_update", Vec::new()),
+        (BranchWriteOperation::ViewUpdateCopy(_), Some(index)) => {
+            ("view_update_copy", vec![Value::U32(index)])
+        }
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "branch write intent evidence binding is invalid",
+            ));
+        }
+    };
+    let tag = schema.tag(name).expect("declared branch write operation");
+    let payload = &schema
+        .case(tag)
+        .expect("declared branch write operation")
+        .payload;
+    let payload = OwnedRecord::new(payload.create(&values)?, payload.clone());
+    Ok(BranchWriteIntentStorageRecord::encode(
+        branch_write_intent_descriptor(),
+        intent.version,
+        intent.physical_table_id.0,
+        intent.authored_schema.0,
+        intent.row_uuid.0,
+        intent
+            .head
+            .try_canonical_bytes()
+            .map_err(|_| Error::InvalidStoredValue("branch write intent head is invalid"))?,
+        records::EnumValue::new(tag, payload),
+    )
+    .map(|record| record.record().clone())?)
+}
+
+fn branch_write_intent_from_storage_record(
+    record: OwnedRecord,
+    copies: &[BranchViewCopyEvidence],
+) -> Result<BranchWriteIntent, Error> {
+    if record.descriptor() != branch_write_intent_descriptor() {
+        return Err(Error::InvalidStoredValue(
+            "branch write intent must be a v1 record",
+        ));
+    }
+    let record = BranchWriteIntentStorageRecord::new(record);
+    let operation_value = record.operation()?;
+    let schema = branch_write_operation_schema();
+    let case = schema
+        .case(operation_value.tag())
+        .map_err(|_| Error::InvalidStoredValue("branch write operation tag is invalid"))?;
+    let operation = match case.name.as_str() {
+        "exact_head_insert" => BranchWriteOperation::ExactHeadInsert,
+        "exact_head_update" => BranchWriteOperation::ExactHeadUpdate,
+        "view_update_copy" => {
+            let payload = operation_value.into_record();
+            let index = payload
+                .get_idx(0)
+                .map_err(|_| Error::InvalidStoredValue("branch write copy index is invalid"))?;
+            let Value::U32(index) = index else {
+                return Err(Error::InvalidStoredValue(
+                    "branch write copy index is invalid",
+                ));
+            };
+            let evidence = copies
+                .get(index as usize)
+                .cloned()
+                .ok_or(Error::InvalidStoredValue(
+                    "branch write copy evidence is missing",
+                ))?;
+            BranchWriteOperation::ViewUpdateCopy(evidence)
+        }
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "branch write operation tag is invalid",
+            ));
+        }
+    };
+    Ok(BranchWriteIntent {
+        version: record.version()?,
+        physical_table_id: PhysicalTableId(record.physical_table_id()?),
+        authored_schema: SchemaVersionId(record.authored_schema()?),
+        row_uuid: RowUuid(record.row_uuid()?),
+        head: BranchKey::from_canonical_bytes(&record.head()?)
+            .map_err(|_| Error::InvalidStoredValue("branch write intent head is invalid"))?,
+        operation,
+    })
+}
+
+fn branch_view_copy_base_schema() -> &'static records::EnumSchema {
+    let records::ValueType::Enum(schema) = record_field_type(branch_view_copy_descriptor(), 2)
+    else {
+        unreachable!("branch-view copy base is an enum")
+    };
+    schema
+}
+
+fn branch_view_copy_base_storage_value(
+    base: &BranchViewCopyBase,
+) -> Result<records::EnumValue, Error> {
+    let schema = branch_view_copy_base_schema();
+    match base {
+        BranchViewCopyBase::Current(branch) => {
+            let tag = schema.tag("current").expect("declared current base");
+            let payload = &schema.case(tag).expect("declared current base").payload;
+            let record = BranchViewCopyCurrentBaseStorageRecord::encode(
+                payload,
+                branch
+                    .try_canonical_bytes()
+                    .map_err(|_| Error::InvalidStoredValue("branch-view copy base is invalid"))?,
+            )?
+            .record()
+            .clone();
+            Ok(records::EnumValue::new(tag, record))
+        }
+        BranchViewCopyBase::Snapshot { branch, snapshot } => {
+            let tag = schema.tag("snapshot").expect("declared snapshot base");
+            let payload = &schema.case(tag).expect("declared snapshot base").payload;
+            let dots_type = record_field_type(payload, 4);
+            let dot_descriptor = nested_record_descriptor(array_element_type(dots_type));
+            let dots = snapshot
+                .dots
+                .iter()
+                .map(|dot| {
+                    BranchViewCopyDotStorageRecord::encode(dot_descriptor, dot.time.0, dot.node.0)
+                        .map(|record| Value::Record(record.record().clone()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let record = BranchViewCopySnapshotBaseStorageRecord::encode(
+                payload,
+                branch
+                    .try_canonical_bytes()
+                    .map_err(|_| Error::InvalidStoredValue("branch-view copy base is invalid"))?,
+                snapshot.owner.0,
+                snapshot.global_base.0,
+                snapshot.local_base.0,
+                dots,
+            )?
+            .record()
+            .clone();
+            Ok(records::EnumValue::new(tag, record))
+        }
+    }
+}
+
+fn branch_view_copy_storage_record(
+    evidence: &BranchViewCopyEvidence,
+) -> Result<OwnedRecord, Error> {
+    let descriptor = branch_view_copy_descriptor();
+    Ok(BranchViewCopyStorageRecord::encode(
+        descriptor,
+        evidence.version,
+        evidence
+            .head
+            .try_canonical_bytes()
+            .map_err(|_| Error::InvalidStoredValue("branch-view copy head is invalid"))?,
+        branch_view_copy_base_storage_value(&evidence.base)?,
+        evidence.table.clone(),
+        evidence.row_uuid.0,
+        evidence.source_version.time.0,
+        evidence.source_version.node.0,
+    )?
+    .record()
+    .clone())
+}
+
+fn branch_view_copy_from_storage_record(
+    record: OwnedRecord,
+) -> Result<BranchViewCopyEvidence, Error> {
+    let descriptor = branch_view_copy_descriptor();
+    if record.descriptor() != descriptor {
+        return Err(Error::InvalidStoredValue(
+            "branch-view copy evidence must be a v1 record",
+        ));
+    }
+    let record = BranchViewCopyStorageRecord::new(record);
+    let base_schema = branch_view_copy_base_schema();
+    let base_value = record.base()?;
+    let base_case = base_schema
+        .case(base_value.tag())
+        .map_err(|_| Error::InvalidStoredValue("branch-view copy base tag is invalid"))?;
+    let base = match base_case.name.as_str() {
+        "current" => {
+            let payload = BranchViewCopyCurrentBaseStorageRecord::new(base_value.into_record());
+            BranchViewCopyBase::Current(
+                BranchKey::from_canonical_bytes(&payload.branch()?).map_err(|_| {
+                    Error::InvalidStoredValue("branch-view copy current branch is invalid")
+                })?,
+            )
+        }
+        "snapshot" => {
+            let payload = BranchViewCopySnapshotBaseStorageRecord::new(base_value.into_record());
+            let dots = payload
+                .dots()?
+                .into_iter()
+                .map(|value| match value {
+                    Value::Record(record) => {
+                        let dot = BranchViewCopyDotStorageRecord::new(record);
+                        Ok(TxId::new(TxTime(dot.time()?), NodeUuid(dot.node()?)))
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "branch-view copy snapshot dot must be a record",
+                    )),
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            BranchViewCopyBase::Snapshot {
+                branch: BranchKey::from_canonical_bytes(&payload.branch()?).map_err(|_| {
+                    Error::InvalidStoredValue("branch-view copy snapshot branch is invalid")
+                })?,
+                snapshot: SnapshotRef {
+                    owner: NodeUuid(payload.owner()?),
+                    global_base: GlobalTime(payload.global_base()?),
+                    local_base: TxTime(payload.local_base()?),
+                    dots,
+                },
+            }
+        }
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "branch-view copy base tag is invalid",
+            ));
+        }
+    };
+    Ok(BranchViewCopyEvidence {
+        version: record.version()?,
+        head: BranchKey::from_canonical_bytes(&record.head()?)
+            .map_err(|_| Error::InvalidStoredValue("branch-view copy head is invalid"))?,
+        base,
+        table: record.table()?,
+        row_uuid: RowUuid(record.row_uuid()?),
+        source_version: TxId::new(
+            TxTime(record.source_time()?),
+            NodeUuid(record.source_node()?),
+        ),
+    })
+}
+
 pub(super) fn record_field_type(
     descriptor: &records::RecordDescriptor,
     index: usize,
@@ -2806,6 +3127,26 @@ pub(super) fn contribution_merge_storage_value(
                         .map(Value::Record)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
+                provenance
+                    .branch_view_copies
+                    .iter()
+                    .map(|evidence| branch_view_copy_storage_record(evidence).map(Value::Record))
+                    .collect::<Result<Vec<_>, _>>()?,
+                provenance
+                    .branch_write_intents
+                    .iter()
+                    .map(|intent| {
+                        let index = match &intent.operation {
+                            BranchWriteOperation::ViewUpdateCopy(evidence) => provenance
+                                .branch_view_copies
+                                .iter()
+                                .position(|candidate| candidate == evidence)
+                                .map(|index| index as u32),
+                            _ => None,
+                        };
+                        branch_write_intent_storage_record(intent, index).map(Value::Record)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
             )?
             .record()
             .clone())
@@ -2973,6 +3314,33 @@ pub(super) fn contribution_merge_from_storage_record(
                 )),
             })
             .collect::<Result<_, _>>()?,
+        branch_view_copies: record
+            .branch_view_copy_v1()?
+            .into_iter()
+            .map(|value| match value {
+                Value::Record(record) => branch_view_copy_from_storage_record(record),
+                _ => Err(Error::InvalidStoredValue(
+                    "branch-view copy evidence must be a record",
+                )),
+            })
+            .collect::<Result<_, _>>()?,
+        branch_write_intents: Vec::new(),
+    };
+    let branch_write_intents = record
+        .branch_write_intent_v1()?
+        .into_iter()
+        .map(|value| match value {
+            Value::Record(record) => {
+                branch_write_intent_from_storage_record(record, &provenance.branch_view_copies)
+            }
+            _ => Err(Error::InvalidStoredValue(
+                "branch write intent must be a record",
+            )),
+        })
+        .collect::<Result<_, _>>()?;
+    let provenance = ContributionMergeProvenance {
+        branch_write_intents,
+        ..provenance
     };
     provenance.validate().map_err(|_| {
         Error::InvalidStoredValue("transaction contribution provenance must be canonical")
@@ -4037,6 +4405,76 @@ fn program_fact_member(
     }
     result_member_from_storage_bytes(&reader.bytes()?)
 }
+fn program_fact_put_source(bytes: &mut Vec<u8>, value: &ProgramSourceId) -> Result<(), Error> {
+    if !value.is_wire_valid() || value.path.len() > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact source identity is invalid",
+        ));
+    }
+    program_fact_put_string(bytes, value.table.as_str())?;
+    program_fact_put_u32(bytes, value.path.len())?;
+    for role in &value.path {
+        match role {
+            ProgramSourceRole::Root => bytes.push(0),
+            ProgramSourceRole::Alias(name) => {
+                bytes.push(1);
+                program_fact_put_string(bytes, name)?;
+            }
+            ProgramSourceRole::RecursiveSeed(name) => {
+                bytes.push(2);
+                program_fact_put_string(bytes, name)?;
+            }
+            ProgramSourceRole::RecursiveStep(name) => {
+                bytes.push(3);
+                program_fact_put_string(bytes, name)?;
+            }
+            ProgramSourceRole::CorrelatedChild(name) => {
+                bytes.push(4);
+                program_fact_put_string(bytes, name)?;
+            }
+            ProgramSourceRole::Policy(name) => {
+                bytes.push(5);
+                program_fact_put_string(bytes, name)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn program_fact_source(
+    reader: &mut ProgramFactStorageReader<'_>,
+) -> Result<ProgramSourceId, Error> {
+    let table: groove::Intern<String> = reader.string()?.into();
+    let len = usize::try_from(reader.u32()?)
+        .map_err(|_| Error::InvalidStoredValue("settled program fact source path is too large"))?;
+    if len == 0 || len > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact source identity is invalid",
+        ));
+    }
+    let mut path = Vec::with_capacity(len);
+    for _ in 0..len {
+        path.push(match reader.u8()? {
+            0 => ProgramSourceRole::Root,
+            1 => ProgramSourceRole::Alias(reader.string()?),
+            2 => ProgramSourceRole::RecursiveSeed(reader.string()?),
+            3 => ProgramSourceRole::RecursiveStep(reader.string()?),
+            4 => ProgramSourceRole::CorrelatedChild(reader.string()?),
+            5 => ProgramSourceRole::Policy(reader.string()?),
+            _ => {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact source role tag is invalid",
+                ));
+            }
+        });
+    }
+    let source = ProgramSourceId { table, path };
+    if !source.is_wire_valid() || source.path.len() > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact source identity is invalid",
+        ));
+    }
+    Ok(source)
+}
 fn program_fact_put_version(bytes: &mut Vec<u8>, value: &RowVersionRefEntry) -> Result<(), Error> {
     program_fact_put_tx(bytes, value.tx);
     program_fact_put_option(bytes, &value.schema_version, |b, v| {
@@ -4193,15 +4631,10 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
             program_fact_put_bytes(&mut bytes, &v.correlation_key)?;
             bytes.push(u8::from(v.complete));
         }
-        ProgramFactEntry::SourceCoverage(v) => {
+        ProgramFactEntry::ProgramSourceCoverage(v) => {
             bytes.push(3);
-            program_fact_put_string(&mut bytes, &v.source)?;
-            program_fact_put_string(&mut bytes, v.table.as_str())?;
-            program_fact_put_option(&mut bytes, &v.row, |b, v| {
-                program_fact_put_uuid(b, v.0);
-                Ok(())
-            })?;
-            program_fact_put_bytes(&mut bytes, &v.coverage)?;
+            program_fact_put_source(&mut bytes, &v.source)?;
+            bytes.push(u8::from(v.complete));
         }
         ProgramFactEntry::ReadFrontierSettled(v) => {
             bytes.push(4);
@@ -4251,6 +4684,18 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
             program_fact_put_option(&mut bytes, &v.member, |b, v| {
                 program_fact_put_member(b, v, 1)
             })?;
+        }
+        ProgramFactEntry::CoveredInput(v) => {
+            if !v.is_wire_valid() {
+                return Err(Error::InvalidStoredValue(
+                    "settled covered input identity is invalid",
+                ));
+            }
+            bytes.push(14);
+            program_fact_put_source(&mut bytes, &v.source)?;
+            program_fact_put_string(&mut bytes, v.version_table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.source_row.0);
+            program_fact_put_version(&mut bytes, &v.version)?;
         }
         ProgramFactEntry::PolicyWitness(v) => {
             bytes.push(9);
@@ -4409,11 +4854,17 @@ pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramF
                 }
             },
         }),
-        3 => ProgramFactEntry::SourceCoverage(SourceCoverageEntry {
-            source: r.string()?,
-            table: r.string()?.into(),
-            row: program_fact_option(&mut r, |r| Ok(RowUuid(r.uuid()?)))?,
-            coverage: r.bytes()?,
+        3 => ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+            source: program_fact_source(&mut r)?,
+            complete: match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact boolean is invalid",
+                    ));
+                }
+            },
         }),
         4 => ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
             scope: r.string()?,
@@ -4460,6 +4911,20 @@ pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramF
             version: program_fact_version(&mut r)?,
             member: program_fact_option(&mut r, |r| program_fact_member(r, 1))?,
         }),
+        14 => {
+            let input = CoveredInputEntry {
+                source: program_fact_source(&mut r)?,
+                version_table: r.string()?.into(),
+                source_row: RowUuid(r.uuid()?),
+                version: program_fact_version(&mut r)?,
+            };
+            if !input.is_wire_valid() {
+                return Err(Error::InvalidStoredValue(
+                    "settled covered input identity is invalid",
+                ));
+            }
+            ProgramFactEntry::CoveredInput(input)
+        }
         9 => ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
             protected: program_fact_member(&mut r, 1)?,
             policy_path: r.string()?,
@@ -5846,7 +6311,7 @@ pub(super) fn version_layer_string(layer: VersionLayer) -> String {
 }
 
 #[cfg(test)]
-mod result_member_storage_codec_tests {
+mod authority_storage_codec_tests {
     use super::*;
 
     fn tx(time: u64, node: u8) -> TxId {
@@ -5868,15 +6333,6 @@ mod result_member_storage_codec_tests {
 
     fn settled_value(value: Value, value_type: records::ValueType) -> Vec<u8> {
         settled_result_value_storage_bytes(&value, &value_type).unwrap()
-    }
-
-    fn result_payload(value: Value, value_type: records::ValueType) -> ResultMemberPayloadEntry {
-        let descriptor = records::RecordDescriptor::new([("value", value_type)]);
-        ResultMemberPayloadEntry {
-            member: fixture_member(),
-            descriptor: records::encode_record_descriptor(&descriptor).unwrap(),
-            record: descriptor.create(&[value]).unwrap(),
-        }
     }
 
     fn fixture_member() -> ResultMemberEntry {
@@ -5901,122 +6357,47 @@ mod result_member_storage_codec_tests {
         }
     }
 
+    fn fixture_source_with_all_roles() -> ProgramSourceId {
+        ProgramSourceId {
+            table: "tasks".to_owned().into(),
+            path: vec![
+                ProgramSourceRole::Root,
+                ProgramSourceRole::Alias("self".to_owned()),
+                ProgramSourceRole::RecursiveSeed("seed".to_owned()),
+                ProgramSourceRole::RecursiveStep("step".to_owned()),
+                ProgramSourceRole::CorrelatedChild("items".to_owned()),
+                ProgramSourceRole::Policy("read".to_owned()),
+            ],
+        }
+    }
+
     // This is necessarily an internal test: raw durable keys are an engine
-    // boundary.  It locks every permanent fact/source/value tag to a fixture;
-    // restart behavior exercises those keys through the public node lifecycle.
+    // boundary. Peer authority receipts persist only exact source-closure
+    // facts; lock those surviving tags and bytes without preserving retired
+    // authority-output fixtures as a compatibility contract.
     #[test]
-    fn program_fact_storage_codec_has_permanent_tags_and_exact_fixtures() {
-        let member = fixture_member();
+    fn peer_source_closure_storage_codec_has_permanent_tags_and_exact_fixtures() {
         let version = fixture_version();
         let facts = vec![
-            ProgramFactEntry::ResultPayload(ResultMemberPayloadEntry {
-                member: member.clone(),
-                ..result_payload(Value::U8(2), records::ValueType::U8)
-            }),
-            ProgramFactEntry::RelationEdge(RelationEdgeEntry {
-                path: "p".into(),
-                source_table: "a".to_owned().into(),
-                source_row: RowUuid::from_bytes([3; 16]),
-                target_table: "b".to_owned().into(),
-                target_row: RowUuid::from_bytes([4; 16]),
-                kind: Some(RelationEdgeKind::Policy),
-                source_version: Some(version.clone()),
-                target_version: Some(version.clone()),
-                depth: Some(5),
-                edge_id: Some(vec![6]),
-                branch: Some(vec![7]),
-                role: Some(RelationEdgeRole::Terminal),
-                order: Some(vec![8]),
-                hole_state: Some(PathHoleState::Hole),
-            }),
-            ProgramFactEntry::PathCorrelationCoverage(PathCorrelationCoverageEntry {
-                path: "p".into(),
-                source_table: "a".to_owned().into(),
-                source_row: RowUuid::from_bytes([9; 16]),
-                correlation_key: vec![10],
+            ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+                source: fixture_source_with_all_roles(),
                 complete: true,
             }),
-            ProgramFactEntry::SourceCoverage(SourceCoverageEntry {
-                source: "s".into(),
-                table: "a".to_owned().into(),
-                row: Some(RowUuid::from_bytes([11; 16])),
-                coverage: vec![12],
-            }),
-            ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
-                scope: "s".into(),
-                tier: DurabilityTier::Global,
-                stream: Some("t".into()),
-                frontier: vec![13],
-            }),
-            ProgramFactEntry::CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry {
-                tx: tx(33, 14),
-                tier: DurabilityTier::Edge,
-                payload_digest: vec![15],
-            }),
-            ProgramFactEntry::ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry {
-                tx: tx(34, 16),
-                scope: "s".into(),
-                result: Some(member.clone()),
-                tier: DurabilityTier::Local,
-                covered_members_digest: vec![17],
-            }),
-            ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
-                decision: vec![18],
-                outcome: PolicyDecisionOutcomeEntry::RequiresCoverage {
-                    scope: "s".into(),
-                    frontier: vec![19],
-                },
-                reason: Some("r".into()),
-            }),
-            ProgramFactEntry::VersionWitness(VersionWitnessEntry {
-                role: "r".into(),
+            ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                source: fixture_source_with_all_roles(),
+                version_table: "a".to_owned().into(),
+                source_row: RowUuid::from_bytes([38; 16]),
                 version: version.clone(),
-                member: Some(member.clone()),
-            }),
-            ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
-                protected: member.clone(),
-                policy_path: "p".into(),
-                witness: version.clone(),
-                edge_kind: Some(RelationEdgeKind::Recursive),
-            }),
-            ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
-                result: member.clone(),
-                contributor: member.clone(),
-                batch: Some(tx(35, 20)),
-                role: Some("r".into()),
-            }),
-            ProgramFactEntry::PredicateRead(PredicateReadEntry {
-                role: PredicateOutputSetRoleEntry::Now,
-                shape_id: ShapeId(uuid::Uuid::from_bytes([21; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([22; 16])),
-                predicate: vec![23],
-                frontier: vec![24],
-            }),
-            ProgramFactEntry::PredicateOutputSet(PredicateOutputSetEntry {
-                role: PredicateOutputSetRoleEntry::Base,
-                table: "a".to_owned().into(),
-                row: RowUuid::from_bytes([25; 16]),
-                version: version.clone(),
-                shape_id: ShapeId(uuid::Uuid::from_bytes([26; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([27; 16])),
-            }),
-            ProgramFactEntry::PointRead(PointReadEntry {
-                present: true,
-                table: "a".to_owned().into(),
-                row: RowUuid::from_bytes([28; 16]),
-                version: Some(version),
-                shape_id: ShapeId(uuid::Uuid::from_bytes([29; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([30; 16])),
             }),
         ];
         let encoded = facts
             .iter()
             .map(|fact| program_fact_storage_bytes(fact).unwrap())
             .collect::<Vec<_>>();
-        for (tag, (fact, bytes)) in facts.iter().zip(&encoded).enumerate() {
+        for (expected_tag, (fact, bytes)) in [3, 14].into_iter().zip(facts.iter().zip(&encoded)) {
             assert_eq!(&bytes[..4], PROGRAM_FACT_STORAGE_MAGIC);
             assert_eq!(bytes[4], PROGRAM_FACT_STORAGE_VERSION);
-            assert_eq!(usize::from(bytes[5]), tag);
+            assert_eq!(usize::from(bytes[5]), expected_tag);
             assert_eq!(program_fact_from_storage_bytes(bytes).unwrap(), *fact);
         }
         assert_eq!(
@@ -6025,22 +6406,52 @@ mod result_member_storage_codec_tests {
                 .map(|bytes| blake3::hash(bytes).to_hex().to_string())
                 .collect::<Vec<_>>(),
             [
-                "fb01d1bbceee0c2e0ad7e77005cb9b73bb2d9203e4951ea8e045b9614a8c4051",
-                "fd88aa550022a04bc6775b5e997d15b8f4e75f9cb26f62b7cb6d9d9aac6c4212",
-                "cc05966da0ecfb3ddbbeb437c3f0466c9757211b4718e005ed98109d0d9e24b0",
-                "090b02e75b1028e4b732d2a1eb56da8d22cac67015ca4b223c3914b62338c753",
-                "85f2bab0a0f503066f669f9482b887b177e3a68cc1e6f7af69343d31795135c2",
-                "cbdf98c6f111efb8b9ffaae39160150cddd7f4ca4b10d7e211e8d23d59104584",
-                "90b3bda57c07eeda03fc389e0287f93627085ab0dfc2db66ea30eea9d7352a44",
-                "2d1ae58110da67261105647b85d16b2cd0eed8e0ad602a2393a49dcd20e1e307",
-                "f19b832022c7623e85f35a321908882ac8d54d685ecdd7b892c041c217b467b9",
-                "0e3395f68049bf529f1e5014170d4aa5f55ac6d45daf6998e9f3376fefce4a47",
-                "67e1ab722ba171d14ab66f5fc31bc948344a75f936865330aebb222c10161be6",
-                "cd7baa59c57b431ceb32580a74541393890e69af5c6587d4a16dfacf4ff10482",
-                "ceca71b78f841cf8ca9387c9cc0c616fd043a5ce5698fb7098c9c5d6a148ad8e",
-                "73b584cebffb48801a204b0c1e5d57e7b1dddc1c40180ffa5497d8981ad5d1b1",
+                "cf2f01f026edaec1097ee2d1463f1719561eeda83e671a3ff07af13c0f861d34",
+                "6f3af744b862a1da729a60506be303af633493fa0ba9987b759cbd33b46fe812",
             ]
         );
+    }
+
+    #[test]
+    fn covered_input_source_codec_pins_every_role_and_rejects_malformed_paths() {
+        let fact = ProgramFactEntry::CoveredInput(CoveredInputEntry {
+            source: fixture_source_with_all_roles(),
+            version_table: "tasks".to_owned().into(),
+            source_row: RowUuid::from_bytes([0x38; 16]),
+            version: fixture_version(),
+        });
+        let encoded = program_fact_storage_bytes(&fact).unwrap();
+        assert_eq!(
+            hex::encode(&encoded),
+            "4a50464b010e050000007461736b730600000000010400000073656c6602040000007365656403040000007374657004050000006974656d73050400000072656164050000007461736b73383838383838383838383838383838381f000000000000003333333333333333333333333333333301343434343434343434343434343434340201200000000000000035353535353535353535353535353535010100000036010100000037"
+        );
+        assert_eq!(program_fact_from_storage_bytes(&encoded).unwrap(), fact);
+
+        let source_offset = 6 + 4 + "tasks".len() + 4;
+        let mut unknown_role = encoded.clone();
+        unknown_role[source_offset] = 0xff;
+        assert!(program_fact_from_storage_bytes(&unknown_role).is_err());
+
+        let mut empty_path = encoded.clone();
+        let path_len_offset = 6 + 4 + "tasks".len();
+        empty_path[path_len_offset..path_len_offset + 4].copy_from_slice(&0_u32.to_le_bytes());
+        empty_path.remove(source_offset);
+        assert!(program_fact_from_storage_bytes(&empty_path).is_err());
+
+        let empty_alias = ProgramFactEntry::CoveredInput(CoveredInputEntry {
+            source: ProgramSourceId {
+                table: "tasks".to_owned().into(),
+                path: vec![ProgramSourceRole::Alias(String::new())],
+            },
+            version_table: "tasks".to_owned().into(),
+            source_row: RowUuid::from_bytes([0x39; 16]),
+            version: fixture_version(),
+        });
+        assert!(program_fact_storage_bytes(&empty_alias).is_err());
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(program_fact_from_storage_bytes(&trailing).is_err());
     }
 
     #[test]

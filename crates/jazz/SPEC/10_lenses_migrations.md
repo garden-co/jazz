@@ -387,6 +387,18 @@ rollback exposure. The legacy logical `(table, schema-version)` registry
 `jazz_partitions` no longer exists; durable `jazz_schema_versions` mappings are
 the complete reopen input.
 
+A valid subscription whose registered shape awaits catalogue activation stays
+pending; absence of the active schema is not a permanent query rejection. The
+serving connection retains the usage-site handle and its admitted immutable
+session snapshot, then resumes ordinary subscription admission when the shape
+becomes available. Unsubscribe or connection closure retires that pending
+request. Pending requests are bounded by the existing per-peer registration
+count and aggregate registration-byte budget; exceeding these bounds is a
+protocol error, not silent eviction. Malformed or unsupported shapes still fail
+explicitly. For example, Bob's query opened against a schema draft returns no
+rows before its lineage lens is activated, then resolves through the same
+subscription after activation without requiring Bob to retry it.
+
 `jazz_schema_versions.physical_mapping` is one typed, exact-consumed **v1**
 binary payload, not JSON or a Rust-layout serialization. Its v1 payload-enum
 introduction ordinal is always a little-endian `u32`, including values below

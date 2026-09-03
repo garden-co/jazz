@@ -59,6 +59,25 @@ pub struct ServerSession {
     identity: AuthorSubject,
 }
 
+/// Capability selected by the server only after authenticating a WebSocket
+/// session and negotiating its transport features.
+///
+/// `WirePeerRole` is deliberately not used here: it is a peer advertisement,
+/// whereas this value controls what the server has admitted the link to do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerLinkAdmission {
+    /// A normal session or backend link.
+    #[default]
+    OrdinarySession,
+    /// A durable relay for exactly the one session authenticated by this
+    /// connection. The epoch is freshly minted at admission and invalidated
+    /// on reconnect.
+    ScopeIsolatedClientRelay {
+        /// Fresh server-issued capability epoch for this accepted connection.
+        admission_epoch: u64,
+    },
+}
+
 impl ServerSession {
     fn transport(self) -> usize {
         self.transport
@@ -265,7 +284,6 @@ struct ServerSessionState {
     connection: ShellPeerConnection,
     transport: SharedWireTransport,
     auxiliary_pump: crate::db::PeerIoPump,
-    negotiated_features: crate::wire::WireFeatures,
     identity: AuthorSubject,
     epoch: u64,
     resume_status: ServerResumeStatus,
@@ -297,8 +315,6 @@ pub(super) struct ServerUpstreamIo {
     pub(super) transport: SharedWireTransport,
     pub(super) pump: crate::db::PeerIoPump,
     pub(super) connection_id: u64,
-    pub(super) protocol_version: u16,
-    pub(super) features: crate::wire::WireFeatures,
 }
 
 impl WireTransport for SharedWireTransport {
@@ -624,6 +640,33 @@ impl ShellDb {
         }
     }
 
+    fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn crate::db::Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> ShellPeerConnection {
+        match self {
+            Self::Memory(db) => {
+                ShellPeerConnection::Memory(db.accept_scope_isolated_relay_subscriber(
+                    transport,
+                    identity,
+                    claims,
+                    admission_epoch,
+                ))
+            }
+            Self::Durable(db) => {
+                ShellPeerConnection::Durable(db.accept_scope_isolated_relay_subscriber(
+                    transport,
+                    identity,
+                    claims,
+                    admission_epoch,
+                ))
+            }
+        }
+    }
+
     fn accept_edge_authority_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn crate::db::Transport>,
@@ -705,6 +748,30 @@ impl ShellPeerConnection {
         match self {
             Self::Memory(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
             Self::Durable(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
+        }
+    }
+
+    #[cfg(test)]
+    fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
+        match self {
+            Self::Memory(connection) => {
+                crate::db::block_on(connection.lock()).scope_relay_admission_epoch_for_test()
+            }
+            Self::Durable(connection) => {
+                crate::db::block_on(connection.lock()).scope_relay_admission_epoch_for_test()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn scope_relay_binding_for_test(&self) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+        match self {
+            Self::Memory(connection) => {
+                crate::db::block_on(connection.lock()).scope_relay_binding_for_test()
+            }
+            Self::Durable(connection) => {
+                crate::db::block_on(connection.lock()).scope_relay_binding_for_test()
+            }
         }
     }
 }
@@ -1168,6 +1235,7 @@ impl InMemoryServerShell {
             trust,
             crate::wire::current_wire_features(),
             None,
+            ServerLinkAdmission::OrdinarySession,
         )
     }
 
@@ -1180,6 +1248,7 @@ impl InMemoryServerShell {
         trust: CommitUnitTrust,
         negotiated_features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
+        link_admission: ServerLinkAdmission,
     ) -> ShellResult<ServerSession> {
         if self.is_draining() {
             self.metrics.rejected_sessions += 1;
@@ -1198,7 +1267,19 @@ impl InMemoryServerShell {
         // Only public sessions are Edge authority writes. Trusted native and
         // backend links retain ordinary local Edge admission, which remains
         // available while the Core authority is disconnected.
-        let connection = if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
+        let connection = if let ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch } =
+            link_admission
+        {
+            // The WebSocket admission boundary has already authenticated this
+            // one external session. Relay frames remain subjectless, while
+            // Subscribe/repair can use only this stored immutable binding.
+            self.db.accept_scope_isolated_relay_subscriber(
+                transport_adapter,
+                identity,
+                claims,
+                admission_epoch,
+            )
+        } else if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
             self.db
                 .accept_edge_authority_subscriber_with_claims_and_trust(
                     transport_adapter,
@@ -1220,7 +1301,6 @@ impl InMemoryServerShell {
             connection,
             transport,
             auxiliary_pump,
-            negotiated_features,
             identity,
             epoch: 1,
             resume_status: ServerResumeStatus::Fresh,
@@ -1267,8 +1347,6 @@ impl InMemoryServerShell {
             transport,
             pump,
             connection_id,
-            protocol_version,
-            features,
         }
     }
 
@@ -1316,7 +1394,7 @@ impl InMemoryServerShell {
                 drain_state: self.drain_state,
             });
         }
-        let Some((identity, cursor)) = self.resume_cursors.remove(&resume.resume_token) else {
+        let Some((identity, mut cursor)) = self.resume_cursors.remove(&resume.resume_token) else {
             return Err(ShellError::InvalidResumeToken(resume.resume_token));
         };
         if identity != resume.identity {
@@ -1327,6 +1405,11 @@ impl InMemoryServerShell {
                 actual: resume.identity,
             });
         }
+        // A resume token only restores in-process state. It still attaches a
+        // fresh physical transport, so a scope-isolated relay retains its
+        // immutable authenticated binding but not the capability epoch issued
+        // to the detached connection.
+        cursor.refresh_scope_relay_admission_epoch();
         let transport = SharedWireTransport::default();
         let connection = self.db.accept_subscriber_with_claims(
             Box::new(WireTransportAdapter::current(transport.clone())),
@@ -1340,7 +1423,6 @@ impl InMemoryServerShell {
             connection,
             transport,
             auxiliary_pump,
-            negotiated_features: crate::wire::current_wire_features(),
             identity: resume.identity,
             epoch: resume.resume_token.saturating_add(1),
             resume_status: ServerResumeStatus::Resumed,
@@ -1429,12 +1511,9 @@ impl InMemoryServerShell {
             self.metrics.frames_received += 1;
             self.metrics.bytes_received += frame.len() as u64;
             let state = self.session_state(session)?;
-            let canonical = crate::db::block_on(
-                state
-                    .auxiliary_pump
-                    .route_incoming_wire_frame(frame, state.negotiated_features),
-            )
-            .map_err(ShellError::Transport)?;
+            let canonical =
+                crate::db::block_on(state.auxiliary_pump.route_incoming_wire_frame(frame))
+                    .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
                 state.transport.queues.borrow_mut().inbound.push_back(frame);
             }
@@ -1456,7 +1535,7 @@ impl InMemoryServerShell {
             let state = self.session_state(session)?;
             let canonical = state
                 .auxiliary_pump
-                .route_incoming_wire_frame(frame, state.negotiated_features)
+                .route_incoming_wire_frame(frame)
                 .await
                 .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
@@ -1517,11 +1596,7 @@ impl InMemoryServerShell {
             .collect::<Vec<_>>();
         while let Some(frame) = state
             .auxiliary_pump
-            .take_outbound_wire_frame(
-                crate::wire::WIRE_PROTOCOL_VERSION,
-                state.negotiated_features,
-                None,
-            )
+            .take_outbound_wire_frame()
             .map_err(ShellError::Transport)?
         {
             frames.push(frame);
@@ -2206,6 +2281,72 @@ mod tests {
                     .column("done", PublicColumnType::Boolean),
             ),
         )
+    }
+
+    #[test]
+    fn scope_isolated_relay_resume_preserves_binding_and_rotates_attachment_capability() {
+        let identity = DbIdentity {
+            node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let viewer = AuthorSubject::for_test_bytes([0x77; 16]);
+        let mut shell =
+            InMemoryServerShell::start(InMemoryServerShellConfig::new(simple_schema(), identity))
+                .expect("scope relay shell starts");
+        let claims = BTreeMap::from([("role".to_owned(), Value::String("viewer".to_owned()))]);
+        let session = shell
+            .accept_subscriber_session_with_claims_and_trust_and_context(
+                viewer,
+                claims.clone(),
+                CommitUnitTrust::Session,
+                crate::wire::current_wire_features(),
+                None,
+                ServerLinkAdmission::ScopeIsolatedClientRelay {
+                    admission_epoch: 41,
+                },
+            )
+            .expect("scope relay session is admitted");
+        let old_epoch = shell.sessions[session.transport()]
+            .as_ref()
+            .expect("live session")
+            .connection
+            .scope_relay_admission_epoch_for_test()
+            .expect("scope relay capability");
+        let old_binding = shell.sessions[session.transport()]
+            .as_ref()
+            .expect("live session")
+            .connection
+            .scope_relay_binding_for_test()
+            .expect("scope relay binding");
+
+        let resume = shell
+            .disconnect_session_for_resume(session)
+            .expect("detached scope relay can resume");
+        assert!(shell.sessions[session.transport()].is_none());
+        let resumed = shell
+            .resume_subscriber_session(resume)
+            .expect("one-shot matching resume is accepted");
+        assert_eq!(resumed.identity(), viewer);
+        let resumed_epoch = shell.sessions[resumed.transport()]
+            .as_ref()
+            .expect("resumed session")
+            .connection
+            .scope_relay_admission_epoch_for_test()
+            .expect("resumed scope relay capability");
+        let resumed_binding = shell.sessions[resumed.transport()]
+            .as_ref()
+            .expect("resumed session")
+            .connection
+            .scope_relay_binding_for_test()
+            .expect("resumed scope relay binding");
+
+        // The old capability was moved out with the detached transport and is
+        // not reusable on the resumed link. Only the exact authenticated
+        // binding survives, represented here by the same resumed identity.
+        assert_eq!(old_epoch, 41);
+        assert_eq!(resumed_epoch, old_epoch + 1);
+        assert_eq!(old_binding, (viewer, claims));
+        assert_eq!(resumed_binding, old_binding);
     }
 
     #[test]

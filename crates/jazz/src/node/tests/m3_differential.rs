@@ -33,8 +33,9 @@ struct DifferentialShape {
 
 struct DifferentialOracle {
     peers: Vec<PeerState>,
+    receivers: Vec<NodeState<MemoryStorage>>,
     shapes: Vec<DifferentialShape>,
-    rows: Vec<BTreeSet<(String, RowUuid)>>,
+    rows: Vec<BTreeMap<(String, RowUuid), BTreeMap<String, Value>>>,
     aggregates: Vec<AggregateDifferential>,
 }
 
@@ -45,6 +46,7 @@ struct AggregateDifferential {
     identity: AuthorSubject,
     subscription: SubscriptionKey,
     peer: PeerState,
+    receiver: NodeState<MemoryStorage>,
     output: &'static str,
     agreement: AggregateAgreement,
     values: BTreeMap<u64, Value>,
@@ -86,8 +88,9 @@ impl DifferentialOracle {
         seed: u64,
     ) -> Self {
         let mut peers = Vec::new();
+        let mut receivers = Vec::new();
         let mut rows = Vec::new();
-        for shape in &shapes {
+        for (receiver_offset, shape) in shapes.iter().enumerate() {
             let mut peer = PeerState::client_link(shape.identity);
             let update = peer
                 .rehydrate_query(core, &shape.shape, &shape.binding)
@@ -97,13 +100,28 @@ impl DifferentialOracle {
                         shape.name
                     )
                 });
-            let mut shape_rows = BTreeSet::new();
-            apply_result_members(&mut shape_rows, &update, &shape.shape.query().table);
+            let mut receiver = maintained_receiver(schema, 0xb0 + receiver_offset as u8);
+            register_maintained_receiver(&mut receiver, &shape.shape, &shape.binding, shape.identity);
+            receiver.apply_sync_message_settled(update).unwrap_or_else(|err| {
+                panic!(
+                    "seed {seed}: receiver rejected initial source closure for {}: {err:?}",
+                    shape.name
+                )
+            });
+            let shape_rows = m3_receiver_row_bodies(
+                &mut receiver,
+                &shape.shape,
+                &shape.binding,
+                shape.identity,
+            );
             rows.push(shape_rows);
             peers.push(peer);
+            receivers.push(receiver);
         }
         let mut aggregates = Vec::new();
-        for (name, aggregate, output, agreement) in aggregate_specs {
+        for (receiver_offset, (name, aggregate, output, agreement)) in
+            aggregate_specs.into_iter().enumerate()
+        {
             let shape = Query::from("docs")
                 .aggregate([aggregate])
                 .group_by("bucket")
@@ -121,15 +139,23 @@ impl DifferentialOracle {
                 .unwrap_or_else(|err| {
                     panic!("seed {seed}: initial maintained open failed for {name}: {err:?}")
                 });
-            let mut values = BTreeMap::new();
-            apply_aggregate_payload(&mut values, &initial, output);
+            let identity = user(0xa1);
+            let mut receiver = maintained_receiver(schema, 0xc0 + receiver_offset as u8);
+            register_maintained_receiver(&mut receiver, &shape, &binding, identity);
+            receiver
+                .apply_sync_message_settled(initial)
+                .unwrap_or_else(|err| {
+                    panic!("seed {seed}: receiver rejected initial source closure for {name}: {err:?}")
+                });
+            let values = receiver_aggregate_values(&mut receiver, &shape, &binding, identity, output);
             aggregates.push(AggregateDifferential {
                 name,
                 shape,
                 binding,
-                identity: user(0xa1),
+                identity,
                 subscription,
                 peer,
+                receiver,
                 output,
                 agreement,
                 values,
@@ -139,6 +165,7 @@ impl DifferentialOracle {
 
         let mut oracle = Self {
             peers,
+            receivers,
             shapes,
             rows,
             aggregates,
@@ -163,9 +190,10 @@ impl DifferentialOracle {
         seed: u64,
         checkpoint: &str,
     ) {
-        for ((peer, shape), rows) in self
+        for (((peer, receiver), shape), rows) in self
             .peers
             .iter_mut()
+            .zip(self.receivers.iter_mut())
             .zip(self.shapes.iter())
             .zip(self.rows.iter_mut())
         {
@@ -182,7 +210,14 @@ impl DifferentialOracle {
                         shape.name
                     )
                 });
-            apply_result_members(rows, &update, &shape.shape.query().table);
+            receiver.apply_sync_message_settled(update).unwrap_or_else(|err| {
+                panic!(
+                    "seed {seed}: receiver rejected source closure for {} at {checkpoint}: {err:?}",
+                    shape.name
+                )
+            });
+            *rows =
+                m3_receiver_row_bodies(receiver, &shape.shape, &shape.binding, shape.identity);
         }
         for aggregate in &mut self.aggregates {
             let aggregate_update = aggregate
@@ -199,7 +234,22 @@ impl DifferentialOracle {
                         aggregate.name
                     )
                 });
-            apply_aggregate_payload(&mut aggregate.values, &aggregate_update, aggregate.output);
+            aggregate
+                .receiver
+                .apply_sync_message_settled(aggregate_update)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "seed {seed}: aggregate receiver rejected source closure for {} at {checkpoint}: {err:?}",
+                        aggregate.name
+                    )
+                });
+            aggregate.values = receiver_aggregate_values(
+                &mut aggregate.receiver,
+                &aggregate.shape,
+                &aggregate.binding,
+                aggregate.identity,
+                aggregate.output,
+            );
             aggregate.maintenance_updates += 1;
         }
     }
@@ -217,10 +267,10 @@ impl DifferentialOracle {
         checkpoint: &str,
     ) {
         for (maintained, shape) in self.rows.iter().zip(self.shapes.iter()) {
-            let one_shot = one_shot_rows(core, &shape.shape, &shape.binding, shape.identity);
+            let one_shot = one_shot_row_bodies(core, &shape.shape, &shape.binding, shape.identity);
             assert_eq!(
                 maintained, &one_shot,
-                "seed {seed}: maintained/one-shot divergence for {} at {checkpoint}",
+                "seed {seed}: maintained/one-shot selected-body divergence for {} at {checkpoint}",
                 shape.name
             );
         }
@@ -301,6 +351,183 @@ fn run_m3_differential_seed(seed: u64) {
         }
         differential.tick_and_assert(&mut core, seed, &format!("fuzz-step-{step}"));
     }
+}
+
+#[test]
+fn m3_differential_plain_body_cells_match_one_shot() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x75), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let shape = Query::from("docs").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let mut oracle = DifferentialOracle::open_with_aggregate_specs(
+        &mut core,
+        &schema,
+        vec![DifferentialShape {
+            name: "docs_plain_body_cells",
+            shape,
+            binding,
+            identity: user(0xa1),
+            subscription,
+        }],
+        Vec::new(),
+        0,
+    );
+    let mut parents = m3_differential_parent_map(&mut core);
+    add_visible_doc(&mut core, &mut parents, 0);
+    oracle.tick_and_assert(&mut core, 0, "after-visible-doc");
+}
+
+/// The authority publishes only Alice's exact recursive seed closure: the
+/// allowed group seed reaches visible docs, while Bob's otherwise valid group
+/// seed must neither appear as a covered source nor arrive in the receiver.
+#[test]
+fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x77), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let alice = user(0xa1);
+    let excluded_seed = row(0x43);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("group_access_edges", excluded_seed, 4).cells(BTreeMap::from([
+            ("user_id".to_owned(), Value::String(user(0xb2).canonical().to_owned())),
+            ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
+        ])),
+    );
+    let shape = m3_differential_shapes(&schema)
+        .into_iter()
+        .find(|shape| shape.name == "docs_edge_seeded_reachable")
+        .expect("M3 matrix includes recursive seed shape");
+    let mut peer = PeerState::client_link(alice);
+    let update = peer
+        .rehydrate_query(&mut core, &shape.shape, &shape.binding)
+        .expect("authority evaluates exact recursive seed closure");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        program_fact_adds,
+        ..
+    }) = &update
+    else {
+        panic!("expected recursive seed view update");
+    };
+    let seed_inputs = program_fact_adds
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source.table.as_str() == "group_access_edges" =>
+            {
+                Some(input)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(seed_inputs.len(), 1, "one allowed recursive seed source");
+    assert_eq!(seed_inputs[0].source_row, row(0x42));
+    assert_eq!(
+        seed_inputs[0].source.path,
+        vec![
+            crate::protocol::ProgramSourceRole::Root,
+            crate::protocol::ProgramSourceRole::RecursiveSeed(
+                "reachable:0:group_access_edges".to_owned()
+            ),
+        ],
+        "allowed seed retains its exact normalized source occurrence"
+    );
+    let shipped_seed_rows = version_bundles_for_update(&update)
+        .into_iter()
+        .flat_map(|bundle| bundle.versions)
+        .filter(|version| version.table() == "group_access_edges")
+        .map(|version| version.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(shipped_seed_rows, BTreeSet::from([row(0x42)]));
+
+    let mut receiver = maintained_receiver(&schema, 0xb9);
+    register_maintained_receiver(&mut receiver, &shape.shape, &shape.binding, alice);
+    receiver
+        .apply_sync_message_settled(update)
+        .expect("receiver accepts only exact recursive seed inputs");
+    let received_seed_rows = receiver
+        .current_rows("group_access_edges", DurabilityTier::Global)
+        .expect("read received recursive seed bodies")
+        .into_iter()
+        .map(|row| (row.row_uuid(), selected_body_cells(&row)))
+        .collect::<BTreeMap<_, _>>();
+    let expected_seed_body = core
+        .current_rows("group_access_edges", DurabilityTier::Global)
+        .expect("read authority seed body")
+        .into_iter()
+        .find(|current| current.row_uuid() == row(0x42))
+        .map(|current| selected_body_cells(&current))
+        .expect("allowed seed exists on authority");
+    assert_eq!(received_seed_rows, BTreeMap::from([(row(0x42), expected_seed_body)]));
+}
+
+#[test]
+fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x78), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let bob_seed = row(0x43);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("group_access_edges", bob_seed, 4).cells(BTreeMap::from([
+            (
+                "user_id".to_owned(),
+                Value::String(bob.canonical().to_owned()),
+            ),
+            ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
+        ])),
+    );
+    let shape = m3_differential_shapes(&schema)
+        .into_iter()
+        .find(|shape| shape.name == "docs_edge_seeded_reachable")
+        .unwrap();
+    let seed_rows = |update: &SyncMessage| {
+        version_bundles_for_update(update)
+            .into_iter()
+            .flat_map(|bundle| bundle.versions)
+            .filter(|version| version.table() == "group_access_edges")
+            .map(|version| version.row_uuid())
+            .collect::<BTreeSet<_>>()
+    };
+    let mut alice_peer = PeerState::client_link(alice);
+    let mut bob_peer = PeerState::client_link(bob);
+    let alice_update = alice_peer
+        .rehydrate_query(&mut core, &shape.shape, &shape.binding)
+        .unwrap();
+    let bob_update = bob_peer
+        .rehydrate_query(&mut core, &shape.shape, &shape.binding)
+        .unwrap();
+    assert_eq!(seed_rows(&alice_update), BTreeSet::from([row(0x42)]));
+    assert_eq!(seed_rows(&bob_update), BTreeSet::from([bob_seed]));
+
+    // Opening Bob's identical query must not contaminate Alice's live route.
+    let refreshed = alice_peer
+        .rehydrate_query(&mut core, &shape.shape, &shape.binding)
+        .unwrap();
+    let SyncMessage::ViewUpdate(payload) = refreshed else {
+        panic!("expected source reset")
+    };
+    let covered_seeds = payload
+        .program_fact_adds
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source.table.as_str() == "group_access_edges" =>
+            {
+                Some(input.source_row)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(covered_seeds, BTreeSet::from([row(0x42)]));
 }
 
 fn run_m3_aggregate_churn_curve() {
@@ -608,8 +835,18 @@ fn m3_maintained_one_shot_differential_oracle_null_semantics() {
     };
     let mut peer = PeerState::client_link(user(0xa1));
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let mut maintained = BTreeMap::new();
-    apply_aggregate_payload(&mut maintained, &initial, "sum_nullable_f64_value");
+    let mut receiver = maintained_receiver(&schema, 0xd1);
+    register_maintained_receiver(&mut receiver, &shape, &binding, user(0xa1));
+    receiver
+        .apply_sync_message_settled(initial)
+        .expect("apply exact initial aggregate source closure");
+    let mut maintained = receiver_aggregate_values(
+        &mut receiver,
+        &shape,
+        &binding,
+        user(0xa1),
+        "sum_nullable_f64_value",
+    );
     assert_eq!(
         maintained,
         one_shot_aggregate_values(
@@ -630,7 +867,16 @@ fn m3_maintained_one_shot_differential_oracle_null_semantics() {
     let update = peer
         .query_update_for_subscription(&mut core, subscription, &shape, &binding)
         .unwrap();
-    apply_aggregate_payload(&mut maintained, &update, "sum_nullable_f64_value");
+    receiver
+        .apply_sync_message_settled(update)
+        .expect("apply exact aggregate source closure after nullable group transition");
+    maintained = receiver_aggregate_values(
+        &mut receiver,
+        &shape,
+        &binding,
+        user(0xa1),
+        "sum_nullable_f64_value",
+    );
     assert_eq!(
         maintained,
         one_shot_aggregate_values(
@@ -653,7 +899,16 @@ fn m3_maintained_one_shot_differential_oracle_null_semantics() {
     let update = peer
         .query_update_for_subscription(&mut core, subscription, &shape, &binding)
         .unwrap();
-    apply_aggregate_payload(&mut maintained, &update, "sum_nullable_f64_value");
+    receiver
+        .apply_sync_message_settled(update)
+        .expect("apply exact aggregate source closure after empty-group transition");
+    maintained = receiver_aggregate_values(
+        &mut receiver,
+        &shape,
+        &binding,
+        user(0xa1),
+        "sum_nullable_f64_value",
+    );
     assert_eq!(
         maintained,
         one_shot_aggregate_values(
@@ -766,11 +1021,13 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let identity = user(0xa1);
     let mut peer = PeerState::client_link(identity);
+    register_maintained_receiver(&mut reader, &shape, &binding, identity);
 
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let mut maintained_rows = BTreeSet::new();
-    apply_result_members(&mut maintained_rows, &initial, shape.query().table.as_str());
     reader.apply_sync_message_settled(initial).unwrap();
+    let mut maintained_rows = m3_receiver_row_bodies(&mut reader, &shape, &binding, identity)
+        .into_keys()
+        .collect::<BTreeSet<_>>();
     assert!(!maintained_rows.is_empty());
 
     for row_uuid in [row(0x11), row(0x12), row(0x14)] {
@@ -787,8 +1044,10 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
         }
     }
     let reset = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    apply_result_members(&mut maintained_rows, &reset, shape.query().table.as_str());
     reader.apply_sync_message_settled(reset).unwrap();
+    maintained_rows = m3_receiver_row_bodies(&mut reader, &shape, &binding, identity)
+        .into_keys()
+        .collect();
     assert!(
         one_shot_rows(&mut core, &shape, &binding, identity).is_empty(),
         "fixture must make the serving node one-shot result genuinely empty"
@@ -1619,110 +1878,37 @@ fn one_shot_rows<S: OrderedKvStorage>(
     binding: &Binding,
     identity: AuthorSubject,
 ) -> BTreeSet<(String, RowUuid)> {
-    core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
-        .unwrap()
-        .into_iter()
-        .map(|row| (row.table().to_owned(), row.row_uuid()))
+    one_shot_row_bodies(core, shape, binding, identity)
+        .into_keys()
         .collect()
 }
 
-fn apply_result_members(
-    rows: &mut BTreeSet<(String, RowUuid)>,
-    update: &SyncMessage,
-    root_table: &str,
-) {
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    if *reset_result_set {
-        rows.clear();
-    }
-    for entry in result_member_removes {
-        if let Some((table, row_uuid, _tx_id)) = entry.as_row()
-            && table.as_str() == root_table
-        {
-            rows.remove(&(table.to_string(), row_uuid));
-        }
-    }
-    for entry in result_member_adds {
-        if let Some((table, row_uuid, _tx_id)) = entry.as_row()
-            && table.as_str() == root_table
-        {
-            rows.insert((table.to_string(), row_uuid));
-        }
-    }
+/// Compare identity and public body cells. Provenance fields begin with `$`
+/// and are intentionally excluded: this oracle checks receiver query output,
+/// not independently generated author/timestamp metadata.
+fn selected_body_cells(row: &CurrentRow) -> BTreeMap<String, Value> {
+    row.test_cells_by_descriptor()
+        .into_iter()
+        .filter(|(name, _)| !name.starts_with('$'))
+        .collect()
 }
 
-fn apply_aggregate_payload(values: &mut BTreeMap<u64, Value>, update: &SyncMessage, output: &str) {
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        program_fact_adds,
-        program_fact_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    if *reset_result_set {
-        values.clear();
-    }
-    for fact in program_fact_removes {
-        if let Some((bucket, _)) = aggregate_payload_value(fact, output) {
-            values.remove(&bucket);
-        }
-    }
-    for fact in program_fact_adds {
-        if let Some((bucket, value)) = aggregate_payload_value(fact, output) {
-            if let Some(value) = value {
-                values.insert(bucket, value);
-            } else {
-                // The aggregate payload is present, but its SQL result is
-                // NULL. Keep that distinct from a missing payload fact while
-                // matching the one-shot public boundary, which omits the
-                // null cell from this numeric comparison map.
-                values.remove(&bucket);
-            }
-        }
-    }
-}
-
-fn aggregate_payload_value(
-    fact: &crate::protocol::ProgramFactEntry,
-    output: &str,
-) -> Option<(u64, Option<Value>)> {
-    let crate::protocol::ProgramFactEntry::ResultPayload(payload) = fact else {
-        return None;
-    };
-    // Aggregate payloads are identified by their synthetic group-key member,
-    // never by a source-derived synthetic table label.
-    if !matches!(
-        payload.member,
-        crate::protocol::ResultMemberEntry::Synthetic { .. }
-    ) {
-        return None;
-    }
-    let descriptor = groove::records::decode_record_descriptor(&payload.descriptor).unwrap();
-    let record = groove::records::BorrowedRecord::new(&payload.record, &descriptor);
-    let Value::U64(bucket) = record.get("user_bucket").unwrap() else {
-        panic!("aggregate bucket must be U64");
-    };
-    // Aggregate output aliases cross the maintained program boundary in their
-    // dedicated physical namespace. Decode that boundary here instead of
-    // assuming the public alias is a compiler-record field name: aliases can
-    // collide with grouped source columns.
-    let output_field = crate::node::query_engine::aggregate_output_field(output);
-    let value = match record.get(&output_field).unwrap() {
-        Value::Nullable(None) => None,
-        Value::Nullable(Some(value)) => Some((*value).clone()),
-        value => Some(value.clone()),
-    };
-    Some((bucket, value))
+fn one_shot_row_bodies<S: OrderedKvStorage>(
+    core: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+) -> BTreeMap<(String, RowUuid), BTreeMap<String, Value>> {
+    core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                (row.table().to_owned(), row.row_uuid()),
+                selected_body_cells(&row),
+            )
+        })
+        .collect()
 }
 
 fn one_shot_aggregate_values<S: OrderedKvStorage>(
@@ -1734,6 +1920,140 @@ fn one_shot_aggregate_values<S: OrderedKvStorage>(
 ) -> BTreeMap<u64, Value> {
     core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
         .unwrap()
+        .into_iter()
+        .filter_map(|row| {
+            let cells = row.test_cells_by_descriptor();
+            let Value::U64(bucket) = &cells["bucket"] else {
+                panic!("aggregate bucket must be U64");
+            };
+            cells.get(output).cloned().map(|value| (*bucket, value))
+        })
+        .collect()
+}
+
+/// The authority ships only the exact, policy-scoped source closure. Output is
+/// deliberately computed by a separately registered client receiver; it must
+/// never be read back from authority result facts on the update.
+fn maintained_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemoryStorage> {
+    let column_families = schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut receiver = NodeState::new(
+        node(receiver_id),
+        schema.clone(),
+        MemoryStorage::new(&refs).expect("valid aggregate receiver storage"),
+    )
+    .expect("open aggregate receiver");
+    receiver.set_non_durable_client();
+    receiver
+}
+
+fn register_maintained_receiver<S: OrderedKvStorage + ReopenableStorage>(
+    receiver: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+) {
+    receiver
+        .apply_sync_message_settled(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(shape),
+            opts: crate::protocol::RegisterShapeOptions::default(),
+        })
+        .expect("register maintained receiver shape");
+    let values = shape
+        .params()
+        .keys()
+        .map(|name| binding.values().get(name).cloned().expect("bound parameter"))
+        .collect();
+    receiver
+        .apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: Default::default(),
+            },
+            values,
+            known_state: None,
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity,
+                claims: BTreeMap::new(),
+            }),
+        }))
+        .expect("register policy-scoped maintained receiver subscription");
+}
+
+fn m3_receiver_row_bodies<S: OrderedKvStorage>(
+    receiver: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+) -> BTreeMap<(String, RowUuid), BTreeMap<String, Value>> {
+    let (shape, binding, plan) = receiver
+        .prepare_query_binding_for_link_in_authorization_mode(
+            shape,
+            binding,
+            DurabilityTier::Global,
+            identity,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .resolve()
+        .expect("prepare maintained receiver from covered inputs");
+    let (_subscription, snapshot) = receiver
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            identity,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .resolve()
+        .expect("evaluate maintained receiver from covered inputs");
+    snapshot
+        .rows
+        .into_iter()
+        .map(|row| {
+            (
+                (row.table().to_owned(), row.row_uuid()),
+                selected_body_cells(&row),
+            )
+        })
+        .collect()
+}
+
+fn receiver_aggregate_values(
+    receiver: &mut NodeState<MemoryStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+    output: &str,
+) -> BTreeMap<u64, Value> {
+    let (shape, binding, plan) = receiver
+        .prepare_query_binding_for_link_in_authorization_mode(
+            shape,
+            binding,
+            DurabilityTier::Global,
+            identity,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .resolve()
+        .expect("prepare aggregate receiver from covered inputs");
+    let (_subscription, snapshot) = receiver
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            identity,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .resolve()
+        .expect("evaluate aggregate from covered receiver inputs");
+    snapshot
+        .rows
         .into_iter()
         .filter_map(|row| {
             let cells = row.test_cells_by_descriptor();

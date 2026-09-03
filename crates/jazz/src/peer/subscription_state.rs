@@ -12,13 +12,16 @@ use groove::ivm::MultisinkSubscription;
 use groove::records::Value;
 
 use super::super::ids::AuthorSubject;
-use super::super::node::PreparedQueryPlanHandle;
+use super::super::ids::SchemaVersionId;
 use super::super::node::maintained_subscription_view::{
     MaintainedSubscriptionView, MaintainedTerminalSchemas,
 };
+use super::super::node::{
+    CoveredInputReceiver, LocalAuthorityReconciliation, PreparedQueryPlanHandle,
+};
 use super::super::protocol::{
-    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
+    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
@@ -102,10 +105,13 @@ pub enum PeerRole {
 }
 
 impl PeerRole {
-    pub(super) fn identity(self) -> AuthorSubject {
+    /// The authenticated principal whose policy may be composed for this
+    /// link. A relay is transport only: treating it as `SYSTEM` here would
+    /// turn a topology role into a policy bypass.
+    pub(super) fn permission_subject(self) -> Option<AuthorSubject> {
         match self {
-            Self::Relay => AuthorSubject::SYSTEM,
-            Self::ClientLink { identity } => identity,
+            Self::Relay => None,
+            Self::ClientLink { identity } => Some(identity),
         }
     }
 }
@@ -116,8 +122,25 @@ pub(super) struct PeerSubscriptionState {
     /// Immutable admitted policy context for this usage site. Relay links can
     /// multiplex sessions, so this must not be inferred from connection role.
     pub(super) policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    /// Exact upstream authority receipt consumed by this served usage site.
+    ///
+    /// A relay's maintained receiver has its own synthetic subscription key
+    /// so that downstream policy scopes do not share a runtime. Its source,
+    /// however, is the separately registered upstream usage site. Keeping the
+    /// source key here preserves that relationship without trying to recover
+    /// it from the (non-unique) canonical binding view.
+    pub(super) authority_result_source: Option<AuthorityResultKey>,
+    /// This non-authoritative scope-relay usage must not materialize its
+    /// receiver until `authority_result_source` has a live reset.  It is
+    /// deliberately separate from the source key: direct authorities may
+    /// retain a D source without awaiting an upstream handoff.
+    pub(super) awaiting_selected_authority_source: bool,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
+    /// Shared Local-plus-authority provenance. Receiver/materialization state
+    /// remains peer-owned; exact-source reconciliation is shared with the DB
+    /// facade rather than reimplemented at this transport boundary.
+    pub(super) local_authority: LocalAuthorityReconciliation,
     pub(super) member_index: BTreeMap<MemberIndexKey, MemberSlot>,
     pub(super) maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
     pub(super) prepared_query: Option<CachedPeerQueryPlan>,
@@ -146,10 +169,17 @@ impl PeerSubscriptionState {
     }
 
     pub(super) fn previous_tx_ids(&self) -> BTreeSet<TxId> {
-        self.result_member_set
+        // A peer's resumable knowledge is the exact source closure it has
+        // received, not the authority's locally rendered output.  A join or
+        // filter can need inputs that do not themselves occur in the public
+        // terminal; carrying only result-member transaction ids would let a
+        // fast cursor suppress a required CoveredInput on the next receipt.
+        self.program_fact_set
             .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, _, tx_id)| tx_id)
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::CoveredInput(input) => Some(input.version.tx),
+                _ => None,
+            })
             .collect()
     }
 }
@@ -160,8 +190,13 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
-    /// Authoritative source membership for an Edge child of a durable relay.
-    pub(super) source_binding_view: Option<BindingViewKey>,
+    /// Exact receiver-owned inputs for a relay Edge child. `None` means this
+    /// is an ordinary trusted-serving maintained view, not a receiver.
+    pub(super) covered_input_receiver: Option<CoveredInputReceiver>,
+    pub(super) result_schema_version: SchemaVersionId,
+    /// Exact authoritative source membership for an Edge child of a durable
+    /// relay. A canonical binding view alone is not a permission boundary.
+    pub(super) source_authority_result: Option<AuthorityResultKey>,
     pub(super) initial_received: bool,
 }
 

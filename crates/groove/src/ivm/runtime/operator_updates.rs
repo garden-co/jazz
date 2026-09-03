@@ -531,20 +531,17 @@ impl NodeState {
         input: &BindingSourceOp,
         output_desc: &RecordDescriptor,
         binding_deltas: &[BindingDelta],
-        binding_snapshots: &HashMap<String, RecordDeltas>,
+        binding_snapshots: &HashMap<BindingSourceKey, RecordDeltas>,
         mode: ArrangementUpdateMode,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if mode == ArrangementUpdateMode::Replace {
-            let Some(snapshot) = binding_snapshots.get(&input.shape) else {
+            let Some(snapshot) = binding_snapshots.get(&input.key) else {
                 return Ok(RecordDeltas::empty(*output_desc));
             };
             return project_binding_source_deltas(snapshot, output_desc);
         }
         let mut deltas = Vec::new();
-        for delta in binding_deltas
-            .iter()
-            .filter(|delta| delta.shape == input.shape)
-        {
+        for delta in binding_deltas.iter().filter(|delta| delta.key == input.key) {
             deltas.extend(
                 project_binding_source_deltas(
                     &RecordDeltas {

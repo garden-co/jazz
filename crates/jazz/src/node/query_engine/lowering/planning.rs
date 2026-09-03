@@ -1053,14 +1053,15 @@ fn supported_current_storage_projection(
         | SourceExpr::SettledBindingView {
             projection,
             binding_view: _,
-            rows: _,
-            requires_result_payload: _,
+            authority_result_key: _,
         } => Some(projection),
         SourceExpr::WithOverlays { input, overlays } => {
-            if overlays
-                .entries
-                .iter()
-                .all(|overlay| matches!(overlay, OverlayRef::OpenTransaction(_)))
+            if (overlays.entries == [OverlayRef::PendingLocal]
+                && matches!(input.as_ref(), SourceExpr::SettledBindingView { .. }))
+                || overlays
+                    .entries
+                    .iter()
+                    .all(|overlay| matches!(overlay, OverlayRef::OpenTransaction(_)))
             {
                 supported_current_storage_projection(Some(input.as_ref()))
             } else {

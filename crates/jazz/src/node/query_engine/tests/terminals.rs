@@ -134,9 +134,34 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
     // Internal execution test: public result-tree delivery still deliberately
     // consumes relation-edge facts, so the new collector terminal is only
     // observable at the compiler/Groove boundary until the later carrier cut.
-    let request = collector_request(policy_context());
-    let mut resolver = InlineCollectorResolver::new(Some("denied"));
-    let program = lower_query_program(request, &mut resolver).expect("collector lowers");
+    let mut authority_request = collector_request(policy_context());
+    authority_request.output.app_rows = None;
+    authority_request.output.facts =
+        BTreeSet::from([ProgramFactKey::ProgramSourceCoverage(program_scope())]);
+    let mut authority_resolver = InlineCollectorResolver::new(Some("denied"));
+    let authority_program = lower_query_program(authority_request, &mut authority_resolver)
+        .expect("authority collector lowers source closure");
+    assert!(
+        authority_program
+            .lowered
+            .terminals
+            .iter()
+            .all(|terminal| terminal.sink != "app_rows")
+    );
+    assert!(authority_resolver.requests.iter().any(|request| {
+        request.source.table == "todo_tags"
+            && matches!(
+                request.authorization,
+                SourceAuthorizationRequest::PolicyFiltered { .. }
+            )
+    }));
+    assert_eq!(authority_resolver.prepared_child_titles, ["allowed"]);
+
+    let admitted_child_titles = authority_resolver.prepared_child_titles.clone();
+    let mut request = collector_request(policy_context());
+    request.authorization_mode = QueryAuthorizationMode::ClientLocal;
+    let mut resolver = InlineCollectorResolver::with_admitted_child_rows(admitted_child_titles);
+    let program = lower_query_program(request, &mut resolver).expect("client collector lowers");
     let terminal = program
         .lowered
         .terminals
@@ -146,20 +171,21 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
     assert!(matches!(terminal.graph, GraphBuilder::CollectBy { .. }));
     assert!(resolver.requests.iter().any(|request| {
         request.source.table == "todo_tags"
-            && matches!(
-                request.authorization,
-                SourceAuthorizationRequest::PolicyFiltered { .. }
-            )
+            && matches!(request.authorization, SourceAuthorizationRequest::System)
             && matches!(
                 &request.requirements.app_fields,
                 FieldRequirement::Fields(fields) if fields.contains("title")
             )
     }));
 
+    let OutputTerminalSchema::AppRows(schema) = &terminal.output else {
+        panic!("collector must expose app rows");
+    };
+    let tags_field = schema.descriptor.field_index("tags").expect("tags field");
     let rows = run_collector_graph(terminal.graph.clone());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].1, 1);
-    let Value::Array(tags) = &rows[0].0[3] else {
+    let Value::Array(tags) = &rows[0].0[tags_field] else {
         panic!("collector must render the named tags slot");
     };
     assert_eq!(tags.len(), 1, "denied child must not reach the tree");
@@ -167,12 +193,13 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
         panic!("tags slot must contain child records");
     };
     assert_eq!(
-        tag.to_values().expect("child values")[1],
+        tag.get("title").expect("child title"),
         Value::String("allowed".to_owned())
     );
 
-    let empty_request = collector_request(policy_context());
-    let mut empty_resolver = InlineCollectorResolver::new(Some("*"));
+    let mut empty_request = collector_request(policy_context());
+    empty_request.authorization_mode = QueryAuthorizationMode::ClientLocal;
+    let mut empty_resolver = InlineCollectorResolver::with_admitted_child_rows([]);
     let program =
         lower_query_program(empty_request, &mut empty_resolver).expect("empty collector lowers");
     let terminal = program
@@ -181,9 +208,13 @@ fn collector_tree_projects_authorized_child_rows_and_keeps_empty_optional_slots(
         .iter()
         .find(|terminal| terminal.sink == "app_rows")
         .expect("empty app rows collector");
+    let OutputTerminalSchema::AppRows(schema) = &terminal.output else {
+        panic!("collector must expose app rows");
+    };
+    let tags_field = schema.descriptor.field_index("tags").expect("tags field");
     let rows = run_collector_graph(terminal.graph.clone());
     assert_eq!(rows.len(), 1, "the childless parent must remain");
-    let Value::Array(tags) = &rows[0].0[3] else {
+    let Value::Array(tags) = &rows[0].0[tags_field] else {
         panic!("collector must render the named tags slot");
     };
     assert!(tags.is_empty(), "childless parent must render tags: []");
@@ -357,7 +388,7 @@ fn collector_uses_row_id_tie_breakers_for_hidden_provenance_windows() {
 }
 
 #[test]
-fn shape_default_collector_hides_provenance_window_keys() {
+fn shape_default_collector_retains_current_row_provenance_window_keys() {
     let mut request = correlated_path_request(
         CorrelationRequirement::Optional,
         row_set_output(BTreeSet::new()),
@@ -367,13 +398,14 @@ fn shape_default_collector_hides_provenance_window_keys() {
         ProvenanceField::UpdatedAt,
         SortDirection::Desc,
     );
+    request.authorization_mode = QueryAuthorizationMode::ClientLocal;
     let mut resolver = InlineCollectorResolver::with_provenance_root_rows([
         (0xd1, "first", 10, 0xa1, 20, 0xa1),
         (0xd2, "second", 20, 0xa2, 30, 0xa2),
         (0xd3, "third", 30, 0xa3, 40, 0xa3),
     ]);
     let program = lower_query_program(request, &mut resolver)
-        .expect("shape-default hidden provenance window should lower");
+        .expect("shape-default provenance window should lower");
     let terminal = program
         .lowered
         .terminals
@@ -384,12 +416,17 @@ fn shape_default_collector_hides_provenance_window_keys() {
         panic!("collector must expose app rows");
     };
     for field in ["$createdAt", "$createdBy", "$updatedAt", "$updatedBy"] {
-        assert!(schema.descriptor.field_index(field).is_none());
+        assert!(schema.descriptor.field_index(field).is_some());
     }
+    assert_eq!(schema.carrier, AppRowCarrier::CurrentRow);
     let output = run_collector_graph(terminal.graph.clone());
     assert_eq!(output.len(), 1);
+    let title_field = schema
+        .descriptor
+        .field_index("user_title")
+        .expect("current row title field");
     assert_eq!(
-        output[0].0[1],
+        output[0].0[title_field],
         Value::Nullable(Some(Box::new(Value::String("second".to_owned()))))
     );
 }
@@ -538,6 +575,7 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
     // Internal execution test for the terminal descriptor: the public tree
     // receiver has not been switched to this carrier in this PR.
     let mut request = collector_request(system_policy_context());
+    request.authorization_mode = QueryAuthorizationMode::ClientLocal;
     let parent = source("todos", SourceRole::Root);
     let tags = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
     let labels = source(
@@ -651,11 +689,26 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         .expect("app collector")
         .graph
         .clone();
+    let OutputTerminalSchema::AppRows(schema) = &program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app collector")
+        .output
+    else {
+        panic!("collector must expose app rows");
+    };
+    let tags_field = schema.descriptor.field_index("tags").expect("tags field");
+    let labels_field = schema
+        .descriptor
+        .field_index("labels")
+        .expect("labels field");
     let rows = run_collector_graph(graph);
-    let Value::Array(tags) = &rows[0].0[3] else {
+    let Value::Array(tags) = &rows[0].0[tags_field] else {
         panic!("expected tags slot");
     };
-    let Value::Array(labels) = &rows[0].0[4] else {
+    let Value::Array(labels) = &rows[0].0[labels_field] else {
         panic!("expected sibling labels slot");
     };
     assert_eq!(tags.len(), 2);
@@ -663,7 +716,7 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
     let Value::Record(tag) = &tags[0] else {
         panic!("expected tag record");
     };
-    let Value::Array(notes) = &tag.to_values().expect("tag values")[2] else {
+    let Value::Array(notes) = &tag.get("notes").expect("nested notes") else {
         panic!("expected nested notes slot");
     };
     assert_eq!(notes.len(), 1);
@@ -679,8 +732,22 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         .expect("required app collector")
         .graph
         .clone();
+    let OutputTerminalSchema::AppRows(required_schema) = &required_program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("required app collector")
+        .output
+    else {
+        panic!("collector must expose app rows");
+    };
+    let required_tags_field = required_schema
+        .descriptor
+        .field_index("tags")
+        .expect("tags field");
     let required_rows = run_collector_graph(required_graph);
-    let Value::Array(required_tags) = &required_rows[0].0[3] else {
+    let Value::Array(required_tags) = &required_rows[0].0[required_tags_field] else {
         panic!("expected required tags slot");
     };
     assert_eq!(
@@ -693,6 +760,7 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
 #[test]
 fn collector_orders_nested_slots_by_hidden_provenance_keys() {
     let mut request = collector_request(system_policy_context());
+    request.authorization_mode = QueryAuthorizationMode::ClientLocal;
     let tags = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
     let order = RowSetNodeId("tags_provenance_order".to_owned());
     let slice = RowSetNodeId("tags_provenance_slice".to_owned());
@@ -767,7 +835,8 @@ fn collector_orders_nested_slots_by_hidden_provenance_keys() {
     assert!(tag.field_index("$createdAt").is_none());
 
     let rows = run_collector_graph(terminal.graph.clone());
-    let Value::Array(tags) = &rows[0].0[3] else {
+    let tags_field = schema.descriptor.field_index("tags").expect("tags field");
+    let Value::Array(tags) = &rows[0].0[tags_field] else {
         panic!("collector must render tags slot");
     };
     assert_eq!(tags.len(), 1);
@@ -775,7 +844,7 @@ fn collector_orders_nested_slots_by_hidden_provenance_keys() {
         panic!("tags slot must contain child records");
     };
     assert_eq!(
-        tag.to_values().expect("tag values")[1],
+        tag.get("title").expect("tag title"),
         Value::String("denied".to_owned()),
         "the nested slot must honor the hidden key's row-id tie breaker"
     );
@@ -1195,7 +1264,7 @@ fn app_rows_are_separate_from_hidden_terminal_facts() {
     let request = row_set_output(BTreeSet::from([
         ProgramFactKey::ResultMembership,
         ProgramFactKey::RelationEdges,
-        ProgramFactKey::SourceCoverage(program_scope()),
+        ProgramFactKey::ProgramSourceCoverage(program_scope()),
     ]));
 
     let app_rows = request.app_rows.as_ref().expect("app rows requested");

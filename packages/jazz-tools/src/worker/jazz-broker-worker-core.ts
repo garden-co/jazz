@@ -85,7 +85,53 @@ type RuntimeContext = {
   transportTransition: Promise<void>;
   transportStateEpoch: number;
   transportStateWaiters: Set<() => void>;
+  authFailureEpoch: number;
 };
+
+function canonicalClaimsJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalClaimsJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalClaimsJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
+}
+
+function assertWorkerSessionClaims(
+  context: RuntimeContext,
+  sessionClaims: Record<string, unknown>,
+): void {
+  if (canonicalClaimsJson(sessionClaims) !== canonicalClaimsJson(context.options.sessionClaims)) {
+    throw new Error(
+      "Browser tab claims differ from the persistent worker's authenticated upstream session",
+    );
+  }
+}
+
+/**
+ * Publish one new authenticated upstream session to every attached tab only
+ * after that upstream has actually admitted.  A persistent worker cannot
+ * safely let one foreground connection retain the prior policy snapshot:
+ * all of its local views are projections of this one upstream authority.
+ */
+async function publishWorkerSessionClaims(
+  context: RuntimeContext,
+  sessionClaims: Record<string, unknown>,
+): Promise<void> {
+  await Promise.all(
+    [...context.peers.values()].map((attachedPeer) =>
+      attachedPeer.subscriber?.updateAuthenticatedClaims?.(sessionClaims),
+    ),
+  );
+  context.options.sessionClaims = sessionClaims;
+}
 
 type ForegroundLeaseOwner = {
   pageStore: IndexedDbPageStore;
@@ -836,6 +882,7 @@ function createContext(
     transportTransition: Promise.resolve(),
     transportStateEpoch: 0,
     transportStateWaiters: new Set(),
+    authFailureEpoch: 0,
     initialize: Promise.resolve(),
     closing: null,
     idleReleaseTimer: null,
@@ -887,8 +934,14 @@ async function initialize(context: RuntimeContext): Promise<void> {
           proof.token,
           proof.appId,
           proof.claimedAuthor,
+          physicalOwner.storageOwner,
         )
-      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config);
+      : await wasmModule.WasmDb.openBrowser(
+          context.pageStore,
+          schema,
+          config,
+          physicalOwner.storageOwner,
+        );
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
@@ -896,17 +949,14 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
-      { selfSignedClientProof: proof },
+      { selfSignedClientProof: proof, scopeIsolatedRelay: true },
     );
-    if (!unownedDb?.setRelayAuthoritySessionOwner) {
-      throw new Error(
-        "Browser worker artifact does not support relay authority-session bindings; rebuild the matching Jazz WASM artifact",
-      );
-    }
-    unownedDb.setRelayAuthoritySessionOwner();
     context.runtime = runtime;
     unownedDb = null;
-    context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
+    context.runtime.onAuthFailure((reason) => {
+      context.authFailureEpoch += 1;
+      broadcast(context, { type: "auth-failure", reason });
+    });
     context.runtime.onMutationError((event) => {
       // A mutation error is a notification for foreground runtimes that are
       // attached now. Durable reconciliation belongs to the worker's database;
@@ -1228,6 +1278,14 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     const activeRuntime = requireRuntime(peer.context);
     if (message.type === "init") {
       if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
+      // A different tab can be publishing a newly admitted upstream session.
+      // Join its transition before checking the shared snapshot so an init
+      // cannot attach between upstream admission and the all-tab rebind.
+      await peer.context.transportTransition;
+      // One persistent worker has one authenticated upstream session. Do not
+      // admit a tab whose policy claims could be evaluated differently from
+      // that session once the worker forwards the subscription upstream.
+      assertWorkerSessionClaims(peer.context, message.sessionClaims);
       // Peer admission mutates the connection registry. A running evaluator
       // may hold that registry across storage suspension, so install only at
       // the owner-wide evaluator boundary. Storage progress is independent of
@@ -1262,14 +1320,29 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     }
     if (message.type === "update-auth") {
       if (!peer.subscriber) throw new Error("Browser tab is not initialized");
+      let authenticationRejected = false;
       await enqueueTransportTransition(peer.context, async () => {
-        await peer.subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
-        peer.context.serverAuthJson = message.authJson;
-        if (!peer.context.explicitlyDisconnected) {
-          await activeRuntime.updateAuth(message.authJson);
+        const authFailureEpoch = peer.context.authFailureEpoch;
+        try {
+          if (!peer.context.explicitlyDisconnected) {
+            await activeRuntime.updateAuth(message.authJson);
+            await activeRuntime.waitForUpstreamServerConnection();
+          }
+        } catch (error) {
+          // Classify inside this serialized attempt: a preceding queued
+          // rejection must not mask this attempt's unrelated runtime failure.
+          // Auth rejection was already broadcast to every tab; retain their
+          // client links so any sibling can provide a replacement credential.
+          if (peer.context.authFailureEpoch !== authFailureEpoch) {
+            authenticationRejected = true;
+            return;
+          }
+          throw error;
         }
+        peer.context.serverAuthJson = message.authJson;
+        await publishWorkerSessionClaims(peer.context, message.sessionClaims);
       });
-      broadcast(peer.context, { type: "auth-restored" });
+      if (!authenticationRejected) broadcast(peer.context, { type: "auth-restored" });
       return;
     }
     if (message.type === "disconnect") {
@@ -1314,9 +1387,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       const serverUrl = peer.context.serverUrl;
       if (!serverUrl) throw new Error("Browser runtime reconnect requires a serverUrl");
       await enqueueTransportTransition(peer.context, async () => {
-        await peer.subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
-        peer.context.serverAuthJson = message.authJson;
         activeRuntime.connect(serverUrl, message.authJson);
+        await activeRuntime.waitForUpstreamServerConnection();
+        peer.context.serverAuthJson = message.authJson;
+        await publishWorkerSessionClaims(peer.context, message.sessionClaims);
         peer.context.explicitlyDisconnected = false;
         peer.context.serverConnectionStarted = true;
         publishExplicitOffline(peer.context);

@@ -761,6 +761,10 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 output.hash(&mut hasher);
                 records.hash(&mut hasher);
             }
+            GraphBuilder::InputSource { id, output } => {
+                id.hash(&mut hasher);
+                output.hash(&mut hasher);
+            }
             GraphBuilder::Index {
                 table,
                 index,
@@ -785,16 +789,22 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
             GraphBuilder::Recursive {
                 seed,
                 step,
+                step_witness,
                 frontier,
                 max_iters,
                 truncate_at_max_iters,
             } => {
                 child!(seed).hash(&mut hasher);
                 child!(step).hash(&mut hasher);
+                step_witness
+                    .as_ref()
+                    .map(|witness| child!(witness))
+                    .hash(&mut hasher);
                 frontier.hash(&mut hasher);
                 max_iters.hash(&mut hasher);
                 truncate_at_max_iters.hash(&mut hasher);
             }
+            GraphBuilder::RecursiveStepWitness { recursive } => child!(recursive).hash(&mut hasher),
             GraphBuilder::Filter {
                 input,
                 predicate,
@@ -949,6 +959,10 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                 },
             ) if a == x && b == y => {}
             (
+                GraphBuilder::InputSource { id: a, output: b },
+                GraphBuilder::InputSource { id: x, output: y },
+            ) if a == x && b == y => {}
+            (
                 GraphBuilder::Index {
                     table: a,
                     index: b,
@@ -988,6 +1002,7 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                 GraphBuilder::Recursive {
                     seed: a,
                     step: b,
+                    step_witness: witness_a,
                     frontier: c,
                     max_iters: d,
                     truncate_at_max_iters: e,
@@ -995,13 +1010,21 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                 GraphBuilder::Recursive {
                     seed: x,
                     step: y,
+                    step_witness: witness_b,
                     frontier: z,
                     max_iters: w,
                     truncate_at_max_iters: v,
                 },
-            ) if c == z && d == w && e == v => {
-                pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())])
+            ) if c == z && d == w && e == v && witness_a.is_some() == witness_b.is_some() => {
+                pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())]);
+                if let (Some(a), Some(b)) = (witness_a, witness_b) {
+                    pending.push((a.as_ref(), b.as_ref()));
+                }
             }
+            (
+                GraphBuilder::RecursiveStepWitness { recursive: a },
+                GraphBuilder::RecursiveStepWitness { recursive: b },
+            ) => pending.push((a.as_ref(), b.as_ref())),
             (
                 GraphBuilder::Filter {
                     input: a,
@@ -1211,13 +1234,44 @@ struct AutoDirectFamilyPlan {
 pub(super) struct BindingSourceState {
     pub(super) descriptor: RecordDescriptor,
     pub(super) refcounts: HashMap<BindingKey, usize>,
+    /// Runtime-owned inputs must acknowledge their first complete replacement
+    /// even when it is empty. An empty multiset is a meaningful frontier for
+    /// an ungrouped aggregate, which has an identity output.
+    pub(super) initialized: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct BindingDelta {
-    pub(super) shape: String,
+    pub(super) key: BindingSourceKey,
     pub(super) descriptor: RecordDescriptor,
     pub(super) deltas: Vec<RecordDelta>,
+    /// This is a complete empty initial snapshot, not a synthetic row delta.
+    pub(super) initializes_snapshot: bool,
+}
+
+/// One exact replacement in a runtime-owned mutable input source.
+///
+/// IDs are opaque and runtime-local. They intentionally carry no protocol,
+/// tenancy, or authorization meaning; callers select them from their own
+/// scoped identity and pass only already-admitted records here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputSourceReplacement {
+    pub id: InputSourceId,
+    pub descriptor: RecordDescriptor,
+    pub records: Vec<Vec<u8>>,
+}
+
+/// One atomic, set-like change to a runtime-owned mutable input source.
+///
+/// Unlike [`InputSourceReplacement`], this preserves work proportional to the
+/// changed records. The runtime still preflights the complete batch before it
+/// touches any source, and all source changes enter one IVM tick.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputSourceDelta {
+    pub id: InputSourceId,
+    pub descriptor: RecordDescriptor,
+    pub adds: Vec<Vec<u8>>,
+    pub removes: Vec<Vec<u8>>,
 }
 
 /// Result of lowering a graph-builder fragment into the deduplicated graph.
@@ -1360,8 +1414,12 @@ fn bound_routed_multisink_graph(
     };
     if let GraphBuilder::CollectBy { input, collect } = &terminal.graph {
         // CollectBy is terminal-only. Route its flat input before rendering and
-        // remove hidden route columns from the collector's own projection,
-        // rather than appending filter/project consumers after the collector.
+        // remove hidden route columns from the collector's own projection and
+        // keys, rather than appending filter/project consumers after the
+        // collector. This graph is now bound to one route: retaining a route
+        // field in a collector key would make that private execution metadata
+        // escape in `TerminalOperation::root_key`, even though it is not an
+        // application-row identity.
         let mut collect = collect.as_ref().clone();
         collect
             .parent_fields
@@ -1369,6 +1427,7 @@ fn bound_routed_multisink_graph(
         collect
             .tuple_fields
             .retain(|field| terminal.public_fields.contains(&field.output_name));
+        strip_bound_route_fields_from_collect(&mut collect, &terminal.route_fields);
         let input = predicate
             .map(|predicate| input.as_ref().clone().filter(predicate))
             .unwrap_or_else(|| input.as_ref().clone());
@@ -1381,6 +1440,37 @@ fn bound_routed_multisink_graph(
         .map(|predicate| terminal.graph.clone().filter(predicate))
         .unwrap_or_else(|| terminal.graph.clone());
     graph.project(terminal.public_fields.clone())
+}
+
+/// A routed terminal is compiled once but a bound subscription executes one
+/// concrete route. Route fields therefore select the input; they are not part
+/// of a public collector's identity. In particular, terminal operations use
+/// collector group keys as their root keys, so retaining a hidden claim route
+/// there would hand Jazz an invalid public root address.
+fn strip_bound_route_fields_from_collect(
+    collect: &mut crate::ivm::CollectByBuilder,
+    route_fields: &[String],
+) {
+    let is_route = |field: &crate::ivm::FieldRef| matches!(field, crate::ivm::FieldRef::Name(name) if route_fields.contains(name));
+    collect.group_cols.retain(|field| !is_route(field));
+    collect.tie_cols.retain(|field| !is_route(field));
+    collect.order_cols.retain(|order| !is_route(&order.field));
+    for slot in &mut collect.slots {
+        strip_bound_route_fields_from_slot(slot, &is_route);
+    }
+}
+
+fn strip_bound_route_fields_from_slot(
+    slot: &mut crate::ivm::CollectBySlotBuilder,
+    is_route: &impl Fn(&crate::ivm::FieldRef) -> bool,
+) {
+    slot.group_cols.retain(|field| !is_route(field));
+    slot.owner_key_cols.retain(|field| !is_route(field));
+    slot.tie_cols.retain(|field| !is_route(field));
+    slot.order_cols.retain(|order| !is_route(&order.field));
+    for child in &mut slot.slots {
+        strip_bound_route_fields_from_slot(child, is_route);
+    }
 }
 
 fn route_predicate(field: &str, value: &Value) -> PredicateExpr {
@@ -1894,10 +1984,12 @@ fn lift_literal_filter_node(
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. }
-        | GraphBuilder::StreamingChecksum { .. } => Ok(None),
+        | GraphBuilder::StreamingChecksum { .. }
+        | GraphBuilder::RecursiveStepWitness { .. } => Ok(None),
     }
 }
 
@@ -2091,6 +2183,7 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
         let output = match node {
             GraphBuilder::BindingSource { output, .. }
             | GraphBuilder::FrontierSource { output, .. }
+            | GraphBuilder::InputSource { output, .. }
             | GraphBuilder::InlineRecords { output, .. } => {
                 output.field_index(binding_field).is_some()
             }
@@ -2116,6 +2209,13 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
             | GraphBuilder::CollectBy { input, .. }
             | GraphBuilder::Aggregate { input, .. } => child!(input),
             GraphBuilder::Recursive { seed, .. } => child!(seed),
+            GraphBuilder::RecursiveStepWitness { recursive } => match recursive.as_ref() {
+                GraphBuilder::Recursive {
+                    step_witness: Some(witness),
+                    ..
+                } => child!(witness),
+                _ => false,
+            },
             GraphBuilder::Join { left, right, .. }
             | GraphBuilder::SemiJoin { left, right, .. }
             | GraphBuilder::AntiJoin { left, right, .. } => child!(left) || child!(right),
@@ -2265,6 +2365,7 @@ fn propagate_binding_through_frontier(
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. }
@@ -2276,7 +2377,8 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::Aggregate { .. }
         | GraphBuilder::Union { .. }
         | GraphBuilder::StreamingChecksum { .. }
-        | GraphBuilder::VariantProject { .. } => None,
+        | GraphBuilder::VariantProject { .. }
+        | GraphBuilder::RecursiveStepWitness { .. } => None,
     }
 }
 
@@ -2308,16 +2410,23 @@ fn replace_binding_shape(graph: &GraphBuilder, shape: &str) -> GraphBuilder {
             GraphBuilder::Recursive {
                 seed,
                 step,
+                step_witness,
                 frontier,
                 max_iters,
                 truncate_at_max_iters,
             } => GraphBuilder::Recursive {
                 seed: child!(seed),
                 step: child!(step),
+                step_witness: step_witness.as_ref().map(|witness| child!(witness)),
                 frontier: frontier.clone(),
                 max_iters: *max_iters,
                 truncate_at_max_iters: *truncate_at_max_iters,
             },
+            GraphBuilder::RecursiveStepWitness { recursive } => {
+                GraphBuilder::RecursiveStepWitness {
+                    recursive: child!(recursive),
+                }
+            }
             GraphBuilder::Filter {
                 input,
                 predicate,
@@ -2445,6 +2554,344 @@ fn replace_binding_shape(graph: &GraphBuilder, shape: &str) -> GraphBuilder {
 }
 
 impl IvmRuntime {
+    /// Atomically apply record-level changes to runtime-owned inputs.
+    ///
+    /// Inputs are sets. Replayed additions and removals of already-absent
+    /// records are no-ops; conflicting add/remove requests for one record
+    /// cancel before state changes. Every descriptor and record is checked
+    /// before the first source mutates.
+    pub async fn apply_input_source_deltas<S>(
+        &mut self,
+        input_deltas: impl IntoIterator<Item = InputSourceDelta>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        let mut canonical = BTreeMap::<
+            InputSourceId,
+            (RecordDescriptor, BTreeSet<Vec<u8>>, BTreeSet<Vec<u8>>),
+        >::new();
+        for delta in input_deltas {
+            let adds = delta.adds.into_iter().collect::<BTreeSet<_>>();
+            let removes = delta.removes.into_iter().collect::<BTreeSet<_>>();
+            for record in adds.iter().chain(&removes) {
+                let borrowed = BorrowedRecord::new(record, &delta.descriptor);
+                let _ = borrowed.to_values()?;
+            }
+            match canonical.entry(delta.id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((delta.descriptor, adds, removes));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (descriptor, existing_adds, existing_removes) = entry.get_mut();
+                    if *descriptor != delta.descriptor {
+                        return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                            entry.key().diagnostic_name(),
+                        ));
+                    }
+                    existing_adds.extend(adds);
+                    existing_removes.extend(removes);
+                }
+            }
+        }
+        for (id, (descriptor, _, _)) in &canonical {
+            if !id.belongs_to(self.input_source_runtime_namespace) {
+                return Err(IvmRuntimeError::ForeignInputSource);
+            }
+            let key = id.binding_key();
+            let Some(source) = self.binding_sources.get(&key) else {
+                return Err(
+                    if id.was_allocated_by(
+                        self.input_source_runtime_namespace,
+                        self.next_input_source_id,
+                    ) {
+                        IvmRuntimeError::InputSourceRetired
+                    } else {
+                        IvmRuntimeError::ForeignInputSource
+                    },
+                );
+            };
+            if source.descriptor != *descriptor {
+                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                    id.diagnostic_name(),
+                ));
+            }
+        }
+
+        let mut deltas = Vec::new();
+        for (id, (descriptor, adds, removes)) in canonical {
+            let key = id.binding_key();
+            let source = self
+                .binding_sources
+                .get_mut(&key)
+                .expect("preflight retained every active input source");
+            let cancelled = adds
+                .intersection(&removes)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let removals = removes
+                .difference(&cancelled)
+                .filter(|record| {
+                    source
+                        .refcounts
+                        .contains_key(&BindingKey((*record).clone()))
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let additions = adds
+                .difference(&cancelled)
+                .filter(|record| {
+                    !source
+                        .refcounts
+                        .contains_key(&BindingKey((*record).clone()))
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let records = removals
+                .iter()
+                .cloned()
+                .map(|record| RecordDelta {
+                    record: record.into(),
+                    weight: -1,
+                })
+                .chain(additions.iter().cloned().map(|record| RecordDelta {
+                    record: record.into(),
+                    weight: 1,
+                }))
+                .collect::<Vec<_>>();
+            if records.is_empty() {
+                continue;
+            }
+            for record in &removals {
+                source.refcounts.remove(&BindingKey(record.clone()));
+            }
+            for record in &additions {
+                source.refcounts.insert(BindingKey(record.clone()), 1);
+            }
+            deltas.push(BindingDelta {
+                key,
+                descriptor,
+                deltas: records,
+                initializes_snapshot: false,
+            });
+        }
+        if deltas.is_empty() {
+            return Ok(TickMetrics::default());
+        }
+        self.tick_with_params(
+            Vec::new(),
+            deltas,
+            OwnedStorage::new(Rc::clone(storage)),
+            None,
+        )
+        .await
+    }
+
+    /// Atomically replace the complete record multisets of runtime-owned
+    /// mutable inputs and drive one ordinary incremental tick.
+    ///
+    /// The replacement validates every descriptor and encoded record before it
+    /// mutates runtime state. It also preflights every existing source
+    /// descriptor before changing any source. Duplicate input IDs and records are
+    /// canonicalized deterministically; a replay of the same replacement
+    /// produces no delta and does not advance a frontier. Multiple sources
+    /// are committed as one batch, so a collector can observe only the old or
+    /// new cross-source frontier, never an intermediate source mix.
+    pub async fn replace_input_sources<S>(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        let mut canonical = BTreeMap::<InputSourceId, (RecordDescriptor, BTreeSet<Vec<u8>>)>::new();
+        for replacement in replacements {
+            let records = replacement.records.into_iter().collect::<BTreeSet<_>>();
+            for record in &records {
+                let borrowed = BorrowedRecord::new(record, &replacement.descriptor);
+                let _ = borrowed.to_values()?;
+            }
+            match canonical.entry(replacement.id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((replacement.descriptor, records));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (descriptor, existing) = entry.get_mut();
+                    if *descriptor != replacement.descriptor {
+                        return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                            entry.key().diagnostic_name(),
+                        ));
+                    }
+                    existing.extend(records);
+                }
+            }
+        }
+
+        // Do every failure-prone compatibility check before the first source
+        // changes. A caller must never observe a prefix of a rejected batch.
+        for (id, (descriptor, _)) in &canonical {
+            if !id.belongs_to(self.input_source_runtime_namespace) {
+                return Err(IvmRuntimeError::ForeignInputSource);
+            }
+            let key = id.binding_key();
+            if !self.binding_sources.contains_key(&key) {
+                return Err(
+                    if id.was_allocated_by(
+                        self.input_source_runtime_namespace,
+                        self.next_input_source_id,
+                    ) {
+                        IvmRuntimeError::InputSourceRetired
+                    } else {
+                        IvmRuntimeError::ForeignInputSource
+                    },
+                );
+            }
+            let Some(source) = self.binding_sources.get(&key) else {
+                return Err(IvmRuntimeError::InputSourceRetired);
+            };
+            if source.descriptor != *descriptor {
+                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                    id.diagnostic_name(),
+                ));
+            }
+        }
+
+        let mut deltas = Vec::new();
+        for (id, (descriptor, replacement)) in canonical {
+            let key = id.binding_key();
+            let source = self
+                .binding_sources
+                .get_mut(&key)
+                .expect("preflight retained every active input source");
+            debug_assert_eq!(source.descriptor, descriptor);
+            let previous = source
+                .refcounts
+                .iter()
+                .filter(|(_, count)| **count > 0)
+                .map(|(key, _)| key.0.clone())
+                .collect::<BTreeSet<_>>();
+            let changed = previous != replacement;
+            let initializes_snapshot = !source.initialized;
+            if !changed && !initializes_snapshot {
+                continue;
+            }
+            source.initialized = true;
+            let records = previous
+                .difference(&replacement)
+                .map(|record| RecordDelta {
+                    record: record.clone().into(),
+                    weight: -1,
+                })
+                .chain(replacement.difference(&previous).map(|record| RecordDelta {
+                    record: record.clone().into(),
+                    weight: 1,
+                }))
+                .collect::<Vec<_>>();
+            source.refcounts = replacement
+                .into_iter()
+                .map(|record| (BindingKey(record), 1))
+                .collect();
+            deltas.push(BindingDelta {
+                key,
+                descriptor,
+                deltas: records,
+                initializes_snapshot,
+            });
+        }
+        if deltas.is_empty() {
+            return Ok(TickMetrics::default());
+        }
+        self.tick_with_params(
+            Vec::new(),
+            deltas,
+            OwnedStorage::new(Rc::clone(storage)),
+            None,
+        )
+        .await
+    }
+
+    /// Retire runtime-owned input sources permanently.
+    ///
+    /// Live records are first retracted through one ordinary tick. Only after
+    /// that tick has quiesced are the source descriptor, refcounts, frontier,
+    /// and runtime name removed. Retained graph nodes may remain resident, but
+    /// henceforth observe the source as empty; retired identities cannot be
+    /// replaced or compiled again.
+    pub async fn retire_input_sources<S>(
+        &mut self,
+        ids: impl IntoIterator<Item = InputSourceId>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        let ids = ids.into_iter().collect::<BTreeSet<_>>();
+        for id in &ids {
+            if !id.belongs_to(self.input_source_runtime_namespace) {
+                return Err(IvmRuntimeError::ForeignInputSource);
+            }
+            let key = id.binding_key();
+            if !self.binding_sources.contains_key(&key) {
+                return Err(IvmRuntimeError::InputSourceRetired);
+            }
+        }
+
+        let mut deltas = Vec::new();
+        for id in &ids {
+            let key = id.binding_key();
+            let source = self
+                .binding_sources
+                .get_mut(&key)
+                .expect("retirement preflight retained every active input source");
+            let records = source
+                .refcounts
+                .keys()
+                .map(|key| RecordDelta {
+                    record: key.0.clone().into(),
+                    weight: -1,
+                })
+                .collect::<Vec<_>>();
+            if !records.is_empty() {
+                deltas.push(BindingDelta {
+                    key,
+                    descriptor: source.descriptor,
+                    deltas: records,
+                    initializes_snapshot: false,
+                });
+            }
+            source.refcounts.clear();
+        }
+
+        let metrics = if deltas.is_empty() {
+            self.drive_pending_incremental().await?;
+            TickMetrics::default()
+        } else {
+            self.tick_with_params(
+                Vec::new(),
+                deltas,
+                OwnedStorage::new(Rc::clone(storage)),
+                None,
+            )
+            .await?
+        };
+        for id in ids {
+            let key = id.binding_key();
+            self.binding_sources.remove(&key);
+            self.binding_frontiers.remove(&key);
+        }
+        Ok(metrics)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_input_source_state_count(&self) -> usize {
+        self.binding_sources
+            .keys()
+            .filter(|key| matches!(key, BindingSourceKey::RuntimeInput { .. }))
+            .count()
+    }
+
     pub async fn subscribe_one_sink<S>(
         &mut self,
         graph: GraphBuilder,
@@ -2715,7 +3162,8 @@ impl IvmRuntime {
             .sum::<usize>() as u64;
         let shape = binding_source_shape.into();
         let shape_id = self.next_shape_id();
-        match self.binding_sources.entry(shape.clone()) {
+        let source_key = BindingSourceKey::prepared(shape.clone());
+        match self.binding_sources.entry(source_key) {
             std::collections::hash_map::Entry::Occupied(existing)
                 if existing.get().descriptor != binding_descriptor =>
             {
@@ -2726,6 +3174,7 @@ impl IvmRuntime {
                 vacant.insert(BindingSourceState {
                     descriptor: binding_descriptor,
                     refcounts: HashMap::default(),
+                    initialized: true,
                 });
             }
         }
@@ -2848,7 +3297,7 @@ impl IvmRuntime {
             let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
             let mut binding_snapshots = runtime.binding_snapshot_deltas();
             let snapshot = binding_snapshots
-                .entry(binding_delta.shape.clone())
+                .entry(binding_delta.key.clone())
                 .or_insert_with(|| RecordDeltas {
                     descriptor: binding_delta.descriptor,
                     deltas: Vec::new(),
@@ -3358,7 +3807,8 @@ impl IvmRuntime {
                 }
                 Ok(table_schema.record_schema())
             }
-            GraphBuilder::InlineRecords { output, .. } => Ok(*output),
+            GraphBuilder::InlineRecords { output, .. }
+            | GraphBuilder::InputSource { output, .. } => Ok(*output),
             GraphBuilder::Index {
                 table,
                 row_projection: Some(target),
@@ -3505,6 +3955,16 @@ impl IvmRuntime {
                 }
                 Ok(seed)
             }
+            GraphBuilder::RecursiveStepWitness { recursive } => {
+                let GraphBuilder::Recursive {
+                    step_witness: Some(step_witness),
+                    ..
+                } = recursive.as_ref()
+                else {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                };
+                self.infer_builder_output_cached(step_witness, output_memo)
+            }
         }
     }
 
@@ -3535,7 +3995,7 @@ impl IvmRuntime {
     fn cancel_pending_binding_retraction(&mut self, shape: &str, binding: &BindingKey) -> bool {
         let mut cancelled = false;
         for pending in &mut self.pending_binding_retractions {
-            if pending.shape != shape {
+            if pending.key != BindingSourceKey::prepared(shape) {
                 continue;
             }
             pending.deltas.retain(|delta| {
@@ -3557,10 +4017,10 @@ impl IvmRuntime {
         let shape = self.binding_source_shape_name(shape_id)?;
         let source = self
             .binding_sources
-            .get(&shape)
+            .get(&BindingSourceKey::prepared(shape.clone()))
             .ok_or_else(|| IvmRuntimeError::BindingSourceNotFound(shape.clone()))?;
         Ok(BindingDelta {
-            shape,
+            key: BindingSourceKey::prepared(shape),
             descriptor: source.descriptor,
             deltas: if source.refcounts.contains_key(binding) {
                 Vec::new()
@@ -3570,6 +4030,7 @@ impl IvmRuntime {
                     weight: 1,
                 }]
             },
+            initializes_snapshot: false,
         })
     }
 
@@ -3580,12 +4041,12 @@ impl IvmRuntime {
     ) -> Result<BindingDelta, IvmRuntimeError> {
         let source = self
             .binding_sources
-            .get_mut(shape)
+            .get_mut(&BindingSourceKey::prepared(shape))
             .ok_or_else(|| IvmRuntimeError::BindingSourceNotFound(shape.to_owned()))?;
         let count = source.refcounts.entry(binding.clone()).or_default();
         *count += 1;
         Ok(BindingDelta {
-            shape: shape.to_owned(),
+            key: BindingSourceKey::prepared(shape),
             descriptor: source.descriptor,
             deltas: if *count == 1 {
                 vec![RecordDelta {
@@ -3595,6 +4056,7 @@ impl IvmRuntime {
             } else {
                 Vec::new()
             },
+            initializes_snapshot: false,
         })
     }
 
@@ -3612,24 +4074,28 @@ impl IvmRuntime {
         shape: &str,
         binding: &BindingKey,
     ) -> Option<BindingDelta> {
-        let source = self.binding_sources.get_mut(shape)?;
+        let source = self
+            .binding_sources
+            .get_mut(&BindingSourceKey::prepared(shape))?;
         let count = source.refcounts.get_mut(binding)?;
         *count -= 1;
         if *count > 0 {
             return Some(BindingDelta {
-                shape: shape.to_owned(),
+                key: BindingSourceKey::prepared(shape),
                 descriptor: source.descriptor,
                 deltas: Vec::new(),
+                initializes_snapshot: false,
             });
         }
         source.refcounts.remove(binding);
         Some(BindingDelta {
-            shape: shape.to_owned(),
+            key: BindingSourceKey::prepared(shape),
             descriptor: source.descriptor,
             deltas: vec![RecordDelta {
                 record: binding.0.clone().into(),
                 weight: -1,
             }],
+            initializes_snapshot: false,
         })
     }
 
@@ -3643,7 +4109,7 @@ impl IvmRuntime {
         Err(IvmRuntimeError::PreparedShapeNotFound(shape_id))
     }
 
-    pub(super) fn binding_snapshot_deltas(&self) -> HashMap<String, RecordDeltas> {
+    pub(super) fn binding_snapshot_deltas(&self) -> HashMap<BindingSourceKey, RecordDeltas> {
         self.binding_sources
             .iter()
             .map(|(shape, source)| {
@@ -3686,7 +4152,8 @@ impl IvmRuntime {
             .map(|terminal| terminal.output.node)
             .collect::<Vec<_>>();
         self.prepared_shapes.remove(&shape_id);
-        self.binding_sources.remove(&shape_name);
+        self.binding_sources
+            .remove(&BindingSourceKey::prepared(shape_name));
         self.auto_direct_families.remove(&key);
         for output_node in output_nodes {
             self.remove_retainer(

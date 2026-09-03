@@ -907,7 +907,15 @@ where
         reason: String,
     ) -> Result<Vec<SyncMessage>, Error> {
         let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-        self.ingest_rejected_transaction(tx.clone(), fate.clone())
+        // Malformed provenance cannot be encoded safely. Retain the terminal
+        // outcome, but never make an invalid payload durable merely to report
+        // it; recovery continues to reject any independently corrupted stored
+        // record at decode time.
+        let storage_tx = Transaction {
+            contribution_merge: None,
+            ..tx.clone()
+        };
+        self.ingest_rejected_transaction(storage_tx, fate.clone())
             .await?;
         let mut updates = vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,

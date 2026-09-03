@@ -160,6 +160,7 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (

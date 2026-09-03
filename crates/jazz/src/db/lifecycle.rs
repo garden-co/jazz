@@ -3,6 +3,55 @@
 use super::*;
 use crate::time::TxTime;
 
+/// Opaque handle for one upstream connection selected by a test host.
+///
+/// This exists only behind the `testing` feature so integration tests can
+/// stage a real protocol frame through one unambiguous production connection
+/// without exposing a normal-runtime message injection API.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct TestUpstreamConnectionHandle {
+    connection_epoch: u64,
+    outbound: Rc<RefCell<Vec<SyncMessage>>>,
+}
+
+#[cfg(feature = "testing")]
+impl TestUpstreamConnectionHandle {
+    /// Drain frames emitted by the selected connection's real transport.
+    #[doc(hidden)]
+    pub fn take_outbound_for_test(&self) -> Vec<SyncMessage> {
+        std::mem::take(&mut *self.outbound.borrow_mut())
+    }
+}
+
+#[cfg(feature = "testing")]
+struct ObservedTestTransport {
+    inner: Box<dyn Transport>,
+    outbound: Rc<RefCell<Vec<SyncMessage>>>,
+}
+
+#[cfg(feature = "testing")]
+impl Transport for ObservedTestTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message.clone())?;
+        self.outbound.borrow_mut().push(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        self.inner.permits_delegated_sessions()
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -21,7 +70,7 @@ where
     /// Internal test inspection for the retry-payload ownership boundary.
     /// Foreign rejections may be observed for live notification, but they may
     /// not become this database's durable retry payload.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
         self.node.has_retained_rejection_for_test(tx_id)
@@ -30,7 +79,7 @@ where
     /// Internal test inspection for browser-relay recovered foreground
     /// transactions. The marker is process-local and must be consumed by
     /// either terminal fate, not only rejection.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
         self.node.has_recovered_browser_relay_tx_for_test(tx_id)
@@ -104,6 +153,36 @@ where
             #[cfg(test)]
             stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         })
+    }
+
+    /// Open the durable, scope-admitted half of a client relay.
+    ///
+    /// # Safety
+    /// The host must already bind this storage root to exactly one durable
+    /// authentication scope and expose the resulting Db only to that scope's
+    /// foregrounds. This is deliberately an open-time host capability, not a
+    /// mutable Db method that an application can acquire after attaching
+    /// arbitrary storage or peers.
+    #[doc(hidden)]
+    pub async unsafe fn open_scope_isolated_client_relay(
+        config: DbConfig<S>,
+        scope: ClientRelayScope,
+    ) -> Result<Self, Error> {
+        let db = Self::open(config).await?;
+        db.node.configure_scope_isolated_client_relay(scope)?;
+        Ok(db)
+    }
+
+    /// Test-only hook for topology fixtures. Production hosts must use the
+    /// scope-admitted constructor above; no public binding exposes this toggle.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_relay_authority_session_owner_for_test(&self) {
+        // SAFETY: test fixtures use a fixed synthetic host-admitted scope.
+        let scope = ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
+        self.node
+            .configure_scope_isolated_client_relay(scope)
+            .expect("test scope is stable");
     }
 
     /// Open a Db allowed to record external provenance while preserving this
@@ -236,6 +315,7 @@ where
             NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
+        node.restore_edge_authority_uploads().await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: bootstrap_schema,
@@ -604,13 +684,6 @@ where
         }
     }
 
-    /// Configure this durable process as the internal browser relay that owns
-    /// fresh upstream authority sessions for client Edge reads.
-    #[doc(hidden)]
-    pub fn set_relay_authority_session_owner(&self) {
-        self.node.set_relay_authority_session_owner();
-    }
-
     /// Restore unsettled writes relayed from a browser client sharing this
     /// worker's author. Browser workers persist main-thread transactions whose
     /// node differs from the worker node, so ordinary local-origin recovery
@@ -822,6 +895,50 @@ where
         self.node.connect_upstream(transport).await
     }
 
+    /// Attach an upstream with a test-only opaque handle for staging inbound
+    /// protocol frames and observing the frames emitted by that same link.
+    ///
+    /// Production bindings must use [`Db::connect_upstream`]. This helper is
+    /// deliberately feature-gated: it exercises the ordinary inbound queue,
+    /// rather than creating a second message-application path for tests.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub async fn connect_upstream_for_test(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> TestUpstreamConnectionHandle {
+        let outbound = Rc::new(RefCell::new(Vec::new()));
+        let connection = self
+            .node
+            .connect_upstream(Box::new(ObservedTestTransport {
+                inner: transport,
+                outbound: Rc::clone(&outbound),
+            }))
+            .await;
+        let connection_epoch = connection.lock().await.connection_epoch;
+        TestUpstreamConnectionHandle {
+            connection_epoch,
+            outbound,
+        }
+    }
+
+    /// Stage one protocol frame on the exactly selected test upstream.
+    ///
+    /// The frame is consumed by the normal `PeerConnection::tick` inbound
+    /// loop. A stale, detached, or ambiguous handle fails explicitly rather
+    /// than selecting an arbitrary connection.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub async fn stage_upstream_message_for_test(
+        &self,
+        handle: &TestUpstreamConnectionHandle,
+        message: SyncMessage,
+    ) -> Result<bool, String> {
+        self.node
+            .stage_upstream_message_for_test(handle.connection_epoch, message)
+            .await
+    }
+
     /// Install or clear the scheduler used to wake this database's live peer
     /// connections when local writes, subscription registrations, or transport
     /// events create sync work.
@@ -869,6 +986,60 @@ where
         identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.accept_subscriber(transport, identity)
+    }
+
+    /// Test-only topology admission for a subjectless relay transport.
+    /// Production servers must derive this capability from their authenticated
+    /// handshake, never from a caller-selected identity or wire frame.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn accept_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_relay_subscriber(transport)
+    }
+
+    /// Test-only server admission for one authenticated scope-isolated relay.
+    /// Production servers derive this capability from their authenticated
+    /// handshake rather than accepting test-supplied identity, claims, or
+    /// epoch values.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn accept_scope_isolated_relay_subscriber_for_test(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_scope_isolated_relay_subscriber(
+            transport,
+            identity,
+            claims,
+            admission_epoch,
+        )
+    }
+
+    /// Server/host-only scope-relay admission after authenticated handshake.
+    // The public serving shell reaches this through its runtime-selected
+    // backend enum. Keep this crate-private so an embedding application cannot
+    // mint a scope-relay capability from caller-controlled claims.
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.node.accept_scope_isolated_relay_subscriber(
+            transport,
+            identity,
+            claims,
+            admission_epoch,
+        )
     }
 
     /// Accept a subscriber connection served under `identity` with auth claims.
@@ -942,12 +1113,11 @@ where
     }
 
     async fn tick_inner(&self) -> Result<(), Error> {
-        // A later queued mutation may be cold while holding its retained
-        // preparation continuation.  Persist resident publications before
-        // polling that queue so unrelated cold preparation cannot starve an
-        // earlier local durability boundary or its outbox release.
+        // Advance both retained queues: a later cold mutation can own the
+        // node lock needed to settle an earlier publication. Do not wait for
+        // settlement before giving that lock owner its next poll.
         if self.node.has_pending_local_publications() {
-            self.node.settle_local_publications().await?;
+            self.node.poll_local_publication_settlement_once()?;
         }
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
@@ -984,7 +1154,7 @@ where
         // See `tick`: previously admitted resident publications must keep
         // progressing even when the next FIFO preparation is cold.
         if self.node.has_pending_local_publications() {
-            self.node.settle_local_publications().await?;
+            self.node.poll_local_publication_settlement_once()?;
         }
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();

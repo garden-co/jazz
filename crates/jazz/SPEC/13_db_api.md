@@ -49,22 +49,38 @@ Invariant digest:
 - `INV-API-34`: An edge outbox MUST retain an edge-accepted upload until an authenticated terminal rejection or an `Accepted` receipt carrying both Global durability and an authority-assigned `GlobalTime` for that `TxId` arrives directly from the currently admitted upstream fate authority; a featureless/unnegotiated link, local acceptance, hydrated state, staged/replayed updates, and receipts from detached or superseded authorities MUST NOT release it.
 - `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
 
-  A durable browser relay is the narrow topology exception to the exact-node
-  recovery test: it also schedules unsettled transactions made by the same
-  canonical author that it durably accepted from its paired main-tab client,
-  whose node intentionally differs from the worker node. This relay exception
-  does not authorize general same-author recovery by ordinary databases and
-  does not weaken the exact node-and-author definition above outside the paired
-  browser client/worker boundary.
+Identical active usages in one admitted authority scope MUST share one upstream
+wire subscription: equality includes the query, bound values, serving options,
+and admitted policy/session scope. Local listeners and one-shot readers pin that
+stream independently. A fresh remote one-shot captures the current receipt and
+requests a refresh on the shared stream; it cannot complete from the receipt it
+captured. Dropping one pin MUST NOT unsubscribe or invalidate another pin. After
+the final pin is released, a later usage opens a new wire identity and cannot
+inherit a late reply to the retired stream. Different scopes MUST NOT coalesce.
 
-  A terminal server or protocol transport failure is not an authority fate. A
-  durable browser worker MUST relay it only to currently initialized foreground
-  peers so their active Edge/Global waits and remote subscriptions reject with
-  that transport error; Local durability remains valid. The worker MUST NOT
-  fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
-  replay that transient foreground error to a peer attached later.
+For example, two listeners for the same room receive one upstream transition
+from inputs `{A}` to `{B}`, fanned out locally. They do not receive two wire
+transitions that both remove A against one shared predecessor. Strict transition
+validation remains unchanged: removing an absent input within that one ordered
+stream is an error, not a replay to tolerate.
+
+A durable browser relay is the narrow topology exception to the exact-node
+recovery test: it also schedules unsettled transactions made by the same
+canonical author that it durably accepted from its paired main-tab client,
+whose node intentionally differs from the worker node. This relay exception
+does not authorize general same-author recovery by ordinary databases and
+does not weaken the exact node-and-author definition above outside the paired
+browser client/worker boundary.
+
+A terminal server or protocol transport failure is not an authority fate. A
+durable browser worker MUST relay it only to currently initialized foreground
+peers so their active Edge/Global waits and remote subscriptions reject with
+that transport error; Local durability remains valid. The worker MUST NOT
+fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
+replay that transient foreground error to a peer attached later.
 
 - `INV-API-35`: Once a local mutation is durably persisted or its ordered publication is owned by the node runtime, the mutation API MUST return its committed `WriteHandle`/`TxId`; a later resident-subscription refresh failure MUST be emitted through the subscription error channel and MUST NOT be returned as a generic mutation or peer-ingest failure.
+- `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
 
 ## Details
 
@@ -217,8 +233,9 @@ wait.
 
 Repeated settled reads require a freshness proof, not merely a locally
 materialized result from an earlier request. Each newly initiated `Edge` or
-`Global` one-shot owns a fresh usage-site subscription and waits for settled
-authority coverage addressed to that exact subscription. A late update for a
+`Global` one-shot pins the shared live subscription and waits for a newer settled
+authority receipt following its refresh request. If no live pin remains, it opens
+a fresh wire subscription. A late update for a
 detached predecessor cannot satisfy the new read, even when its shape, binding,
 and options are identical. Synchronous and local-tier reads retain their local
 semantics, and still-live maintained subscriptions may continue sharing their
@@ -244,11 +261,24 @@ events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `DurabilityTier` remains the protocol/core lattice and the write-settlement API.
 Bindings expose the separate, read-only `ReadTier` vocabulary:
 
-| `ReadTier`         | binding behavior                                                                                                      | own local writes | core lowering                                                                       |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------- |
-| `LocalFirst`       | return/evaluate local knowledge                                                                                       | immediate        | `DurabilityTier::Local`                                                             |
-| `Remote`           | wait for the ordinary remote/edge view                                                                                | deferred         | legacy remote durability tier                                                       |
-| `RemoteIfPossible` | use local knowledge only after an application explicitly disconnects; otherwise use the same initial gate as `Remote` | immediate        | local only for that explicit-offline start, otherwise legacy remote durability tier |
+| `ReadTier`         | binding behavior                                                                | own local writes                     | core lowering                                                              |
+| ------------------ | ------------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------- |
+| `LocalFirst`       | evaluate cached local knowledge, online or offline                              | immediate                            | local current state plus pending changes                                   |
+| `Remote`           | wait for the current authority scope; wait while offline                        | excluded                             | remote accepted inputs only                                                |
+| `RemoteIfPossible` | online: authority inputs plus bounded pending overlay; offline: local knowledge | immediate within the selected inputs | remote scope with pending edits/deletes and new inserts, or local fallback |
+
+The online bounded overlay applies edits/deletes to authority-scoped rows and
+admits eligible pending new inserts through the same query. An edit does not
+itself admit an existing out-of-scope row, nor does a relationship expand into
+cached dependencies. Existing data newly relevant because of a pending edit
+may wait for the authority's next scope update. Broader expansion is an open
+question in [#2501](https://github.com/garden-co/jazz/issues/2501).
+
+Remote scope withdrawal is not a deletion or a persistent client permission
+filter. LocalFirst may still show downloaded rows; RemoteIfPossible may show
+them again on offline fallback. An actual authorized deletion version updates
+local knowledge and must suppress ordinary local reads too. Clients do not
+reevaluate read permissions. See ch. 16 §16.1.1 for source and deletion rules.
 
 Bindings MUST infer the own-local-write policy from `ReadTier`; they MUST NOT
 expose `LocalUpdates` as a product query option. The low-level core `ReadOpts`
@@ -261,10 +291,10 @@ binding `ReadTier` type.
 
 `RemoteIfPossible` does **not** infer offline state from a timeout, connection
 error, slow response, or an ordinary transport reconnect. A one-shot read
-chooses once. A subscription that starts while explicitly offline starts local,
-then atomically replaces that local native subscription with the remote one on
-reconnect; it never creates a second query path or replays a historical remote
-failure. Low-level `ReadOpts` and the legacy binding entrypoints still accept
+chooses once. A subscription follows definite connectivity transitions in both
+directions: offline uses local knowledge; online requires fresh remote scope
+with the bounded pending overlay. It never creates a second query engine or
+replays a historical remote failure. Low-level `ReadOpts` and the legacy binding entrypoints still accept
 `DurabilityTier` unchanged during the migration. The native Rust facade has no
 public explicit-offline toggle, so its `RemoteIfPossible` always uses the remote
 initial gate while retaining the immediate own-write policy.
@@ -784,115 +814,11 @@ winner selection, or copy-on-write semantics in TypeScript or host code.
 
 ### Open questions
 
-These are designed but not landed:
-
-- 🔶 **Server shell boundary.** A server executable/package should wrap `Node`
-  rather than widening the client `Db` facade: config, WebSocket/transport
-  listeners, auth admission, health/metrics, RocksDB/storage path, migration
-  reporting, and shutdown live in the shell; transaction/query/sync semantics
-  stay here and in ch. 8–9.
-- 🔶 **Watch deltas/streams & stable row identity.** The design promises
-  `delta()`, `into_stream()`, and stable row allocation identity; the current
-  handle exposes only `current()` (cloned `Vec<CurrentRow>`) and `changed()`.
-- 🔶 **Tier-gated first result & loading state.** The design has `all`/`subscribe`
-  gating the first result on remote propagation; the current slice queries local
-  state immediately and is woken by `tick`. Reads otherwise do not perform an
-  implicit network wait: a `Local` read shows optimistic writes immediately, and a
-  `Global` read shows only locally-observed accepted state, which may be empty
-  until sync has been ticked. The product contract also distinguishes _undefined_
-  (never settled) from _empty_ (settled, empty) — i.e. whether the subscriber has
-  a settled subscription result set for the binding (ch. 6), surfaced as a
-  queryable `settled()` bit on the handle before the first gate. Neither the
-  gating nor `settled()` is implemented yet.
-- 🔶 **Observable connection state, and cancelling a wait.** A wait at `Edge` or
-  `Global` tier while disconnected has no honest answer today: rejecting loses a
-  write's durability observation that would have resolved on reconnect, and
-  waiting indefinitely gives the caller no way to distinguish "offline, will
-  resolve later" from "something is broken". Neither carries a diagnosis.
-  The intended shape is that the **core waits indefinitely** and cancellation is
-  **caller policy**, because the core promises durability, not latency — only the
-  caller knows whether a wait backs a background sync or a user pressing Save. In
-  Rust this needs nothing new: `wait` is an `async fn`, so dropping the future
-  cancels and `tokio::time::timeout` composes. In TypeScript the idiomatic form is
-  an `AbortSignal` on the wait options, which yields timeouts via
-  `AbortSignal.timeout`, composition via `AbortSignal.any`, and component-lifecycle
-  cancellation for free; there is currently no `AbortSignal` anywhere in the
-  runtime API. Three details are load-bearing whenever this is built: cancelling a
-  _wait_ MUST NOT cancel the _write_, which is already committed and queued;
-  abort MUST reject with a distinct reason so "I gave up" is never mistaken for
-  "the write failed"; and abort MUST deregister the waiter, or an indefinite wait
-  becomes a slow leak on a long-lived client.
-  The missing complement is an **observable connection and pending state** — at
-  minimum whether the client is connected, and how many writes are outstanding at
-  each tier — so an application can render honestly rather than inferring from a
-  promise that has not settled. This is the more valuable half: a timeout tells
-  you only that time passed. A bulk import that hung on a global-tier wait was
-  undiagnosable for exactly this reason; the wait was unbounded, uncancellable,
-  and invisible, and the cause could only be found by instrumenting the core.
-  None of this is implemented.
-- 🔶 **Identity modes & admission.** `DbIdentity` is `{ node, author }` today;
-  core-only attributed writes are callable, but the broader backend /
-  no-identity-platform modes (ch. 9) and `accept_subscriber` admission policy are
-  not yet represented.
-- 🔶 **Exclusive transaction handles in the binding ABI.** The binding ABI opens
-  real core `OpenTransactionId`/open-exclusive state through a small internal handle API
-  for write-side exclusive transactions. They are not faked by replaying staged
-  point writes at commit time. Tx reads, restore behavior, multi-row
-  `WriteStarted` row ids, and rejected-write wait semantics for unmet higher
-  durability tiers remain explicit follow-up decisions. Binding write state now
-  includes structured rejection diagnostics.
-- 🔶 **Transport backpressure/disconnect.** Local `send` paths are fallible and
-  bounded queues now surface retryable backpressure; upstream uploads and
-  subscription announcements are not marked delivered until local enqueue
-  succeeds. ABI transport diagnostics expose runtime-local session id/epoch,
-  fresh/resumed status, and queue depths for live attachments. `try_recv` still
-  cannot signal closed/error, remote disconnect frames and durable resume
-  credentials are not specified, and subscriber-side view-update generation still
-  needs a deeper peer-state rollback/redo contract before every served update can
-  claim retry-perfect delivery under backpressure.
-- 🔶 **Binding storage backends beyond memory.** The first executable local-app
-  slice supports memory storage only. Browser, RocksDB, and host-provided storage
-  need explicit config payloads, migration reporting, corruption behavior, and
-  durability tests before `OpenStorage` may advertise them as supported features.
-- 🔶 **React Native relay artifact.** RN persistence is owned by the
-  `jazz-native-relay` SQLite host, exposed through the thin `crates/jazz-rn`
-  command transport rather than a JavaScript storage driver or a second JSI
-  runtime. Define Android/iOS artifact packaging, migration reporting,
-  corruption behavior, teardown, and durability tests before the binding
-  advertises persistent runtime support.
-- 🔶 **Postcard binding payload evolution.** Row-shaped outputs and target
-  write-input variants should be descriptor/raw `Record` payloads carried inside
-  postcard envelopes, but the concrete Rust structs should be introduced by the
-  direct WASM binding work instead of kept as speculative core DTOs.
-- 🔶 **Direct object completion semantics.** Bindings should use host-native
-  promises, callbacks, and streams over real Rust objects. WASM and NAPI still
-  need to prove equivalent completion and error ordering without a Rust-owned
-  global event queue.
-
-- 🔶 **Benchmark migration.** As each remaining sync slice lands, migrate the
-  matching peer-layer benchmarks onto the `Db` surface: S3/S4 for
-  permission-filtered sync, S5/S6 for current-row sync and resume, S7 for schema
-  migration, and S9 for durable execution. The measurement target is the public
-  user API end to end, not permanent internal peer hooks.
-- 🔶 **Backend context helper cleanup.** Keep `asBackend()`, `forRequest(...)`,
-  and `forSession(...)` semantically separate; decide whether `db()` remains
-  public and, if so, document it as embedded/local-only rather than a
-  server-connected default.
-- 🔶 **Optimistic update DX.** Expose pending/confirmed/rejected mutation state
-  on writes and rows, including filters by settlement tier, without inventing a
-  second fate model.
-- 🔶 **Full-mode subscription API.** Decide whether callers can opt into full
-  result replacement, delta streams, or first-settle opt-out, and how those modes
-  map to maintained-view terminal deltas.
-- 🔶 **Live identity switching.** Changing the authenticated principal on a live
-  client needs a teardown/rebind protocol for subscriptions, outbox attribution,
-  claims, and local optimistic state.
-- 🔶 **React Native runtime reuse.** RN `connect()` should reuse an owned runtime
-  and expose deterministic connect/disconnect lifecycle signals rather than
-  creating a fresh executor per call.
-- 🔶 **WASM teardown trap true fix.** The current mitigation hides inert
-  teardown traps; the durable fix is an explicit async shutdown and transport
-  lifecycle boundary that prevents callbacks into torn-down linear memory.
+- 🔶 [#2514](https://github.com/garden-co/jazz/issues/2514) — Reconcile the historical
+  DB API implementation-status notes against current code and existing issues.
+  The complete old checklist is preserved there; it is not a statement that
+  those features are absent, and it does not override this chapter's normative
+  contracts.
 
 ### Intentional disconnect, tiers, and propagation
 

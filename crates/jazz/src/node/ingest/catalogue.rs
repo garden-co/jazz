@@ -50,6 +50,7 @@ where
                 identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::TrustedBackend,
                 edge_authority: false,
+                admitted_write_authorization: false,
             }),
         )
         .await
@@ -77,6 +78,23 @@ where
                 return Err(Error::CatalogueActivationFailed);
             }
             match message {
+                SyncMessage::AuthorityPublication(publication) => {
+                    if !ingest_context.is_some_and(|context|
+                        matches!(context.trust, CommitUnitTrust::TrustedAuthority | CommitUnitTrust::TrustedAdmin)
+                            && !context.edge_authority)
+                    {
+                        return Err(Error::UnsupportedSyncMessage(
+                            "authority publication requires an authenticated edge-to-core authority link",
+                        ));
+                    }
+                    for unit in &publication.commits {
+                        let descriptors = version_indirect_descriptors(&unit.versions);
+                        self.current_staged_ids_for_descriptors(&descriptors, true).await?;
+                    }
+                    self.ingest_edge_authority_publication(
+                        publication, authority_wall_clock_ms()?,
+                    ).await
+                }
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
                         super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
@@ -227,7 +245,7 @@ where
                 )),
                 SyncMessage::SessionClaims { identity, claims } => {
                     if let Some(context) = ingest_context
-                        && context.trust == CommitUnitTrust::TrustedBackend
+                        && matches!(context.trust, CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority)
                     {
                         self.set_session_claims(identity, claims);
                     }
@@ -240,18 +258,7 @@ where
                             .await?;
                     }
                     let now_ms = if ingest_context.is_some() {
-                        web_time::SystemTime::now()
-                            .duration_since(web_time::UNIX_EPOCH)
-                            .map_err(|_| {
-                                Error::InvalidStoredValue("authority clock precedes Unix epoch")
-                            })?
-                            .as_millis()
-                            .try_into()
-                            .map_err(|_| {
-                                Error::InvalidStoredValue(
-                                    "authority clock exceeds u64 milliseconds",
-                                )
-                            })?
+                        authority_wall_clock_ms()?
                     } else {
                         tx.tx_id.time.physical_ms()
                     };
@@ -277,7 +284,6 @@ where
                     peer_payload_inventory,
                     result_member_adds,
                     result_member_removes,
-                    terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
                 }) => {
@@ -292,7 +298,6 @@ where
                         opening_pending: peer_payload_inventory.opening_pending,
                         result_member_adds,
                         result_member_removes,
-                        terminal_operations,
                         program_fact_adds,
                         program_fact_removes,
                     })
@@ -307,7 +312,7 @@ where
                     validate_shape_registration_size(&ast, &opts).map_err(|_| {
                         Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
                     })?;
-                    self.register_shape(shape_id, ast)?;
+                    self.register_shape_with_options(shape_id, ast, opts)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
                 SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
@@ -1035,7 +1040,7 @@ where
             ingest_context,
             Some(context)
                 if context.identity == AuthorSubject::SYSTEM
-                    && context.trust == CommitUnitTrust::TrustedBackend
+                    && matches!(context.trust, CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority)
         ) {
             Ok(())
         } else {

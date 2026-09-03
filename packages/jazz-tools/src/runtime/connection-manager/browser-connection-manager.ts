@@ -175,6 +175,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       await this.connection?.disconnect();
       // Keep RemoteIfPossible strict until the worker confirms disconnect.
       this.disconnected = true;
+      this.publishExplicitOfflineState();
     });
   }
 
@@ -193,6 +194,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         runtimeSessionClaims(this.host.config),
       );
       this.disconnected = false;
+      this.publishExplicitOfflineState();
     });
     if (!this.disconnected) this.resolveReconnectWaiters();
   }
@@ -337,6 +339,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private setExplicitOffline(connection: BrowserWorkerConnection, offline: boolean): void {
     if (this.connection !== connection) return;
     this.disconnected = offline;
+    this.publishExplicitOfflineState();
     if (!offline) this.resolveReconnectWaiters();
   }
 

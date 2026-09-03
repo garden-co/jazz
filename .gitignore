@@ -37,6 +37,8 @@ examples/wequencer/walkthrough/*.html
 **/.jazz-schema-*.mjs
 
 # Local data
+# Runtime-owned process identity locks/receipts, not application source.
+**/.jazz/foreground-node-leases/
 data/
 !dev/benchmarks/storage/data/
 !dev/benchmarks/storage/data/*.kv

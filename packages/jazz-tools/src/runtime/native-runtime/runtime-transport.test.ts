@@ -867,6 +867,56 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  // This is a binding scheduler test: a real storage future cannot reliably
+  // force the one-microtask gap between an idle check and synchronous admission.
+  it("does not yield between an idle check and peer admission when a tick is queued", async () => {
+    let schedule!: (urgency: "immediate" | "deferred") => void;
+    let releaseTick!: () => void;
+    let tickHoldingNode = false;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: typeof schedule) => {
+              schedule = callback;
+            },
+            tick: () => {
+              tickHoldingNode = true;
+              return new Promise<void>((resolve) => {
+                releaseTick = () => {
+                  tickHoldingNode = false;
+                  resolve();
+                };
+              });
+            },
+            acceptSubscriber: () => {
+              if (tickHoldingNode) throw new Error("admission reentered a suspended tick");
+              return transport;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    schedule("immediate");
+    const admission = runtime.acceptPeerWhenIdle();
+    try {
+      await expect(admission).resolves.toBe(transport);
+      expect(tickHoldingNode).toBe(true);
+    } finally {
+      releaseTick();
+      await runtime.close();
+    }
+  });
+
   it("yields to the host event loop when every core tick schedules more work", async () => {
     let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
     let dbTicks = 0;

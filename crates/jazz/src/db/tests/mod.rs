@@ -33,11 +33,10 @@ use crate::legacy_test_future::{
 };
 use crate::protocol::{
     AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
-    BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,
-    PeerPayloadInventory, PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, SnapshotRef, Subscribe,
-    SubscribeRejectReason, SubscribeServerFailureCode, TableLens, VersionBundle,
-    VersionBundleScope, VersionCarrier,
+    CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp, PeerPayloadInventory,
+    PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RowVersionRef,
+    ShapeAst, SnapshotRef, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
+    VersionBundle, VersionBundleScope, VersionCarrier,
 };
 use crate::protocol_limits::{
     MAX_FETCH_ROW_VERSIONS, MAX_FRAGMENT_REASSEMBLY_AGE_MS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS,

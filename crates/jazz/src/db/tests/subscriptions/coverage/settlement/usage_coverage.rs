@@ -67,12 +67,19 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
     server.tick().unwrap();
     client.tick().unwrap();
     let (binding_view, required_after) = attachment.required_after[0];
+    let authority_result_key = client
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(attachment.subscription())
+        .unwrap();
+    assert_eq!(authority_result_key.binding_view, binding_view);
     assert!(
         client
             .node
             .node
             .borrow()
-            .applied_view_update_generation(binding_view)
+            .applied_authority_result_generation(&authority_result_key)
             > required_after,
         "the reconnect response must advance the attachment generation"
     );
@@ -96,8 +103,10 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
-    client.node.set_non_durable_client();
-    let (client_transport, mut authority_transport) = duplex();
+    // This standalone client owns its local storage. A memory-only foreground
+    // first needs its persistent owner's answer, covered separately by
+    // foreground_local_attachment_waits_for_owner_delivery_not_authority.
+    let (client_transport, _authority_transport) = duplex();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -112,30 +121,14 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
         )
         .unwrap();
     client.tick().unwrap();
-    let subscription = loop {
-        match authority_transport.try_recv().unwrap() {
-            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
-            _ => continue,
-        }
-    };
-    authority_transport
-        .send(SyncMessage::ViewUpdate(
-            crate::protocol::ViewUpdatePayload {
-                subscription,
-                settled_through: GlobalTime(1),
-                reset_result_set: true,
-                version_carriers: Vec::new(),
-                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
-            },
-        ))
-        .unwrap();
-    client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&attachment));
+    let propagating = client
+        .attach_query_with_opts(&prepared, ReadOpts::default())
+        .unwrap();
+    assert!(
+        client.query_attachment_is_covered(&propagating),
+        "Local-first propagation must not wait for an authority response"
+    );
 
     assert!(client.detach_connection(&upstream));
     assert!(
@@ -143,6 +136,8 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
         "Local coverage remains process-local and does not depend on authority continuity"
     );
     client.detach_query(attachment);
+    assert!(client.query_attachment_is_covered(&propagating));
+    client.detach_query(propagating);
 }
 
 #[test]
@@ -175,6 +170,10 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     let second_attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
+    assert_eq!(
+        first_attachment.subscription(),
+        second_attachment.subscription()
+    );
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
     client.tick().unwrap();
@@ -184,6 +183,10 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     assert!(client.query_attachment_is_covered(&second_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 2);
     client.detach_query(first_attachment);
+    assert!(
+        client.query_attachment_is_covered(&second_attachment),
+        "dropping a sibling pin must not invalidate the shared receipt"
+    );
     client.detach_query(second_attachment);
 }
 
@@ -358,7 +361,7 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
 }
 
 #[test]
-fn reconnect_replays_each_distinct_usage_subscription_key() {
+fn reconnect_replays_one_shared_stream_for_identical_usages() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -392,7 +395,10 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
         ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) => served.len(),
         _ => panic!("expected subscriber connection"),
     };
-    assert_eq!(served_len, 2, "reconnect must replay S/q1 and distinct q2");
+    assert_eq!(
+        served_len, 1,
+        "reconnect must replay one stream for all three pins"
+    );
 
     client.detach_query(owned);
     client.tick().unwrap();
@@ -482,13 +488,13 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     else {
         panic!("expected subscriber connection");
     };
-    assert_eq!(served.len(), 2);
+    assert_eq!(served.len(), 1);
     assert_eq!(coverage_groups.len(), 1);
     let group = coverage_groups
         .values()
         .next()
         .expect("duplicate usage subscriptions should share one coverage group");
-    assert_eq!(group.subscribers.len(), 2);
+    assert_eq!(group.subscribers.len(), 1);
     let maintained_metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(maintained_metrics.hits_out, 2);
     assert_eq!(maintained_metrics.footprint.result_rows, 1);
@@ -652,8 +658,19 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            // A claimed reset must close its exact source set independently
+            // of row cardinality. This fixture isolates the intentionally
+            // malformed version carrier below rather than relying on an
+            // obsolete empty-fact authority result path.
+            program_fact_adds: vec![crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source: crate::protocol::ProgramSourceId {
+                        table: "todos".to_owned().into(),
+                        path: vec![crate::protocol::ProgramSourceRole::Root],
+                    },
+                    complete: true,
+                },
+            )],
             program_fact_removes: Vec::new(),
         })
     };
@@ -663,7 +680,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             tx: crate::tx::Transaction {
                 tx_id: TxId::new(TxTime::from(44), NodeUuid::from_bytes([0x44; 16])),
                 kind: crate::tx::TxKind::Mergeable,
-                n_total_writes: 0,
+                n_total_writes: 1,
                 made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
@@ -679,11 +696,16 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             durability: DurabilityTier::Edge,
         }]))
         .unwrap();
+    client.tick().unwrap();
     assert!(
-        client.tick().is_err(),
-        "missing payload must reject the update"
+        matches!(
+            first.try_next_event(),
+            Some(SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. },
+            })
+        ),
+        "missing payload must be reported to its public subscription"
     );
-
     let mut duplicate = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(
         duplicate.try_next_event().is_none(),
@@ -692,8 +714,8 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
 
     authority_transport.send(update(Vec::new())).unwrap();
     client.tick().unwrap();
-    assert!(opened_rows(block_on(first.next_raw()).unwrap()).is_empty());
-    assert!(opened_rows(block_on(duplicate.next_raw()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(first.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(duplicate.next_event()).unwrap()).is_empty());
     let mut after_success = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(
         opened_rows(

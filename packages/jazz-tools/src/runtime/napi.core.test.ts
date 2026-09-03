@@ -1095,8 +1095,20 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     async () => {
       const { NapiDb } = await loadNapiModule();
       const fixture = debugSubscriptionEventFixture!;
-      const [unsupportedEvent, pendingEvent, serverFailureEvent, closedEvent] = fixture();
-      expect([unsupportedEvent, pendingEvent, serverFailureEvent, closedEvent]).toStrictEqual([
+      const [
+        unsupportedEvent,
+        pendingEvent,
+        serverFailureEvent,
+        invalidAuthorityEvent,
+        closedEvent,
+      ] = fixture();
+      expect([
+        unsupportedEvent,
+        pendingEvent,
+        serverFailureEvent,
+        invalidAuthorityEvent,
+        closedEvent,
+      ]).toStrictEqual([
         {
           type: "rejected",
           reason: {
@@ -1112,9 +1124,22 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           type: "rejected",
           reason: { type: "ServerFailure", code: "QueryValidation" },
         },
+        {
+          type: "rejected",
+          reason: {
+            type: "InvalidAuthoritySourceClosure",
+            transition: "fixture invalid transition",
+          },
+        },
         { type: "closed" },
       ]);
-      if (!unsupportedEvent || !pendingEvent || !serverFailureEvent || !closedEvent) {
+      if (
+        !unsupportedEvent ||
+        !pendingEvent ||
+        !serverFailureEvent ||
+        !invalidAuthorityEvent ||
+        !closedEvent
+      ) {
         throw new Error("jazz-napi test fixture returned incomplete events");
       }
 
@@ -1988,7 +2013,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       ]),
     );
 
-    const transport = runtime.connectUpstreamPeer();
+    const transport = await runtime.connectUpstreamPeer();
     expect(transport.tick()).toBeGreaterThanOrEqual(0);
     expect(transport.recvWireFrames()).toEqual(expect.any(Array));
     expect(transport.close()).toBe(true);

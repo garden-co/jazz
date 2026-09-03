@@ -46,6 +46,8 @@ export type WebSocketCarrierOptions = {
   /** Features supported by the native runtime that will receive this link. */
   features?: number;
   authJson?: string;
+  /** Requested only by the durable, scope-admitted browser relay host. */
+  requestedLink?: "scope_isolated_client_relay";
   onFrame: WebSocketFrameHandler;
   onError?: WebSocketErrorHandler;
   onTerminal?: WebSocketTerminalHandler;
@@ -245,7 +247,13 @@ export class WebSocketCarrier {
     });
     void waitForOpen(this.socket).then(
       () => {
-        this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
+        this.socket.send(
+          encodeWebSocketPrelude(
+            options.authJson ?? "{}",
+            options.peerIdentity,
+            options.requestedLink,
+          ),
+        );
         this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
       },
       (error) => {
@@ -457,7 +465,11 @@ function websocketCloseDetails(event: unknown): { code?: number; reason?: string
   };
 }
 
-export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {
+export function encodeWebSocketPrelude(
+  authJson: string,
+  peerIdentity: Uint8Array,
+  requestedLink?: "scope_isolated_client_relay",
+): string {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
   const peerAuthor = new TextDecoder().decode(peerIdentity);
   const sub = authSub(auth) ?? canonicalAuthorSubjectPart(peerAuthor) ?? peerAuthor;
@@ -466,6 +478,7 @@ export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Arra
     ...auth,
     auth: { ...auth, sub },
     sub,
+    ...(requestedLink ? { requested_link: requestedLink } : {}),
   });
 }
 
@@ -486,8 +499,52 @@ export function peerIdentityForWebSocketAuth(
   fallbackIdentity: Uint8Array,
 ): Uint8Array {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
+  // A credential-only backend connection is the trusted SYSTEM serving
+  // authority. Its raw-core backend open already uses this identity, and the
+  // WebSocket prelude must agree: otherwise the server attaches remote query
+  // coverage as the adapter's incidental local fallback author and evaluates
+  // row policies for that author. A backend session remains an explicit
+  // end-user serving subject and is handled by `canonicalAuthorForWebSocketAuth`.
+  if (
+    typeof auth.backend_secret === "string" &&
+    !auth.admin_secret &&
+    !hasUsableBackendSession(auth)
+  ) {
+    return new TextEncoder().encode(canonicalAuthorSubject("urn:jazz:system", "system"));
+  }
   const canonical = canonicalAuthorForWebSocketAuth(auth);
   return canonical ? new TextEncoder().encode(canonical) : fallbackIdentity;
+}
+
+/**
+ * Normalize credentials at the native transport boundary. A backend open is
+ * SYSTEM unless it deliberately supplies a backend session; an incidental
+ * bearer token would otherwise make the server select Session admission while
+ * the local raw-core database remains SYSTEM.
+ */
+export function normalizeBackendWebSocketAuth(authJson: string): string {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  if (
+    typeof auth.backend_secret === "string" &&
+    !auth.admin_secret &&
+    !hasUsableBackendSession(auth)
+  ) {
+    delete auth.jwt_token;
+  }
+  return JSON.stringify(auth);
+}
+
+function hasUsableBackendSession(auth: Record<string, unknown>): boolean {
+  const session = auth.backend_session as { issuer?: unknown; user_id?: unknown } | null;
+  return (
+    session !== null &&
+    typeof session === "object" &&
+    !Array.isArray(session) &&
+    typeof session.issuer === "string" &&
+    typeof session.user_id === "string" &&
+    isUsableSubject(session.issuer) &&
+    isUsableSubject(session.user_id)
+  );
 }
 
 function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string | null {
@@ -500,17 +557,8 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
   // backend secret. It carries the same public Session wire fields as a
   // server-side impersonation request, so it uses the same canonical author.
   // It also has the server's highest session-authentication precedence.
-  const session = auth.backend_session as { issuer?: unknown; user_id?: unknown } | null;
-  if (
-    typeof auth.backend_secret === "string" &&
-    session !== null &&
-    typeof session === "object" &&
-    !Array.isArray(session) &&
-    typeof session.issuer === "string" &&
-    typeof session.user_id === "string" &&
-    isUsableSubject(session.issuer) &&
-    isUsableSubject(session.user_id)
-  ) {
+  if (typeof auth.backend_secret === "string" && hasUsableBackendSession(auth)) {
+    const session = auth.backend_session as { issuer: string; user_id: string };
     return canonicalAuthorSubject(session.issuer, session.user_id);
   }
 

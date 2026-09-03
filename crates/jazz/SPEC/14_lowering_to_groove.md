@@ -404,11 +404,25 @@ the patch is subordinate to the root occurrence and must reduce to the same
 terminal relation. It must not create a separately authoritative
 `relation_delta`, row/edge snapshot, or high-level assembler state.
 
+That carrier boundary is local to one Groove execution and its application
+consumer. A serving authority does not send its collector's terminal row or
+structural patch to another peer. It sends the exact safe source closure and
+the identity of the authorized residual program; the receiver projects those
+inputs through catalogue lineage and runs the same lowered graph locally. The
+receiver's collector is therefore the sole owner of ordering after local and
+authority inputs have been reconciled (`INV-SYNC-36`, ch. 16). This is required
+even when the authority and receiver currently have equal source state: an
+eligible local pending write can make an authority-computed child index false.
+
 During migration, relation facts remain permitted as internal sync coverage and
 authorization evidence. They are not public query output and consumers must
 not combine them with a root-row delta to reconstruct application values. A
-protocol revision that carries terminal rows advertises that output mode
-explicitly; receivers must not infer it from query syntax or descriptor shape.
+relation fact carries every source/correlation dimension required by the local
+lowered program. Query ordering comes from explicit query terms, the specified
+implicit stable order, or ordinary stored ordering data; it is never recovered
+from an authority collector position. A shape whose safe closure cannot let the
+receiver reproduce its terminal is outside the synchronized query surface and
+must be rejected rather than tunneled as authority output.
 
 Sync view maintenance shares the same lowered query machinery as ordinary reads.
 The target peer-serving path consumes maintained terminal facts for result

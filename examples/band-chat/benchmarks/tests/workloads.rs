@@ -6,9 +6,10 @@ fn caught_up_fast_resume_emits_no_membership_or_version_payload() {
         let mut fixture = FastResumeFixture::new(message_count);
         let receipt = fixture.caught_up_fast_resume();
         assert!(
-            receipt.is_caught_up_noop(),
+            receipt.is_body_deduplicated_reset(),
             "{message_count} messages leaked a caught-up resume payload: {receipt:?}"
         );
+        assert_eq!(receipt.covered_inputs, message_count);
     }
 }
 

@@ -101,7 +101,34 @@ pub struct FrontierSourceOp {
 /// Source node for a runtime-maintained subscription-shape parameter set.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BindingSourceOp {
-    pub shape: String,
+    /// This is an internal identity, not the public prepared-shape name.
+    /// Runtime-owned mutable inputs must be disjoint from user-chosen prepared
+    /// binding names: a prefix is not an isolation boundary.
+    pub key: BindingSourceKey,
+}
+
+/// Internal identity for a source feeding the common binding delta engine.
+///
+/// Prepared bindings retain their user-visible string name. Mutable runtime
+/// inputs instead use their opaque allocation identity, so no caller-provided
+/// string can alias or overwrite their descriptor or records.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BindingSourceKey {
+    Prepared(String),
+    RuntimeInput { runtime_namespace: u64, local: u64 },
+}
+
+impl BindingSourceKey {
+    pub(crate) fn prepared(shape: impl Into<String>) -> Self {
+        Self::Prepared(shape.into())
+    }
+
+    pub(crate) fn prepared_name(&self) -> Option<&str> {
+        match self {
+            Self::Prepared(shape) => Some(shape),
+            Self::RuntimeInput { .. } => None,
+        }
+    }
 }
 
 /// Name of a value bound in an evaluation context.
@@ -268,7 +295,15 @@ pub struct RecursiveOp {
     pub truncate_at_max_iters: bool,
     /// Tables read by the seed and step graphs, cached when the graph is compiled.
     pub read_tables: Vec<String>,
+    /// Descriptor of the optional recursion-owned step witness side stream.
+    /// The witness is intentionally generic record data; consumers decide what
+    /// its rows mean.
+    pub step_witness_output: Option<RecordDescriptor>,
 }
+
+/// Exposes the retained generic step witness stream of one recursive input.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RecursiveStepWitnessOp;
 
 // Aggregate.
 

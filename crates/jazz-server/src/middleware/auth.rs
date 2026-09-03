@@ -1142,6 +1142,10 @@ pub async fn extract_session(
             return Ok(Some(Session {
                 issuer: verified.issuer.to_owned(),
                 user_id: verified.user_id,
+                // The verified key proves the issuer-scoped subject above; it
+                // is transport proof material, not an application policy
+                // claim. In particular, fresh anonymous proofs intentionally
+                // share the same empty policy binding.
                 claims: serde_json::Value::Object(serde_json::Map::new()),
                 auth_mode,
             }));
@@ -1716,7 +1720,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_first_session_has_auth_mode_localfirst_and_no_claim() {
+    async fn local_first_session_excludes_verified_public_key_from_policy_claims() {
         let app_id = AppId::from_name("test-app");
         let seed = [7u8; 32];
         let token = jazz::tools::identity::mint_jazz_self_signed_token(
@@ -1744,6 +1748,10 @@ mod tests {
             assert!(
                 !map.contains_key("auth_mode"),
                 "claims must not carry auth_mode anymore"
+            );
+            assert!(
+                !map.contains_key("jazz_pub_key"),
+                "verified transport proof material must not become a policy claim"
             );
         } else {
             panic!("expected object claims");
@@ -1901,5 +1909,6 @@ mod tests {
             .expect("session");
 
         assert_eq!(session.auth_mode, jazz::tools::AuthMode::Anonymous);
+        assert_eq!(session.claims, serde_json::json!({}));
     }
 }

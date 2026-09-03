@@ -87,7 +87,14 @@ where
                 last_rows = Some(rows);
                 last_error = None;
             }
-            Ok(Err(e)) => last_error = Some(e.to_string()),
+            Ok(Err(e)) => {
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    eprintln!(
+                        "JAZZ_COVERED_INPUT_TRACE stage=wait_for_query_error description={description} error={e}"
+                    );
+                }
+                last_error = Some(e.to_string());
+            }
             Err(_) => {}
         }
 

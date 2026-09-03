@@ -21,6 +21,7 @@ use jazz::db::{CommitUnitTrust, ConnectionSessionContext};
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
+use jazz::serving::ServerLinkAdmission;
 use jazz::tools::Session;
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
@@ -72,6 +73,7 @@ struct WebSocketAdmission {
     claims: BTreeMap<String, CoreValue>,
     trust: CommitUnitTrust,
     credential: WebSocketCredential,
+    requested_link: RequestedWebSocketLink,
 }
 
 /// Authentication class selected by the prelude.  `TrustedBackend` is still
@@ -190,6 +192,22 @@ struct WebSocketPrelude {
     /// subscriber session and never admits application frames.
     #[serde(default)]
     bootstrap_catalogue: bool,
+    /// Requested before any wire frame.  It is only a request: after JWT/cookie
+    /// authentication and feature negotiation the server either creates its
+    /// own immutable admitted relay capability or rejects the connection.
+    #[serde(default)]
+    requested_link: RequestedWebSocketLink,
+}
+
+/// The only client-selectable *request* at the WebSocket boundary.  This is
+/// intentionally separate from `WirePeerRole`: a wire hello says what a peer
+/// implements, not what authority it receives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RequestedWebSocketLink {
+    #[default]
+    OrdinarySession,
+    ScopeIsolatedClientRelay,
 }
 
 async fn ws_admission(
@@ -198,6 +216,7 @@ async fn ws_admission(
     state: &Arc<ServerState>,
 ) -> Result<WebSocketAdmission, String> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
+    let requested_link = prelude.requested_link;
     let auth = prelude.auth;
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
@@ -205,21 +224,23 @@ async fn ws_admission(
             .map_err(|(_, message)| message.to_owned())?;
         // An admin credential authenticates Edge's control plane, but ordinary
         // relay commits must retain their transaction permission subject for
-        // application-policy evaluation. Catalogue bootstrap is the sole
-        // privileged admission, and is further checked at the protocol edge.
+        // application-policy evaluation. Complete authority publications have
+        // their own prior-edge-admission capability, never inferred from SYSTEM
+        // or from an ordinary backend credential.
         let trust = if prelude.bootstrap_catalogue
             && peer_identity == AuthorSubject::SYSTEM
             && state.topology == crate::server::ServerTopology::Core
         {
             CommitUnitTrust::TrustedAdmin
         } else {
-            CommitUnitTrust::TrustedBackend
+            CommitUnitTrust::TrustedAuthority
         };
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
             trust,
             credential: WebSocketCredential::Admin,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
         });
     }
 
@@ -265,6 +286,7 @@ async fn ws_admission(
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
             credential: WebSocketCredential::Backend,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
         });
     }
 
@@ -296,6 +318,7 @@ async fn ws_admission(
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
         credential: WebSocketCredential::Session,
+        requested_link,
     })
 }
 
@@ -306,7 +329,16 @@ fn session_claims(
         .author_subject()
         .map_err(|error| error.to_string())?;
     let provider_claims = match session.claims {
-        serde_json::Value::Object(map) => map.into_iter().collect(),
+        serde_json::Value::Object(mut map) => {
+            // Middleware exposes these convenient aliases to server handlers,
+            // but they duplicate the verified transport identity. A relay
+            // capability must use the one canonical binding vocabulary: the
+            // shared admission constructor derives `claims.iss`/`claims.sub`,
+            // `user`, and `authMode` from the verified AuthorSubject.
+            map.remove("issuer");
+            map.remove("subject");
+            map.into_iter().collect()
+        }
         _ => BTreeMap::new(),
     };
     let provider_claims =
@@ -693,6 +725,32 @@ async fn handle_ws_connection(
     } else {
         None
     };
+    let link_admission = match admission.requested_link {
+        RequestedWebSocketLink::OrdinarySession => ServerLinkAdmission::OrdinarySession,
+        RequestedWebSocketLink::ScopeIsolatedClientRelay
+            if admission.credential == WebSocketCredential::Session
+                && negotiated.features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
+        {
+            // This epoch was minted by the server for this accepted socket.
+            // Reconnects necessarily get a fresh capability.
+            ServerLinkAdmission::ScopeIsolatedClientRelay {
+                admission_epoch: server_endpoint.epoch,
+            }
+        }
+        RequestedWebSocketLink::ScopeIsolatedClientRelay => {
+            send_ws_error(
+                &mut socket,
+                WireError::new(
+                    WireErrorCode::UnsupportedFeature,
+                    WireRetry::Never,
+                    "scope-isolated client relay requires an authenticated session and negotiated relay feature",
+                ),
+            )
+            .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
     let session = match core_server_shell
         .open_with_session_context(
             admission.identity,
@@ -700,6 +758,7 @@ async fn handle_ws_connection(
             admission.trust,
             negotiated.features,
             session_context,
+            link_admission,
         )
         .await
     {
@@ -1126,6 +1185,12 @@ mod tests {
                 "role": "writer",
                 "iss": "spoofed-issuer",
                 "sub": "spoofed-subject",
+                // These are middleware convenience aliases, not provider
+                // policy claims. They must not create a different relay
+                // capability than the JWT-derived browser binding.
+                "issuer": "middleware-issuer",
+                "subject": "middleware-subject",
+                "authMode": "spoofed-mode",
                 "score": 7
             }),
         );
@@ -1146,6 +1211,16 @@ mod tests {
             Some(&CoreValue::String("writer".to_owned()))
         );
         assert_eq!(claims.get("\0claims:score"), Some(&CoreValue::U64(7)));
+        assert_eq!(
+            claims.get("\0claims:authMode"),
+            Some(&CoreValue::String("spoofed-mode".to_owned()))
+        );
+        assert!(!claims.contains_key("\0claims:issuer"));
+        assert!(!claims.contains_key("\0claims:subject"));
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&CoreValue::String("external".to_owned()))
+        );
         assert_eq!(
             claims.get("\0claims:iss"),
             Some(&CoreValue::String("https://issuer.example".to_owned()))
@@ -1258,6 +1333,7 @@ mod tests {
         let prelude = WebSocketPrelude {
             peer_identity: peer_identity.canonical().to_owned(),
             bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_session: Some(serde_json::json!({ "attacker": true })),
                 ..Default::default()
@@ -1372,12 +1448,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_admin_secret_only_elevates_system_catalogue_bootstrap_at_core() {
+    async fn ws_admin_authority_capability_is_distinct_from_backend_attribution() {
         let state = make_ws_test_state().await;
         let relay = ws_admission(
             WebSocketPrelude {
                 peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
                 bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1389,12 +1466,13 @@ mod tests {
         .await
         .expect("admit authenticated edge relay");
         assert_eq!(relay.credential, WebSocketCredential::Admin);
-        assert_eq!(relay.trust, CommitUnitTrust::TrustedBackend);
+        assert_eq!(relay.trust, CommitUnitTrust::TrustedAuthority);
 
         let bootstrap = ws_admission(
             WebSocketPrelude {
                 peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
                 bootstrap_catalogue: true,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1413,6 +1491,7 @@ mod tests {
                     .canonical()
                     .to_owned(),
                 bootstrap_catalogue: true,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1423,7 +1502,24 @@ mod tests {
         )
         .await
         .expect("admit authentication before protocol bootstrap rejection");
-        assert_eq!(non_system.trust, CommitUnitTrust::TrustedBackend);
+        assert_eq!(non_system.trust, CommitUnitTrust::TrustedAuthority);
+
+        let backend = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    backend_secret: Some("backend-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("ordinary backend is authenticated, but has no prior-edge-admission proof");
+        assert_eq!(backend.trust, CommitUnitTrust::TrustedBackend);
     }
 
     #[tokio::test]
@@ -1435,6 +1531,7 @@ mod tests {
         let prelude = WebSocketPrelude {
             peer_identity: forged_peer.canonical().to_owned(),
             bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
@@ -1469,6 +1566,7 @@ mod tests {
         let prelude = WebSocketPrelude {
             peer_identity: identity.canonical().to_owned(),
             bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
@@ -1517,7 +1615,17 @@ mod tests {
         );
         assert!(!admission.claims.contains_key("subject"));
         assert!(!admission.claims.contains_key("user_id"));
-        assert!(!admission.claims.contains_key("authMode"));
+        // Auth metadata is derived from the admitted identity, not flattened
+        // from caller claims. Arbitrary claims remain in their own namespace.
+        assert_eq!(
+            admission.claims.get("authMode"),
+            Some(&CoreValue::String("external".to_owned()))
+        );
+        assert_eq!(
+            admission.claims.get("user"),
+            Some(&CoreValue::String(identity.canonical().to_owned()))
+        );
+        assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
 
     // Internal route-boundary test: this proves the reusable core

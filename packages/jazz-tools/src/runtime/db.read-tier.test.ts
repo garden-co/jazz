@@ -131,6 +131,57 @@ async function settle(): Promise<void> {
 }
 
 describe("Db ReadTier.RemoteIfPossible", () => {
+  it("keeps explicit Local reads propagating whether connected or explicitly offline", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-public-local-propagation",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+
+    await db.all(query(), { tier: ReadTier.LocalFirst });
+    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: ReadTier.LocalFirst });
+    expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
+
+    await db.disconnect();
+    await db.all(query(), { tier: "local" });
+    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: "local" });
+    expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
+
+    await db.reconnect();
+    await db.all(query(), { tier: ReadTier.Remote });
+    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: ReadTier.Remote });
+    expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
+  });
+
+  it("keeps explicit Local subscriptions propagating without changing connected Edge", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-public-local-subscription-propagation",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+
+    const stopLocal = db.subscribe(query(), () => undefined, { tier: ReadTier.LocalFirst });
+    expect(client.subscribe.mock.calls.at(-1)?.[2]).toMatchObject({ tier: ReadTier.LocalFirst });
+    expect(client.subscribe.mock.calls.at(-1)?.[2]).not.toHaveProperty("propagation");
+
+    const stopRemote = db.subscribe(query(), () => undefined, { tier: ReadTier.Remote });
+    expect(client.subscribe.mock.calls.at(-1)?.[2]).toMatchObject({ tier: ReadTier.Remote });
+    expect(client.subscribe.mock.calls.at(-1)?.[2]).not.toHaveProperty("propagation");
+
+    stopLocal();
+    stopRemote();
+  });
+
   it("chooses local once for one-shot reads during an explicit disconnect", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
@@ -418,12 +469,12 @@ describe("Db ReadTier.RemoteIfPossible", () => {
 
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
     expect(client.subscribe).toHaveBeenCalledTimes(2);
-    expect(client.subscribe.mock.calls[1]?.[2]).toMatchObject({ tier: "edge" });
+    expect(client.subscribe.mock.calls[1]?.[2]).toMatchObject({ tier: ReadTier.RemoteIfPossible });
 
     unsubscribe();
   });
 
-  it("keeps local updates live during handoff and rejects callbacks from the retired stream", async () => {
+  it("waits for fresh remote inputs on reconnect and rejects retired local callbacks", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {
@@ -444,6 +495,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     );
     const localCallback = client.subscriptionCallbacks.get(1)!;
     const edgeReady = deferred<void>();
+    localCallback({ added: [], removed: [], updated: [], reset: true });
     const connection = (
       db as unknown as { connection: { ensureReady: (tier?: string) => Promise<void> } }
     ).connection;
@@ -456,10 +508,10 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await db.reconnect();
     await settle();
     expect(client.subscribe).toHaveBeenCalledOnce();
-    expect(client.unsubscribe).not.toHaveBeenCalled();
+    expect(client.unsubscribe).toHaveBeenCalledWith(1);
 
     localCallback(added("during", "during handoff"));
-    expect(publications.at(-1)).toEqual(["during handoff"]);
+    expect(publications.at(-1)).toEqual([]);
 
     edgeReady.resolve();
     await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
@@ -469,8 +521,50 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(publications).toHaveLength(publicationCount);
 
     client.subscriptionCallbacks.get(2)!(added("remote", "remote"));
-    expect(publications.at(-1)).toEqual(["remote", "during handoff"]);
+    expect(publications.at(-1)).toEqual(["remote"]);
     unsubscribe();
+  });
+
+  it("switches an existing remote-if-possible stream repeatedly without admitting retired callbacks", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-repeated-transition",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    const onDelta = vi.fn();
+    const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+      query(),
+      { onDelta },
+      {
+        tier: ReadTier.RemoteIfPossible,
+      },
+    );
+    for (const [index, offline] of [true, false, true, false].entries()) {
+      const previous = client.subscriptionCallbacks.get(index + 1)!;
+      if (offline) await db.disconnect();
+      else await db.reconnect();
+      await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(index + 2));
+      expect(client.subscribe.mock.calls[index + 1]?.[2]).toMatchObject({
+        tier: offline ? "local" : ReadTier.RemoteIfPossible,
+      });
+      onDelta.mockClear();
+      previous(added("stale", "retired generation"));
+      expect(onDelta).not.toHaveBeenCalled();
+      client.subscriptionCallbacks.get(index + 2)!(added(`live-${index}`, "current generation"));
+      expect(onDelta).toHaveBeenCalledOnce();
+    }
+    unsubscribe();
+    const count = client.subscribe.mock.calls.length;
+    await db.disconnect();
+    await db.reconnect();
+    await settle();
+    expect(client.subscribe).toHaveBeenCalledTimes(count);
+    expect(client.subscriptionCallbacks.size).toBe(0);
   });
 
   it("terminalizes the local generation when reconnect handoff readiness fails", async () => {
@@ -596,15 +690,14 @@ describe("Db ReadTier.RemoteIfPossible", () => {
 
     expect(onError).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledWith(failure);
-    expect(onDelta).toHaveBeenCalledOnce();
-    expect(publicationTitles(onDelta.mock.calls[0]![0].all)).toEqual([]);
+    expect(onDelta).not.toHaveBeenCalled();
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);
 
     openingCallbacks.onUpdate(added("late", "must stay terminal"));
     openingCallbacks.onError?.(new Error("late error"));
     unsubscribe();
 
-    expect(onDelta).toHaveBeenCalledOnce();
+    expect(onDelta).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledOnce();
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);
   });
@@ -650,12 +743,8 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     unsubscribe();
   });
 
-  it("fences an already-running local seed after a native terminal error", async () => {
+  it("uses only the native stream for its opening and later results", async () => {
     const client = makeClient();
-    const localSeed = deferred<
-      Array<{ id: string; values: Array<{ type: "Text"; value: string }> }>
-    >();
-    client.query.mockImplementationOnce(() => localSeed.promise);
     const db = await createDbWithRuntimeSource(
       {
         appId: "read-tier-running-seed-error",
@@ -671,21 +760,21 @@ describe("Db ReadTier.RemoteIfPossible", () => {
       onUpdate: (rows) => updates.push(publicationTitles(rows)),
       onError: (error) => errors.push(error),
     });
-    await vi.waitFor(() => expect(client.query).toHaveBeenCalledOnce());
+    await settle();
+    expect(client.query).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    const onDelta = client.subscriptionCallbacks.get(1)!;
+    onDelta(added("opening", "native opening"));
+    expect(updates).toEqual([["native opening"]]);
     const onNativeError = client.subscriptionErrorCallbacks.get(1)!;
-    const failure = new Error("native stream failed while seed was reading");
+    const failure = new Error("native stream failed");
     onNativeError(failure);
-
-    localSeed.resolve([
-      {
-        id: "00000000-0000-0000-0000-000000000001",
-        values: [{ type: "Text", value: "late local seed" }],
-      },
-    ]);
+    onDelta(added("late", "must stay terminal"));
     await settle();
 
     expect(errors).toEqual([failure]);
-    expect(updates).toEqual([[]]);
+    expect(updates).toEqual([["native opening"]]);
+    expect(client.query).not.toHaveBeenCalled();
     unsubscribe();
   });
 
@@ -719,7 +808,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(() => onDelta(added("callback", "throws"))).not.toThrow();
     onDelta(added("late", "must stay terminal"));
 
-    expect(updates).toHaveBeenCalledTimes(2);
+    expect(updates).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledWith(updateFailure);
     expect(consoleError).toHaveBeenCalledWith(
@@ -755,7 +844,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await db.reconnect();
     await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
 
-    expect(publications).toEqual([[], ["synchronous remote"]]);
+    expect(publications).toEqual([["synchronous remote"]]);
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
     unsubscribe();
   });
@@ -794,10 +883,10 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
 
     expect(errors).toEqual([failure]);
-    expect(publications).toEqual([[]]);
+    expect(publications).toEqual([]);
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);
     localCallback(added("local", "retired after replacement failure"));
-    expect(publications).toEqual([[]]);
+    expect(publications).toEqual([]);
 
     unsubscribe();
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);

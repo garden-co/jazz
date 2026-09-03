@@ -56,10 +56,12 @@ impl IvmRuntime {
         let compiled = match graph {
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::InputSource { .. }
             | GraphBuilder::Index { .. }
             | GraphBuilder::FrontierSource { .. }
             | GraphBuilder::BindingSource { .. }
             | GraphBuilder::Recursive { .. }
+            | GraphBuilder::RecursiveStepWitness { .. }
             | GraphBuilder::CollectBy { .. } => {
                 self.add_dedup_source_graph(graph, inferred_output, output_memo, compiled_memo)
             }
@@ -145,6 +147,40 @@ impl IvmRuntime {
                     root_ordering_node: None,
                 })
             }
+            GraphBuilder::InputSource { id, output } => {
+                if !id.belongs_to(self.input_source_runtime_namespace) {
+                    return Err(IvmRuntimeError::ForeignInputSource);
+                }
+                if !inferred_output.registry_compatible_with(output) {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                let key = id.binding_key();
+                let Some(source) = self.binding_sources.get(&key) else {
+                    return Err(IvmRuntimeError::InputSourceRetired);
+                };
+                if source.descriptor != *output {
+                    return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(
+                        id.diagnostic_name(),
+                    ));
+                }
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        // A mutable input uses the same runtime delta and
+                        // hydration machinery as a prepared binding source;
+                        // only its GraphBuilder/API ownership differs.
+                        OpType::BindingSource(BindingSourceOp { key }),
+                        [],
+                        *output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode {
+                    output: *output,
+                    node,
+                    root_ordering_node: None,
+                })
+            }
             GraphBuilder::Index {
                 table,
                 index,
@@ -204,7 +240,7 @@ impl IvmRuntime {
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::BindingSource(BindingSourceOp {
-                            shape: shape.clone(),
+                            key: BindingSourceKey::prepared(shape.clone()),
                         }),
                         [],
                         *output,
@@ -221,17 +257,27 @@ impl IvmRuntime {
             GraphBuilder::Recursive {
                 seed,
                 step,
+                step_witness,
                 frontier,
                 max_iters,
                 truncate_at_max_iters,
             } => {
-                if builder_contains_recursive(seed) || builder_contains_recursive(step) {
+                if builder_contains_recursive(seed)
+                    || builder_contains_recursive(step)
+                    || step_witness
+                        .as_ref()
+                        .is_some_and(|witness| builder_contains_recursive(witness))
+                {
                     return Err(IvmRuntimeError::UnsupportedNestedRecursion);
                 }
                 let compiled_seed =
                     self.add_dedup_graph_cached(seed, output_memo, compiled_memo)?;
                 let compiled_step =
                     self.add_dedup_graph_cached(step, output_memo, compiled_memo)?;
+                let compiled_step_witness = step_witness
+                    .as_ref()
+                    .map(|witness| self.add_dedup_graph_cached(witness, output_memo, compiled_memo))
+                    .transpose()?;
                 if !compiled_seed
                     .output
                     .registry_compatible_with(&compiled_step.output)
@@ -248,13 +294,66 @@ impl IvmRuntime {
                             frontier: frontier.clone(),
                             max_iters: *max_iters,
                             truncate_at_max_iters: *truncate_at_max_iters,
+                            step_witness_output: compiled_step_witness
+                                .as_ref()
+                                .map(|witness| witness.output),
                             read_tables: recursive_read_tables(
                                 &self.graph,
                                 compiled_seed.node,
                                 compiled_step.node,
+                                compiled_step_witness.as_ref().map(|witness| witness.node),
                             )?,
                         }),
-                        [compiled_seed.node, compiled_step.node],
+                        compiled_step_witness
+                            .as_ref()
+                            .map(|witness| {
+                                vec![compiled_seed.node, compiled_step.node, witness.node]
+                            })
+                            .unwrap_or_else(|| vec![compiled_seed.node, compiled_step.node]),
+                        output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: None,
+                })
+            }
+            GraphBuilder::RecursiveStepWitness { recursive } => {
+                let GraphBuilder::Recursive {
+                    step_witness: Some(_),
+                    ..
+                } = recursive.as_ref()
+                else {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                };
+                let compiled_recursive =
+                    self.add_dedup_graph_cached(recursive, output_memo, compiled_memo)?;
+                let [_, _, witness] = self
+                    .graph
+                    .node(compiled_recursive.node)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(compiled_recursive.node))?
+                    .descriptor
+                    .inputs
+                    .as_slice()
+                else {
+                    return Err(IvmRuntimeError::GraphInputArityMismatch(
+                        compiled_recursive.node,
+                    ));
+                };
+                let output = self
+                    .graph
+                    .node(*witness)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(*witness))?
+                    .descriptor
+                    .output
+                    .records();
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        OpType::RecursiveStepWitness(crate::ivm::RecursiveStepWitnessOp),
+                        [compiled_recursive.node],
                         output,
                     ),
                     NodeDurability::Ephemeral,

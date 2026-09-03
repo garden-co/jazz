@@ -57,7 +57,15 @@ fn lower_correlated_path_plan(
         .child
         .steps
         .iter()
-        .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+        // The path graph carries physical parent/child witnesses. Public
+        // child projections are applied by the collector after the path, so
+        // they must not rename or discard the row/version fields used here.
+        .filter(|step| {
+            !matches!(
+                step,
+                LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Project(_)
+            )
+        })
         .cloned()
         .collect::<Vec<_>>();
     let child_relation_plan = LinearCurrentRoot {
@@ -326,7 +334,18 @@ pub(super) fn lower_correlated_path_relation_graph_from_parent(
             path.child
                 .steps
                 .iter()
-                .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+                // Correlated paths are a source-level relationship boundary.
+                // The collector projects the public child record after that
+                // boundary, while relationship edges and nested paths still
+                // need the child's physical row/version fields. In
+                // particular, a final public projection can rename or omit
+                // `row_uuid`, which must not shape the path graph.
+                .filter(|step| {
+                    !matches!(
+                        step,
+                        LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Project(_)
+                    )
+                })
                 .cloned()
                 .collect()
         },
@@ -375,6 +394,15 @@ fn child_steps_for_relation_edges(steps: &[LinearStep]) -> Vec<LinearStep> {
     let mut filtered = Vec::with_capacity(steps.len());
     for step in steps {
         match step {
+            // Relation-edge terminals describe the physical parent/child
+            // witnesses, not the child query's rendered row. A final public
+            // projection can rename `row_uuid` to `id` and discard the
+            // version fields the edge needs; retain the source layout here
+            // and let the public collector perform that projection on its
+            // own path.
+            LinearStep::Project(_) => {
+                previous_was_order_by = false;
+            }
             LinearStep::Slice { .. } if !previous_was_order_by => {
                 previous_was_order_by = false;
             }
@@ -423,14 +451,45 @@ pub(super) fn lower_relation_input(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_relation_input_with_retained_final_fields(plan, resolved_sources, request, false)
+}
+
+fn lower_relation_input_with_retained_final_fields(
+    plan: &RelationInputPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    retain_final_project_input_fields: bool,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = BTreeMap::new();
+    let final_plan_key = relation_input_key(plan);
     for input in relation_input_postorder(plan) {
-        let output = lower_relation_input_cached(input, resolved_sources, request, &lowered)?;
+        let output = lower_relation_input_cached(
+            input,
+            resolved_sources,
+            request,
+            &lowered,
+            retain_final_project_input_fields && relation_input_key(input) == final_plan_key,
+        )?;
         lowered.insert(relation_input_key(input), output);
     }
     lowered
         .remove(&relation_input_key(plan))
         .ok_or_else(|| UnsupportedReason::Runtime("relation input was not lowered".to_owned()))
+}
+
+/// Lower a relation as an input to a source-closure contributor terminal.
+///
+/// A relation facade's final `Project` renders its public output.  Contributor
+/// terminals instead freeze the source occurrence that supplied that output,
+/// including its row/version witness fields. Retain those physical fields
+/// alongside, rather than instead of, the facade projection: membership may
+/// deliberately name a public bridge alias such as `bridge_root`.
+pub(super) fn lower_relation_input_for_contributor(
+    plan: &RelationInputPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_relation_input_with_retained_final_fields(plan, resolved_sources, request, true)
 }
 
 /// Relation inputs are nested by policy joins.  Lower them in postorder so a
@@ -485,6 +544,7 @@ fn lower_relation_input_cached(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
     lowered: &BTreeMap<usize, LoweredRelationInput>,
+    retain_final_project_input_fields: bool,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     match plan {
         RelationInputPlan::Linear(linear) => {
@@ -502,6 +562,7 @@ fn lower_relation_input_cached(
                 request,
                 Some(lowered),
                 Some(linear),
+                retain_final_project_input_fields,
             )
         }
         RelationInputPlan::Union(union) => {
@@ -608,6 +669,7 @@ fn lower_union_relation_input_with_prefix_cached(
             request,
             lowered,
             Some(linear),
+            false,
         )?;
         if !output.fields.contains("__union_occurrence_row") {
             let row_field = &source.row_shape.row_uuid_field;
@@ -914,7 +976,7 @@ fn lower_recursive_relation(
     )
 }
 
-fn lower_recursive_relation_cached(
+pub(super) fn lower_recursive_relation_cached(
     root_graph: Option<GraphBuilder>,
     relation: &RecursiveRelationPlan,
     root_source: &ResolvedSource,
@@ -922,6 +984,22 @@ fn lower_recursive_relation_cached(
     request: &QueryProgramRequest,
     lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    // A recursive relation is ordinarily reached through relation-input
+    // postorder and receives its lowered join children. The recursion-owned
+    // witness is also lowered directly by closure terminals; build the same
+    // immediate child cache there instead of taking an alternate lowering
+    // path.
+    let mut owned_children = lowered.cloned().unwrap_or_default();
+    for linear in [&relation.seed, &relation.step] {
+        for step in &linear.steps {
+            if let LinearStep::Join { right, .. } = step {
+                owned_children
+                    .entry(relation_input_key(right))
+                    .or_insert(lower_relation_input(right, resolved_sources, request)?);
+            }
+        }
+    }
+    let lowered = Some(&owned_children);
     let seed_root_source = relation
         .seed_source()
         .and_then(|source| resolved_sources.get(source));
@@ -937,6 +1015,7 @@ fn lower_recursive_relation_cached(
         request,
         lowered,
         None,
+        false,
     )?;
     let step_source_id = relation.step_source().ok_or_else(|| {
         UnsupportedReason::Operator("recursive step must include a table source".to_owned())
@@ -955,7 +1034,44 @@ fn lower_recursive_relation_cached(
         request,
         lowered,
         None,
+        false,
     )?;
+    // Preserve a generic recursion-owned view of the physical step rows
+    // before the normalized recursive projection discards them. The runtime
+    // executes this side graph with the exact same frontier/depth as `step`;
+    // it is not a second reachability traversal.
+    let step_witness = {
+        let mut witness_step_plan = relation.step.clone();
+        let Some(LinearStep::Project(_)) = witness_step_plan.steps.last() else {
+            return Err(UnsupportedReason::Operator(
+                "recursive step witness requires a final projection".to_owned(),
+            ));
+        };
+        witness_step_plan.steps.pop();
+        // The side output is still authority-local until its terminal is routed
+        // to an admitted session. Preserve the same route carriers as the main
+        // step; the wire encoder, not this graph, removes private claim fields.
+        let witness_step_source = step_source;
+        let mut witness_children = BTreeMap::new();
+        for step in &witness_step_plan.steps {
+            if let LinearStep::Join { right, .. } = step {
+                witness_children.insert(
+                    relation_input_key(right),
+                    lower_relation_input(right, resolved_sources, request)?,
+                );
+            }
+        }
+        lower_linear_plan_steps_cached(
+            witness_step_source.graph.clone(),
+            &witness_step_plan,
+            witness_step_source,
+            resolved_sources,
+            request,
+            Some(&witness_children),
+            Some(&witness_step_plan),
+            false,
+        )?
+    };
     let truncate_at_max_iters = matches!(relation.bound, RecursionBound::MaxDepth(_));
     let max_iters = match relation.bound {
         RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
@@ -968,21 +1084,14 @@ fn lower_recursive_relation_cached(
     }
     let fields = seed.fields.clone();
     Ok(LoweredRelationInput {
-        graph: if truncate_at_max_iters {
-            GraphBuilder::recursive_bounded(
-                seed.graph,
-                step.graph,
-                relation.frontier.0.clone(),
-                max_iters,
-            )
-        } else {
-            GraphBuilder::recursive(
-                seed.graph,
-                step.graph,
-                relation.frontier.0.clone(),
-                max_iters,
-            )
-        },
+        graph: GraphBuilder::recursive_with_step_witness(
+            seed.graph,
+            step.graph,
+            step_witness.graph,
+            relation.frontier.0.clone(),
+            max_iters,
+            truncate_at_max_iters,
+        ),
         root_source: Some(root_source.clone()),
         fields,
         nullable_fields: BTreeSet::new(),
@@ -991,7 +1100,7 @@ fn lower_recursive_relation_cached(
     })
 }
 
-fn lower_linear_plan_steps(
+pub(super) fn lower_linear_plan_steps(
     graph: GraphBuilder,
     plan: &LinearCurrentRoot,
     root_source: &ResolvedSource,
@@ -1006,6 +1115,28 @@ fn lower_linear_plan_steps(
         request,
         None,
         None,
+        false,
+    )
+}
+
+/// Lower a recursive seed for a covered receiver input. The seed's rendered
+/// relation establishes the initial frontier, while the retained source fields
+/// encode the exact admitted source occurrence for the receiver closure.
+pub(super) fn lower_recursive_seed_membership(
+    relation: &RecursiveRelationPlan,
+    seed_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_linear_plan_steps_cached(
+        seed_source.graph.clone(),
+        &relation.seed,
+        seed_source,
+        resolved_sources,
+        request,
+        None,
+        None,
+        true,
     )
 }
 
@@ -1017,6 +1148,7 @@ fn lower_linear_plan_steps_cached(
     request: &QueryProgramRequest,
     lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
     cache_plan: Option<&LinearCurrentRoot>,
+    retain_final_project_input_fields: bool,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut graph = match &plan.root {
         LinearRoot::Source { .. } => graph,
@@ -1450,6 +1582,17 @@ fn lower_linear_plan_steps_cached(
                 }
             }
             LinearStep::Project(columns) => {
+                // A contributor freezes the same rendered relation that
+                // membership predicates name, but it must also retain the
+                // pre-projection physical row/version fields needed to encode
+                // the admitted source occurrence. Capture the exact fields
+                // available at this boundary before the facade aliases them.
+                let retained_contributor_fields = (retain_final_project_input_fields
+                    && step_index + 1 == plan.steps.len())
+                .then(|| fields.clone());
+                let retained_contributor_nullable_depths = retained_contributor_fields
+                    .as_ref()
+                    .map(|_| nullable_field_depths.clone());
                 let mut unwrap_fields = BTreeMap::<String, usize>::new();
                 let mut projected_nullable_field_depths = BTreeMap::<String, usize>::new();
                 let project_fields = columns
@@ -1486,7 +1629,7 @@ fn lower_linear_plan_steps_cached(
                 }
                 let mut project_fields = project_fields;
                 let mut retained_route_fields = BTreeSet::new();
-                let projected_outputs = project_fields
+                let mut projected_outputs = project_fields
                     .iter()
                     .map(|field| field.output_name.clone())
                     .collect::<BTreeSet<_>>();
@@ -1519,14 +1662,48 @@ fn lower_linear_plan_steps_cached(
                         }
                     }
                 }
+                if let Some(retained_fields) = &retained_contributor_fields {
+                    // A final relation projection follows a joined graph, so
+                    // every retained root descriptor field—including magic
+                    // provenance and version metadata—still lives on the
+                    // left side. Keeping user fields qualified but appending
+                    // metadata unqualified made nested covered-input joins
+                    // fail while preparing their receiver-local terminal.
+                    let retained_prefix = last_join_right
+                        .as_ref()
+                        .map(|_| LEFT_JOIN_PREFIX)
+                        .unwrap_or("");
+                    for field in retained_fields {
+                        if projected_outputs.insert(field.clone()) {
+                            project_fields.push(ProjectField::renamed(
+                                format!("{retained_prefix}{field}"),
+                                field.clone(),
+                            ));
+                        }
+                    }
+                }
                 graph = graph.project_fields(project_fields);
                 fields = columns
                     .iter()
                     .map(|column| column.output.name.clone())
                     .collect();
                 fields.extend(retained_route_fields.iter().cloned());
+                if let Some(retained_fields) = retained_contributor_fields {
+                    fields.extend(retained_fields);
+                }
                 nullable_fields = projected_nullable_field_depths.keys().cloned().collect();
                 nullable_field_depths = projected_nullable_field_depths;
+                if let Some(retained_depths) = retained_contributor_nullable_depths {
+                    for (field, depth) in retained_depths {
+                        if fields.contains(&field) {
+                            nullable_fields.insert(field.clone());
+                            nullable_field_depths
+                                .entry(field)
+                                .and_modify(|existing| *existing = (*existing).max(depth))
+                                .or_insert(depth);
+                        }
+                    }
+                }
                 available_route_fields = retained_route_fields;
                 last_join_right = None;
             }
@@ -2121,7 +2298,7 @@ fn key_pair_error(result: Result<String, UnsupportedReason>) -> String {
     }
 }
 
-fn lower_relation_key_ref(
+pub(super) fn lower_relation_key_ref(
     value: &NormalizedValueRef,
     plan: &RelationInputPlan,
     output: &LoweredRelationInput,

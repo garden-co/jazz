@@ -72,6 +72,58 @@ where
         provenance.validate().map_err(|_| {
             Error::InvalidStoredValue("transaction contribution provenance must be canonical")
         })?;
+        // Validate every branch key structurally against its *authored*
+        // physical table before any durable codec calls `canonical_bytes`.
+        // Raw input must become a malformed rejection, never an encoder panic.
+        for intent in &provenance.branch_write_intents {
+            let catalogue_schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&intent.authored_schema)
+                .ok_or(Error::InvalidStoredValue("branch write intent schema is unknown"))?;
+            let mapping = self
+                .catalogue
+                .physical_mappings
+                .get(&intent.authored_schema)
+                .ok_or(Error::InvalidStoredValue("branch write intent physical mapping is missing"))?;
+            let (table_name, _) = mapping
+                .tables
+                .iter()
+                .find(|(_, table)| table.table_id == intent.physical_table_id)
+                .ok_or(Error::InvalidStoredValue("branch write intent table is unknown"))?;
+            let table = catalogue_schema
+                .schema
+                .tables
+                .iter()
+                .find(|table| &table.name == table_name)
+                .ok_or(Error::InvalidStoredValue("branch write intent table schema is missing"))?;
+            catalogue_schema
+                .schema
+                .validate_authored_branch_key(table, &intent.head)
+                .map_err(Error::InvalidBranchKey)?;
+            if let crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence) = &intent.operation {
+                if evidence.table != *table_name
+                    || evidence.row_uuid != intent.row_uuid
+                    || evidence.head != intent.head
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "branch write copy evidence is not bound to its intent",
+                    ));
+                }
+                catalogue_schema
+                    .schema
+                    .validate_authored_branch_key(table, &evidence.head)
+                    .map_err(Error::InvalidBranchKey)?;
+                let base = match &evidence.base {
+                    crate::tx::BranchViewCopyBase::Current(base) => base,
+                    crate::tx::BranchViewCopyBase::Snapshot { branch, .. } => branch,
+                };
+                catalogue_schema
+                    .schema
+                    .validate_authored_branch_key(table, base)
+                    .map_err(Error::InvalidBranchKey)?;
+            }
+        }
         let schema_version = self.catalogue.current_write_schema.schema;
         let coordinates = provenance.substitutions.iter().flat_map(|substitution| {
             std::iter::once(&substitution.target)

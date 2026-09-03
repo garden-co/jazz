@@ -2,6 +2,33 @@
 
 use super::*;
 
+/// Test-only capability wrapper for a transport whose remote endpoint was
+/// authenticated and admitted as a trusted backend.  The transport capability
+/// is deliberately separate from `accept_subscriber_with_trust`: accepting a
+/// peer does not let an arbitrary client-side transport self-authorize
+/// delegated session bindings.
+struct TrustedBackendTransport {
+    inner: Box<dyn Transport>,
+}
+
+impl Transport for TrustedBackendTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), crate::wire::TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        true
+    }
+}
+
 /// JSON pointer writes use the RFC 6901 array-index grammar, so a caller
 /// cannot mutate `alice`'s first array member through a leading-zero path that
 /// an equivalent read treats as absent.
@@ -181,7 +208,9 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
 }
 
 /// A session that can satisfy `UPDATE` policy but cannot select a branch row
-/// cannot update it through either the facade or a mergeable transaction.
+/// cannot update it through the immediate facade. A mergeable transaction may
+/// stage the same structural mutation, but the fate authority must reject it
+/// from its complete policy inputs.
 ///
 /// mallory ──update branch row──► read-hidden source ──► denied
 #[test]
@@ -277,7 +306,7 @@ fn session_branch_updates_require_read_visibility_before_staging() {
     assert_eq!(upsert_error.code, crate::db::ErrorCode::WriteRejected);
     assert!(upsert_error.message.contains("UPSERT"));
 
-    let transaction_error = block_on(db.transaction_for_identity(writer, async |tx| {
+    let (_, tx_id) = block_on(db.transaction_for_identity(writer, async |tx| {
         tx.update(
             "todos",
             row_id,
@@ -292,9 +321,17 @@ fn session_branch_updates_require_read_visibility_before_staging() {
         )
         .await
     }))
-    .expect_err("transaction branch update must require read visibility");
-    assert_eq!(transaction_error.code, crate::db::ErrorCode::WriteRejected);
-    assert!(transaction_error.message.contains("UPDATE"));
+    .expect("mergeable client staging must not issue a policy verdict");
+    db.finalize_local_mergeable_commit_for_test(tx_id)
+        .expect("history-complete fate authority settles the staged write");
+    let transaction_state = db.write_state(tx_id).expect("staged transaction state");
+    assert!(matches!(
+        transaction_state,
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        }
+    ));
 
     assert!(
         block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))
@@ -2806,7 +2843,10 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _upstream =
+        crate::db::block_on(backend.connect_upstream(Box::new(TrustedBackendTransport {
+            inner: backend_transport,
+        })));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,
@@ -2887,7 +2927,10 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _upstream =
+        crate::db::block_on(backend.connect_upstream(Box::new(TrustedBackendTransport {
+            inner: backend_transport,
+        })));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,
@@ -3725,6 +3768,55 @@ fn deferred_local_publications_persist_and_enqueue_in_publication_order_once() {
 
     block_on(db.tick()).unwrap();
     assert_eq!(db.node.outbox.borrow().len(), 2);
+}
+
+/// Internal because the regression needs the exact overlap between a retained
+/// owner operation holding node state and an earlier publication's settlement.
+/// The browser counterpart performs insert/subscribe/insert without delays.
+#[test]
+fn deferred_publication_does_not_starve_the_queued_operation_holding_node_state() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let db = open_db(0xa8, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let write = block_on(db.insert(
+        "todos",
+        cells("settle while next operation is cold", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    let node = db.node.node();
+    let (release, blocked) = futures::channel::oneshot::channel();
+    db.node
+        .enqueue_transaction_operation(
+            OpenTransactionId::new(),
+            Box::pin(async move {
+                let _guard = node.lock().await;
+                blocked.await.expect("owner operation must remain retained");
+                Ok(())
+            }),
+        )
+        .unwrap();
+    db.drive_queued_mutation_once();
+
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut tick = Box::pin(db.tick());
+    assert!(matches!(
+        tick.as_mut().poll(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+    drop(tick);
+    assert_eq!(db.node.pending_local_publications.borrow().len(), 1);
+
+    release.send(()).unwrap();
+    block_on(db.tick()).unwrap();
+    assert!(db.node.pending_local_publications.borrow().is_empty());
+    assert_eq!(
+        db.write_state(write.mergeable_tx_id()).unwrap().durability,
+        DurabilityTier::Local
+    );
+    assert_eq!(prepared_read(&db, &db.table("todos")).len(), 1);
 }
 
 /// Causal flow: a mergeable transaction enters the node-owned deferred queue,

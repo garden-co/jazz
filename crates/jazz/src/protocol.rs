@@ -11,7 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use groove::large_values::Locator;
-use groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+use groove::records::{
+    EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ScalarEnumSchema, Value,
+    ValueType,
+};
 
 use crate::ids::{
     AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
@@ -22,6 +25,28 @@ use crate::time::GlobalTime;
 use crate::time::TxTime;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
+
+/// One complete transaction inside an edge-authority publication.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorityCommitUnit {
+    /// Canonical transaction envelope, including generated branch intent.
+    pub tx: Transaction,
+    /// Every row version in the transaction, never a query-scoped subset.
+    pub versions: Vec<VersionRecord>,
+}
+
+/// A coherent edge-authorized frontier for one admitted write.
+///
+/// Core admits every member before reconciling remaining concurrent heads.
+/// The group may include pending-global history dependencies and edge merges;
+/// it is not an additional application transaction or a query result.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorityPublication {
+    /// Admitted write whose upload/acknowledgement owns this publication.
+    pub tx_id: TxId,
+    /// Complete accepted transactions in increasing transaction-id order.
+    pub commits: Vec<AuthorityCommitUnit>,
+}
 
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -222,6 +247,9 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
+    /// Complete edge-admitted frontier, accepted only on an authenticated
+    /// authority link. Core reconciles after all members have been admitted.
+    AuthorityPublication(AuthorityPublication),
 }
 
 /// Shared payload for ordinary and authorization-scope view updates.
@@ -246,8 +274,6 @@ pub struct ViewUpdatePayload {
     pub result_member_adds: Vec<ResultMemberEntry>,
     /// Result members removed by the update.
     pub result_member_removes: Vec<ResultMemberEntry>,
-    /// Terminal-owned structural result edits.
-    pub terminal_operations: Vec<groove::ivm::TerminalOperation>,
     /// Program facts added by this update.
     pub program_fact_adds: Vec<ProgramFactEntry>,
     /// Program facts removed by this update.
@@ -550,6 +576,25 @@ pub struct CatalogueSnapshot {
 }
 
 impl SyncMessage {
+    /// Complete uploaded versions, including every member of an authority
+    /// publication. Shared by chunk staging and upload validation.
+    pub fn uploaded_versions(&self) -> impl Iterator<Item = &VersionRecord> {
+        let single = match self {
+            Self::CommitUnit { versions, .. } => Some(versions),
+            _ => None,
+        };
+        let publication = match self {
+            Self::AuthorityPublication(publication) => Some(publication),
+            _ => None,
+        };
+        single.into_iter().flatten().chain(
+            publication
+                .into_iter()
+                .flat_map(|publication| &publication.commits)
+                .flat_map(|unit| &unit.versions),
+        )
+    }
+
     /// Optional wire capabilities required to serialize this semantic message.
     ///
     /// Kept on the semantic type so every codec caller uses one exhaustive
@@ -557,6 +602,7 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
+            Self::AuthorityPublication(_) => crate::wire::FEATURE_AUTHORITY_PUBLICATIONS,
             Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             }
@@ -580,6 +626,12 @@ impl SyncMessage {
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
         match self {
             Self::CommitUnit { versions, .. } => validate_version_records(versions),
+            Self::AuthorityPublication(publication) => {
+                for unit in &publication.commits {
+                    validate_version_records(&unit.versions)?;
+                }
+                Ok(())
+            }
             Self::RowVersionPayloads { version_bundles } => {
                 validate_version_bundles(version_bundles)
             }
@@ -595,6 +647,81 @@ impl SyncMessage {
         }
     }
 
+    /// Validate peer-wire facts whose meaning must be fixed before a receiver
+    /// attaches them to a compiled maintained program.
+    pub fn validate_wire_contract(&self) -> Result<(), WireContractError> {
+        self.validate_version_carriers()
+            .map_err(WireContractError::VersionCarrier)?;
+        let Some(view) = self.carried_view_update() else {
+            return Ok(());
+        };
+        // Peer view frames carry only the authority-selected source closure.
+        // Result membership and materialized result payloads are authority
+        // output, never receiver input: accepting either would bypass the
+        // receiver-local maintained graph and its exact coverage receipt.
+        if !view.result_member_adds.is_empty()
+            || !view.result_member_removes.is_empty()
+            || view
+                .program_fact_adds
+                .iter()
+                .chain(&view.program_fact_removes)
+                .any(|fact| !fact.is_peer_source_closure_fact())
+        {
+            return Err(WireContractError::NonClosurePeerViewFact);
+        }
+        if view
+            .program_fact_adds
+            .iter()
+            .chain(&view.program_fact_removes)
+            .any(|fact| matches!(fact, ProgramFactEntry::CoveredInput(input) if !input.is_wire_valid()))
+        {
+            return Err(WireContractError::InvalidCoveredInput);
+        }
+        if view
+            .program_fact_adds
+            .iter()
+            .chain(&view.program_fact_removes)
+            .any(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ProgramSourceCoverage(coverage)
+                        if !coverage.complete || !coverage.source.is_wire_valid()
+                )
+            })
+        {
+            return Err(WireContractError::InvalidProgramSourceCoverage);
+        }
+        // A peer update is an unordered predecessor→successor set delta. A
+        // fact in both sides has no stable meaning at ingress (and would make
+        // a receiver depend on arbitrary application order), so only the
+        // authority may collapse terminal batches into a disjoint transition.
+        let added_facts = view
+            .program_fact_adds
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if view
+            .program_fact_removes
+            .iter()
+            .any(|fact| added_facts.contains(fact))
+        {
+            return Err(WireContractError::OverlappingPeerSourceClosureDelta);
+        }
+        // A closure is a set of exact compiled source occurrences. Rejecting
+        // duplicate entries at the wire boundary preserves the distinction
+        // between one empty source and two competing receipts before the
+        // receiver's durable fact set can coalesce them.
+        let mut coverage_sources = std::collections::BTreeSet::new();
+        if view.program_fact_adds.iter().any(|fact| {
+            let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact else {
+                return false;
+            };
+            !coverage_sources.insert(coverage.source.clone())
+        }) {
+            return Err(WireContractError::InvalidProgramSourceCoverage);
+        }
+        Ok(())
+    }
+
     fn carried_view_update(&self) -> Option<&ViewUpdatePayload> {
         match self {
             Self::ViewUpdate(view) | Self::AuthorizationScopeView { view, .. } => Some(view),
@@ -602,6 +729,46 @@ impl SyncMessage {
         }
     }
 }
+
+/// A semantic value violates the frozen peer-wire contract.
+#[derive(Debug)]
+pub enum WireContractError {
+    /// A version carrier is structurally malformed.
+    VersionCarrier(VersionBundleRunError),
+    /// A covered source input has no canonical source identity.
+    InvalidCoveredInput,
+    /// A program-source closure receipt is incomplete or noncanonical.
+    InvalidProgramSourceCoverage,
+    /// A peer frame attempted to carry authority terminal output, an internal
+    /// proof, or another fact outside the receiver source-closure contract.
+    NonClosurePeerViewFact,
+    /// One unordered peer source-closure frame attempted to both add and
+    /// remove the same fact rather than naming a canonical net transition.
+    OverlappingPeerSourceClosureDelta,
+}
+
+impl std::fmt::Display for WireContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VersionCarrier(error) => error.fmt(f),
+            Self::InvalidCoveredInput => write!(f, "covered input source identity is invalid"),
+            Self::InvalidProgramSourceCoverage => {
+                write!(f, "program-source coverage receipt is invalid")
+            }
+            Self::NonClosurePeerViewFact => {
+                write!(f, "peer view update carries a non-closure program fact")
+            }
+            Self::OverlappingPeerSourceClosureDelta => {
+                write!(
+                    f,
+                    "peer view update overlaps source-closure adds and removes"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for WireContractError {}
 
 fn validate_version_carrier_runs(
     version_carriers: &[VersionCarrier],
@@ -1656,6 +1823,40 @@ pub struct BindingViewKey {
     pub read_view: ReadViewKey,
 }
 
+/// Exact identity of a result selected by an authority.
+///
+/// A canonical query binding alone is not a permission boundary: a relay may
+/// carry the same query for two delegated claim snapshots. The full policy
+/// snapshot is therefore part of the Jazz result identity, never a truncated
+/// or hash-only discriminator.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct AuthorityResultKey {
+    /// Canonical query binding and requested serving view.
+    pub binding_view: BindingViewKey,
+    /// Complete immutable policy snapshot that selected the result.
+    pub policy_binding: Option<PolicyBindingKey>,
+}
+
+impl AuthorityResultKey {
+    /// Construct a result identity for an already scope-isolated local view.
+    pub const fn unscoped(binding_view: BindingViewKey) -> Self {
+        Self {
+            binding_view,
+            policy_binding: None,
+        }
+    }
+
+    /// Construct a result identity for a delegated authority policy snapshot.
+    pub fn policy_scoped(binding_view: BindingViewKey, policy_binding: PolicyBindingKey) -> Self {
+        Self {
+            binding_view,
+            policy_binding: Some(policy_binding),
+        }
+    }
+}
+
 impl BindingViewKey {
     /// Create a canonical binding-view key.
     pub fn new(shape_id: ShapeId, binding_id: BindingId, read_view: ReadViewKey) -> Self {
@@ -1702,9 +1903,476 @@ pub struct CoverageKey {
 pub struct PolicyBindingKey {
     /// Logical session subject selected at subscription admission.
     pub identity: AuthorSubject,
-    /// Canonical postcard bytes of the claims map; retained rather than hashed
-    /// so distinct snapshots can never share coverage on a hash collision.
-    pub canonical_claims: Vec<u8>,
+    /// Canonical named Groove values retained rather than hashed so distinct
+    /// snapshots can never share coverage on a hash collision.
+    pub canonical_claims: CanonicalPolicyClaims,
+}
+
+/// Exact ordered policy claims with a private canonical comparison key.
+///
+/// The comparison bytes are process-local bookkeeping only. Serde persists or
+/// transports the ordinary named Groove values and reconstructs them on read.
+#[derive(Clone, Debug)]
+pub struct CanonicalPolicyClaims {
+    claims: BTreeMap<String, Value>,
+    comparison_key: Vec<u8>,
+}
+
+impl CanonicalPolicyClaims {
+    /// Construct from the exact named claims map.
+    pub fn new(claims: BTreeMap<String, Value>) -> Self {
+        let mut comparison_key = Vec::new();
+        for (name, value) in &claims {
+            put_str(&mut comparison_key, name);
+            put_value(&mut comparison_key, value);
+        }
+        Self {
+            claims,
+            comparison_key,
+        }
+    }
+
+    /// Borrow the ordinary durable/wire claims representation.
+    pub fn claims(&self) -> &BTreeMap<String, Value> {
+        &self.claims
+    }
+}
+
+impl PartialEq for CanonicalPolicyClaims {
+    fn eq(&self, other: &Self) -> bool {
+        self.comparison_key == other.comparison_key
+    }
+}
+impl Eq for CanonicalPolicyClaims {}
+impl PartialOrd for CanonicalPolicyClaims {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for CanonicalPolicyClaims {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.comparison_key.cmp(&other.comparison_key)
+    }
+}
+impl std::hash::Hash for CanonicalPolicyClaims {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.comparison_key.hash(state)
+    }
+}
+
+impl serde::Serialize for CanonicalPolicyClaims {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.claims.serialize(serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for CanonicalPolicyClaims {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(BTreeMap::deserialize(deserializer)?))
+    }
+}
+
+impl PolicyBindingKey {
+    /// Canonicalize the exact claims snapshot delegated with a subscription.
+    pub fn from_delegated_session(session: &DelegatedSessionBinding) -> Self {
+        Self {
+            identity: session.identity,
+            canonical_claims: CanonicalPolicyClaims::new(session.claims.clone()),
+        }
+    }
+
+    /// Rebuild an exact policy key from ordinary durable components.
+    pub(crate) fn from_canonical_parts(
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Self {
+        Self {
+            identity,
+            canonical_claims: CanonicalPolicyClaims::new(claims),
+        }
+    }
+
+    /// Named claims in their durable canonical ordering.
+    pub(crate) fn claims(&self) -> &BTreeMap<String, Value> {
+        self.canonical_claims.claims()
+    }
+
+    pub(crate) fn directory_digest(&self) -> [u8; 32] {
+        let mut exact = Vec::new();
+        put_str(&mut exact, self.identity.canonical());
+        exact.extend_from_slice(&self.canonical_claims.comparison_key);
+        blake3::derive_key("jazz.authority-policy-binding-directory.v1", &exact)
+    }
+}
+
+/// The durable, typed payload used by the policy-binding directory.
+///
+/// This deliberately flattens a recursively shaped claims map into ordinary
+/// Groove records instead of inventing another opaque byte codec.  Each root
+/// node carries its claim name; containers name their children only by their
+/// position.  The representation supports the policy-claim value vocabulary
+/// admitted at public boundaries (scalars, nullable values, arrays, and
+/// tuples), and rejects engine-owned values such as rows or large-value refs.
+/// Those values are not valid policy claims because their physical identity is
+/// local storage state rather than a portable session assertion.
+pub(crate) fn policy_binding_directory_claims_value(
+    claims: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    let mut nodes = Vec::new();
+    for (name, value) in claims {
+        encode_policy_claim_node(&mut nodes, Some(name), value)?;
+    }
+    Ok(Value::Array(nodes))
+}
+
+/// Decode and validate the normal Groove representation of policy claims.
+pub(crate) fn policy_binding_directory_claims_from_value(
+    value: Value,
+) -> Result<BTreeMap<String, Value>, String> {
+    let Value::Array(nodes) = value else {
+        return Err("policy binding directory claims must be an array".to_owned());
+    };
+    if nodes.len() > POLICY_CLAIM_DIRECTORY_MAX_NODES {
+        return Err("policy binding directory claims exceed node limit".to_owned());
+    }
+    let mut cursor = 0;
+    let mut claims = BTreeMap::new();
+    while cursor < nodes.len() {
+        let (name, value) = decode_policy_claim_node(&nodes, &mut cursor, true)?;
+        let Some(name) = name else {
+            return Err("policy binding directory root claim is unnamed".to_owned());
+        };
+        if claims.insert(name, value).is_some() {
+            return Err("policy binding directory contains duplicate claim names".to_owned());
+        }
+    }
+    Ok(claims)
+}
+
+/// Direct-store value type for the collision-checked policy-binding directory.
+pub(crate) fn policy_binding_directory_claims_value_type() -> ValueType {
+    ValueType::Array(Box::new(ValueType::Record(Box::new(
+        *policy_claim_node_descriptor(),
+    ))))
+}
+
+const POLICY_CLAIM_DIRECTORY_MAX_NODES: usize = 1024;
+
+const POLICY_CLAIM_U8: u32 = 0;
+const POLICY_CLAIM_U16: u32 = 1;
+const POLICY_CLAIM_U32: u32 = 2;
+const POLICY_CLAIM_U64: u32 = 3;
+const POLICY_CLAIM_I32: u32 = 4;
+const POLICY_CLAIM_I64: u32 = 5;
+const POLICY_CLAIM_F64: u32 = 6;
+const POLICY_CLAIM_BOOL: u32 = 7;
+const POLICY_CLAIM_STRING: u32 = 8;
+const POLICY_CLAIM_BYTES: u32 = 9;
+const POLICY_CLAIM_UUID: u32 = 10;
+const POLICY_CLAIM_ENUM_TAG: u32 = 11;
+const POLICY_CLAIM_NULL: u32 = 12;
+const POLICY_CLAIM_TUPLE: u32 = 13;
+const POLICY_CLAIM_ARRAY: u32 = 14;
+const POLICY_CLAIM_NULLABLE: u32 = 15;
+
+fn policy_claim_kind_type() -> ValueType {
+    ValueType::EnumTag(
+        ScalarEnumSchema::new(
+            "jazz.internal.policy_claim_directory_node_kind.v1",
+            [
+                "u8", "u16", "u32", "u64", "i32", "i64", "f64", "bool", "string", "bytes", "uuid",
+                "enum_tag", "null", "tuple", "array", "nullable",
+            ],
+        )
+        .expect("fixed policy-claim node kinds are valid"),
+    )
+}
+
+fn policy_claim_value_schema() -> &'static EnumSchema {
+    static SCHEMA: std::sync::OnceLock<EnumSchema> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let empty = || RecordDescriptor::new(Vec::<(String, ValueType)>::new());
+        let scalar = |name: &str, value_type: ValueType| {
+            EnumCase::new(name, RecordDescriptor::new([("value", value_type)]))
+        };
+        EnumSchema::new(
+            "jazz.internal.policy_claim_directory_value.v1",
+            [
+                scalar("u8", ValueType::U8),
+                scalar("u16", ValueType::U16),
+                scalar("u32", ValueType::U32),
+                scalar("u64", ValueType::U64),
+                scalar("i32", ValueType::I32),
+                scalar("i64", ValueType::I64),
+                scalar("f64", ValueType::F64),
+                scalar("bool", ValueType::Bool),
+                scalar("string", ValueType::String),
+                scalar("bytes", ValueType::Bytes),
+                scalar("uuid", ValueType::Uuid),
+                scalar("enum_tag", ValueType::U8),
+                EnumCase::new("null", empty()),
+                EnumCase::new("tuple", empty()),
+                EnumCase::new("array", empty()),
+                EnumCase::new("nullable", empty()),
+            ],
+        )
+        .expect("fixed policy-claim value enum is valid")
+    })
+}
+
+fn policy_claim_node_descriptor() -> &'static RecordDescriptor {
+    static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("name", ValueType::Nullable(Box::new(ValueType::String))),
+            ("kind", policy_claim_kind_type()),
+            ("children", ValueType::U32),
+            (
+                "value",
+                ValueType::Enum(Box::new(policy_claim_value_schema().clone())),
+            ),
+        ])
+    })
+}
+
+fn encode_policy_claim_node(
+    nodes: &mut Vec<Value>,
+    name: Option<&str>,
+    value: &Value,
+) -> Result<(), String> {
+    if nodes.len() >= POLICY_CLAIM_DIRECTORY_MAX_NODES {
+        return Err("policy binding directory claims exceed node limit".to_owned());
+    }
+    let (kind, enum_value, children): (u8, EnumValue, Vec<&Value>) = match value {
+        Value::U8(value) => (
+            POLICY_CLAIM_U8 as u8,
+            policy_claim_scalar(POLICY_CLAIM_U8, Value::U8(*value))?,
+            vec![],
+        ),
+        Value::U16(value) => (
+            POLICY_CLAIM_U16 as u8,
+            policy_claim_scalar(POLICY_CLAIM_U16, Value::U16(*value))?,
+            vec![],
+        ),
+        Value::U32(value) => (
+            POLICY_CLAIM_U32 as u8,
+            policy_claim_scalar(POLICY_CLAIM_U32, Value::U32(*value))?,
+            vec![],
+        ),
+        Value::U64(value) => (
+            POLICY_CLAIM_U64 as u8,
+            policy_claim_scalar(POLICY_CLAIM_U64, Value::U64(*value))?,
+            vec![],
+        ),
+        Value::I32(value) => (
+            POLICY_CLAIM_I32 as u8,
+            policy_claim_scalar(POLICY_CLAIM_I32, Value::I32(*value))?,
+            vec![],
+        ),
+        Value::I64(value) => (
+            POLICY_CLAIM_I64 as u8,
+            policy_claim_scalar(POLICY_CLAIM_I64, Value::I64(*value))?,
+            vec![],
+        ),
+        Value::F64(value) => (
+            POLICY_CLAIM_F64 as u8,
+            policy_claim_scalar(POLICY_CLAIM_F64, Value::F64(*value))?,
+            vec![],
+        ),
+        Value::Bool(value) => (
+            POLICY_CLAIM_BOOL as u8,
+            policy_claim_scalar(POLICY_CLAIM_BOOL, Value::Bool(*value))?,
+            vec![],
+        ),
+        Value::String(value) => (
+            POLICY_CLAIM_STRING as u8,
+            policy_claim_scalar(POLICY_CLAIM_STRING, Value::String(value.clone()))?,
+            vec![],
+        ),
+        Value::Bytes(value) => (
+            POLICY_CLAIM_BYTES as u8,
+            policy_claim_scalar(POLICY_CLAIM_BYTES, Value::Bytes(value.clone()))?,
+            vec![],
+        ),
+        Value::Uuid(value) => (
+            POLICY_CLAIM_UUID as u8,
+            policy_claim_scalar(POLICY_CLAIM_UUID, Value::Uuid(*value))?,
+            vec![],
+        ),
+        Value::EnumTag(value) => (
+            POLICY_CLAIM_ENUM_TAG as u8,
+            policy_claim_scalar(POLICY_CLAIM_ENUM_TAG, Value::U8(*value))?,
+            vec![],
+        ),
+        Value::Nullable(None) => (
+            POLICY_CLAIM_NULL as u8,
+            policy_claim_container(POLICY_CLAIM_NULL)?,
+            vec![],
+        ),
+        Value::Nullable(Some(value)) => (
+            POLICY_CLAIM_NULLABLE as u8,
+            policy_claim_container(POLICY_CLAIM_NULLABLE)?,
+            vec![value],
+        ),
+        Value::Tuple(values) => (
+            POLICY_CLAIM_TUPLE as u8,
+            policy_claim_container(POLICY_CLAIM_TUPLE)?,
+            values.iter().collect(),
+        ),
+        Value::Array(values) => (
+            POLICY_CLAIM_ARRAY as u8,
+            policy_claim_container(POLICY_CLAIM_ARRAY)?,
+            values.iter().collect(),
+        ),
+        Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
+            return Err(
+                "policy binding directory does not admit engine-owned claim values".to_owned(),
+            );
+        }
+    };
+    let child_count = u32::try_from(children.len())
+        .map_err(|_| "policy binding directory has too many child claims".to_owned())?;
+    let descriptor = policy_claim_node_descriptor();
+    let raw = descriptor
+        .create(&[
+            Value::Nullable(name.map(|name| Box::new(Value::String(name.to_owned())))),
+            Value::EnumTag(kind),
+            Value::U32(child_count),
+            Value::Enum(enum_value),
+        ])
+        .map_err(|error| format!("policy binding directory claim node is invalid: {error}"))?;
+    nodes.push(Value::Record(OwnedRecord::new(raw, *descriptor)));
+    for child in children {
+        encode_policy_claim_node(nodes, None, child)?;
+    }
+    Ok(())
+}
+
+fn policy_claim_scalar(tag: u32, value: Value) -> Result<EnumValue, String> {
+    let schema = policy_claim_value_schema();
+    EnumValue::create(
+        tag,
+        schema.case(tag).expect("fixed tag").payload.clone(),
+        &[value],
+    )
+    .map_err(|error| format!("policy binding directory scalar is invalid: {error}"))
+}
+
+fn policy_claim_container(tag: u32) -> Result<EnumValue, String> {
+    let schema = policy_claim_value_schema();
+    EnumValue::create(
+        tag,
+        schema.case(tag).expect("fixed tag").payload.clone(),
+        &[],
+    )
+    .map_err(|error| format!("policy binding directory container is invalid: {error}"))
+}
+
+fn decode_policy_claim_node(
+    nodes: &[Value],
+    cursor: &mut usize,
+    root: bool,
+) -> Result<(Option<String>, Value), String> {
+    let node = nodes
+        .get(*cursor)
+        .ok_or_else(|| "policy binding directory claim tree ended early".to_owned())?;
+    *cursor += 1;
+    let Value::Record(record) = node else {
+        return Err("policy binding directory node must be a record".to_owned());
+    };
+    if record.descriptor() != policy_claim_node_descriptor() {
+        return Err("policy binding directory node has unexpected descriptor".to_owned());
+    }
+    let values = record
+        .to_values()
+        .map_err(|error| format!("policy binding directory node cannot decode: {error}"))?;
+    let [
+        name,
+        Value::EnumTag(kind),
+        Value::U32(children),
+        Value::Enum(enum_value),
+    ] = values.as_slice()
+    else {
+        return Err("policy binding directory node has invalid fields".to_owned());
+    };
+    let name = match name {
+        Value::Nullable(Some(name)) => match name.as_ref() {
+            Value::String(name) => Some(name.clone()),
+            _ => return Err("policy binding directory name must be string".to_owned()),
+        },
+        Value::Nullable(None) => None,
+        _ => return Err("policy binding directory name must be nullable string".to_owned()),
+    };
+    if root != name.is_some() {
+        return Err(if root {
+            "policy binding directory root claim is unnamed".to_owned()
+        } else {
+            "policy binding directory child claim is named".to_owned()
+        });
+    }
+    let expected_tag = u32::from(*kind);
+    if enum_value.tag() != expected_tag || expected_tag > POLICY_CLAIM_NULLABLE {
+        return Err("policy binding directory kind and value disagree".to_owned());
+    }
+    let payload = enum_value
+        .record()
+        .to_values()
+        .map_err(|error| format!("policy binding directory value cannot decode: {error}"))?;
+    let child_count = usize::try_from(*children)
+        .map_err(|_| "policy binding directory child count overflows".to_owned())?;
+    let scalar = |expected: u32| -> Result<Value, String> {
+        if expected_tag != expected || child_count != 0 || payload.len() != 1 {
+            return Err(
+                "policy binding directory scalar has invalid children or payload".to_owned(),
+            );
+        }
+        Ok(payload[0].clone())
+    };
+    let value = match expected_tag {
+        POLICY_CLAIM_U8 => scalar(POLICY_CLAIM_U8)?,
+        POLICY_CLAIM_U16 => scalar(POLICY_CLAIM_U16)?,
+        POLICY_CLAIM_U32 => scalar(POLICY_CLAIM_U32)?,
+        POLICY_CLAIM_U64 => scalar(POLICY_CLAIM_U64)?,
+        POLICY_CLAIM_I32 => scalar(POLICY_CLAIM_I32)?,
+        POLICY_CLAIM_I64 => scalar(POLICY_CLAIM_I64)?,
+        POLICY_CLAIM_F64 => scalar(POLICY_CLAIM_F64)?,
+        POLICY_CLAIM_BOOL => scalar(POLICY_CLAIM_BOOL)?,
+        POLICY_CLAIM_STRING => scalar(POLICY_CLAIM_STRING)?,
+        POLICY_CLAIM_BYTES => scalar(POLICY_CLAIM_BYTES)?,
+        POLICY_CLAIM_UUID => scalar(POLICY_CLAIM_UUID)?,
+        POLICY_CLAIM_ENUM_TAG => match scalar(POLICY_CLAIM_ENUM_TAG)? {
+            Value::U8(value) => Value::EnumTag(value),
+            _ => return Err("policy binding directory enum tag must be u8".to_owned()),
+        },
+        POLICY_CLAIM_NULL => {
+            if child_count != 0 || !payload.is_empty() {
+                return Err("policy binding directory null has payload or children".to_owned());
+            }
+            Value::Nullable(None)
+        }
+        POLICY_CLAIM_TUPLE | POLICY_CLAIM_ARRAY | POLICY_CLAIM_NULLABLE => {
+            if !payload.is_empty() {
+                return Err("policy binding directory container has payload".to_owned());
+            }
+            if expected_tag == POLICY_CLAIM_NULLABLE && child_count != 1 {
+                return Err("policy binding directory nullable must have one child".to_owned());
+            }
+            let mut children = Vec::with_capacity(child_count);
+            for _ in 0..child_count {
+                let (_, child) = decode_policy_claim_node(nodes, cursor, false)?;
+                children.push(child);
+            }
+            match expected_tag {
+                POLICY_CLAIM_TUPLE => Value::Tuple(children),
+                POLICY_CLAIM_ARRAY => Value::Array(children),
+                POLICY_CLAIM_NULLABLE => {
+                    Value::Nullable(Some(Box::new(children.pop().expect("one child"))))
+                }
+                _ => unreachable!(),
+            }
+        }
+        _ => return Err("policy binding directory node kind is unknown".to_owned()),
+    };
+    Ok((name, value))
 }
 
 /// Versioned query AST carried by shape registration.
@@ -2464,6 +3132,15 @@ pub enum SubscribeRejectReason {
         /// Stable, client-safe classification of the server-side failure.
         code: SubscribeServerFailureCode,
     },
+    /// The receiver rejected an authority update before it could change its
+    /// maintained source closure.  `transition` is a receiver-generated,
+    /// client-safe description of the impossible predecessor-to-successor
+    /// transition; it deliberately excludes row bodies, version claims, and
+    /// policy data.
+    InvalidAuthoritySourceClosure {
+        /// Client-safe description of the rejected closure transition.
+        transition: String,
+    },
 }
 
 /// Client-safe classes for server-side subscription failures.
@@ -2843,8 +3520,8 @@ pub enum ProgramFactEntry {
     RelationEdge(RelationEdgeEntry),
     /// Coverage for one correlated path expansion.
     PathCorrelationCoverage(PathCorrelationCoverageEntry),
-    /// Source/table coverage fact.
-    SourceCoverage(SourceCoverageEntry),
+    /// Complete authority-selected closure for one normalized program source.
+    ProgramSourceCoverage(ProgramSourceCoverageEntry),
     /// Settled read-frontier fact.
     ReadFrontierSettled(ReadFrontierSettledEntry),
     /// Complete transaction payload coverage fact.
@@ -2855,6 +3532,12 @@ pub enum ProgramFactEntry {
     PolicyDecision(PolicyDecisionEntry),
     /// Content/deletion/replacement version witness.
     VersionWitness(VersionWitnessEntry),
+    /// A source version that belongs to the authority-approved input closure.
+    ///
+    /// This is an input fact, not a rendered result row: receivers use it to
+    /// advance their local maintained program even when output membership and
+    /// relation facts are unchanged.
+    CoveredInput(CoveredInputEntry),
     /// Policy dependency witness.
     PolicyWitness(PolicyWitnessEntry),
     /// Contributing member/batch provenance.
@@ -2865,6 +3548,16 @@ pub enum ProgramFactEntry {
     PredicateOutputSet(PredicateOutputSetEntry),
     /// Point row-read validation fact.
     PointRead(PointReadEntry),
+}
+
+impl ProgramFactEntry {
+    /// The only typed facts permitted in a peer `ViewUpdate` under
+    /// INV-SYNC-36. They describe the exact receiver input closure; every
+    /// other variant is authority output, policy-internal proof, or local
+    /// validation state and must not cross this boundary.
+    pub fn is_peer_source_closure_fact(&self) -> bool {
+        matches!(self, Self::ProgramSourceCoverage(_) | Self::CoveredInput(_))
+    }
 }
 
 /// Compatibility alias while current code still imports the previous name.
@@ -2958,6 +3651,94 @@ pub struct VersionWitnessEntry {
     pub version: RowVersionRefEntry,
     /// Result member this witness serves, when scoped to one member.
     pub member: Option<ResultMemberEntry>,
+}
+
+/// One concrete source occurrence/version in a peer's covered query input.
+///
+/// The surrounding `ViewUpdate` supplies the exact subscription (and an
+/// authorization-scope wrapper, when present); `source` preserves the stable
+/// row occurrence and `version` pins the concrete content or deletion layer.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct CoveredInputEntry {
+    /// Stable normalized query source occurrence, never a runtime-local slot.
+    pub source: ProgramSourceId,
+    /// Logical table naming the concrete version body.
+    ///
+    /// This remains explicit because a source may be reached through a lens
+    /// whose source-role table and authored version-table label differ.
+    pub version_table: groove::Intern<String>,
+    /// Source row occurrence within that table.
+    pub source_row: RowUuid,
+    /// Exact source version admitted in the covered input closure.
+    pub version: RowVersionRefEntry,
+}
+
+impl CoveredInputEntry {
+    /// Validate the frozen peer-wire identity without consulting local state.
+    ///
+    /// The subsequent receiver lookup is intentionally stricter: it must find
+    /// this complete `source` value among sources compiled for the subscription.
+    pub fn is_wire_valid(&self) -> bool {
+        self.source.is_wire_valid() && !self.version_table.is_empty()
+    }
+}
+
+/// Canonical, wire-safe identity of one logical source occurrence in a
+/// normalized maintained program.
+///
+/// It deliberately distinguishes repeated scans of the same table (aliases,
+/// relation paths, policy sources, and recursive roles) without referring to
+/// a collector slot or runtime allocation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ProgramSourceId {
+    /// Logical table emitted by this source occurrence.
+    pub table: groove::Intern<String>,
+    /// Ordered normalized-role path from the query root to this occurrence.
+    pub path: Vec<ProgramSourceRole>,
+}
+
+/// Maximum normalized source-path depth admitted on the v1 peer wire.
+pub const MAX_PROGRAM_SOURCE_PATH_SEGMENTS: usize = 32;
+
+impl ProgramSourceId {
+    /// Whether this is a syntactically valid frozen source occurrence key.
+    ///
+    /// A receiver resolves this key only by complete equality against a source
+    /// occurrence compiled from its registered shape. Matching the table,
+    /// result member, collector position, or any path prefix is forbidden:
+    /// self-joins and repeated relation paths can share all of those weaker
+    /// properties. A missing exact occurrence therefore parks/rejects the
+    /// authority update rather than falling back to another source.
+    pub fn is_wire_valid(&self) -> bool {
+        !self.table.is_empty()
+            && !self.path.is_empty()
+            && self.path.len() <= MAX_PROGRAM_SOURCE_PATH_SEGMENTS
+            && self.path.iter().all(|role| match role {
+                ProgramSourceRole::Root => true,
+                ProgramSourceRole::Alias(name)
+                | ProgramSourceRole::RecursiveSeed(name)
+                | ProgramSourceRole::RecursiveStep(name)
+                | ProgramSourceRole::CorrelatedChild(name)
+                | ProgramSourceRole::Policy(name) => !name.is_empty(),
+            })
+    }
+}
+
+/// One component of a [`ProgramSourceId`] path.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum ProgramSourceRole {
+    /// Root query source.
+    Root,
+    /// Explicit alias in a join or relation path.
+    Alias(String),
+    /// Recursive seed source.
+    RecursiveSeed(String),
+    /// Recursive step/frontier source.
+    RecursiveStep(String),
+    /// Correlated child source.
+    CorrelatedChild(String),
+    /// Policy-augmentation source.
+    Policy(String),
 }
 
 /// Policy dependency witness fact.
@@ -3074,17 +3855,18 @@ pub struct PathCorrelationCoverageEntry {
     pub complete: bool,
 }
 
-/// Source/table coverage fact.
+/// Complete authority-selected closure for one normalized program source.
+///
+/// This is a control-plane receipt, not a row/range fact. A complete receiver
+/// receipt has exactly one entry for every compiled [`ProgramSourceId`], even
+/// when that source contributes zero rows. Its enclosing view-update generation
+/// identifies the immutable closure being installed.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct SourceCoverageEntry {
-    /// Logical source id/path encoded for the wire.
-    pub source: String,
-    /// Logical table.
-    pub table: groove::Intern<String>,
-    /// Optional covered row.
-    pub row: Option<RowUuid>,
-    /// Canonical encoded coverage/range key.
-    pub coverage: Vec<u8>,
+pub struct ProgramSourceCoverageEntry {
+    /// Exact normalized source occurrence whose input closure is complete.
+    pub source: ProgramSourceId,
+    /// Must be true for a receipt that may settle a receiver.
+    pub complete: bool,
 }
 
 /// Settled read-frontier fact.
@@ -4752,8 +5534,70 @@ mod tests {
     use crate::tx::TxKind;
     use groove::schema::{ColumnSchema, ColumnType};
 
+    #[test]
+    fn peer_view_rejects_overlapping_source_closure_delta() {
+        let fact = ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+            source: ProgramSourceId {
+                table: "todos".to_owned().into(),
+                path: vec![ProgramSourceRole::Root],
+            },
+            complete: true,
+        });
+        let message = SyncMessage::ViewUpdate(ViewUpdatePayload {
+            subscription: SubscriptionKey {
+                shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+                read_view: ReadViewKey::default(),
+            },
+            settled_through: GlobalTime(0),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            peer_payload_inventory: PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: vec![fact.clone()],
+            program_fact_removes: vec![fact],
+        });
+
+        assert!(matches!(
+            message.validate_wire_contract(),
+            Err(WireContractError::OverlappingPeerSourceClosureDelta)
+        ));
+    }
+
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn policy_binding_directory_uses_typed_claim_nodes_without_an_opaque_blob() {
+        // A relay durable directory must preserve the exact session snapshot,
+        // including nested claim arrays, in normal Groove fields. The test
+        // intentionally checks the carrier shape as well as round-tripping:
+        // replacing it with postcard-in-Bytes would make the first assertion
+        // fail even if the logical values still happened to decode.
+        let claims = BTreeMap::from([
+            ("role".to_owned(), Value::String("editor".to_owned())),
+            (
+                "teams".to_owned(),
+                Value::Array(vec![
+                    Value::String("rhythm".to_owned()),
+                    Value::Nullable(None),
+                    Value::Array(vec![Value::U64(7)]),
+                ]),
+            ),
+        ]);
+        let encoded = policy_binding_directory_claims_value(&claims)
+            .expect("public policy claim vocabulary is persistable");
+        let Value::Array(nodes) = &encoded else {
+            panic!("claims must use a typed array carrier");
+        };
+        assert!(nodes.iter().all(|node| matches!(node, Value::Record(_))));
+        assert_eq!(
+            policy_binding_directory_claims_from_value(encoded)
+                .expect("typed claim carrier decodes"),
+            claims
+        );
     }
 
     /// Forces postcard's `serialize_bytes` representation rather than the

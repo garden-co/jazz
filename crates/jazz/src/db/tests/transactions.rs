@@ -2311,6 +2311,170 @@ fn exclusive_read_for_write_schema() -> JazzSchema {
     )
 }
 
+fn private_grant_read_for_write_schema() -> JazzSchema {
+    let grant = PublicPolicyExpr::Exists {
+        table: "grants".to_owned(),
+        condition: Box::new(PublicPolicyExpr::and(vec![
+            public_outer_eq("doc_id", "id"),
+            public_session_eq("subject", &["claims", "sub"]),
+        ])),
+    };
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(grant)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("grants")
+                    .fk_column("doc_id", "docs")
+                    .column("subject", PublicColumnType::Uuid),
+            ),
+    )
+}
+
+/// A replica may have a complete document preimage but not the private grant
+/// that proves its reader identity. It must still stage a mergeable UPDATE;
+/// only the connected fate authority decides the read-for-write rule. This is
+/// deliberately an end-to-end transport test rather than a local policy unit:
+/// the observable contract is pending locally, then Accepted or
+/// AuthorizationDenied without exposing the grant.
+///
+/// ```text
+/// client (doc, no grants) ──stage UPDATE──► authority (doc, private grant)
+///                                           ├── alice grant: Accepted
+///                                           └── bob no grant: AuthorizationDenied
+/// ```
+#[test]
+fn mergeable_read_for_write_is_decided_only_by_the_authority() {
+    let schema = private_grant_read_for_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xd9; 16]);
+    let target = row(0xca);
+    let server = open_core(0xda, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "docs",
+            target,
+            BTreeMap::from([("title".to_owned(), Value::String("original".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "grants",
+            row(0xcb),
+            BTreeMap::from([
+                ("doc_id".to_owned(), Value::Uuid(target.0)),
+                ("subject".to_owned(), Value::Uuid(alice.test_uuid())),
+            ]),
+        )
+        .unwrap();
+
+    let alice_client = open_db(0xdb, alice, &schema);
+    let bob_client = open_db(0xdc, bob, &schema);
+    alice_client.set_test_provider_claims(alice, test_provider_claims(alice));
+    bob_client.set_test_provider_claims(bob, test_provider_claims(bob));
+
+    // Seed only the complete target preimage on each client. Neither client
+    // receives or creates the authority's private `grants` support row.
+    for client in [&alice_client, &bob_client] {
+        client
+            .insert(
+                "docs",
+                BTreeMap::from([("title".to_owned(), Value::String("original".to_owned()))]),
+                InsertOptions {
+                    row_id: Some(target),
+                    identity: WriteIdentity::Session(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    let (alice_transport, alice_server_transport) = duplex();
+    let _alice_upstream = block_on(alice_client.connect_upstream(alice_transport));
+    let _alice_subscriber = server.accept_subscriber_with_claims(
+        alice_server_transport,
+        alice,
+        test_provider_claims(alice),
+    );
+    let (bob_transport, bob_server_transport) = duplex();
+    let _bob_upstream = block_on(bob_client.connect_upstream(bob_transport));
+    let _bob_subscriber =
+        server.accept_subscriber_with_claims(bob_server_transport, bob, test_provider_claims(bob));
+
+    // Settle the SYSTEM setup writes before the session cases. The grants
+    // remain authority-only because docs policy narrows ordinary delivery.
+    for client in [&alice_client, &bob_client] {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    }
+
+    let stage_update = |client: &Db<RocksDbStorage>, author, use_upsert| {
+        block_on(client.transaction_for_identity(author, async |tx| {
+            let cells = BTreeMap::from([("title".to_owned(), Value::String("edited".to_owned()))]);
+            if use_upsert {
+                tx.upsert("docs", target, cells, Default::default()).await
+            } else {
+                tx.update("docs", target, cells, Default::default()).await
+            }
+        }))
+        .expect("client staging uses the retained preimage, not local policy support")
+        .1
+    };
+
+    let alice_tx = stage_update(&alice_client, alice, false);
+    assert!(matches!(
+        alice_client.write_state(alice_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            ..
+        }
+    ));
+    alice_client.tick().unwrap();
+    server.tick().unwrap();
+    alice_client.tick().unwrap();
+    assert!(matches!(
+        alice_client.write_state(alice_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    let bob_tx = stage_update(&bob_client, bob, true);
+    assert!(matches!(
+        bob_client.write_state(bob_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            ..
+        }
+    ));
+    bob_client.tick().unwrap();
+    server.tick().unwrap();
+    bob_client.tick().unwrap();
+    assert!(matches!(
+        bob_client.write_state(bob_tx).unwrap(),
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        }
+    ));
+    let docs = server.read(&Query::from("docs")).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(
+        docs[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("edited".to_owned())),
+        "the denied update must not overwrite the authority's accepted result"
+    );
+}
+
 /// Alice's exclusive transaction cannot update or upsert Bob's read-hidden
 /// snapshot row. Full and partial updates return the same non-disclosing error.
 ///
@@ -2484,8 +2648,9 @@ fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change(
     assert_eq!(error.code, ErrorCode::TransactionConflict);
 }
 
-/// A session-authored mergeable transaction authorizes later mutations from
-/// its fixed overlay, not only from the pre-transaction current state.
+/// A session-authored mergeable transaction stages later mutations from its
+/// fixed overlay, not only from the pre-transaction current state. Policy
+/// authorization is deferred to the fate authority.
 ///
 /// alice tx: INSERT visible row ──UPDATE/UPSERT──► same staged row
 #[test]
@@ -2531,57 +2696,6 @@ fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
         committed.cell(table, "title"),
         Some(Value::String("ready".to_owned()))
     );
-
-    // A different visible row must not satisfy the targeted policy proof for
-    // a staged row that Alice cannot read.
-    let hidden = row(0xc9);
-    let hidden_open = OpenTransactionId::new();
-    db.begin_mergeable_for_identity(hidden_open, alice).unwrap();
-    let hidden_tx = db.mergeable_tx_ref(hidden_open);
-    hidden_tx
-        .insert(
-            "todos",
-            cells("hidden", false, AuthorSubject::for_test_bytes([0xb7; 16])),
-            InsertOptions {
-                row_id: Some(hidden),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    for (label, error) in [
-        (
-            "update",
-            hidden_tx
-                .update(
-                    "todos",
-                    hidden,
-                    BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
-                    Default::default(),
-                )
-                .expect_err("hidden overlay UPDATE must require visibility"),
-        ),
-        (
-            "upsert",
-            hidden_tx
-                .upsert(
-                    "todos",
-                    hidden,
-                    BTreeMap::from([("title".to_owned(), Value::String("nope".to_owned()))]),
-                    Default::default(),
-                )
-                .expect_err("hidden overlay UPSERT must require visibility"),
-        ),
-    ] {
-        assert_eq!(error.code, ErrorCode::WriteRejected, "{label}");
-        assert_eq!(
-            error.message,
-            format!(
-                "read policy denied {} on table todos: the operation requires read permission on the target row",
-                label.to_ascii_uppercase()
-            )
-        );
-    }
-    db.commit_mergeable_handle(hidden_open).unwrap();
 }
 
 /// A mergeable transaction opened for alice is an identity capability: its

@@ -139,6 +139,22 @@ export abstract class ConnectionManager {
 
   /** True only after the application explicitly called Db.disconnect(). */
   abstract isExplicitlyOffline(): boolean;
+  private readonly explicitOfflineListeners = new Set<(offline: boolean) => void>();
+
+  /** Observe confirmed host transitions, never inferred transport failures. */
+  onExplicitOfflineChange(listener: (offline: boolean) => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.explicitOfflineListeners.add(listener);
+    signal.addEventListener("abort", () => this.explicitOfflineListeners.delete(listener), {
+      once: true,
+    });
+  }
+
+  protected publishExplicitOfflineState(): void {
+    const offline = this.isExplicitlyOffline();
+    for (const listener of [...this.explicitOfflineListeners]) listener(offline);
+  }
+
   /** Resolves when that explicit offline state is cleared. */
   abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
 

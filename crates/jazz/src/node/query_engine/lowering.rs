@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::ProgramSourceId;
 mod collect_layout;
 use collect_layout::*;
 use groove::ivm::{
@@ -11,7 +12,8 @@ use groove::records::{ValueType, collect_by_ordered_scalar};
 
 mod closure;
 use closure::{
-    closure_path_segments, join_contribution_membership_graph, lower_closure_membership,
+    closure_path_segments, flat_join_contribution_membership_graph,
+    join_contribution_membership_graph, lower_closure_membership,
 };
 
 // Groove returns RecursiveIterationLimit instead of silently truncating when
@@ -90,6 +92,31 @@ pub(crate) fn query_program_source_requests(
         .collect()
 }
 
+/// Prepare the policy-filtered include-deleted sibling only for a visible
+/// source that actually requested an exact deletion-register witness. This
+/// retains the normal source occurrence and authorization plan, while keeping
+/// ordinary non-deletion programs on their existing one-source path.
+pub(crate) fn authorized_deletion_preimage_source_request(
+    request: &SourceRequest,
+) -> Option<SourceRequest> {
+    if request.visibility != RowVisibility::Visible
+        || !request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::DeletionMarkers)
+    {
+        return None;
+    }
+    let mut preimage = request.clone();
+    preimage.visibility = RowVisibility::IncludeDeleted;
+    // The sibling supplies only the policy-filtered preimage. It must not ask
+    // an IncludeDeleted resolver for visible-only witnesses: the ordinary
+    // source retains the exact register tx/branch/schema carrier, and the
+    // terminal joins this sibling solely by its canonical deleted winner.
+    preimage.requirements.metadata.clear();
+    Some(preimage)
+}
+
 /// Prepare concrete source descriptions, then synchronously lower the program.
 ///
 /// This is an explicit compatibility boundary while snapshot capture and
@@ -121,7 +148,7 @@ pub(crate) async fn prepare_and_lower_query_program(
         // Policy programs have already been prepared by compilation
         // orchestration; this future is only for source-local snapshot and
         // physical-layout work that has not migrated to Groove yet.
-        let resolved_source =
+        let mut resolved_source =
             match Box::pin(source_preparer.prepare_source_graph(&source_request)).await {
                 Ok(resolved_source) => resolved_source,
                 Err(err) => {
@@ -135,6 +162,34 @@ pub(crate) async fn prepare_and_lower_query_program(
                     }));
                 }
             };
+        if resolved_source.deletion_register.is_some()
+            && let Some(preimage_request) =
+                authorized_deletion_preimage_source_request(&source_request)
+        {
+            let preimage = Box::pin(source_preparer.prepare_source_graph(&preimage_request))
+                .await
+                .map_err(|err| {
+                    Box::new(CapabilityReport {
+                        gaps: vec![UnsupportedReason::Source(err.gap)],
+                        explain: explain_with_request(
+                            &request,
+                            ExplainPlan {
+                                read: vec![format!(
+                                    "failed authorized deletion preimage request: {:#?}",
+                                    err.request
+                                )],
+                                ..ExplainPlan::default()
+                            },
+                        ),
+                    })
+                })?;
+            resolved_source.authorized_deletion_preimage = Some(preimage.graph);
+        }
+        // A receiver-local maintained subscription may replace an
+        // authority-approved source closure through runtime-owned input
+        // sources.  Those inputs are allocated by the receiving database and
+        // remain wholly local; the frozen `ProgramSourceId` maps them back to
+        // exactly one normalized source before this lowering boundary.
         explain.physical.push(format!(
             "source {:?} ({:?}) -> resolved table {}",
             source,
@@ -218,6 +273,7 @@ pub(crate) fn lower_resolved_query_program(
         &plan,
         &resolved_root,
         &resolved_sources,
+        &parameters,
         &parameters.routing_params,
         &lowered.fields,
     )?;
@@ -228,6 +284,10 @@ pub(crate) fn lower_resolved_query_program(
             .map(|terminal| terminal.output.clone())
             .collect(),
     );
+    // `resolved_sources` also contains authority-local proof and existence
+    // reads. A receiver may allocate only the exact occurrences that have a
+    // post-policy residual version-witness terminal.
+    let covered_input_source_descriptors = covered_input_source_descriptors(&terminals)?;
 
     for terminal in &terminals {
         collect_binding_source_params(&terminal.graph, &mut parameters);
@@ -256,9 +316,47 @@ pub(crate) fn lower_resolved_query_program(
                 })
                 .collect(),
         },
+        source_descriptors: resolved_sources
+            .iter()
+            .map(|(source, resolved)| {
+                (
+                    source.program_source_id(),
+                    resolved.row_shape.descriptor.clone(),
+                )
+            })
+            .collect(),
+        covered_input_source_descriptors,
         request,
         explain,
     })
+}
+
+fn covered_input_source_descriptors(
+    terminals: &[LoweredTerminal],
+) -> CapabilityResult<BTreeMap<ProgramSourceId, RecordDescriptor>> {
+    let mut descriptors = BTreeMap::new();
+    for terminal in terminals {
+        let OutputTerminalSchema::Fact(ProgramFactOutput {
+            key: ProgramFactKey::VersionWitnesses,
+            schema: ProgramFactSchema::VersionWitnesses(schema),
+            ..
+        }) = &terminal.output
+        else {
+            continue;
+        };
+        let Some(witness) = schema.content.as_ref() else {
+            continue;
+        };
+        if let Some(existing) =
+            descriptors.insert(witness.source.clone(), witness.descriptor.clone())
+            && existing != witness.descriptor
+        {
+            return Err(single_gap_report(UnsupportedReason::Runtime(
+                "covered input source has conflicting compiled descriptors".to_owned(),
+            )));
+        }
+    }
+    Ok(descriptors)
 }
 
 #[cfg(test)]
@@ -336,6 +434,7 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
             GraphBuilder::InlineRecords { output, .. }
             | GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
+            GraphBuilder::InputSource { .. } => None,
             GraphBuilder::Project { fields, .. } => Some(
                 fields
                     .iter()
@@ -396,6 +495,13 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 fields
             }),
             GraphBuilder::Recursive { seed, .. } => child_output(seed),
+            GraphBuilder::RecursiveStepWitness { recursive } => match recursive.as_ref() {
+                GraphBuilder::Recursive {
+                    step_witness: Some(witness),
+                    ..
+                } => child_output(witness),
+                _ => None,
+            },
             GraphBuilder::Union { inputs } => inputs.split_first().and_then(|(first, rest)| {
                 let mut fields = child_output(first)?;
                 for input in rest {
@@ -446,16 +552,22 @@ fn source_authorization_for_source(
     // Client-local results are scoped by the upstream emission boundary, not
     // by a second, potentially stale/incomplete local policy evaluation.
     if request.authorization_mode == QueryAuthorizationMode::ClientLocal {
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=source_authorization mode=client_local source={source:?} policy={:?} authorization=system",
+                request.policy,
+            );
+        }
         return Ok(SourceAuthorizationRequest::System);
     }
-    match &request.policy {
-        PolicyContext::System => Ok(SourceAuthorizationRequest::System),
+    let authorization = match &request.policy {
+        PolicyContext::System => SourceAuthorizationRequest::System,
         PolicyContext::AuthorizationSubplan {
             protected_source, ..
-        } if protected_source == source => Ok(SourceAuthorizationRequest::System),
+        } if protected_source == source => SourceAuthorizationRequest::System,
         PolicyContext::Identity {
             permission_subject, ..
-        } => Ok(SourceAuthorizationRequest::PolicyFiltered {
+        } => SourceAuthorizationRequest::PolicyFiltered {
             permission_subject: *permission_subject,
             plan: PolicyAuthorizationPlan {
                 protected_source: source.clone(),
@@ -465,11 +577,18 @@ fn source_authorization_for_source(
                 binding_user_params: binding_user_param_types(&request.input.binding)?,
                 binding_claim_params: request.input.binding.claim_params.clone(),
             },
-        }),
+        },
         // Auxiliary closure and payload sources do not establish policy
         // membership, so proof compilation reads them under system authority.
-        PolicyContext::AuthorizationSubplan { .. } => Ok(SourceAuthorizationRequest::System),
+        PolicyContext::AuthorizationSubplan { .. } => SourceAuthorizationRequest::System,
+    };
+    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        eprintln!(
+            "JAZZ_COVERED_INPUT_TRACE stage=source_authorization mode=trusted_serving source={source:?} policy={:?} authorization={authorization:?}",
+            request.policy,
+        );
     }
+    Ok(authorization)
 }
 
 fn binding_user_param_types(
@@ -690,6 +809,15 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
     }
 }
 
+/// Jazz query lowering owns declarative sources only. A mutable Groove input
+/// is a receiver-local runtime adapter, so it must be composed after lowering
+/// rather than smuggled through an app/query source resolver.
+fn graph_contains_input_source(graph: &GraphBuilder) -> bool {
+    graph_builder_postorder(graph)
+        .into_iter()
+        .any(|node| matches!(node, GraphBuilder::InputSource { .. }))
+}
+
 /// Return builder nodes in child-before-parent order without consuming the
 /// calling thread's stack. Builder graphs are finite by construction; shared
 /// children are intentionally visited once per structural occurrence, matching
@@ -704,10 +832,19 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
         }
         pending.push((node, true));
         match node {
-            GraphBuilder::Recursive { seed, step, .. } => {
+            GraphBuilder::Recursive {
+                seed,
+                step,
+                step_witness,
+                ..
+            } => {
+                if let Some(witness) = step_witness {
+                    pending.push((witness, false));
+                }
                 pending.push((step, false));
                 pending.push((seed, false));
             }
+            GraphBuilder::RecursiveStepWitness { recursive } => pending.push((recursive, false)),
             GraphBuilder::Filter { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
@@ -730,6 +867,7 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
             }
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::InputSource { .. }
             | GraphBuilder::Index { .. }
             | GraphBuilder::FrontierSource { .. }
             | GraphBuilder::BindingSource { .. } => {}
@@ -796,6 +934,13 @@ pub(crate) struct QueryProgram {
     pub(crate) request: QueryProgramRequest,
     /// Groove graph and its boundary contracts.
     pub(crate) lowered: LoweredGraph,
+    /// Canonical record descriptor for every normalized source occurrence.
+    /// Receiver-owned authority closures use this solely to allocate and
+    /// validate local mutable Groove inputs; it is never a wire identity.
+    pub(crate) source_descriptors: BTreeMap<ProgramSourceId, RecordDescriptor>,
+    /// Exact post-policy source occurrences that may cross into a
+    /// receiver-local maintained graph as CoveredInput.
+    pub(crate) covered_input_source_descriptors: BTreeMap<ProgramSourceId, RecordDescriptor>,
     /// Human-readable debugging and test artifact.
     pub(crate) explain: ExplainPlan,
 }

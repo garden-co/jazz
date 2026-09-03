@@ -1,5 +1,40 @@
 // Scalar, payload, and nested enum projection across schema evolution.
 
+/// Peer maintained updates disclose the exact source closure. These enum
+/// fixtures query one root table, so their old membership checks map directly
+/// to content-layer covered inputs for that table.
+fn covered_input_rows(update: &SyncMessage, additions: bool) -> Vec<(RowUuid, TxId)> {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    }) = update
+    else {
+        panic!("expected maintained view update");
+    };
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    let facts = if additions {
+        program_fact_adds
+    } else {
+        program_fact_removes
+    };
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.version_table.as_str() == "items"
+                    && input.version.layer == crate::protocol::ResultRowLayer::Content =>
+            {
+                Some((input.source_row, input.version.tx))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn independent_enum_schema(a: &[&str], b: &[&str]) -> JazzSchema {
     build_public_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("items")
@@ -14,6 +49,50 @@ fn enum_projection_schema(statuses: &[&str]) -> JazzSchema {
             .column("title", PublicColumnType::Text)
             .column("status", public_scalar_enum("status", statuses)),
     ))
+}
+
+#[test]
+fn maintained_enum_parameter_preserves_type_for_empty_and_populated_coverage() {
+    // Inspect the public peer update here because an empty result must still
+    // encode its coverage terminal, not just return an empty application row set.
+    let schema = enum_projection_schema(&["open", "active", "closed"]);
+    let query = Query::from("items")
+        .filter(eq(col("status"), param("wanted")))
+        .validate(&schema)
+        .unwrap();
+    for wanted in 0..3 {
+        let (_dir, mut core) = open_node_with_schema(node(0x91), schema.clone());
+        let item = row(0x92);
+        let first = accept_global(
+            &mut core,
+            MergeableCommit::new("items", item, 1).cells(BTreeMap::from([
+                ("title".to_owned(), v("enum route")),
+                ("status".to_owned(), Value::EnumTag(0)),
+            ])),
+        );
+        let binding = query
+            .bind(BTreeMap::from([("wanted".to_owned(), Value::EnumTag(wanted))]))
+            .unwrap();
+        let mut peer = PeerState::new();
+        let initial = peer.rehydrate_query(&mut core, &query, &binding).unwrap();
+        let expected = if wanted == 0 { vec![(item, first)] } else { vec![] };
+        assert_eq!(covered_input_rows(&initial, true), expected);
+        let SyncMessage::ViewUpdate(payload) = &initial else {
+            panic!("expected maintained view update");
+        };
+        assert!(!payload.program_fact_adds.is_empty(), "empty results still carry coverage");
+
+        let next = accept_global(
+            &mut core,
+            MergeableCommit::new("items", item, 2).cells(BTreeMap::from([
+                ("title".to_owned(), v("updated enum route")),
+                ("status".to_owned(), Value::EnumTag(wanted)),
+            ])),
+        );
+        let update = peer.query_update(&mut core, &query, &binding).unwrap();
+        assert_eq!(covered_input_rows(&update, true), vec![(item, next)]);
+        assert_eq!(covered_input_rows(&update, false), expected);
+    }
 }
 
 fn public_scalar_enum(name: &str, variants: &[&str]) -> PublicColumnType {
@@ -677,30 +756,23 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let initial = title_peer
         .rehydrate_query(&mut core, &title_only, &title_binding)
         .expect("old-schema title subscription opens over known case");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, result_member_adds, .. }) = initial else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, .. }) = &initial else {
         panic!("expected initial maintained view update");
     };
     assert!(reset_result_set);
-    assert_eq!(result_member_adds.len(), 1);
+    assert_eq!(covered_input_rows(&initial, true).len(), 1);
 
     // Recompiling exactly the same target must leave the maintained graph in
     // place: target registration is idempotent, not a hidden reset mechanism.
     let unchanged = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("identical projection target remains registered");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        terminal_operations,
-        ..
-    }) = unchanged else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, .. }) = &unchanged else {
         panic!("expected maintained view update");
     };
     assert!(!reset_result_set, "idempotent target registration must not reset");
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
-    assert!(terminal_operations.is_empty());
+    assert!(covered_input_rows(&unchanged, true).is_empty());
+    assert!(covered_input_rows(&unchanged, false).is_empty());
 
     let unknown = row(0x7c);
     let unknown_tx = accept_global(
@@ -713,13 +785,13 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let update = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("unused unknown enum must not break maintained title output");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, result_member_adds, .. }) = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, .. }) = &update else {
         panic!("expected maintained view update");
     };
     assert!(!reset_result_set);
-    assert!(result_member_adds.iter().any(|member| {
-        member.as_row().is_some_and(|(_, row_uuid, tx_id)| row_uuid == unknown && tx_id == unknown_tx)
-    }));
+    assert!(covered_input_rows(&update, true)
+        .iter()
+        .any(|&(row_uuid, tx_id)| row_uuid == unknown && tx_id == unknown_tx));
 
     // A separate old-schema subscription that semantically consumes status
     // must omit the same physical row. In particular, it may not reinterpret
@@ -754,13 +826,10 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
             status_options.clone(),
         )
         .expect("required unknown enum case is a row exclusion");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
-        panic!("expected initial maintained view update");
-    };
-    assert_eq!(result_member_adds.len(), 1);
-    assert!(result_member_adds.iter().all(|member| {
-        member.as_row().is_some_and(|(_, row_uuid, _)| row_uuid == known)
-    }));
+    assert_eq!(covered_input_rows(&update, true).len(), 1);
+    assert!(covered_input_rows(&update, true)
+        .iter()
+        .all(|&(row_uuid, _)| row_uuid == known));
 
     // Maintained membership follows the same compatibility boundary on every
     // delta: a newer local/Ahead unknown winner retracts the older Global row,
@@ -782,12 +851,9 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly incompatible delta removes the row")
         .expect("expected view update");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. }) = update else {
-        panic!("expected maintained view update");
-    };
-    assert!(result_member_removes.iter().any(|member| {
-        member.as_row().is_some_and(|(_, row_uuid, _)| row_uuid == known)
-    }));
+    assert!(covered_input_rows(&update, false)
+        .iter()
+        .any(|&(row_uuid, _)| row_uuid == known));
     core.commit_mergeable_settled(
         MergeableCommit::new("items", known, 4).cells(BTreeMap::from([
             ("title".to_owned(), v("compatible again")),
@@ -805,12 +871,9 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly compatible delta re-adds the row")
         .expect("expected view update");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
-        panic!("expected maintained view update");
-    };
-    assert!(result_member_adds.iter().any(|member| {
-        member.as_row().is_some_and(|(_, row_uuid, _)| row_uuid == known)
-    }));
+    assert!(covered_input_rows(&update, true)
+        .iter()
+        .any(|&(row_uuid, _)| row_uuid == known));
 }
 
 #[test]
@@ -870,10 +933,7 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
     let update = required_peer
         .rehydrate_query(&mut core, &required, &binding)
         .expect("unknown payload case is a row exclusion");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
-        panic!("expected initial maintained view update");
-    };
-    assert!(result_member_adds.is_empty());
+    assert!(covered_input_rows(&update, true).is_empty());
 }
 
 #[test]

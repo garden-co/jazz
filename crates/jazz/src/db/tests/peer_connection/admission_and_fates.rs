@@ -8,6 +8,152 @@ use crate::db::peer_connection::{
 use crate::node::SKEW_TOLERANCE_MS;
 
 #[test]
+fn restarted_edge_forwards_complete_publication_without_original_clients() {
+    // Internal topology test: inspect exact merge authorship and the durable
+    // outbox while exercising the real peer-connection scheduler/storage.
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ),
+    );
+    let edge_id = NodeUuid::from_bytes([0xe6; 16]);
+    let core_id = NodeUuid::from_bytes([0xc6; 16]);
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut edge_state = NodeState::new(
+        edge_id,
+        schema.clone(),
+        RocksDbStorage::open(dir.path(), &refs).unwrap(),
+    )
+    .unwrap();
+    let shared_row = RowUuid::from_bytes([0x66; 16]);
+    let mut writes = Vec::new();
+    for (writer_id, column, value) in [(0xa6, "title", "left"), (0xb6, "body", "right")] {
+        let mut writer = NodeState::new(
+            NodeUuid::from_bytes([writer_id; 16]),
+            schema.clone(),
+            rocks_storage(&schema),
+        )
+        .unwrap();
+        let (tx_id, unit) = writer
+            .commit_mergeable_unit_settled(
+                MergeableCommit::new("todos", shared_row, 10)
+                    .made_by(AuthorSubject::for_test_bytes([writer_id; 16]))
+                    .cells(BTreeMap::from([(
+                        column.to_owned(),
+                        Value::String(value.to_owned()),
+                    )])),
+            )
+            .unwrap();
+        let SyncMessage::CommitUnit { tx, versions } = unit else {
+            panic!("commit unit")
+        };
+        let outcome = edge_state
+            .ingest_edge_authority_mergeable_commit_unit(tx, versions, 100)
+            .unwrap();
+        block_on(edge_state.persist_and_settle_outcome(outcome)).unwrap();
+        writes.push(tx_id);
+    }
+    let publication = edge_state
+        .edge_authority_publication_for(writes[1])
+        .unwrap();
+    let merge_tx = publication
+        .commits
+        .iter()
+        .find(|unit| unit.tx.tx_id.node == edge_id)
+        .unwrap()
+        .tx
+        .tx_id;
+    drop(edge_state);
+
+    let reopened = NodeState::new(
+        edge_id,
+        schema.clone(),
+        RocksDbStorage::open(dir.path(), &refs).unwrap(),
+    )
+    .unwrap();
+    let edge = Node::new(reopened);
+    block_on(edge.restore_edge_authority_uploads()).unwrap();
+    assert_eq!(
+        edge.outbox.borrow().len(),
+        1,
+        "recover one frontier, not one growing history prefix per write"
+    );
+    let anchor = edge.outbox.borrow().iter().next().unwrap().tx_id;
+    let completed = edge
+        .outbox
+        .borrow_mut()
+        .remove_released(&mut HashSet::from([anchor]));
+    assert!(completed.is_empty());
+    assert_eq!(
+        edge.outbox.borrow().len(),
+        1,
+        "an anchor receipt alone must not retire a publication with unacknowledged members"
+    );
+    assert!(
+        writes
+            .iter()
+            .all(|tx_id| edge.outbox.borrow().authority_members.contains(tx_id)),
+        "recovered member fates remain bound to the selected authority after a partial acknowledgement"
+    );
+    let core = open_core(0xc6, AuthorSubject::SYSTEM, &schema);
+    let (edge_transport, core_transport) =
+        duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_id, 61, core_id, 62);
+    let _upstream = block_on(edge.connect_upstream(edge_transport));
+    let _subscriber = core.accept_subscriber_with_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedAuthority,
+    );
+    for _ in 0..16 {
+        block_on(edge.tick()).unwrap();
+        core.tick().unwrap();
+        block_on(edge.tick()).unwrap();
+        if edge.outbox.borrow().len() == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        edge.outbox.borrow().len(),
+        0,
+        "core's accepted receipts must discharge the recovered publication"
+    );
+    for tx_id in writes.into_iter().chain([merge_tx]) {
+        assert!(matches!(
+            edge.node().borrow_mut().transaction_state(tx_id).resolve(),
+            Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+        ));
+    }
+    let rows = core.read(&Query::from("todos")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables()[0], "title"),
+        Some(Value::String("left".to_owned()))
+    );
+    assert_eq!(
+        rows[0].cell(&schema.tables()[0], "body"),
+        Some(Value::String("right".to_owned()))
+    );
+    assert_eq!(
+        core.node()
+            .borrow_mut()
+            .current_row_tx_id(&rows[0])
+            .resolve(),
+        Some(merge_tx),
+        "forwarding must not create a redundant core merge"
+    );
+    block_on(edge.restore_edge_authority_uploads()).unwrap();
+    assert_eq!(
+        edge.outbox.borrow().len(),
+        0,
+        "globally acknowledged history is not recovered again"
+    );
+}
+
+#[test]
 fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
     let identity = AuthorSubject::for_test_bytes([0xc1; 16]);
     let schema = schema();
@@ -1074,7 +1220,6 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
         peer_payload_inventory: PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -1693,12 +1838,11 @@ fn direct_subscription_claim_refresh_replaces_membership_without_touching_same_s
     );
 }
 
-/// Whole-table current-row serving is also a maintained, policy-bound usage
-/// site. Refreshing direct admission must discard its retained receiver and
-/// emit a fresh reset, rather than letting its normal delta path retain the
-/// old session's rows.
+/// A whole-table maintained usage refreshes its direct admission by replacing
+/// the retained receiver with a fresh reset, rather than letting its normal
+/// delta path retain the old session's rows.
 #[test]
-fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
+fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
     let schema = owner_read_schema();
     let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
     let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
@@ -1719,53 +1863,250 @@ fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
-    let _attachment = client
+    let attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
-    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+    subscriber.borrow_mut().tick().unwrap();
     client.tick().unwrap();
 
+    // Discard the opening reset. The refresh must independently publish a
+    // replacement empty closure rather than letting this assertion pass on
+    // the original allowed snapshot.
+    server_sent.borrow_mut().clear();
     client.set_test_provider_claims(session_subject, denied_claims.clone());
     let expected_denied_claims = denied_claims.clone();
     subscriber
         .borrow_mut()
         .update_authenticated_session_claims(denied_claims);
     subscriber.borrow_mut().tick().unwrap();
+    let sent = server_sent.borrow();
+    let refreshed = sent
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert!(
-        server_sent.borrow().iter().any(|message| {
-            matches!(
-                message,
-                SyncMessage::ViewUpdate(update)
-                    if update.reset_result_set
-                        && update.result_member_adds.is_empty()
-                        && update.result_member_removes.is_empty()
-            )
-        }),
-        "claim refresh must publish an empty current-row reset"
+        !refreshed.is_empty(),
+        "claim refresh must publish a replacement ViewUpdate, got {sent:?}"
     );
+    assert_eq!(
+        refreshed.len(),
+        1,
+        "claim refresh must not duplicate one live ViewUpdate transition"
+    );
+    for update in refreshed {
+        assert_eq!(update.subscription, attachment.subscription());
+        assert!(update.reset_result_set);
+        assert!(update.version_carriers.is_empty());
+        assert!(update.result_member_adds.is_empty());
+        assert!(update.result_member_removes.is_empty());
+        assert!(update.program_fact_removes.is_empty());
+        assert!(
+            update
+                .peer_payload_inventory
+                .authorization_progress
+                .is_some()
+                && !update.peer_payload_inventory.opening_pending,
+            "the empty reset must carry its settled authorization receipt"
+        );
+        assert_eq!(
+            update.program_fact_adds.len(),
+            1,
+            "the empty reset must carry exactly its complete source manifest"
+        );
+        assert!(matches!(
+            update.program_fact_adds.as_slice(),
+            [crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage)] if coverage.complete
+        ));
+    }
+    drop(sent);
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
         unreachable!("accepted client is served by a subscriber link")
     };
-    let subscription = server
-        .node()
-        .borrow()
-        .whole_table_subscription_key("todos")
-        .unwrap();
-    let served = state
-        .served_current_rows
-        .get(&subscription)
-        .expect("current-row usage stays registered");
-    assert_eq!(served.policy_binding.1, expected_denied_claims);
+    let coverage = state
+        .served
+        .get(&attachment.subscription())
+        .expect("ordinary usage stays registered");
+    let group = state
+        .coverage_groups
+        .get(coverage)
+        .expect("ordinary usage retains its coverage group");
+    assert_eq!(group.policy_binding.1, expected_denied_claims);
     assert_eq!(
-        served.policy_binding_origin,
+        group.policy_binding_origin,
         CoveragePolicyBindingOrigin::DirectAdmitted
     );
 }
 
-/// A delegated usage site is immutable even when its trusted relay transport
-/// refreshes its own admitted snapshot. This deliberately delegates SYSTEM:
-/// provenance comes from the admitted wire form, not identity equality.
+/// The maintained-group cursor consumes each accepted replacement reset once.
+/// The public admission contract normally gives one connection one exact
+/// `SubscriptionKey` per coverage group; this white-box pair exercises the
+/// shared group path anyway so a future coalescing caller cannot replay the
+/// first accepted reset when the second send is backpressured.
+#[test]
+fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
+    struct SecondViewUpdateBackpressureTransport {
+        outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+        accepted_view_updates: usize,
+        rejected_second_view_update: bool,
+    }
+
+    impl Transport for SecondViewUpdateBackpressureTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::ViewUpdate(_)) {
+                if self.accepted_view_updates == 1 && !self.rejected_second_view_update {
+                    self.rejected_second_view_update = true;
+                    return Err(TransportError::Backpressure);
+                }
+                self.accepted_view_updates += 1;
+            }
+            self.outbound.borrow_mut().push_back(message);
+            Ok(())
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            None
+        }
+    }
+
+    let schema = owner_read_schema();
+    let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let denied_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let later_denied_owner = AuthorSubject::for_test_bytes([0xb3; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert("todos", cells("A only", false, allowed_owner))
+        .unwrap();
+    let client = open_db(0xa1, session_subject, &schema);
+    let allowed_claims =
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(allowed_owner.test_uuid()))]);
+    let denied_claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(denied_owner.test_uuid()))]);
+    let later_denied_claims = BTreeMap::from([(
+        "sub".to_owned(),
+        Value::Uuid(later_denied_owner.test_uuid()),
+    )]);
+    client.set_test_provider_claims(session_subject, allowed_claims.clone());
+    let (client_transport, server_transport, _client_sent, _server_sent) = duplex_with_taps();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
+
+    let prepared = prepared(&client, &Query::from("todos"));
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+
+    let mut second_subscription = attachment.subscription();
+    second_subscription.read_view.id = uuid::Uuid::from_bytes([0xc3; 16]);
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    {
+        let mut connection = subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(state) = &mut connection.link else {
+            unreachable!("accepted client is served by a subscriber link")
+        };
+        let coverage = state.served[&attachment.subscription()].clone();
+        state.served.insert(second_subscription, coverage.clone());
+        let group = state
+            .coverage_groups
+            .get_mut(&coverage)
+            .expect("ordinary usage retains its coverage group");
+        group.subscribers.insert(second_subscription);
+        group
+            .pending_initial_subscribers
+            .insert(second_subscription);
+        connection.transport = Box::new(SecondViewUpdateBackpressureTransport {
+            outbound: Rc::clone(&outbound),
+            accepted_view_updates: 0,
+            rejected_second_view_update: false,
+        });
+    }
+
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(denied_claims.clone());
+    let error = subscriber
+        .borrow_mut()
+        .tick()
+        .expect_err("the second fresh reset is backpressured");
+    assert_eq!(error.code, ErrorCode::Backpressure);
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(later_denied_claims.clone());
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("a newer claim revision reopens every group member after capacity returns");
+
+    let outbound = outbound.borrow();
+    let refreshed = outbound
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(refreshed.len(), 3);
+    let progress_by_subscription = refreshed.iter().fold(
+        BTreeMap::<SubscriptionKey, Vec<u64>>::new(),
+        |mut progress, update| {
+            progress.entry(update.subscription).or_default().push(
+                update
+                    .peer_payload_inventory
+                    .authorization_progress
+                    .expect("claim-refresh reset carries authorization progress"),
+            );
+            progress
+        },
+    );
+    assert_eq!(
+        progress_by_subscription[&attachment.subscription()].len(),
+        2,
+        "the accepted A reset is followed by exactly one newer B reset"
+    );
+    assert_eq!(
+        progress_by_subscription[&second_subscription].len(),
+        1,
+        "the rejected A reset never reaches the second member"
+    );
+    assert!(
+        progress_by_subscription[&attachment.subscription()][0]
+            < progress_by_subscription[&attachment.subscription()][1]
+    );
+    assert_eq!(
+        progress_by_subscription[&attachment.subscription()][1],
+        progress_by_subscription[&second_subscription][0],
+        "the newer claim revision reaches every current member"
+    );
+    assert!(refreshed.iter().all(|update| {
+        update.reset_result_set
+            && update.result_member_adds.is_empty()
+            && update.result_member_removes.is_empty()
+            && matches!(
+                update.program_fact_adds.as_slice(),
+                [crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage)] if coverage.complete
+            )
+    }));
+    let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
+        unreachable!("accepted client is served by a subscriber link")
+    };
+    let coverage = &state.served[&attachment.subscription()];
+    let group = &state.coverage_groups[coverage];
+    assert!(group.pending_initial_subscribers.is_empty());
+    assert!(group.initialized);
+    assert_eq!(group.policy_binding.1, later_denied_claims);
+    drop(outbound);
+}
+
+/// A scope-isolated relay usage site retains the immutable session selected by
+/// server admission even when the host refresh hook runs afterward. This
+/// deliberately admits SYSTEM as the foreground session: provenance comes
+/// from the exact admitted binding, not identity equality or the transport.
 #[test]
 fn delegated_subscription_binding_survives_relay_claim_refresh() {
     let schema = owner_read_schema();
@@ -1783,11 +2124,11 @@ fn delegated_subscription_binding_survives_relay_claim_refresh() {
         Value::Uuid(AuthorSubject::for_test_bytes([0xb1; 16]).test_uuid()),
     )]);
     let (mut relay_transport, server_transport) = duplex();
-    let subscriber = server.server.accept_subscriber_with_claims_and_trust(
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
         server_transport,
-        AuthorSubject::SYSTEM,
-        BTreeMap::new(),
-        CommitUnitTrust::TrustedBackend,
+        delegated_identity,
+        delegated_claims.clone(),
+        1,
     );
     relay_transport
         .send(SyncMessage::RegisterShape {
@@ -1846,9 +2187,9 @@ fn delegated_subscription_binding_survives_relay_claim_refresh() {
 }
 
 /// Closing a subscriber must retire the group-owned maintained receiver, not
-/// merely its concrete wire usage. Direct coverage uses the ordinary binding
-/// key, while a trusted relay's delegated coverage is policy-partitioned; both
-/// ownership forms must leave no Groove work behind after normal detach.
+/// merely its concrete wire usage. Both direct coverage and a scope-isolated
+/// relay use an immutable admitted-policy key, so neither may leave Groove
+/// work behind after normal detach.
 #[test]
 fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     let direct_schema = schema();
@@ -1883,17 +2224,13 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
         let coverage = &state.served[&direct_attachment.subscription()];
         let maintained = coverage_group_subscription_key(coverage);
         assert!(
-            coverage.policy_binding.is_none(),
-            "direct coverage is not policy-partitioned"
+            coverage.policy_binding.is_some(),
+            "direct coverage is isolated by its admitted policy snapshot"
         );
-        assert_eq!(
+        assert_ne!(
             maintained,
-            SubscriptionKey {
-                shape_id: coverage.shape_id,
-                binding_id: coverage.binding_id,
-                read_view: coverage.opts.read_view_key(),
-            },
-            "ordinary direct coverage uses the unpartitioned maintained key"
+            direct_attachment.subscription(),
+            "a direct coverage evaluator must not reuse its public wire usage key"
         );
         assert!(state.peer.has_maintained_subscription(maintained));
         maintained
@@ -1945,11 +2282,11 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
     let (mut relay_transport, delegated_server_transport) = duplex();
     let delegated_subscriber = delegated_server
         .server
-        .accept_subscriber_with_claims_and_trust(
+        .accept_scope_isolated_relay_subscriber(
             delegated_server_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
+            delegated_identity,
+            delegated_claims.clone(),
+            1,
         );
     relay_transport
         .send(SyncMessage::RegisterShape {
@@ -2033,23 +2370,30 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         .unwrap()
         .row_uuid();
     let edge = open_db(0xe1, AuthorSubject::SYSTEM, &schema);
-    edge.set_relay_authority_session_owner();
+    edge.set_relay_authority_session_owner_for_test();
     let client = open_db(0xc1, session_subject, &schema);
     let allowed_claims = test_provider_claims(allowed_owner);
     let denied_claims = test_provider_claims(denied_owner);
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
 
     let (edge_transport, core_transport) = duplex();
-    let _edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
-    let core_edge = core.accept_subscriber_with_trust(
+    let edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    // The Core does not infer a user session from a trusted/backend transport.
+    // This test models the production scope-relay handshake that admits the
+    // exact foreground binding forwarded by the Edge.
+    let core_edge = core.accept_scope_isolated_relay_subscriber(
         core_transport,
-        AuthorSubject::SYSTEM,
-        CommitUnitTrust::TrustedBackend,
+        session_subject,
+        allowed_claims.clone(),
+        1,
     );
     let (client_transport, edge_client_transport, _client_sent, edge_sent) = duplex_with_taps();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client =
-        edge.accept_subscriber_with_claims(edge_client_transport, session_subject, allowed_claims);
+    let edge_client = edge.accept_subscriber_with_claims(
+        edge_client_transport,
+        session_subject,
+        allowed_claims.clone(),
+    );
 
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -2093,7 +2437,48 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         &edge_client.borrow().link,
         ConnectionLink::Subscriber(state) if state.peer.has_maintained_subscription(old_maintained_subscription)
     ));
+    let expected_group_source = edge
+        .node
+        .node()
+        .borrow()
+        .authority_result_key_for_subscription(old_upstream_subscription)
+        .expect("scope relay installs the exact upstream authority result");
+    assert!(
+        matches!(
+            &edge_client.borrow().link,
+            ConnectionLink::Subscriber(state)
+                if state
+                    .peer
+                    .subscription_authority_result_source(old_maintained_subscription)
+                    == Some(&expected_group_source)
+        ),
+        "the group-owned maintained receiver must be bound to U before opening; recording U only on D reproduces the cold source=None receiver"
+    );
 
+    // The original Core capability is immutable. A direct client claim
+    // refresh cannot widen or narrow it in place; production `updateAuth`
+    // disconnects and re-admits the scope relay under a fresh epoch.
+    let old_core_binding = match &core_edge.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .peer
+            .subscription_policy_binding(old_upstream_subscription),
+        ConnectionLink::Upstream(_) => None,
+    };
+    assert_eq!(
+        old_core_binding,
+        Some((session_subject, allowed_claims.clone()))
+    );
+    assert!(edge.detach_connection(&edge_upstream));
+
+    let (replacement_edge_transport, replacement_core_transport) = duplex();
+    let _replacement_edge_upstream =
+        crate::db::block_on(edge.connect_upstream(replacement_edge_transport));
+    let replacement_core_edge = core.accept_scope_isolated_relay_subscriber(
+        replacement_core_transport,
+        session_subject,
+        denied_claims.clone(),
+        2,
+    );
     client.set_test_provider_claims(session_subject, denied_claims.clone());
     edge_client
         .borrow_mut()
@@ -2111,13 +2496,12 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
                     if update.subscription == downstream_subscription
                         && update.reset_result_set
                         && update.result_member_adds.is_empty()
-                        && update.result_member_removes.is_empty()
             )
         });
         client.tick().unwrap();
         if saw_fresh_downstream_reset
             && !matches!(
-                &core_edge.borrow().link,
+                &replacement_core_edge.borrow().link,
                 ConnectionLink::Subscriber(state) if state.served.contains_key(&old_upstream_subscription)
             )
         {
@@ -2129,9 +2513,10 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         unreachable!("edge keeps serving the direct client")
     };
     let coverage = &state.served[&downstream_subscription];
+    let fresh_group_subscription = coverage_group_subscription_key(coverage);
     let fresh_upstream_subscription = state.coverage_groups[coverage].upstream_subscription;
     drop(connection);
-    let core_fresh = match &core_edge.borrow().link {
+    let core_fresh = match &replacement_core_edge.borrow().link {
         ConnectionLink::Subscriber(state) => (
             state
                 .peer
@@ -2148,18 +2533,30 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         "the refreshed remote policy must publish a new empty membership reset"
     );
     assert!(matches!(
-        &core_edge.borrow().link,
+        &replacement_core_edge.borrow().link,
         ConnectionLink::Subscriber(state)
             if !state.served.contains_key(&old_upstream_subscription)
                 && state.served.contains_key(&fresh_upstream_subscription)
     ));
+    let fresh_authority_source = edge
+        .node
+        .node()
+        .borrow()
+        .authority_result_key_for_subscription(fresh_upstream_subscription)
+        .expect("fresh upstream usage has an exact authority result");
     assert!(
         matches!(
             &edge_client.borrow().link,
             ConnectionLink::Subscriber(state)
-                if !state.peer.has_maintained_subscription(old_maintained_subscription)
+                if fresh_group_subscription != old_maintained_subscription
+                    && !state.peer.has_maintained_subscription(old_maintained_subscription)
+                    && state.peer.has_maintained_subscription(fresh_group_subscription)
+                    && state
+                        .peer
+                        .subscription_authority_result_source(fresh_group_subscription)
+                        == Some(&fresh_authority_source)
         ),
-        "claim refresh must retire the old policy-bound maintained receiver"
+        "claim refresh must retire the old policy receiver and reopen a fresh group against fresh U"
     );
     assert_eq!(
         core_fresh.1,
@@ -2243,6 +2640,150 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     );
 }
 
+/// A scope-isolated relay carries one binding selected by server admission. A
+/// raw `SessionClaims` frame must neither replace that binding nor make the
+/// later terminal write proof use the forged editor role.
+///
+/// ```text
+/// viewer handshake ──scope relay──► Core
+///       │ raw { role: editor }         │ terminal proof remains viewer → Rejected
+///       └──────────────────────────────┘
+/// ```
+#[test]
+fn scope_isolated_relay_terminal_write_rejects_denied_handshake_claims() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let client = open_db(0xa8, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let viewer_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("viewer".to_owned()),
+    )]);
+    let hostile_editor_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("editor".to_owned()),
+    )]);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        viewer_claims,
+        7,
+    );
+
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(hostile_editor_claims.clone());
+    // Generic host refresh is valid for an ordinary Session link, but a
+    // scope-isolated relay must receive a new server-issued capability on
+    // reconnect rather than widen its immutable binding in place.
+
+    relay_transport
+        .send(SyncMessage::SessionClaims {
+            identity: alice,
+            claims: hostile_editor_claims.clone(),
+        })
+        .expect("hostile relay can send a raw wire frame");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("scope relay drops raw SessionClaims instead of adopting them");
+    assert_ne!(
+        server.node().borrow().session_claims_for(alice),
+        hostile_editor_claims,
+        "raw relay claims must not enter the node's mutable compatibility map"
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            cells("viewer must not write", false, alice),
+            Default::default(),
+        )
+        .expect("client can stage a mergeable candidate before terminal policy proof");
+    let tx_id = write.mergeable_tx_id();
+    let unit = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("staged candidate retains its exact commit unit");
+    relay_transport
+        .send(unit)
+        .expect("scope relay forwards the unchanged commit unit");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("terminal authority processes scope relay upload");
+
+    let fates = std::iter::from_fn(|| relay_transport.try_recv()).collect::<Vec<_>>();
+    assert!(
+        fates.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id: candidate, fate: Fate::Rejected(_), .. }
+                if *candidate == tx_id
+        )),
+        "the terminal proof must use the immutable viewer handshake binding, got {fates:?}"
+    );
+    assert!(matches!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .expect("terminal authority retains the upload outcome")
+            .0,
+        Fate::Rejected(_)
+    ));
+}
+
+/// Empty scope-relay claims are an admitted empty snapshot, not an invitation
+/// to use default, prior, or process-global claims when terminal policy proof
+/// runs.
+#[test]
+fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
+    let client = open_db(0xa9, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        BTreeMap::new(),
+        8,
+    );
+    let write = client
+        .insert(
+            "todos",
+            cells("empty claims must not write", false, alice),
+            Default::default(),
+        )
+        .expect("client can stage before the terminal policy decision");
+    let tx_id = write.mergeable_tx_id();
+    relay_transport
+        .send(
+            client
+                .node
+                .node
+                .borrow_mut()
+                .commit_unit_for(tx_id)
+                .expect("staged candidate retains its commit unit"),
+        )
+        .expect("scope relay forwards the unchanged commit unit");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("terminal authority processes empty-claims relay upload");
+    assert!(
+        std::iter::from_fn(|| relay_transport.try_recv()).any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id: candidate, fate: Fate::Rejected(_), .. }
+                if candidate == tx_id
+        )),
+        "an empty admitted binding must fail closed rather than inherit a policy subject"
+    );
+}
+
 /// A terminal support receiver belongs to one admitted link, even if another
 /// live link authenticates the same author with different claims before that
 /// receiver is first proved.
@@ -2317,11 +2858,12 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     let scope = server
         .node()
         .borrow()
-        .authorization_support_scope(
+        .authorization_support_scope_for_session(
             alice,
+            Some(&a_claims),
             &PermissionAdviceAction::Insert {
                 table: "todos".to_owned(),
-                cells: candidate_cells,
+                cells: candidate_cells.clone(),
             },
         )
         .expect("editor policy has a support clause");
@@ -2330,7 +2872,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         .into_iter()
         .next()
         .expect("editor policy produces one support subscription");
-    let subscription = SubscriptionKey {
+    let a_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: scope.options.read_view_key(),
@@ -2350,7 +2892,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("A terminal proof remains valid after B updates the legacy cache");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims.clone())),
             "the maintained terminal support receiver retains A rather than B's sibling snapshot"
         );
@@ -2361,6 +2903,28 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     a_subscriber
         .borrow_mut()
         .update_authenticated_session_claims(b_claims.clone());
+    let b_scope = server
+        .node()
+        .borrow()
+        .authorization_support_scope_for_session(
+            alice,
+            Some(&b_claims),
+            &PermissionAdviceAction::Insert {
+                table: "todos".to_owned(),
+                cells: candidate_cells.clone(),
+            },
+        )
+        .expect("viewer policy has the same support clause under its own snapshot");
+    let (b_shape, b_binding) = b_scope
+        .subscriptions
+        .into_iter()
+        .next()
+        .expect("viewer policy produces one support subscription");
+    let b_subscription = SubscriptionKey {
+        shape_id: b_shape.shape_id(),
+        binding_id: b_binding.binding_id(),
+        read_view: b_scope.options.read_view_key(),
+    };
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
@@ -2375,7 +2939,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("a refreshed terminal proof replaces the stale support receiver");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(b_subscription),
             Some((alice, b_claims)),
             "terminal support reuse is keyed by exact immutable claims, not just its query key"
         );
@@ -2397,7 +2961,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         ))
         .expect("the next refreshed terminal proof replaces the stale support receiver");
         assert_eq!(
-            a_state.peer.subscription_policy_binding(subscription),
+            a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims)),
             "each claim revision receives a fresh terminal support receiver"
         );
@@ -2601,6 +3165,7 @@ fn edge_fate_route_identity_is_shared_across_client_connections() {
         identity: alice,
         trust: CommitUnitTrust::Session,
         edge_authority: true,
+        admitted_write_authorization: false,
     };
 
     let first_outcome = crate::db::block_on(dispatch_admitted_subscriber_message(
@@ -3148,7 +3713,11 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         20,
     );
     let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
-    let a = authority_a.accept_subscriber(a_transport, identity);
+    let a = authority_a.accept_subscriber_with_trust(
+        a_transport,
+        identity,
+        CommitUnitTrust::TrustedAuthority,
+    );
     let (edge_b_transport, b_transport) = duplex_with_admitted_session_context(
         identity,
         edge_node,
@@ -3157,7 +3726,11 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         21,
     );
     let edge_b = crate::db::block_on(edge.server.connect_upstream(edge_b_transport));
-    let _b = authority_b.accept_subscriber(b_transport, identity);
+    let _b = authority_b.accept_subscriber_with_trust(
+        b_transport,
+        identity,
+        CommitUnitTrust::TrustedAuthority,
+    );
 
     let client = open_db(0xc1, identity, &schema);
     let (client_transport, edge_transport) = duplex_with_admitted_session_context(
@@ -3307,7 +3880,11 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         20,
     );
     let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
-    let _a = authority_a.accept_subscriber(a_transport, identity);
+    let _a = authority_a.accept_subscriber_with_trust(
+        a_transport,
+        identity,
+        CommitUnitTrust::TrustedAuthority,
+    );
 
     let client = open_db(0xc1, identity, &schema);
     let (client_transport, edge_transport) = duplex_with_admitted_session_context(
@@ -3358,7 +3935,11 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         22,
     );
     let _edge_c = crate::db::block_on(edge.server.connect_upstream(edge_c_transport));
-    let _c = authority_c.accept_subscriber(c_transport, identity);
+    let _c = authority_c.accept_subscriber_with_trust(
+        c_transport,
+        identity,
+        CommitUnitTrust::TrustedAuthority,
+    );
     edge.tick().unwrap();
     authority_c.tick().unwrap();
     edge.tick().unwrap();
@@ -3447,10 +4028,22 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         .iter()
         .find(|pending| pending.tx_id == tx_id)
         .expect("accepted Edge write remains queued for its future Core");
+    let Some(SyncMessage::AuthorityPublication(publication)) = retained.unit.as_ref() else {
+        panic!("edge must retain a coherent publication, not a bare write");
+    };
+    assert_eq!(publication.tx_id, tx_id);
+    let unit = publication
+        .commits
+        .iter()
+        .find(|unit| unit.tx.tx_id == tx_id)
+        .unwrap();
     assert_eq!(
-        retained.unit.as_ref(),
-        Some(&canonical),
-        "the exact inbound unit must replace an earlier same-tx reconstruction"
+        SyncMessage::CommitUnit {
+            tx: unit.tx.clone(),
+            versions: unit.versions.clone()
+        },
+        canonical,
+        "the publication must retain the exact canonical admitted write"
     );
     drop(outbox);
     client_upstream
@@ -3484,8 +4077,17 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
     let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
     let core_session = core.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
     edge.tick().unwrap();
-    let uploaded = std::iter::from_fn(|| core_session.borrow_mut().transport.try_recv())
-        .any(|message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id));
+    let uploaded =
+        std::iter::from_fn(|| core_session.borrow_mut().transport.try_recv()).any(|message| {
+            matches!(message,
+            SyncMessage::AuthorityPublication(publication)
+                if publication.tx_id == tx_id
+                    && publication.commits.iter().any(|unit|
+                        SyncMessage::CommitUnit {
+                            tx: unit.tx.clone(),
+                            versions: unit.versions.clone(),
+                        } == canonical))
+        });
     assert!(
         uploaded,
         "binding the first authority redrives the parked unit"
@@ -3743,7 +4345,8 @@ fn outbox_release_requires_current_admitted_authority_receipt() {
     edge.tick().unwrap();
     assert!(
         std::iter::from_fn(|| reconnected.borrow_mut().transport.try_recv()).any(
-            |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+            |message| matches!(message, SyncMessage::AuthorityPublication(publication)
+                if publication.tx_id == tx_id && publication.commits.iter().any(|unit| unit.tx.tx_id == tx_id))
         ),
         "the retained canonical upload must be retransmitted after authority reconnect"
     );

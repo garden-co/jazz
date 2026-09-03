@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { BrowserWebSocket } from "./websocket.js";
@@ -87,7 +88,11 @@ describe("websocket frame carrier", () => {
     const largestSingleton = new Uint8Array(2 * 1024 * 1024 - 4);
     const exactCarrier = encodeWebSocketFrameBatch([largestSingleton]);
     expect(exactCarrier.byteLength).toBe(2 * 1024 * 1024);
-    expect(decodeWebSocketFrameBatch(exactCarrier)).toEqual([largestSingleton]);
+    const decoded = decodeWebSocketFrameBatch(exactCarrier);
+    expect(decoded).toHaveLength(1);
+    // Compare every byte without asking the general deep-equality matcher to
+    // walk two million indexed properties under a busy full-suite worker pool.
+    expect(Buffer.from(decoded[0]!).equals(Buffer.from(largestSingleton))).toBe(true);
 
     const rawLimit = new Uint8Array(2 * 1024 * 1024);
     expect(() => encodeWebSocketFrameBatch([rawLimit])).toThrow(
@@ -234,6 +239,35 @@ describe("websocket frame carrier", () => {
     );
 
     expect(actual).toBe('["https://issuer.example","provider-subject"]');
+  });
+
+  it("uses SYSTEM as the wire identity for a credential-only backend open", () => {
+    const fallback = new TextEncoder().encode('["https://jazz.test","backend-cache"]');
+
+    const actual = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ backend_secret: "not inspected by the client" }),
+        fallback,
+      ),
+    );
+
+    expect(actual).toBe('["urn:jazz:system","system"]');
+  });
+
+  it("ignores an incidental bearer token for a credential-only backend open", () => {
+    const fallback = new TextEncoder().encode('["https://jazz.test","backend-cache"]');
+    const jwt = `header.${btoa(
+      JSON.stringify({ iss: "https://issuer.example", sub: "user-123" }),
+    )}.signature`;
+
+    const actual = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ backend_secret: "not inspected by the client", jwt_token: jwt }),
+        fallback,
+      ),
+    );
+
+    expect(actual).toBe('["urn:jazz:system","system"]');
   });
 
   it("matches the server's backend-session precedence over a simultaneous bearer token", () => {
