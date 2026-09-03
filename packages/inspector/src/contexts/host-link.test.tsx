@@ -2,13 +2,36 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { INSPECTOR_HOST_GLOBAL } from "jazz-tools";
 import {
+  openInspectorRuntimeSession,
   readInspectorHostConfig,
   readInspectorHostSchema,
   useHostSubscriptions,
 } from "./host-link.js";
 
+type TestPort = MessagePort & { dispatch(data: unknown): void };
+
+function createTestPort() {
+  const listeners = new Set<(event: MessageEvent) => void>();
+  const postMessage = vi.fn();
+  const port = {
+    addEventListener: vi.fn((type: string, listener: unknown) => {
+      if (type === "message") listeners.add(listener as (event: MessageEvent) => void);
+    }),
+    removeEventListener: vi.fn((type: string, listener: unknown) => {
+      if (type === "message") listeners.delete(listener as (event: MessageEvent) => void);
+    }),
+    start: vi.fn(),
+    postMessage,
+    close: vi.fn(),
+    dispatch(data: unknown) {
+      for (const listener of listeners) listener(new MessageEvent("message", { data }));
+    },
+  } as unknown as TestPort;
+  return { port, postMessage };
+}
+
 // In jsdom, window.parent === window, so installing on window.parent installs here.
-function installHost(subs: unknown[] = []) {
+function installHost(subs: unknown[] = [], openControlPort?: () => Promise<MessagePort>) {
   (window as unknown as Record<string, unknown>)[INSPECTOR_HOST_GLOBAL] = {
     getConnectionConfig: () => ({
       appId: "app1",
@@ -18,6 +41,7 @@ function installHost(subs: unknown[] = []) {
     }),
     getWasmSchema: () => ({ todos: { columns: [] } }),
     getActiveSubscriptions: () => subs,
+    openControlPort,
   };
 }
 
@@ -130,5 +154,84 @@ describe("host-link", () => {
     Object.defineProperty(window, "opener", { configurable: true, value: opener });
 
     expect(readInspectorHostConfig()).toMatchObject({ appId: "app1" });
+  });
+  it("bounds and cleans up a silent control request", async () => {
+    vi.useFakeTimers();
+    try {
+      const control = createTestPort();
+      installHost([], async () => control.port);
+      const opening = openInspectorRuntimeSession().then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
+      );
+      const deadline = new Promise<{ kind: "deadline" }>((resolve) => {
+        setTimeout(() => resolve({ kind: "deadline" }), 60_000);
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await Promise.race([opening, deadline]);
+      expect(result.kind).toBe("rejected");
+      if (result.kind === "rejected") expect(result.error).toBeInstanceOf(Error);
+      expect(control.port.removeEventListener).toHaveBeenCalledOnce();
+      expect(control.port.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes the attached port when the host rejects attachment", async () => {
+    const control = createTestPort();
+    control.postMessage.mockImplementation((message: { id: number; type: string }) => {
+      if (message.type === "list-contexts") {
+        control.port.dispatch({
+          id: message.id,
+          type: "contexts",
+          contexts: [{ key: "ctx", appId: "app1", dbName: "db", schema: {} }],
+        });
+      } else if (message.type === "attach-context") {
+        control.port.dispatch({ id: message.id, type: "result", error: "attach failed" });
+      }
+    });
+    installHost([], async () => control.port);
+
+    const attachedPort = createTestPort();
+    const previousMessageChannel = globalThis.MessageChannel;
+    Object.defineProperty(globalThis, "MessageChannel", {
+      configurable: true,
+      value: class {
+        port1 = attachedPort.port;
+        port2 = createTestPort().port;
+      },
+    });
+    try {
+      const session = await openInspectorRuntimeSession();
+      await expect(session?.attach("ctx")).rejects.toThrow("attach failed");
+      expect(attachedPort.port.close).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(globalThis, "MessageChannel", {
+        configurable: true,
+        value: previousMessageChannel,
+      });
+    }
+  });
+
+  it("closes a control session idempotently", async () => {
+    const control = createTestPort();
+    control.postMessage.mockImplementation((message: { id: number; type: string }) => {
+      if (message.type === "list-contexts") {
+        control.port.dispatch({ id: message.id, type: "contexts", contexts: [] });
+      }
+    });
+    installHost([], async () => control.port);
+
+    const session = await openInspectorRuntimeSession();
+    session?.close();
+    session?.close();
+
+    expect(control.postMessage).toHaveBeenCalledWith({ type: "close" });
+    expect(
+      control.postMessage.mock.calls.filter(([message]) => message.type === "close"),
+    ).toHaveLength(1);
+    expect(control.port.close).toHaveBeenCalledOnce();
   });
 });

@@ -1,8 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { act, cleanup, render } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
+import { describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "jazz-tools";
 import { defaultRuntimeContextKey } from "./contexts/default-runtime-context";
 import type { InspectorRuntimeContext } from "./contexts/host-link";
+import { InspectorApp } from "./inspector-app";
 
+const { openSessionMock, readHostConfigMock } = vi.hoisted(() => ({
+  openSessionMock: vi.fn(),
+  readHostConfigMock: vi.fn(),
+}));
+
+vi.mock("./contexts/host-link", () => ({
+  openInspectorRuntimeSession: openSessionMock,
+  readInspectorHostConfig: readHostConfigMock,
+}));
+
+vi.mock("./contexts/devtools-context", () => ({
+  DevtoolsProvider: ({ children }: { children: ReactNode }) => children,
+}));
+
+vi.mock("./routes", () => ({
+  InspectorRoutes: () => null,
+}));
 const appId = "shared-app";
 const logicalBase = "shared-db";
 const externalPhysicalDbName =
