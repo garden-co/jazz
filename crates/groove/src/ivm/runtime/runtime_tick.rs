@@ -11,7 +11,7 @@ use super::evaluation_session::{
     EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
 };
 use super::*;
-use crate::storage::{OwnedStorage, StagedWriteOverlay, StagedWriteState};
+use crate::storage::{OwnedStorage, StagedWriteOverlay, StagedWriteState, WriteManyOutcome};
 
 /// Hydration can discover a large resident graph in one poll. Keep every
 /// owner turn bounded so a browser worker returns to transport ingress between
@@ -20,6 +20,22 @@ use crate::storage::{OwnedStorage, StagedWriteOverlay, StagedWriteState};
 const MAX_HYDRATION_RUNNABLE_NODES_PER_POLL: usize = 32;
 
 type PersistFlush<'a> = Pin<Box<dyn Future<Output = Result<(), IvmRuntimeError>> + 'a>>;
+
+/// A started direct flush has no rollback path. If its owner drops it before
+/// receiving a definite outcome, retain that fact on the runtime so a later
+/// owner cannot continue from the old evaluator state.
+struct PersistFlushAttempt {
+    indeterminate: Rc<Cell<bool>>,
+    completed: bool,
+}
+
+impl Drop for PersistFlushAttempt {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.indeterminate.set(true);
+        }
+    }
+}
 
 /// Owned preparation state for one interruptible evaluation.
 ///
@@ -1040,9 +1056,22 @@ impl IncrementalEvaluation<'_> {
         if self.persist_flush.is_none() && !self.durable_writes.borrow().is_empty() {
             let operations = std::mem::take(self.durable_writes.get_mut()).into_operations();
             let storage = self.storage.clone();
+            let indeterminate = Rc::clone(&runtime.persistence_indeterminate);
             self.persist_flush = Some(Box::pin(async move {
-                storage.as_ref().write_many(operations).await?;
-                Ok(())
+                let mut attempt = PersistFlushAttempt {
+                    indeterminate,
+                    completed: false,
+                };
+                let result = match storage.as_ref().write_many_outcome(operations).await {
+                    WriteManyOutcome::Committed => Ok(()),
+                    WriteManyOutcome::Uncommitted(error) => Err(error.into()),
+                    WriteManyOutcome::PossiblyCommitted(error) => {
+                        attempt.indeterminate.set(true);
+                        Err(error.into())
+                    }
+                };
+                attempt.completed = true;
+                result
             }));
         }
         if let Some(flush) = &mut self.persist_flush {
@@ -2100,6 +2129,9 @@ impl IvmRuntime {
         storage: OwnedStorage<'a>,
         notification_publication: Option<PublicationId>,
     ) -> Result<TickMetrics, IvmRuntimeError> {
+        if self.persistence_indeterminate.get() {
+            return Err(IvmRuntimeError::PersistenceOutcomeIndeterminate);
+        }
         self.drive_pending_incremental().await?;
         let mut evaluation = self
             .begin_tick_with_params(

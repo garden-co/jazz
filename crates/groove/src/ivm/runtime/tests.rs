@@ -2432,7 +2432,7 @@ async fn recursive_iteration_limit_does_not_leak_staged_durable_index_writes() {
 }
 
 #[futures_test::test]
-async fn durable_flush_failure_discards_staged_state_and_notifications() {
+async fn definitely_uncommitted_durable_flush_failure_discards_staged_state_and_notifications() {
     let schema = indexed_edges_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let (storage, control) = TestStorage::controlled(&["edges", "indices"]);
@@ -2447,7 +2447,7 @@ async fn durable_flush_failure_discards_staged_state_and_notifications() {
     let before_tick = runtime.current_tick;
 
     control.take_observed();
-    control.fail_next(TestStorageOperation::WriteMany);
+    control.fail_next_uncommitted(TestStorageOperation::WriteMany);
     let mut tick = Box::pin(runtime.tick(vec![edge_table_delta(edges, &[(1, 1, 2)])], &storage));
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
@@ -2476,6 +2476,53 @@ async fn durable_flush_failure_discards_staged_state_and_notifications() {
         1,
         "the staged durable batch is submitted exactly once"
     );
+}
+
+/// This is intentionally an internal runtime test: the public Database owner
+/// converts this runtime state into `DatabasePoisoned`, while this fixture
+/// proves the lower-level direct evaluator never reuses its pre-flush state.
+#[futures_test::test]
+async fn commit_then_lost_flush_acknowledgement_poisoned_direct_runtime() {
+    let schema = indexed_edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let (storage, control) = TestStorage::controlled(&["edges", "indices"]);
+    let storage = Rc::new(storage);
+    let edges = schema.table("edges").unwrap().record_schema();
+    let initial_storage = Rc::new(MemoryStorage::new(&["edges", "indices"]).unwrap());
+    let subscription = runtime
+        .subscribe_one_sink(GraphBuilder::table("edges"), &initial_storage)
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    control.take_observed();
+    control.lose_next_write_many_acknowledgement();
+    let error = runtime
+        .tick(vec![edge_table_delta(edges, &[(1, 1, 2)])], &storage)
+        .await
+        .expect_err("a lost acknowledgement must fail closed");
+    assert!(matches!(error, IvmRuntimeError::Storage(_)));
+    assert!(subscription.try_recv().is_err());
+    let mut index_rows = storage
+        .scan(crate::storage::ScanRequest::prefix(
+            "indices".to_owned(),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        index_rows.next_batch().await.unwrap().is_some(),
+        "the injected fault must lose only the acknowledgement, after the batch commits"
+    );
+
+    let error = runtime
+        .tick(Vec::new(), &storage)
+        .await
+        .expect_err("an indeterminate flush must prevent reuse of the old evaluator");
+    assert!(matches!(
+        error,
+        IvmRuntimeError::PersistenceOutcomeIndeterminate
+    ));
 }
 
 #[futures_test::test]
@@ -2528,6 +2575,14 @@ async fn cancelling_pending_durable_flush_discards_the_uninstalled_tick() {
         .await
         .unwrap();
     assert!(index_rows.next_batch().await.unwrap().is_none());
+    let error = runtime
+        .tick(Vec::new(), &storage)
+        .await
+        .expect_err("dropping a started flush must poison the direct runtime");
+    assert!(matches!(
+        error,
+        IvmRuntimeError::PersistenceOutcomeIndeterminate
+    ));
 }
 
 /// Resident Database writes use the same staged evaluator as direct ticks, but
