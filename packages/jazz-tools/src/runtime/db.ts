@@ -2964,6 +2964,9 @@ export class Db {
     }
 
     const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
+    // Inspector-only reads must not recursively appear in the inspector's
+    // own subscription list. Public local-first still propagates and is listed.
+    if (resolvedOptions.propagation === "local-only") return null;
     const payload = this.parseRuntimeQueryTracePayload(queryJson);
     const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
 

@@ -580,6 +580,12 @@ aligned with the settled typed result-member model.
 
 #### Retained receiver input pages
 
+The interaction of this retained-page contract with literal local-first
+pagination is under clarification in [#2502](https://github.com/garden-co/jazz/issues/2502).
+In particular, an offset into an authority page is not necessarily the same
+offset into the receiver's currently cached inputs. That question is not
+permission to infer authority result positions from partial local data.
+
 The same compiler-owned window stage is used by authority closure publication
 and by the receiver's application collector. A closure for a bounded root or
 parent window is proportional to that requested window; it is never an

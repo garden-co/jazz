@@ -1927,6 +1927,31 @@ impl WasmDb {
         }))
     }
 
+    /// Authority read capability minted only by an explicit backend open.
+    /// No caller-supplied identity can select SYSTEM through this boundary.
+    #[wasm_bindgen(js_name = allForBackend)]
+    pub fn all_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        let inner = self.open_inner()?;
+        let query = query.inner.clone();
+        let opts = read_opts_from_js(opts)?;
+        Ok(future_to_promise(async move {
+            let mut rows = inner
+                .all_for_identity_async(&query, opts, AuthorSubject::SYSTEM)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_rows_for_binding(&mut rows)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_rows(&rows).map_err(to_js_error)?)
+        }))
+    }
+
     #[wasm_bindgen(js_name = one)]
     pub fn one(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<Vec<u8>, JsValue> {
         let opts = read_opts_from_js(opts)?;
@@ -1958,6 +1983,24 @@ impl WasmDb {
     ) -> Result<js_sys::Promise, JsValue> {
         let author = author_id_from_bytes(&author)?;
         transaction_rows_promise(&self.open_inner()?, query, tx, Some(author), opts, false)
+    }
+
+    #[wasm_bindgen(js_name = allInTransactionForBackend)]
+    pub fn all_in_transaction_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        tx: &WasmTx,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        transaction_rows_promise(
+            &self.open_inner()?,
+            query,
+            tx,
+            Some(AuthorSubject::SYSTEM),
+            opts,
+            false,
+        )
     }
 
     #[wasm_bindgen(js_name = oneInTransaction)]
@@ -2010,6 +2053,23 @@ impl WasmDb {
         let claims = claims_from_js(author, claims)?;
         self.open_inner()?.set_identity_claims(author, claims);
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = allRelationSnapshotInTransactionForBackend)]
+    pub fn all_relation_snapshot_in_transaction_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        tx: &WasmTx,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        transaction_relation_snapshot_promise(
+            &self.open_inner()?,
+            query,
+            tx,
+            Some(AuthorSubject::SYSTEM),
+            opts,
+        )
     }
 
     #[wasm_bindgen(js_name = allForIdentity)]
@@ -2099,6 +2159,29 @@ impl WasmDb {
         }))
     }
 
+    #[wasm_bindgen(js_name = allRelationQueryForBackend)]
+    pub fn all_relation_query_for_backend(
+        &self,
+        query_json: String,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        let inner = self.open_inner()?;
+        let opts = read_opts_from_js(opts)?;
+        let query = relation_query_from_json(&query_json)?;
+        Ok(future_to_promise(async move {
+            let mut snapshot = inner
+                .all_relation_query_for_identity(&query, opts, AuthorSubject::SYSTEM)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_rows(&snapshot.rows).map_err(to_js_error)?)
+        }))
+    }
+
     #[wasm_bindgen(js_name = allRelationSnapshot)]
     pub fn all_relation_snapshot(
         &self,
@@ -2143,6 +2226,44 @@ impl WasmDb {
                 .map_err(to_js_error)?;
             bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
         }))
+    }
+
+    #[wasm_bindgen(js_name = allRelationSnapshotForBackend)]
+    pub fn all_relation_snapshot_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.require_trusted_backend()?;
+        let inner = self.open_inner()?;
+        let opts = read_opts_from_js(opts)?;
+        let query = query.inner.clone();
+        Ok(future_to_promise(async move {
+            let mut snapshot = inner
+                .all_relation_snapshot_for_identity(&query, opts, AuthorSubject::SYSTEM)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
+        }))
+    }
+
+    #[wasm_bindgen(js_name = subscribeForBackend)]
+    pub fn subscribe_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        self.require_trusted_backend()?;
+        let opts = read_opts_from_js(opts)?;
+        let inner = self.open_inner()?;
+        let stream = inner
+            .subscribe_for_identity(&query.inner, opts, AuthorSubject::SYSTEM)
+            .map_err(to_js_error)?;
+        subscription_stream_to_js(inner, stream)
     }
 
     #[wasm_bindgen(js_name = subscribe)]
@@ -2199,6 +2320,38 @@ impl WasmDb {
             .subscribe_relation_query_for_identity(&query, opts, author)
             .map_err(to_js_error)?;
         subscription_stream_to_js(inner, stream)
+    }
+
+    #[wasm_bindgen(js_name = subscribeRelationQueryForBackend)]
+    pub fn subscribe_relation_query_for_backend(
+        &self,
+        query_json: String,
+        opts: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        self.require_trusted_backend()?;
+        let opts = read_opts_from_js(opts)?;
+        let query = relation_query_from_json(&query_json)?;
+        let inner = self.open_inner()?;
+        let stream = inner
+            .subscribe_relation_query_for_identity(&query, opts, AuthorSubject::SYSTEM)
+            .map_err(to_js_error)?;
+        subscription_stream_to_js(inner, stream)
+    }
+
+    #[wasm_bindgen(js_name = attachQueryForBackend)]
+    pub fn attach_query_for_backend(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<WasmQueryAttachment, JsValue> {
+        self.require_trusted_backend()?;
+        let opts = read_opts_from_js(opts)?;
+        Ok(WasmQueryAttachment {
+            inner: self
+                .open_inner()?
+                .attach_query_for_identity(&query.inner, opts, AuthorSubject::SYSTEM)
+                .map_err(to_js_error)?,
+        })
     }
 
     #[wasm_bindgen(js_name = attachQuery)]

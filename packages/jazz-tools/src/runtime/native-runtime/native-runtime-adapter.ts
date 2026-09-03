@@ -191,7 +191,7 @@ type NativeDb = {
   attachExclusiveTx?(openTransactionId: string): Tx;
   all(query: PreparedQuery, opts: unknown): NativeReadResult;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
-  allForBackend?(query: PreparedQuery, opts: unknown): NativeReadResult;
+  allForBackend?(query: PreparedQuery, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allAsync?(query: PreparedQuery, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allForIdentityAsync?(
     query: PreparedQuery,
