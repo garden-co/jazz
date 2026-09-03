@@ -1620,8 +1620,9 @@ where
                         .all(|source| overlay.1.get(source).copied() == Some(true)))
             {
                 return Err(invalid(format!(
-                    "reset source coverage does not exactly match compiled source set: expected {compiled_sources:?}, received {:?}",
-                    overlay.1
+                    "reset source coverage does not exactly match compiled source set: expected {compiled_sources:?}, received {:?} (receiver is scope relay: {})",
+                    overlay.1,
+                    self.client_relay_scope().is_some()
                 )));
             }
             for fact in &update.program_fact_adds {

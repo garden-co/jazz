@@ -1414,12 +1414,35 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
 
 #[test]
 fn scope_relay_local_read_delivers_cache_before_authority_opens() {
-    assert_scope_relay_local_read_before_authority(false);
-    assert_scope_relay_local_read_before_authority(true);
+    assert_scope_relay_local_read_before_authority(false, false);
+    assert_scope_relay_local_read_before_authority(true, false);
 }
 
-fn assert_scope_relay_local_read_before_authority(seed_cache: bool) {
-    let schema = schema();
+#[test]
+fn scope_relay_empty_includes_publish_complete_source_manifest() {
+    assert_scope_relay_local_read_before_authority(false, true);
+}
+
+fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_includes: bool) {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner", PublicColumnType::Uuid)
+                    .nullable_fk_column("parent", "todos")
+                    .nullable_fk_column("project", "projects")
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(None, PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    ),
+            ),
+    );
     let author = AuthorSubject::for_test_bytes([0xb4; 16]);
     let core = open_core(0x64, AuthorSubject::SYSTEM, &schema);
     let relay = open_db(0x65, author, &schema);
@@ -1438,7 +1461,17 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool) {
     let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
     let _relay_foreground =
         relay.accept_subscriber_with_claims(relay_transport, author, BTreeMap::new());
-    let query = Query::from("todos");
+    let query = if with_includes {
+        Query::from("todos")
+            .include_with(
+                crate::query::Include::new("parent").join_mode(crate::query::JoinMode::Holes),
+            )
+            .include_with(
+                crate::query::Include::new("project").join_mode(crate::query::JoinMode::Holes),
+            )
+    } else {
+        Query::from("todos")
+    };
     let opts = ReadOpts {
         tier: DurabilityTier::Local,
         propagation: Propagation::Full,

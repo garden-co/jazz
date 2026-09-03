@@ -6524,6 +6524,29 @@ where
         "transport send {}",
         summarize_sync_message(&message)
     ));
+    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+        && let SyncMessage::ViewUpdate(payload) = &message
+    {
+        let coverage = payload
+            .program_fact_adds
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
+                )
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "JAZZ_COVERED_INPUT_TRACE stage=transport_send relay={} subscription={:?} reset={} pending={} coverage={coverage:?} facts={} carriers={}",
+            node.borrow().client_relay_scope().is_some(),
+            payload.subscription,
+            payload.reset_result_set,
+            payload.peer_payload_inventory.opening_pending,
+            payload.program_fact_adds.len(),
+            payload.version_carriers.len()
+        );
+    }
     send_sync_message_chunked(transport, message)
 }
 
