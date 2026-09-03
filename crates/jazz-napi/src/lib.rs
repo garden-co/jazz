@@ -4882,10 +4882,15 @@ fn core_claims_from_json(
 ) -> napi::Result<BTreeMap<String, CoreValue>> {
     let claims = match claims {
         None | Some(JsonValue::Null) => BTreeMap::new(),
-        Some(JsonValue::Object(map)) => map
-            .into_iter()
-            .map(|(key, value)| Ok((key, core_claim_value_from_json(value)?)))
-            .collect::<napi::Result<BTreeMap<_, _>>>()?,
+        Some(JsonValue::Object(map)) => {
+            let mut projected = BTreeMap::new();
+            for (key, value) in map {
+                if let Some(value) = core_claim_value_from_json(value)? {
+                    projected.insert(key, value);
+                }
+            }
+            projected
+        }
         Some(_) => {
             return Err(napi::Error::from_reason(
                 "identity claims must be an object",
@@ -4902,28 +4907,12 @@ fn core_claims_from_json(
     ))
 }
 
-fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
-    Ok(match value {
-        JsonValue::Null => CoreValue::Nullable(None),
-        JsonValue::Bool(value) => CoreValue::Bool(value),
-        JsonValue::Number(value) => jazz::tools::policy_claims::json_number_to_policy_claim(
-            value,
-            jazz::tools::policy_claims::NumericClaimOrigin::JavaScript,
-        )
-        .map_err(napi::Error::from_reason)?,
-        JsonValue::String(value) => CoreValue::String(value),
-        JsonValue::Array(values) => CoreValue::Array(
-            values
-                .into_iter()
-                .map(core_claim_value_from_json)
-                .collect::<napi::Result<Vec<_>>>()?,
-        ),
-        JsonValue::Object(_) => {
-            return Err(napi::Error::from_reason(
-                "nested object claims are not supported",
-            ));
-        }
-    })
+fn core_claim_value_from_json(value: JsonValue) -> napi::Result<Option<CoreValue>> {
+    jazz::tools::policy_claims::json_value_to_policy_claim(
+        value,
+        jazz::tools::policy_claims::NumericClaimOrigin::JavaScript,
+    )
+    .map_err(napi::Error::from_reason)
 }
 
 fn core_tick_connection<S>(
@@ -6674,6 +6663,32 @@ mod tests {
     }
 
     #[test]
+    fn identity_claim_ingress_omits_recursive_json_but_keeps_scalar_prototype_names() {
+        let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let claims = crate::core_claims_from_json(
+            author,
+            Some(json!({
+                "profile": { "handler_only": true },
+                "mixed": ["editor", { "nested": true }],
+                "__proto__": "safe",
+                "constructor": "also-safe",
+            })),
+        )
+        .expect("recursive metadata must not reject NAPI admission");
+
+        assert!(!claims.contains_key(&jazz::query::provider_claim_key("profile")));
+        assert!(!claims.contains_key(&jazz::query::provider_claim_key("mixed")));
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("__proto__")),
+            Some(&CoreValue::String("safe".to_owned()))
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("constructor")),
+            Some(&CoreValue::String("also-safe".to_owned()))
+        );
+    }
+
+    #[test]
     fn identity_claim_ingress_derives_first_party_auth_mode_from_verified_author() {
         let author = CoreAuthorSubject::from_canonical(r#"["urn:jazz:local-first","alice"]"#)
             .expect("canonical first-party author");
@@ -7155,32 +7170,37 @@ mod tests {
     #[test]
     fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
         assert_eq!(
-            core_claim_value_from_json(json!(7)).unwrap(),
+            core_claim_value_from_json(json!(7)).unwrap().unwrap(),
             CoreValue::U64(7)
         );
         assert_eq!(
-            core_claim_value_from_json(json!(-7)).unwrap(),
+            core_claim_value_from_json(json!(-7)).unwrap().unwrap(),
             CoreValue::I64(-7)
         );
         assert_eq!(
             core_claim_value_from_json(serde_json::Value::Number(
                 serde_json::Number::from_f64(7.0).unwrap()
             ))
+            .unwrap()
             .unwrap(),
             CoreValue::U64(7),
             "JS-number deserialization must agree with integer JSON"
         );
         assert_eq!(
-            core_claim_value_from_json(json!(7.5)).unwrap(),
+            core_claim_value_from_json(json!(7.5)).unwrap().unwrap(),
             CoreValue::F64(7.5)
         );
         assert_eq!(
-            core_claim_value_from_json(json!(9_007_199_254_740_992_u64)).unwrap(),
+            core_claim_value_from_json(json!(9_007_199_254_740_992_u64))
+                .unwrap()
+                .unwrap(),
             CoreValue::F64(9_007_199_254_740_992.0),
             "integers beyond Number.MAX_SAFE_INTEGER must not participate in integer policy matching"
         );
         assert_eq!(
-            core_claim_value_from_json(json!(-9_007_199_254_740_992_i64)).unwrap(),
+            core_claim_value_from_json(json!(-9_007_199_254_740_992_i64))
+                .unwrap()
+                .unwrap(),
             CoreValue::F64(-9_007_199_254_740_992.0)
         );
     }

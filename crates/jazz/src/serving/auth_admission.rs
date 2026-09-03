@@ -458,47 +458,16 @@ pub fn jwt_json_claims_to_policy_claims(
         ) {
             continue;
         }
-        if let Some(value) = json_claim_to_policy_claim(value)? {
+        if let Some(value) = crate::tools::policy_claims::json_value_to_policy_claim(
+            value,
+            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+        )
+        .map_err(AuthAdmissionError::InvalidJwt)?
+        {
             claims.insert(name, value);
         }
     }
     Ok(claims)
-}
-
-fn json_claim_to_policy_claim(
-    value: serde_json::Value,
-) -> Result<Option<Value>, AuthAdmissionError> {
-    match value {
-        serde_json::Value::Null => Ok(Some(Value::Nullable(None))),
-        serde_json::Value::Bool(value) => Ok(Some(Value::Bool(value))),
-        serde_json::Value::Number(number) => {
-            crate::tools::policy_claims::json_number_to_policy_claim(
-                number,
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
-            )
-            .map_err(AuthAdmissionError::InvalidJwt)
-            .map(Some)
-        }
-        serde_json::Value::String(value) => Ok(Some(
-            value
-                .parse()
-                .map(Value::Uuid)
-                .unwrap_or(Value::String(value)),
-        )),
-        serde_json::Value::Array(values) => {
-            let mut claims = Vec::with_capacity(values.len());
-            for value in values {
-                let Some(value) = json_claim_to_policy_claim(value)? else {
-                    return Ok(None);
-                };
-                claims.push(value);
-            }
-            Ok(Some(Value::Array(claims)))
-        }
-        // OIDC providers routinely attach unrelated nested metadata. It is not
-        // representable in policy claims, so omit this claim as before.
-        serde_json::Value::Object(_) => Ok(None),
-    }
 }
 
 /// Bind an exact issuer/subject pair into the logical Jazz author identity.
