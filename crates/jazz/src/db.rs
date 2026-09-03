@@ -1618,6 +1618,7 @@ type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
 struct PendingLocalPublication {
     published: Rc<PublishedTransaction>,
     upload_unit: Option<SyncMessage>,
+    settlement: Pin<Box<dyn Future<Output = Result<TxId, Error>> + 'static>>,
 }
 
 type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;

@@ -118,7 +118,8 @@ For the two self-signed issuers, the signed `jazz_pub_key` verifies the proof
 and derives `sub`; it is not copied into `session.claims` as an application
 policy input. The client and authority therefore bind the same empty claim map
 when no application claim exists, while issuer-scoped authorship remains exact.
-This provisional clarification is tracked for review in [#2518](https://github.com/garden-co/jazz/issues/2518).
+This proof-versus-policy boundary was settled in
+[#2518](https://github.com/garden-co/jazz/issues/2518).
 
 ### Local-first identity root format
 

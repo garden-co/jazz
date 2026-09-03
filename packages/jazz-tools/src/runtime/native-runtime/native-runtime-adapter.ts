@@ -429,7 +429,7 @@ type NativeDb = {
     descriptors: unknown,
     updatedAtMs?: number | null,
   ): Write;
-  connectUpstream(): Transport;
+  connectUpstream(): Transport | Promise<Transport>;
   connectUpstreamWithSession?(
     protocolVersion: number,
     features: number,
@@ -940,10 +940,10 @@ export class NativeRuntimeAdapter implements Runtime {
     }) as (error: Error | null, urgency: string) => void);
   }
 
-  connectUpstreamPeer(): Transport {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.connectUpstreamPeer();
+  async connectUpstreamPeer(): Promise<Transport> {
+    if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer();
     this.peerUpstreamAttached = true;
-    return this.db.connectUpstream();
+    return await this.db.connectUpstream();
   }
 
   onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
@@ -2300,7 +2300,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private async connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Promise<Transport> {
     const authority = negotiation.authority;
     const connectWithSession = this.db.connectUpstreamWithSession;
-    if (!authority || !connectWithSession) return this.db.connectUpstream();
+    if (!authority || !connectWithSession) return await this.db.connectUpstream();
     const localEpoch = this.nextServerConnectionEpoch++;
     return await connectWithSession.call(
       this.db,

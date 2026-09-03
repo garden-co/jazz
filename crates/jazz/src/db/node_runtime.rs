@@ -99,7 +99,6 @@ where
     pub(super) pending_transaction_abandonments: TransactionAbandonmentTombstones,
     transaction_abandonments_closed: Cell<bool>,
     transaction_abandonment_shutdown_pending: Cell<bool>,
-    pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
     subscription_finalizations_closed: Cell<bool>,
@@ -233,7 +232,6 @@ where
             pending_transaction_abandonments: Rc::new(RefCell::new(BTreeSet::new())),
             transaction_abandonments_closed: Cell::new(false),
             transaction_abandonment_shutdown_pending: Cell::new(false),
-            local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
             subscription_finalizations_closed: Cell::new(false),
@@ -668,11 +666,24 @@ where
         published: PublishedTransaction,
         upload_unit: Option<SyncMessage>,
     ) {
+        let published = Rc::new(published);
+        let settlement_publication = Rc::clone(&published);
+        let settlement_node = Rc::clone(&self.node);
+        let settlement = Box::pin(async move {
+            let tx_id = settlement_publication.tx_id();
+            let persistence = settlement_publication.persist().await;
+            settlement_node
+                .lock()
+                .await
+                .settle_published_transaction(tx_id, persistence)?;
+            Ok(tx_id)
+        });
         self.pending_local_publications
             .borrow_mut()
             .push_back(PendingLocalPublication {
-                published: Rc::new(published),
+                published,
                 upload_unit,
+                settlement,
             });
         self.schedule_tick(TickUrgency::Immediate);
     }
@@ -685,31 +696,50 @@ where
         !self.pending_local_publications.borrow().is_empty()
     }
 
-    pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
-        let _settler = self.local_publication_settler.lock().await;
+    fn poll_local_publication_settlement(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        use std::task::Poll;
+
         loop {
-            let Some((published, upload_unit)) = self
-                .pending_local_publications
-                .borrow()
-                .front()
-                .map(|pending| (Rc::clone(&pending.published), pending.upload_unit.clone()))
-            else {
-                return Ok(());
+            let Some(mut pending) = self.pending_local_publications.borrow_mut().pop_front() else {
+                return Poll::Ready(Ok(()));
             };
-            let tx_id = published.tx_id();
-            let persistence = published.persist().await;
-            self.node
-                .lock()
-                .await
-                .settle_published_transaction(tx_id, persistence)?;
-            let settled = self
-                .pending_local_publications
-                .borrow_mut()
-                .pop_front()
-                .expect("settled local publication remains at queue front");
-            debug_assert_eq!(settled.published.tx_id(), tx_id);
-            self.queue_pending_upload(tx_id, upload_unit);
+            match pending.settlement.as_mut().poll(cx) {
+                Poll::Pending => {
+                    self.pending_local_publications
+                        .borrow_mut()
+                        .push_front(pending);
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(tx_id)) => {
+                    debug_assert_eq!(pending.published.tx_id(), tx_id);
+                    self.queue_pending_upload(tx_id, pending.upload_unit);
+                }
+            }
         }
+    }
+
+    /// Advance ordered local durability without keeping the host tick pending.
+    /// A retained mutation may own the node lock needed to finish settlement;
+    /// the tick must still poll that mutation. The runtime-owned waker requests
+    /// another owner turn when this retained settlement can make progress.
+    pub(super) fn poll_local_publication_settlement_once(&self) -> Result<bool, Error> {
+        use std::task::{Context, Poll, Waker};
+
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        match self.poll_local_publication_settlement(&mut context) {
+            Poll::Pending => Ok(true),
+            Poll::Ready(result) => result.map(|()| false),
+        }
+    }
+
+    pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
+        futures::future::poll_fn(|cx| self.poll_local_publication_settlement(cx)).await
     }
 
     /// Restore locally originated, unsettled durable writes into the

@@ -644,8 +644,9 @@ aligned with the settled typed result-member model.
 
 Local-first pagination is literal over local knowledge. An offset into an
 authority page is not necessarily the same offset into the receiver's cached
-inputs. The draft interpretation and its pagination UX implications remain
-flagged for review in [#2502](https://github.com/garden-co/jazz/issues/2502).
+inputs. Pagination follows the same tier-selected input semantics as filtering,
+ordering, and projection; it has no retained-page exception. This contract was
+settled in [#2502](https://github.com/garden-co/jazz/issues/2502).
 
 The same compiler-owned window stage is used by authority closure publication
 and by the receiver's application collector. A closure for a bounded root or

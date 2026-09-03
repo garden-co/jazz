@@ -2901,7 +2901,7 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = connectUpstream)]
-    pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
+    pub fn connect_upstream(&self) -> Result<js_sys::Promise, JsValue> {
         let queues = WasmWireQueues::default();
         // Browser WebSocket carriers negotiate ordinary sync only. They do not
         // receive the authenticated endpoint context required for scoped
@@ -2918,29 +2918,32 @@ impl WasmDb {
             None,
         ));
         let db_inner = self.open_inner()?;
-        let inner = match &db_inner {
-            WasmDbInner::Memory(db) => WasmTransportInner::Memory {
-                db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
-            },
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => WasmTransportInner::Browser {
-                db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
-            },
-            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-        };
-        let auxiliary_pump = inner.auxiliary_pump();
-        Ok(WasmTransport {
-            inner,
-            queues,
-            auxiliary_pump,
-            protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
-            features: jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
-            subscriber_identity: None,
-        })
+        Ok(future_to_promise(async move {
+            let inner = match &db_inner {
+                WasmDbInner::Memory(db) => WasmTransportInner::Memory {
+                    db: Rc::clone(db),
+                    connection: Some(db.connect_upstream(transport).await),
+                },
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => WasmTransportInner::Browser {
+                    db: Rc::clone(db),
+                    connection: Some(db.connect_upstream(transport).await),
+                },
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            };
+            let auxiliary_pump = inner.auxiliary_pump();
+            Ok(WasmTransport {
+                inner,
+                queues,
+                auxiliary_pump,
+                protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                features: jazz::wire::current_wire_features()
+                    & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                        | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                subscriber_identity: None,
+            }
+            .into())
+        }))
     }
 
     /// Connect after the browser carrier has accepted the server Hello. The
@@ -3674,7 +3677,7 @@ fn update_options_from_js(options: JsValue) -> Result<jazz::db::UpdateOptions, J
         None => {
             return Err(JsValue::from_str(
                 "branch view base requires a head selector",
-            ))
+            ));
         }
     };
     Ok(jazz::db::UpdateOptions {
