@@ -1414,6 +1414,11 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
 
 #[test]
 fn scope_relay_local_read_delivers_cache_before_authority_opens() {
+    assert_scope_relay_local_read_before_authority(false);
+    assert_scope_relay_local_read_before_authority(true);
+}
+
+fn assert_scope_relay_local_read_before_authority(seed_cache: bool) {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xb4; 16]);
     let core = open_core(0x64, AuthorSubject::SYSTEM, &schema);
@@ -1422,9 +1427,11 @@ fn scope_relay_local_read_delivers_cache_before_authority_opens() {
     let foreground = open_db(0x66, author, &schema);
     foreground.set_non_durable_client();
     let cached = row(0x67);
-    relay
-        .insert_with_id_attributed(author, "todos", cached, cells("cached", false, author))
-        .unwrap();
+    if seed_cache {
+        relay
+            .insert_with_id_attributed(author, "todos", cached, cells("cached", false, author))
+            .unwrap();
+    }
     let (relay_transport, core_transport) = duplex();
     let _relay_upstream = block_on(relay.connect_upstream(relay_transport));
     let (foreground_transport, relay_transport) = duplex();
@@ -1464,8 +1471,27 @@ fn scope_relay_local_read_delivers_cache_before_authority_opens() {
     }
     assert_eq!(
         row_ids(&prepared_all(&foreground, &query, opts.clone())),
-        vec![cached]
+        if seed_cache { vec![cached] } else { vec![] }
     );
+    if !seed_cache {
+        relay
+            .insert_with_id_attributed(author, "todos", cached, cells("cached", false, author))
+            .unwrap();
+        for _ in 0..16 {
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+        }
+        while let Some(event) = stream.try_next_event() {
+            assert!(
+                !matches!(event, SubscriptionEvent::Rejected { .. }),
+                "{event:?}"
+            );
+        }
+        assert_eq!(
+            row_ids(&prepared_all(&foreground, &query, opts.clone())),
+            vec![cached]
+        );
+    }
     let _core_relay =
         core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 1);
     for _ in 0..16 {

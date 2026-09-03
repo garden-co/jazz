@@ -1619,9 +1619,10 @@ where
                         .iter()
                         .all(|source| overlay.1.get(source).copied() == Some(true)))
             {
-                return Err(invalid(
-                    "reset source coverage does not exactly match compiled source set".to_owned(),
-                ));
+                return Err(invalid(format!(
+                    "reset source coverage does not exactly match compiled source set: expected {compiled_sources:?}, received {:?}",
+                    overlay.1
+                )));
             }
             for fact in &update.program_fact_adds {
                 if let ProgramFactEntry::CoveredInput(input) = fact {
