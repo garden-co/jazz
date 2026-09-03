@@ -320,6 +320,14 @@ relations, settled/tier metadata, and a `reset` flag. There is no separate
 snapshot event type. The first delivery for a fresh subscription is a reset
 delta from the empty result set; reducing that delta yields the initial view.
 
+The maintained stream owns both this opening and all subsequent changes.
+Bindings must not manufacture an empty opening or supplement the stream with
+an independent one-shot cache read: such a read has no ordering relationship
+with delivered deltas and may overwrite newer results or fail independently.
+An empty opening is a valid result, not a reason to launch a second read.
+Explicit server-rendered hydration snapshots remain a separate initial-display
+facility; they do not replace the live stream's opening contract.
+
 Consumers own the materialized result set. The contract is that applying the
 delta reducer to events in stream order produces the same result as a one-shot
 read at the corresponding frontier. Non-reset deltas do not carry a complete
