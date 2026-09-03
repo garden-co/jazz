@@ -1,5 +1,5 @@
 import nativeRelay from './NativeJazzRelay';
-import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_VERSION } from './native-relay-abi';
+import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from './native-relay-abi';
 
 /**
  * Versioned private global installed by the native JSI bridge.
@@ -16,7 +16,7 @@ export interface NativeRelayAbiRange {
   maximum: number;
 }
 
-export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_VERSION };
+export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 };
 
 function requireNativeRelay() {
   if (nativeRelay == null) {
@@ -144,11 +144,6 @@ function foregroundRuntimeInstallationError(): Error {
 function requireCompatibleRelay() {
   const relay = requireNativeRelay();
   const nativeAbi = relay.getAbiVersion();
-  if (nativeAbi === 0) {
-    throw new Error(
-      'Jazz native relay is unavailable: this native build contains only the source fallback (ABI 0), not the Jazz relay artifact. Install a matching native development or release build.'
-    );
-  }
   if (
     nativeAbi < NATIVE_RELAY_ABI.minimum ||
     nativeAbi > NATIVE_RELAY_ABI.maximum

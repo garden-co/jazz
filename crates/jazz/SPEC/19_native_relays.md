@@ -131,9 +131,9 @@ storage with a clear **“new native development/release build required”** err
 This makes OTA JavaScript updates safe without pretending they can update an
 embedded Rust library.
 
-ABI version 3 introduces host-generated opaque admission capabilities and
-trusted revocation. Its postcard command contract is intentionally incompatible
-with version 2, whose `open` command carried a predictable integer scope handle.
+The first public ABI is V1. It includes host-generated opaque admission
+capabilities and trusted revocation; no earlier implementation number or
+compatibility path is part of the released contract.
 
 The ABI stays coarse and binary:
 
@@ -343,7 +343,7 @@ before opening a foreground. Unknown or malformed command/response bytes fail
 closed, with no partially returned buffer. Command outputs are copied into
 JS-owned memory before Rust frees its response allocation.
 
-**V1 vertical slice.** Native relay ABI 7 defines the concrete foreground
+**V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
 local-first query lifecycle `PrepareQuery`, `All`, `Subscribe`,
 `DrainSubscription`, `Unsubscribe`. Query inputs are exactly the canonical
@@ -377,7 +377,7 @@ cleanup; the next bounded `Tick` performs its finalization, because awaiting
 that acknowledgement while already executing on the core owner thread would
 deadlock. Repeated close or unsubscribe reports `false`.
 
-ABI 7 also adds a deliberately narrow write family: `BeginTransaction` with
+ABI V1 also includes a deliberately narrow write family: `BeginTransaction` with
 the ordinary `mergeable` or `exclusive` core semantics, full-cell
 `Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
 `RollbackTransaction`. Cell payloads are the established postcard
@@ -410,17 +410,16 @@ query or encoded-cell bytes. `tick`/`close` convenience JSI methods may remain
 internal compatibility shorthands only while they invoke the same foreground
 lifecycle; `jazz-tools` must move to `execute` as each family is implemented.
 
-**Wake registration.** ABI 6 leaves that postcard command vocabulary unchanged
-and adds the private JSI `setTickScheduler(callback)` companion on each
-foreground handle. The callback receives `"immediate"`, `"deferred"`, or
-`"after:<milliseconds>"`; it schedules the adapter's normal JS-side tick and
-does not synchronously call the native handle. Rust records one opaque platform
-callback per foreground Db. The C++ registration coalesces owner-thread signals
-per foreground/runtime through that runtime's `CallInvoker`, chooses the most
-urgent pending wake, and never invokes JavaScript while a host or relay mutex
-is held. Teardown synchronously clears Rust's callback before freeing its
-platform context; scope revocation sends a terminal cancel signal, so an
-already queued callback becomes a no-op. This is a JSI lifecycle extension,
+**Wake registration.** ABI V1 includes the private JSI `setTickScheduler(callback)`
+companion on each foreground handle. The callback receives `"immediate"`,
+`"deferred"`, or `"after:<milliseconds>"`; it schedules the adapter's normal
+JS-side tick and does not synchronously call the native handle. Rust records
+one opaque platform callback per foreground Db. The C++ registration coalesces
+owner-thread signals per foreground/runtime through that runtime's `CallInvoker`,
+chooses the most urgent pending wake, and never invokes JavaScript while a host
+or relay mutex is held. Teardown synchronously clears Rust's callback before
+freeing its platform context; scope revocation sends a terminal cancel signal,
+so an already queued callback becomes a no-op. This is a JSI lifecycle extension,
 not a new byte command discriminant.
 
 Synchronous local operations (opening an attached foreground runtime, local

@@ -30,11 +30,11 @@ if (!/^[0-9a-f]{40}$/i.test(sourceRevision ?? ""))
   throw new Error("JAZZ_NATIVE_RELAY_SOURCE_REVISION must be the exact 40-character source commit");
 
 const abiSource = readFileSync(join(relaySource, "src/lib.rs"), "utf8");
-const abi = Number(/pub const NATIVE_RELAY_ABI_VERSION: u16 = (\d+);/.exec(abiSource)?.[1]);
+const abi = Number(/pub const NATIVE_RELAY_ABI_V1: u16 = (\d+);/.exec(abiSource)?.[1]);
 if (!Number.isSafeInteger(abi)) throw new Error("could not read native relay ABI from Rust source");
 const tsAbiSource = readFileSync(join(root, "crates/jazz-rn/src/native-relay-abi.ts"), "utf8");
 const tsAbi = Number(
-  /export const NATIVE_RELAY_ABI_VERSION = (\d+) as const;/.exec(tsAbiSource)?.[1],
+  /export const NATIVE_RELAY_ABI_V1 = (\d+) as const;/.exec(tsAbiSource)?.[1],
 );
 if (tsAbi !== abi)
   throw new Error(

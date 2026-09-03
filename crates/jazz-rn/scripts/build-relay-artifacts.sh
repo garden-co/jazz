@@ -8,7 +8,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 package="$root/crates/jazz-rn"
 relay_manifest="$root/crates/jazz-native-relay/Cargo.toml"
 platform=${1:?usage: build-relay-artifacts.sh <android|ios>}
-abi=$(sed -nE 's/^pub const NATIVE_RELAY_ABI_VERSION: u16 = ([0-9]+);/\1/p' \
+abi=$(sed -nE 's/^pub const NATIVE_RELAY_ABI_V1: u16 = ([0-9]+);/\1/p' \
   "$root/crates/jazz-native-relay/src/lib.rs")
 if [[ -z "$abi" ]]; then
   echo "could not determine native relay ABI version" >&2

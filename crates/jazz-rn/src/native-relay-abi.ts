@@ -6,9 +6,9 @@
  * value at runtime through `jazz_native_relay_abi_version()`, while TypeScript
  * imports this checked-in generated mirror before it sends any bytes.
  */
-export const NATIVE_RELAY_ABI_VERSION = 7 as const;
+export const NATIVE_RELAY_ABI_V1 = 1 as const;
 
 export const NATIVE_RELAY_ABI = {
-  minimum: NATIVE_RELAY_ABI_VERSION,
-  maximum: NATIVE_RELAY_ABI_VERSION,
+  minimum: NATIVE_RELAY_ABI_V1,
+  maximum: NATIVE_RELAY_ABI_V1,
 } as const;

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
+import { NATIVE_RELAY_ABI_V1 } from "jazz-rn";
 import {
   PostcardWriter,
   createRecord,
@@ -13,7 +14,7 @@ const nativeForegroundTest = vi.hoisted(() => ({
   close: vi.fn(() => true),
   openAttached: vi.fn(),
   turboModule: {
-    getAbiVersion: () => 7,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: async () => {
       throw new Error("the read-only foreground path must not use TurboModule execute");
     },
@@ -52,7 +53,7 @@ const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => inde
 
 function installJsiForegroundFactory() {
   (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV1 = {
-    abiVersion: 7,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached: (capability: Uint8Array) => {
       nativeForegroundTest.openAttached(capability);
       return {

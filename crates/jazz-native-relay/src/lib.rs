@@ -38,11 +38,9 @@ use jazz::wire::{TransportError, decode_sync_message, encode_sync_message};
 use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
 use thiserror::Error;
 
-/// Increment this only for a breaking change to the native command/wire ABI.
-/// JS wrappers must compare this with their expected range during startup and
-/// explain that an OTA update needs a new native development build when it is
-/// incompatible.
-pub const NATIVE_RELAY_ABI_VERSION: u16 = 7;
+/// The first public native-relay ABI. Future breaking command/wire changes
+/// receive a distinct version; no historical implementation number is public.
+pub const NATIVE_RELAY_ABI_V1: u16 = 1;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_DEFERRED: u8 = 1;
@@ -291,7 +289,7 @@ pub enum RelayCommandResponse {
 /// This is intentionally a separate vocabulary from [`RelayCommandRequest`]:
 /// relay commands own persistent-relay lifecycle and peer frames, while these
 /// commands own the existing byte-oriented `NativeDb` surface for one UI
-/// runtime. Both are postcard and are versioned by [`NATIVE_RELAY_ABI_VERSION`].
+/// runtime. Both are postcard and are versioned by [`NATIVE_RELAY_ABI_V1`].
 /// A caller can carry an opaque foreground handle only after capability-only
 /// admission; it can never smuggle an open configuration through this codec.
 ///
@@ -301,10 +299,8 @@ pub enum RelayCommandResponse {
 /// first capability-gated slice; non-default tiers/views remain unavailable
 /// until their shared codec is added.
 ///
-/// Adding these variants changed what an ABI-6 wrapper could safely request,
-/// so this extension is gated by native-relay ABI 7. Future changes follow
-/// the same rule: additive commands which a caller must understand require a
-/// new relay ABI, while a command's established payload is immutable.
+/// This is the settled V1 command vocabulary. Future incompatible changes
+/// require a new relay ABI, while a command's established payload is immutable.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum ForegroundDbCommandRequest {
     /// Verify that this attached foreground is still live and return the ABI.
@@ -694,7 +690,7 @@ impl NativeRelayHost {
     ) -> Result<RelayCommandResponse, JazzNativeRelayStatus> {
         match command {
             RelayCommandRequest::Probe => Ok(RelayCommandResponse::Probe {
-                abi_version: NATIVE_RELAY_ABI_VERSION,
+                abi_version: NATIVE_RELAY_ABI_V1,
             }),
             RelayCommandRequest::Open {
                 supported_abi_minimum,
@@ -1209,8 +1205,8 @@ impl NativeRelayHost {
             JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let config = RelayOpenConfig {
             supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_VERSION,
-                maximum: NATIVE_RELAY_ABI_VERSION,
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
             },
             scope: request.scope.into(),
             sqlite_path: PathBuf::from(request.sqlite_path),
@@ -1344,7 +1340,7 @@ fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
 /// stay behind the future shared binary relay codec.
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
-    NATIVE_RELAY_ABI_VERSION
+    NATIVE_RELAY_ABI_V1
 }
 
 /// Execute one codec-owned native relay command.
@@ -1387,7 +1383,7 @@ pub unsafe extern "C" fn jazz_native_relay_execute(
     };
     let response = match command {
         RelayCommandRequest::Probe => RelayCommandResponse::Probe {
-            abi_version: NATIVE_RELAY_ABI_VERSION,
+            abi_version: NATIVE_RELAY_ABI_V1,
         },
         _ => return JazzNativeRelayStatus::InvalidCommand,
     };
@@ -1922,7 +1918,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
     }
     let response = match command {
         ForegroundDbCommandRequest::Probe => ForegroundDbCommandResponse::Probe {
-            abi_version: NATIVE_RELAY_ABI_VERSION,
+            abi_version: NATIVE_RELAY_ABI_V1,
         },
         ForegroundDbCommandRequest::Tick => match host.tick_foreground(foreground) {
             Ok(()) => ForegroundDbCommandResponse::Ticked,
@@ -2196,11 +2192,11 @@ pub fn ensure_native_relay_abi_compatible(
     wrapper_range: NativeRelayAbiRange,
 ) -> Result<u16, RelayError> {
     wrapper_range.validate()?;
-    if wrapper_range.includes(NATIVE_RELAY_ABI_VERSION) {
-        Ok(NATIVE_RELAY_ABI_VERSION)
+    if wrapper_range.includes(NATIVE_RELAY_ABI_V1) {
+        Ok(NATIVE_RELAY_ABI_V1)
     } else {
         Err(RelayError::IncompatibleAbi {
-            native: NATIVE_RELAY_ABI_VERSION,
+            native: NATIVE_RELAY_ABI_V1,
             minimum: wrapper_range.minimum,
             maximum: wrapper_range.maximum,
         })
@@ -3707,7 +3703,7 @@ impl NativeRelay {
     }
 
     pub fn abi_version(&self) -> u16 {
-        NATIVE_RELAY_ABI_VERSION
+        NATIVE_RELAY_ABI_V1
     }
 
     /// Verify that a host wrapper understands this embedded native relay before
@@ -4511,11 +4507,11 @@ mod tests {
         let b = fixture.open_foreground(&b_capability);
         assert!(matches!(
             fixture.execute(a, ForegroundDbCommandRequest::Probe),
-            ForegroundDbCommandResponse::Probe { abi_version } if abi_version == NATIVE_RELAY_ABI_VERSION
+            ForegroundDbCommandResponse::Probe { abi_version } if abi_version == NATIVE_RELAY_ABI_V1
         ));
         assert!(matches!(
             fixture.execute(b, ForegroundDbCommandRequest::Probe),
-            ForegroundDbCommandResponse::Probe { abi_version } if abi_version == NATIVE_RELAY_ABI_VERSION
+            ForegroundDbCommandResponse::Probe { abi_version } if abi_version == NATIVE_RELAY_ABI_V1
         ));
 
         fixture.insert_todo(a, [0xa1; 16], "scope-a-only");
@@ -4920,8 +4916,8 @@ mod tests {
     fn config(path: PathBuf, auth_scope: Option<&str>) -> RelayOpenConfig {
         RelayOpenConfig {
             supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_VERSION,
-                maximum: NATIVE_RELAY_ABI_VERSION,
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
             },
             scope: RelayScope {
                 app_namespace: "native-relay-test".to_owned(),
@@ -5325,19 +5321,19 @@ mod tests {
     fn abi_handshake_accepts_supported_versions_before_storage_opens() {
         assert_eq!(
             ensure_native_relay_abi_compatible(NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_VERSION,
-                maximum: NATIVE_RELAY_ABI_VERSION,
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
             })
             .unwrap(),
-            NATIVE_RELAY_ABI_VERSION
+            NATIVE_RELAY_ABI_V1
         );
         assert_eq!(
             NativeRelay::ensure_abi_compatible(NativeRelayAbiRange {
                 minimum: 0,
-                maximum: NATIVE_RELAY_ABI_VERSION,
+                maximum: NATIVE_RELAY_ABI_V1,
             })
             .unwrap(),
-            NATIVE_RELAY_ABI_VERSION
+            NATIVE_RELAY_ABI_V1
         );
     }
 
@@ -5355,10 +5351,10 @@ mod tests {
         ));
         assert!(matches!(
             ensure_native_relay_abi_compatible(NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_VERSION.saturating_add(1),
+                minimum: NATIVE_RELAY_ABI_V1.saturating_add(1),
                 maximum: u16::MAX,
             }),
-            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_VERSION
+            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_V1
         ));
     }
 
@@ -5368,14 +5364,14 @@ mod tests {
         let sqlite_path = directory.path().join("must-not-exist.sqlite");
         let mut open = config(sqlite_path.clone(), Some("alice"));
         open.supported_abi = NativeRelayAbiRange {
-            minimum: NATIVE_RELAY_ABI_VERSION.saturating_add(1),
+            minimum: NATIVE_RELAY_ABI_V1.saturating_add(1),
             maximum: u16::MAX,
         };
         let registry = NativeRelayRegistry::default();
 
         assert!(matches!(
             registry.open(open),
-            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_VERSION
+            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_V1
         ));
         assert!(
             !sqlite_path.exists(),
@@ -5393,7 +5389,7 @@ mod tests {
         let sqlite_path = directory.path().join("must-not-exist-direct.sqlite");
         let mut open = config(sqlite_path.clone(), Some("alice"));
         open.supported_abi = NativeRelayAbiRange {
-            minimum: NATIVE_RELAY_ABI_VERSION.saturating_add(1),
+            minimum: NATIVE_RELAY_ABI_V1.saturating_add(1),
             maximum: u16::MAX,
         };
         let threads_started = Arc::new(AtomicUsize::new(0));
@@ -5401,7 +5397,7 @@ mod tests {
 
         assert!(matches!(
             NativeRelay::spawn(open),
-            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_VERSION
+            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_V1
         ));
         assert_eq!(threads_started.load(Ordering::Relaxed), 0);
         assert!(
@@ -5566,8 +5562,8 @@ mod tests {
         let admitted_scope = unsafe { (*host).inner.lock().unwrap().admit_scope(admission) }
             .expect("test admission is valid");
         let open = RelayCommandRequest::Open {
-            supported_abi_minimum: NATIVE_RELAY_ABI_VERSION,
-            supported_abi_maximum: NATIVE_RELAY_ABI_VERSION,
+            supported_abi_minimum: NATIVE_RELAY_ABI_V1,
+            supported_abi_maximum: NATIVE_RELAY_ABI_V1,
             admitted_scope,
         };
         unsafe fn command(
@@ -6148,8 +6144,8 @@ mod tests {
         assert_ne!(bob.0, [0; 32]);
 
         let open = |admitted_scope| RelayCommandRequest::Open {
-            supported_abi_minimum: NATIVE_RELAY_ABI_VERSION,
-            supported_abi_maximum: NATIVE_RELAY_ABI_VERSION,
+            supported_abi_minimum: NATIVE_RELAY_ABI_V1,
+            supported_abi_maximum: NATIVE_RELAY_ABI_V1,
             admitted_scope,
         };
         let execute = |request| unsafe { (*host).inner.lock().unwrap().execute(request) };
@@ -6718,7 +6714,7 @@ mod tests {
         assert_eq!(
             postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
             ForegroundDbCommandResponse::Probe {
-                abi_version: NATIVE_RELAY_ABI_VERSION
+                abi_version: NATIVE_RELAY_ABI_V1
             }
         );
         let (status, response) = execute(ForegroundDbCommandRequest::Tick);

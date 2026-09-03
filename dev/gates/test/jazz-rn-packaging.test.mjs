@@ -282,7 +282,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     indexExports[0],
     [
       "NATIVE_RELAY_ABI",
-      "NATIVE_RELAY_ABI_VERSION",
+      "NATIVE_RELAY_ABI_V1",
       "decodeNativeForegroundResponse",
       "encodeNativeForegroundCommand",
       "executeNativeRelayCommand",
@@ -842,14 +842,6 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
           JAZZ_RN_PACKED_NATIVE_ABI: String(packedRelayAbi),
         },
         /native relay is unavailable.*Expo Go never includes it/i,
-      ],
-      [
-        "source-only ABI zero",
-        {
-          JAZZ_RN_PACKED_NATIVE_AVAILABLE: "1",
-          JAZZ_RN_PACKED_NATIVE_ABI: "0",
-        },
-        /source fallback \(ABI 0\)/i,
       ],
       [
         "incompatible native ABI",
@@ -1745,7 +1737,7 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     encoding: "utf8",
   }).trim();
   const nativeRelayAbi = Number(
-    /pub const NATIVE_RELAY_ABI_VERSION: u16 = (\d+);/.exec(
+    /pub const NATIVE_RELAY_ABI_V1: u16 = (\d+);/.exec(
       readFileSync(
         new URL("../../../crates/jazz-native-relay/src/lib.rs", import.meta.url),
         "utf8",

@@ -123,7 +123,7 @@ jazz_native_relay_status jazz_native_relay_host_lease_set_foreground_wake_callba
 
 /* Execute one complete postcard foreground NativeDb command against a live
  * attached foreground handle. This is private to native binding adapters: it
- * is not part of the public relay TurboModule command channel. ABI 7 includes
+ * is not part of the public relay TurboModule command channel. ABI V1 includes
  * the existing core mergeable/exclusive transaction semantics and full-cell
  * mutations, using the shared encoded-cell record envelope. Transaction
  * handles are opaque and scoped to this foreground; commits return the public

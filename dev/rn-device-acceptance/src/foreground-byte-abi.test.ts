@@ -7,7 +7,7 @@ import {
   proveSameJsiRuntimeWriteSubscription,
   type ForegroundByteCodec,
 } from "./foreground-byte-abi.ts";
-import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
+import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import {
   createRecord,
   PostcardWriter,
@@ -21,8 +21,8 @@ const codec = {
     return Uint8Array.of(command === "probe" ? 0 : command === "tick" ? 1 : 2);
   },
   decode(bytes: Uint8Array) {
-    if (bytes[0] === 0 && bytes[1] === NATIVE_RELAY_ABI_VERSION)
-      return { type: "probe" as const, abiVersion: NATIVE_RELAY_ABI_VERSION };
+    if (bytes[0] === 0 && bytes[1] === NATIVE_RELAY_ABI_V1)
+      return { type: "probe" as const, abiVersion: NATIVE_RELAY_ABI_V1 };
     if (bytes[0] === 1) return { type: "ticked" as const };
     if (bytes[0] === 2) return { type: "closed" as const, closed: bytes[1] === 1 };
     throw new Error("malformed response");
@@ -37,7 +37,7 @@ test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () 
     execute(command: Uint8Array) {
       commands.push(command[0]!);
       if (closed && command[0] !== 2) throw new Error("foreground closed");
-      if (command[0] === 0) return Uint8Array.of(0, NATIVE_RELAY_ABI_VERSION);
+      if (command[0] === 0) return Uint8Array.of(0, NATIVE_RELAY_ABI_V1);
       if (command[0] === 1) return Uint8Array.of(1);
       if (command[0] === 2) {
         const first = !closed;
@@ -51,7 +51,7 @@ test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () 
   };
   proveForegroundByteAbi(
     {
-      abiVersion: NATIVE_RELAY_ABI_VERSION,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       openAttached: (received) => {
         assert.deepEqual(received, capability);
         return foreground;
@@ -145,7 +145,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     writerMustProgress = false,
     writerMustYield = false,
   ) => ({
-    abiVersion: NATIVE_RELAY_ABI_VERSION,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached(capability: Uint8Array) {
       const isA = capability[0] === 1;
       let stagedWrite = false;
@@ -285,7 +285,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     let opens = 0;
     const closes: string[] = [];
     const factory = {
-      abiVersion: NATIVE_RELAY_ABI_VERSION,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       openAttached() {
         opens += 1;
         if (opens === 2 && failure === "reader-open")
@@ -363,7 +363,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
       }, 0);
     };
     const factory = {
-      abiVersion: NATIVE_RELAY_ABI_VERSION,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       openAttached() {
         return {
           execute(command: Uint8Array) {
@@ -569,7 +569,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   const schedulers: Array<((urgency: string) => void) | undefined> = [];
   const ticks = [0, 0];
   const factory = {
-    abiVersion: NATIVE_RELAY_ABI_VERSION,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached(received: Uint8Array) {
       assert.deepEqual(received, capability);
       const peer = opened++;

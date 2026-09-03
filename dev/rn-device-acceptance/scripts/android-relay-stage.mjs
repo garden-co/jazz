@@ -5,7 +5,7 @@ import { join, relative, resolve } from "node:path";
 const root = resolve(import.meta.dirname, "../../..");
 const abiSource = readFileSync(join(root, "crates/jazz-rn/src/native-relay-abi.ts"), "utf8");
 export const nativeRelayAbi = Number(
-  /export const NATIVE_RELAY_ABI_VERSION = (\d+) as const;/.exec(abiSource)?.[1],
+  /export const NATIVE_RELAY_ABI_V1 = (\d+) as const;/.exec(abiSource)?.[1],
 );
 if (!Number.isSafeInteger(nativeRelayAbi))
   throw new Error("could not read generated native relay ABI from jazz-rn");

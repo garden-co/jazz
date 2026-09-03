@@ -3,6 +3,8 @@ type FixtureNativeRelay = {
   execute(commandBase64: string): Promise<string>;
 };
 
+import { NATIVE_RELAY_ABI_V1 } from '../native-relay-abi';
+
 const foregroundRuntimeGlobal = '__jazzNativeForegroundRuntimeV1';
 
 type NativeForegroundCommand =
@@ -95,27 +97,14 @@ it('rejects an installed native build with an incompatible ABI before executing 
   const relay = loadRelay(nativeRelay);
 
   await expect(relay.executeNativeRelayCommand('AA==')).rejects.toThrow(
-    'Jazz native relay ABI 2 is incompatible with JavaScript ABI 7..=7; install a matching native development or release build.'
-  );
-  expect(nativeRelay.execute).not.toHaveBeenCalled();
-});
-
-it('rejects the source-only ABI fallback before executing a command', async () => {
-  const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 0,
-    execute: jest.fn(),
-  };
-  const relay = loadRelay(nativeRelay);
-
-  await expect(relay.executeNativeRelayCommand('AA==')).rejects.toThrow(
-    'Jazz native relay is unavailable: this native build contains only the source fallback (ABI 0), not the Jazz relay artifact. Install a matching native development or release build.'
+    'Jazz native relay ABI 2 is incompatible with JavaScript ABI 1..=1; install a matching native development or release build.'
   );
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
 
 it('forwards opaque commands only after the embedded relay ABI matches', async () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 7,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn().mockResolvedValue('AQ=='),
   };
   const relay = loadRelay(nativeRelay);
@@ -126,7 +115,7 @@ it('forwards opaque commands only after the embedded relay ABI matches', async (
 
 it('requires the matching bindings-installed foreground factory instead of attempting browser WASM', () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 7,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
@@ -141,18 +130,18 @@ it('accepts only the matching capability-only JSI foreground factory', () => {
   const foreground = foregroundFixture();
   const openAttached = jest.fn(() => foreground);
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: 7,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached,
   };
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 7,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
 
   const factory = relay.installNativeForegroundRuntime();
 
-  expect(factory.abiVersion).toBe(7);
+  expect(factory.abiVersion).toBe(NATIVE_RELAY_ABI_V1);
   const capability = new Uint8Array(32);
   expect(factory.openAttached(capability)).toMatchObject({
     execute: expect.any(Function),
@@ -170,7 +159,7 @@ it('rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
     { abiVersion: 2, openAttached: () => foregroundFixture() },
   ]) {
     const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => 7,
+      getAbiVersion: () => NATIVE_RELAY_ABI_V1,
       execute: jest.fn(),
     };
     if (factory !== undefined)
@@ -188,11 +177,11 @@ it('rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
 it('keeps malformed capability input out of the JSI foreground factory', () => {
   const openAttached = jest.fn(() => foregroundFixture());
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 7,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   };
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: 7,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached,
   };
   const relay = loadRelay(nativeRelay);
@@ -215,7 +204,7 @@ it('keeps malformed capability input out of the JSI foreground factory', () => {
 });
 
 it('uses a compact versioned byte vocabulary for the initial foreground NativeDb slice', () => {
-  const relay = loadRelay({ getAbiVersion: () => 7, execute: jest.fn() });
+  const relay = loadRelay({ getAbiVersion: () => NATIVE_RELAY_ABI_V1, execute: jest.fn() });
 
   expect(relay.encodeNativeForegroundCommand('probe')).toEqual(
     Uint8Array.of(0)
@@ -346,9 +335,9 @@ it('uses a compact versioned byte vocabulary for the initial foreground NativeDb
   ).toThrow(
     'Jazz native foreground transaction kind must be mergeable or exclusive'
   );
-  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(0, 7))).toEqual({
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(0, NATIVE_RELAY_ABI_V1))).toEqual({
     type: 'probe',
-    abiVersion: 7,
+    abiVersion: NATIVE_RELAY_ABI_V1,
   });
   expect(relay.decodeNativeForegroundResponse(Uint8Array.of(1))).toEqual({
     type: 'ticked',

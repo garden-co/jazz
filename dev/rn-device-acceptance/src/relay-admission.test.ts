@@ -6,10 +6,10 @@ import {
   proveLogoutRevocation,
 } from "./relay-admission.ts";
 import { decodeBase64 as bytes, encodeBase64 } from "./base64.ts";
-import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
+import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 
 const admitted = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
-const abiVarint = postcardVarint(BigInt(NATIVE_RELAY_ABI_VERSION));
+const abiVarint = postcardVarint(BigInt(NATIVE_RELAY_ABI_V1));
 const probeResponse = encodeBase64(Uint8Array.of(0, ...abiVarint));
 
 test("Probe follows a successful Open carrying the exact admitted capability", async () => {

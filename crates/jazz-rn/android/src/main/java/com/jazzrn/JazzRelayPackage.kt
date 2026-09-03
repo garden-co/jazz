@@ -11,7 +11,7 @@ import java.util.HashMap
  * The sole Android entry point for the relay-only bridge.
  *
  * It deliberately owns no Rust runtime. Until a matching Rust artifact is
- * packaged, [JazzRelayModule] reports ABI 0 and rejects commands explicitly.
+ * packaged, [JazzRelayModule] rejects commands explicitly.
  */
 class JazzRelayPackage : TurboReactPackage() {
   override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? {
