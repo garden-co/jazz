@@ -72,11 +72,12 @@ describe("client session resolution", () => {
     }
   });
 
-  it("uses JWT sub as user_id", () => {
+  it("derives the user from iss/sub and exposes flat Better Auth-style metadata", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       iss: "https://issuer.example",
-      claims: { role: "editor" },
+      better_auth_user_id: "user-subject",
+      profile_id: "profile-456",
     });
 
     const session = resolveClientSessionSync({
@@ -86,34 +87,36 @@ describe("client session resolution", () => {
 
     expect(session).toEqual({
       user: '["https://issuer.example","user-subject"]',
-      claims: { role: "editor", iss: "https://issuer.example", sub: "user-subject" },
+      claims: {
+        better_auth_user_id: "user-subject",
+        profile_id: "profile-456",
+        iss: "https://issuer.example",
+        sub: "user-subject",
+      },
       authMode: "external",
     });
   });
 
-  it("preserves provider claims but overwrites spoofed iss/sub with verified identity", () => {
-    const claims = {
+  it("keeps app metadata flat while reserved transport claims determine identity", () => {
+    const metadata = {
       subject: "application-owned-subject",
       issuer: "application-owned-issuer",
-      sub: "application-owned-sub",
       role: "editor",
     };
 
     expect(
       resolveClientSessionSync({
         appId: "app-exact-claims",
-        jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", claims }),
+        jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", ...metadata }),
       }),
     ).toMatchObject({
       user: '["https://issuer.example","alice"]',
-      claims: { ...claims, iss: "https://issuer.example", sub: "alice" },
+      claims: { ...metadata, iss: "https://issuer.example", sub: "alice" },
     });
   });
 
   it("publishes an independent deeply immutable session without transport fields", () => {
     const providerClaims = {
-      iss: "spoofed-issuer",
-      sub: "spoofed-subject",
       roles: ["writer"],
     };
     const session = resolveClientSessionSync({
@@ -121,7 +124,7 @@ describe("client session resolution", () => {
       jwtToken: makeJwt({
         iss: "https://issuer.example",
         sub: "verified-subject",
-        claims: providerClaims,
+        ...providerClaims,
       }),
     })!;
 
@@ -143,18 +146,19 @@ describe("client session resolution", () => {
     }
   });
 
-  it("mirrors server JWT policy-claim admission, including deterministic collision precedence", () => {
+  it("exposes every non-reserved top-level JSON claim without a nested-claims path", () => {
     const session = resolveClientSessionSync({
       appId: "app-jwt-policy-claim-corpus",
       jwtToken: makeJwt({
         iss: "https://issuer.example",
         sub: "alice",
-        // `claims` is visited before `role`; the later top-level custom claim
-        // wins exactly as server admission's BTreeMap traversal does.
-        claims: { role: "nested", issuer: "nested-issuer" },
         role: "top-level",
         issuer: "custom-provider-issuer",
-        metadata: { intentionally: "not policy-visible" },
+        flags: ["writer", "beta"],
+        profile: { id: "profile-456", active: true },
+        revoked_at: null,
+        // This spelling is ordinary app metadata; Jazz never flattens it.
+        claims: { role: "nested" },
       }),
     });
 
@@ -162,24 +166,16 @@ describe("client session resolution", () => {
       claims: {
         role: "top-level",
         issuer: "custom-provider-issuer",
+        flags: ["writer", "beta"],
+        profile: { id: "profile-456", active: true },
+        revoked_at: null,
+        claims: { role: "nested" },
         iss: "https://issuer.example",
         sub: "alice",
       },
     });
-    expect(session?.claims.metadata).toBeUndefined();
-  });
-
-  it("rejects unsupported nested policy claims instead of diverging from server admission", () => {
-    expect(
-      resolveClientSessionSync({
-        appId: "app-jwt-nested-policy-claim",
-        jwtToken: makeJwt({
-          iss: "https://issuer.example",
-          sub: "alice",
-          claims: { profile: { role: "writer" } },
-        }),
-      }),
-    ).toBeNull();
+    expect(session?.claims.exp).toBeUndefined();
+    expect(session?.claims.aud).toBeUndefined();
   });
 
   it("preserves exact nonblank JWT issuer and subject bytes and rejects ASCII-whitespace-only components", () => {
@@ -268,7 +264,7 @@ describe("client session resolution", () => {
   it("rejects a JWT without an iss claim", () => {
     const jwt = makeJwt({
       sub: "user-subject",
-      claims: { team: "eng" },
+      team: "eng",
     });
 
     const session = resolveClientSessionSync({
@@ -347,7 +343,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
 
   it("verified reserved JWT paths construct only their dedicated auth modes", () => {
     const localFirst = sessionFromVerifiedReservedJwtPayload(
-      { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, claims: { role: "writer" } },
+      { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, role: "writer" },
       "local-first",
     );
     expect(localFirst).toEqual({
@@ -360,7 +356,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
         appId: "app-verified-local-first",
         jwtToken: jwt({ sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER }),
         trustedReservedSession: internalSessionFromVerifiedReservedJwtPayload(
-          { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, claims: { role: "writer" } },
+          { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, role: "writer" },
           "local-first",
         )!,
       }),

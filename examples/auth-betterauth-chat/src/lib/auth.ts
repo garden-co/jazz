@@ -81,9 +81,7 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
           }: {
             user: { id: string; name: string; role?: string | string[] };
           }) => ({
-            claims: {
-              role: Array.isArray(user.role) ? user.role[0] : (user.role ?? ""),
-            },
+            role: Array.isArray(user.role) ? user.role[0] : (user.role ?? ""),
             username: user.name,
           }),
           getSubject: ({ user }: { user: { id: string } }) => user.id,
