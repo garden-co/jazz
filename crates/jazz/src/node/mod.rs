@@ -706,7 +706,6 @@ where
         self.clock.tx_time = self.clock.tx_time.max(high_water.tick_after()?);
         Ok(())
     }
-
 }
 
 #[cfg(test)]
