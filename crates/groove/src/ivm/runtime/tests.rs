@@ -2,8 +2,9 @@ use super::*;
 use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
 };
-use crate::storage::{MemoryStorage, OwnedStorage, RecordStore};
+use crate::storage::{MemoryStorage, OwnedStorage, RecordStore, TestStorage, TestStorageOperation};
 use std::rc::Rc;
+use std::task::{Context, Poll};
 
 #[futures_test::test]
 async fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
@@ -433,6 +434,19 @@ fn edges_schema() -> DatabaseSchema {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
+}
+
+fn indexed_edges_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "edges",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("src", ColumnType::U64),
+            ColumnSchema::new("dst", ColumnType::U64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_index(IndexSchema::new("by_src", ["src"]))])
 }
 
 fn reach_descriptor() -> RecordDescriptor {
@@ -2368,6 +2382,152 @@ async fn recursive_iteration_limit_rolls_back_partial_positive_tick() {
         subscription.try_recv().is_err(),
         "a failed recursive tick must not expose staged facts"
     );
+}
+
+/// Derived durable index changes are part of a recursive tick's publication
+/// boundary. A limit failure after producing a partial closure must not leak
+/// its index writes into physical storage.
+#[futures_test::test]
+async fn recursive_iteration_limit_does_not_leak_staged_durable_index_writes() {
+    let schema = indexed_edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let storage =
+        Rc::new(MemoryStorage::new(&["edges", "indices"]).expect("valid memory storage families"));
+    let edges = schema.table("edges").unwrap().record_schema();
+    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+
+    let subscription = runtime
+        .subscribe_one_sink(recursive_reach_graph_with_limit(1), &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+
+    let error = runtime
+        .tick(
+            vec![edge_table_delta(edges, &[(2, 2, 3), (3, 3, 4)])],
+            &storage,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        IvmRuntimeError::RecursiveIterationLimit { max_iters: 1, .. }
+    ));
+
+    let mut index_rows = storage
+        .scan(crate::storage::ScanRequest::prefix(
+            "indices".to_owned(),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        index_rows.next_batch().await.unwrap().is_none(),
+        "failed recursion must discard derived durable index writes"
+    );
+    assert!(subscription.try_recv().is_err());
+}
+
+#[futures_test::test]
+async fn durable_flush_failure_discards_staged_state_and_notifications() {
+    let schema = indexed_edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let (storage, control) = TestStorage::controlled(&["edges", "indices"]);
+    let storage = Rc::new(storage);
+    let edges = schema.table("edges").unwrap().record_schema();
+    let initial_storage = Rc::new(MemoryStorage::new(&["edges", "indices"]).unwrap());
+    let subscription = runtime
+        .subscribe_one_sink(GraphBuilder::table("edges"), &initial_storage)
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let before_tick = runtime.current_tick;
+
+    control.take_observed();
+    control.fail_next(TestStorageOperation::WriteMany);
+    let mut tick = Box::pin(runtime.tick(vec![edge_table_delta(edges, &[(1, 1, 2)])], &storage));
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut result = None;
+    for _ in 0..16 {
+        if let Poll::Ready(outcome) = tick.as_mut().poll(&mut cx) {
+            result = Some(outcome);
+            break;
+        }
+    }
+    assert!(
+        result.is_some(),
+        "flush failure must resolve rather than retain an un-wakeable tick"
+    );
+    assert!(result.unwrap().is_err());
+    drop(tick);
+
+    assert_eq!(runtime.current_tick, before_tick);
+    assert!(subscription.try_recv().is_err());
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::WriteMany)
+            .count(),
+        1,
+        "the staged durable batch is submitted exactly once"
+    );
+}
+
+#[futures_test::test]
+async fn cancelling_pending_durable_flush_discards_the_uninstalled_tick() {
+    let schema = indexed_edges_schema();
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let (storage, control) = TestStorage::controlled(&["edges", "indices"]);
+    let storage = Rc::new(storage);
+    let edges = schema.table("edges").unwrap().record_schema();
+    let initial_storage = Rc::new(MemoryStorage::new(&["edges", "indices"]).unwrap());
+    let subscription = runtime
+        .subscribe_one_sink(GraphBuilder::table("edges"), &initial_storage)
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let before_tick = runtime.current_tick;
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::WriteMany);
+    let mut tick = Box::pin(runtime.tick(vec![edge_table_delta(edges, &[(1, 1, 2)])], &storage));
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..8 {
+        if matches!(tick.as_mut().poll(&mut cx), Poll::Pending)
+            && control
+                .observed()
+                .contains(&TestStorageOperation::WriteMany)
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::WriteMany)
+            .count(),
+        1,
+        "the pending flush owns one physical submission"
+    );
+    drop(tick);
+
+    assert_eq!(runtime.current_tick, before_tick);
+    assert!(subscription.try_recv().is_err());
+    let mut index_rows = storage
+        .scan(crate::storage::ScanRequest::prefix(
+            "indices".to_owned(),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    assert!(index_rows.next_batch().await.unwrap().is_none());
 }
 
 /// Resident Database writes use the same staged evaluator as direct ticks, but
