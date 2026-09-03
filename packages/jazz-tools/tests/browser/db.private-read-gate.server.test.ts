@@ -2,17 +2,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createDb,
   generateAuthSecret,
-  publishStoredPermissions,
   schema,
   type CompiledPermissions,
   type Db,
   type QueryBuilder,
   type RowOf,
 } from "../../src/index.js";
+import { deploy } from "../../src/dev/catalogue.js";
 import { createJazzClient } from "../../src/web/create-jazz-client.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
-import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import {
   TestCleanup,
   sleep,
@@ -1057,21 +1056,12 @@ async function publishSchemaAndPermissions(
   permissions: CompiledPermissions,
   appSchema: { wasmSchema: typeof app.wasmSchema } = app,
 ): Promise<void> {
-  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+  await deploy({
     appId,
+    serverUrl,
     adminSecret,
     schema: appSchema.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(serverUrl, {
-    appId,
-    adminSecret,
-  });
-  await publishStoredPermissions(serverUrl, {
-    appId,
-    adminSecret,
-    schemaHash,
     permissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 }
 
