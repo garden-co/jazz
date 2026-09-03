@@ -300,6 +300,135 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
     );
 }
 
+#[test]
+fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader() {
+    for malformed_closure in [false, true] {
+        let schema = schema_with_explicit_public_read();
+        let author = AuthorSubject::for_test_bytes([0xb7; 16]);
+        let core = open_core(0x80, AuthorSubject::SYSTEM, &schema);
+        core.insert_with_id("todos", row(0x83), cells("visible", false, author))
+            .unwrap();
+        let relay = open_db(0x81, author, &schema);
+        let foreground = open_db(0x82, author, &schema);
+        relay.set_relay_authority_session_owner_for_test();
+        foreground.set_non_durable_client();
+        let (up, down, inbound) = duplex_with_server_outbound_tap();
+        block_on(relay.connect_upstream(up));
+        core.accept_scope_isolated_relay_subscriber(down, author, BTreeMap::new(), 1);
+        let (up, down) = duplex();
+        block_on(foreground.connect_upstream(up));
+        relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+        let query = Query::from("todos");
+        let mut streams = [
+            prepared_subscribe(
+                &foreground,
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Local,
+                    propagation: Propagation::Full,
+                    ..ReadOpts::default()
+                },
+            )
+            .unwrap(),
+            prepared_subscribe(&foreground, &query, global_subscribe_opts()).unwrap(),
+        ];
+        let mut opening = None;
+        let mut healthy = prepared_subscribe(
+            &foreground,
+            &query.clone().filter(eq(col("title"), lit("healthy"))),
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                propagation: Propagation::Full,
+                ..ReadOpts::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..32 {
+            foreground.tick().unwrap();
+            relay.tick().unwrap();
+            core.tick().unwrap();
+            for message in inbound.borrow().iter() {
+                if let SyncMessage::ViewUpdate(payload) = message
+                    && !payload.peer_payload_inventory.opening_pending
+                    && payload.program_fact_adds.iter().any(|fact| {
+                        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_))
+                    })
+                {
+                    opening = Some(payload.clone());
+                }
+            }
+        }
+        for stream in &mut streams {
+            while stream.try_next_event().is_some() {}
+        }
+        let mut opening = opening.expect("authority sends a populated exact closure");
+        let failure = if malformed_closure {
+            // A duplicate addition is impossible in the ordered predecessor
+            // sequence. The relay must reject it and expose that error below.
+            opening.reset_result_set = false;
+            SyncMessage::ViewUpdate(opening)
+        } else {
+            SyncMessage::SubscribeRejected {
+                subscription: SubscriptionKey {
+                    binding_id: crate::query::BindingId(uuid::Uuid::nil()),
+                    ..opening.subscription
+                },
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::Internal,
+                },
+            }
+        };
+        inbound.borrow_mut().push_back(failure);
+        for _ in 0..32 {
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+            core.tick().unwrap();
+        }
+        for stream in &mut streams {
+            let mut rejected = false;
+            while let Some(event) = stream.try_next_event() {
+                if let SubscriptionEvent::Rejected { reason } = event {
+                    assert_eq!(
+                        matches!(
+                            reason,
+                            SubscribeRejectReason::InvalidAuthoritySourceClosure { .. }
+                        ),
+                        malformed_closure
+                    );
+                    rejected = true;
+                }
+            }
+            assert!(
+                rejected,
+                "every shared reader must see the failure, not wait forever"
+            );
+        }
+        assert_eq!(
+            relay.node.relay_upstream_subscription_owners.borrow().len(),
+            1,
+            "an unrelated query retains its upstream ownership"
+        );
+        core.insert_with_id("todos", row(0x84), cells("healthy", false, author))
+            .unwrap();
+        for _ in 0..32 {
+            core.tick().unwrap();
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+        }
+        let mut delivered = false;
+        while let Some(event) = healthy.try_next_event() {
+            assert!(
+                !matches!(event, SubscriptionEvent::Rejected { .. }),
+                "unrelated query: {event:?}"
+            );
+            if let SubscriptionEvent::Delta { added, .. } = event {
+                delivered |= added.iter().any(|value| value.row.row_uuid() == row(0x84));
+            }
+        }
+        assert!(delivered, "an unrelated query remains live after rejection");
+    }
+}
+
 /// Peer updates disclose the exact authority-approved source closure. A client
 /// derives result membership locally, so protocol-facing tests inspect source
 /// inputs rather than the retired authority-rendered member payload.

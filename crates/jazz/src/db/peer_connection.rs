@@ -10,6 +10,38 @@ use super::node_runtime::{
 };
 use super::*;
 use crate::protocol::expand_version_carriers;
+
+/// Both wire rejections and receiver validation failures terminate the same
+/// downstream usages. A relay has no public SubscriptionList of its own.
+fn queue_relay_subscription_rejection(
+    owners: &RelayUpstreamSubscriptionOwners,
+    pending: &PendingRelaySubscriptionRejections,
+    upstream: &PendingUpstreamCommands,
+    subscription: SubscriptionKey,
+    reason: &SubscribeRejectReason,
+) -> usize {
+    let removed = take_relay_upstream_subscription_owner(owners, subscription);
+    let count = removed.len();
+    let mut retired = BTreeSet::new();
+    for (handle, owner) in removed {
+        retired.insert(handle);
+        pending
+            .borrow_mut()
+            .entry(owner.downstream_connection_epoch)
+            .or_default()
+            .push_back(RelaySubscriptionRejection {
+                coverage: owner.coverage,
+                policy_binding: owner.policy_binding,
+                downstream_subscriptions: owner.downstream_subscriptions,
+                reason: reason.clone(),
+            });
+    }
+    upstream
+        .borrow_mut()
+        .extend(retired.into_iter().map(PendingUpstreamCommand::Unsubscribe));
+    count
+}
+
 pub(super) fn route_subscription_refresh_failure(
     subscriptions: &SubscriptionList,
     error: &Error,
@@ -2516,6 +2548,9 @@ where
                                         &self.node,
                                         &self.subscriptions,
                                         &mut pending_view_updates,
+                                        &self.relay_upstream_subscription_owners,
+                                        &self.pending_relay_subscription_rejections,
+                                        upstream_subscriptions,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
                                         &self.query_coverage_registrations,
@@ -2541,6 +2576,9 @@ where
                                         &self.node,
                                         &self.subscriptions,
                                         &mut pending_view_updates,
+                                        &self.relay_upstream_subscription_owners,
+                                        &self.pending_relay_subscription_rejections,
+                                        upstream_subscriptions,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
                                         &self.query_coverage_registrations,
@@ -2660,33 +2698,20 @@ where
                                 subscription,
                                 reason,
                             } => {
-                                let relay_owners = take_relay_upstream_subscription_owner(
+                                if !authority_receipt_eligible || self.active_authority_view_receipts
+                                    .borrow().as_ref()
+                                    .is_some_and(|active| active.connection_epoch != self.connection_epoch)
+                                {
+                                    continue;
+                                }
+                                let delivered = queue_relay_subscription_rejection(
                                     &self.relay_upstream_subscription_owners,
+                                    &self.pending_relay_subscription_rejections,
+                                    upstream_subscriptions,
                                     subscription,
+                                    &reason,
                                 );
-                                if !relay_owners.is_empty() {
-                                    for owner in relay_owners {
-                                    self.pending_relay_subscription_rejections
-                                        .borrow_mut()
-                                        .entry(owner.downstream_connection_epoch)
-                                        .or_default()
-                                        .push_back(RelaySubscriptionRejection {
-                                            coverage: owner.coverage,
-                                            policy_binding: owner.policy_binding,
-                                            downstream_subscriptions: owner
-                                                .downstream_subscriptions,
-                                            reason: reason.clone(),
-                                        });
-                                    }
-                                    // The authority has already retired its
-                                    // own attempt, but sending an explicit
-                                    // unsubscribe makes reconnect/replay
-                                    // convergence deterministic on peers that
-                                    // retain rejected handles until told
-                                    // otherwise.
-                                    upstream_subscriptions.borrow_mut().push(
-                                        PendingUpstreamCommand::Unsubscribe(subscription),
-                                    );
+                                if delivered > 0 {
                                     let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                                     self.subscriber_dirty_epoch.set(next);
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
@@ -2880,6 +2905,9 @@ where
                                         &self.node,
                                         &self.subscriptions,
                                         &mut pending_view_updates,
+                                        &self.relay_upstream_subscription_owners,
+                                        &self.pending_relay_subscription_rejections,
+                                        upstream_subscriptions,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
                                         &self.query_coverage_registrations,
@@ -3204,6 +3232,9 @@ where
                                         &self.node,
                                         &self.subscriptions,
                                         &mut pending_view_updates,
+                                        &self.relay_upstream_subscription_owners,
+                                        &self.pending_relay_subscription_rejections,
+                                        upstream_subscriptions,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
                                         &self.query_coverage_registrations,
@@ -3297,6 +3328,9 @@ where
                             &self.node,
                             &self.subscriptions,
                             &mut pending_view_updates,
+                            &self.relay_upstream_subscription_owners,
+                            &self.pending_relay_subscription_rejections,
+                            upstream_subscriptions,
                             &self.awaiting_initial_authority_coverage,
                             &mut pending_initial_coverage_clears,
                             &self.query_coverage_registrations,
@@ -5548,6 +5582,9 @@ async fn apply_pending_authority_view_updates<S>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
     pending: &mut Vec<PendingAuthorityViewUpdate>,
+    relay_owners: &RelayUpstreamSubscriptionOwners,
+    relay_rejections: &PendingRelaySubscriptionRejections,
+    upstream: &PendingUpstreamCommands,
     awaiting: &AwaitingInitialAuthorityCoverage,
     clears: &mut BTreeSet<CoverageKey>,
     query_coverage_registrations: &QueryCoverageRegistrations,
@@ -5676,6 +5713,26 @@ where
             }
             Err(error @ crate::node::Error::InvalidAuthoritySourceClosure { .. }) => {
                 route_invalid_authority_source_closure(subscriptions, &error);
+                let crate::node::Error::InvalidAuthoritySourceClosure {
+                    subscription,
+                    transition,
+                } = &error
+                else {
+                    unreachable!()
+                };
+                if queue_relay_subscription_rejection(
+                    relay_owners,
+                    relay_rejections,
+                    upstream,
+                    *subscription,
+                    &SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                        transition: transition.clone(),
+                    },
+                ) > 0
+                {
+                    subscriber_dirty_epoch.set(subscriber_dirty_epoch.get().wrapping_add(1));
+                    schedule_tick_in(scheduler, TickUrgency::Immediate);
+                }
                 return Ok(());
             }
             Err(error) => return Err(error.into()),

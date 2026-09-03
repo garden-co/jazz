@@ -3825,18 +3825,26 @@ pub(super) fn retire_relay_upstream_subscription(
 /// subscription. Unlike an ordinary unsubscribe there is no downstream link
 /// assertion here: the opaque upstream handle itself is the unforgeable owner
 /// token, and all returned pins identify downstream recipients of the rejection.
+/// A RegisterShape rejection uses a nil binding marker and retires every pin
+/// for that exact shape/read-view registration. Callers admit the authority
+/// connection generation before using this registration-wide form.
 pub(super) fn take_relay_upstream_subscription_owner(
     owners: &RelayUpstreamSubscriptionOwners,
     subscription: SubscriptionKey,
-) -> Vec<RelayUpstreamSubscriptionOwner> {
+) -> Vec<(SubscriptionKey, RelayUpstreamSubscriptionOwner)> {
     let mut owners = owners.borrow_mut();
     let keys = owners
         .keys()
-        .filter(|(candidate, _, _)| *candidate == subscription)
+        .filter(|(candidate, _, _)| {
+            *candidate == subscription
+                || (subscription.binding_id == BindingId(uuid::Uuid::nil())
+                    && candidate.shape_id == subscription.shape_id
+                    && candidate.read_view == subscription.read_view)
+        })
         .copied()
         .collect::<Vec<_>>();
     keys.into_iter()
-        .filter_map(|key| owners.remove(&key))
+        .filter_map(|key| owners.remove(&key).map(|owner| (key.0, owner)))
         .collect()
 }
 
