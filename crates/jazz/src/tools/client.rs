@@ -4120,10 +4120,11 @@ mod tests {
     }
 
     fn make_native_context(name: &str) -> AppContext {
-        let mut context = make_offline_context(
+        let mut context = make_offline_context_with_storage(
             AppId::from_name(name),
             std::path::PathBuf::new(),
             declared_todo_schema(),
+            ClientStorage::Memory,
         );
         context.server_url = "ws://native-transport.test".to_owned();
         context
