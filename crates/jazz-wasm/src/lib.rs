@@ -629,63 +629,6 @@ struct WasmWireTransport {
     queues: WasmWireQueues,
 }
 
-// Temporary covered-input publication diagnostic; remove after browser repair.
-#[wasm_bindgen(
-    inline_js = "export function traceSourceSend(message) { const channel = new BroadcastChannel('jazz-source-debug'); channel.postMessage(message); channel.close(); }"
-)]
-extern "C" {
-    #[wasm_bindgen(js_name = traceSourceSend)]
-    fn trace_source_send(message: &str);
-}
-
-struct TracedSubscriberTransport<T>(T);
-
-impl<T: jazz::db::Transport> jazz::db::Transport for TracedSubscriberTransport<T> {
-    fn send(&mut self, message: jazz::protocol::SyncMessage) -> Result<(), TransportError> {
-        if let jazz::protocol::SyncMessage::ViewUpdate(payload) = &message {
-            let coverage = payload
-                .program_fact_adds
-                .iter()
-                .filter(|fact| {
-                    matches!(
-                        fact,
-                        jazz::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
-                    )
-                })
-                .collect::<Vec<_>>();
-            let summary = format!(
-                "JAZZ_WASM_SOURCE_SEND subscription={:?} reset={} pending={} coverage={coverage:?} facts={} carriers={}",
-                payload.subscription, payload.reset_result_set,
-                payload.peer_payload_inventory.opening_pending,
-                payload.program_fact_adds.len(), payload.version_carriers.len(),
-            );
-            trace_source_send(&summary);
-            if let Ok(console) =
-                js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("console"))
-            {
-                if let Ok(warn) = js_sys::Reflect::get(&console, &JsValue::from_str("warn")) {
-                    if let Some(warn) = warn.dyn_ref::<js_sys::Function>() {
-                        let _ = warn.call1(&console, &JsValue::from_str(&summary));
-                    }
-                }
-            }
-        }
-        self.0.send(message)
-    }
-
-    fn try_recv(&mut self) -> Option<jazz::protocol::SyncMessage> {
-        self.0.try_recv()
-    }
-
-    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
-        self.0.connection_session_context()
-    }
-
-    fn permits_delegated_sessions(&self) -> bool {
-        self.0.permits_delegated_sessions()
-    }
-}
-
 struct WasmTickScheduler {
     callback: js_sys::Function,
     progress_wake: UnboundedSender<()>,
@@ -2953,7 +2896,7 @@ impl WasmDb {
         let queues = WasmWireQueues::default();
         // Like the JS-owned upstream carrier, this binding-local transport has
         // no authenticated endpoint context for scoped receipt/view frames.
-        let transport = Box::new(TracedSubscriberTransport(WireTransportAdapter::new(
+        let transport = Box::new(WireTransportAdapter::new(
             WasmWireTransport {
                 queues: queues.clone(),
             },
@@ -2962,7 +2905,7 @@ impl WasmDb {
                 & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
                     | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
             None,
-        )));
+        ));
         let db_inner = self.open_inner()?;
         let inner = match &db_inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
