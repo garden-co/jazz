@@ -46,6 +46,27 @@ function authenticatedFetch(
   headers.set("Authorization", `Bearer ${identity.token}`);
   return fetch(input, { ...init, headers });
 }
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  const { promise: result, resolve, reject } = Promise.withResolvers<T>();
+  // This integration test deliberately bounds platform shutdown with a real timer.
+  const timer = setTimeout(
+    () => reject(new Error(`Timed out after ${timeoutMs}ms`)),
+    timeoutMs,
+  );
+  promise.then(
+    (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    },
+    (error: unknown) => {
+      clearTimeout(timer);
+      reject(error);
+    },
+  );
+  return result;
+}
+
+
 
 describe("Todo Server Integration", () => {
   let server: RunningServer;
@@ -389,6 +410,51 @@ describe("Todo Server Integration", () => {
           await reader.cancel().catch(() => undefined);
         }
         await stopServer(sseServer);
+      }
+    });
+    it("gracefully closes active SSE connections during shutdown", async () => {
+      const sseServer = await startServer(
+        await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
+      const sseBaseUrl = sseServer.baseUrl;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let shutdown: Promise<void> | undefined;
+      let succeeded = false;
+      try {
+        const res = await authenticatedFetch(`${sseBaseUrl}/todos/live`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe("text/event-stream");
+
+        const sseReader = res.body!.getReader();
+        reader = sseReader;
+        let initialEvent = "";
+        const decoder = new TextDecoder();
+        while (!initialEvent.includes("\n\n")) {
+          const { value, done } = await sseReader.read();
+          expect(done).toBe(false);
+          initialEvent += decoder.decode(value, { stream: true });
+        }
+        const dataLine = initialEvent
+          .slice(0, initialEvent.indexOf("\n\n"))
+          .split("\n")
+          .find((line) => line.startsWith("data: "));
+        expect(dataLine).toBeDefined();
+        expect(JSON.parse(dataLine!.slice(6))).toEqual([]);
+
+        const stop = stopServer(sseServer);
+        shutdown = stop;
+        const [, eof] = await withTimeout(
+          Promise.all([stop, sseReader.read()]),
+          1_000,
+        );
+        expect(eof.done).toBe(true);
+        succeeded = true;
+      } finally {
+        if (!succeeded) {
+          await reader?.cancel().catch(() => undefined);
+          await (shutdown ?? stopServer(sseServer)).catch(() => undefined);
+        }
       }
     });
   });
