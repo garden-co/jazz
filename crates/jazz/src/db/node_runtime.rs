@@ -3210,8 +3210,12 @@ where
             // A propagation receipt is not a replacement input frontier for
             // local-first. Its ordinary local graph observes synced storage
             // changes, and must keep draining even when remote scope changes.
-            let authority_scoped = authorization_mode != QueryAuthorizationMode::ClientLocal
-                || read_tier >= DurabilityTier::Edge;
+            // Observation tier, not the caller's authorization host, decides
+            // whether the remote closure is this stream's input frontier. A
+            // trusted backend may still request Local: it evaluates its own
+            // storage-backed graph and merely propagates upstream, exactly
+            // like any other Local reader.
+            let authority_scoped = read_tier >= DurabilityTier::Edge;
             let authoritative_reset_pending =
                 authority_scoped && authoritative_reset_result.is_some();
             // Optimistic local writes are represented as eligible local input

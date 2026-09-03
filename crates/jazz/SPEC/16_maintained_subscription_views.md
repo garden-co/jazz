@@ -196,7 +196,10 @@ answer may be published; it does not select another evaluator:
 
 - `local-first` evaluates locally known current data plus pending local
   changes, online or offline. Installing a remote closure does not retire its
-  cached inputs. Remote scope withdrawal is not a stored client-side revocation;
+  cached inputs. This is determined by observation tier, not by whether the
+  local node is a trusted backend: a trusted backend may make the same Local
+  read while merely propagating upstream. Remote scope withdrawal is not a
+  stored client-side revocation;
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
