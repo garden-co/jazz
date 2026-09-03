@@ -2,6 +2,265 @@
 
 use super::*;
 
+// Internal for the same reason as the parent-reordering regression below:
+// inspect this receiver's retained tree, not a freshly opened one-shot graph.
+#[test]
+fn structured_live_snapshot_keeps_grandchildren_across_child_replacement() {
+    fn comments(subscription: &SubscriptionStream, expected_title: &str) -> Vec<String> {
+        let state = subscription._state.borrow();
+        let snapshot = super::super::super::materialized_subscription_snapshot(
+            &state.snapshot,
+            &state.snapshot_index,
+        )
+        .unwrap();
+        let (descriptor, raw) = snapshot.rows[0].encoded_record();
+        let Value::Array(todos) = descriptor.bind(raw).get("todos").unwrap() else {
+            panic!("expected todos collection");
+        };
+        assert_eq!(todos.len(), 1);
+        let Value::Record(todo) = &todos[0] else {
+            panic!("expected todo record");
+        };
+        assert_eq!(
+            todo.get("title").unwrap(),
+            Value::String(expected_title.to_owned())
+        );
+        let Value::Array(comments) = todo.get("comments").unwrap() else {
+            panic!("expected comments collection");
+        };
+        comments
+            .into_iter()
+            .map(|comment| {
+                let Value::Record(comment) = comment else {
+                    panic!("expected comment record");
+                };
+                let Value::String(body) = comment.get("body").unwrap() else {
+                    panic!("expected comment body");
+                };
+                body
+            })
+            .collect()
+    }
+    let schema = relation_schema();
+    let db = open_db(0xce, AuthorSubject::for_test_bytes([0xce; 16]), &schema);
+    for (table, id, fields) in [
+        (
+            "users",
+            0xa1,
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        ),
+        (
+            "todos",
+            0x11,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("task".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+            ]),
+        ),
+        (
+            "comments",
+            0x21,
+            BTreeMap::from([
+                ("body".to_owned(), Value::String("keep me".to_owned())),
+                ("todo_id".to_owned(), Value::Uuid(row(0x11).0)),
+            ]),
+        ),
+    ] {
+        db.insert(
+            table,
+            fields,
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("todos", "todos", "owner_id", "id")
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+    );
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert_eq!(comments(&subscription, "task"), vec!["keep me"]);
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("title".to_owned(), Value::String("renamed task".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert_eq!(
+        comments(&subscription, "renamed task"),
+        vec!["keep me"],
+        "a child scalar replacement preserves its independently maintained comments"
+    );
+
+    db.update(
+        "comments",
+        row(0x21),
+        BTreeMap::from([(
+            "body".to_owned(),
+            Value::String("edited comment".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert_eq!(
+        comments(&subscription, "renamed task"),
+        vec!["edited comment"]
+    );
+
+    db.update(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("renamed owner".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert_eq!(
+        comments(&subscription, "renamed task"),
+        vec!["edited comment"]
+    );
+
+    db.delete("comments", row(0x21), Default::default())
+        .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert!(
+        comments(&subscription, "renamed task").is_empty(),
+        "a real grandchild deletion still retracts it"
+    );
+}
+
+// Internal regression: a new public one-shot query would open another receiver
+// and hide stale decoded state in the existing stream's snapshot cache.
+#[test]
+fn structured_live_snapshot_keeps_child_edits_across_parent_reordering() {
+    fn retained_snapshot(subscription: &SubscriptionStream) -> RelationSnapshot {
+        let state = subscription._state.borrow();
+        super::super::super::materialized_subscription_snapshot(
+            &state.snapshot,
+            &state.snapshot_index,
+        )
+        .unwrap()
+    }
+    let schema = relation_schema();
+    let db = open_db(0xcf, AuthorSubject::for_test_bytes([0xcf; 16]), &schema);
+    for (id, name) in [(0xa1, "alice"), (0xb1, "bob")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (id, owner, title) in [(0x11, 0xa1, "first"), (0x21, 0xb1, "untouched")] {
+        db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(owner).0)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = Query::from("users")
+        .order_by("name", OrderDirection::Asc)
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(
+        &prepared_query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("title".to_owned(), Value::String("edited".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["edited"]
+    );
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xb1), "todosViaOwner", "title"),
+        vec!["untouched"]
+    );
+
+    db.update(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xb1), row(0xa1)]);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["edited"]
+    );
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("title".to_owned(), Value::String("after move".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["after move"]
+    );
+
+    db.delete("todos", row(0x11), Default::default()).unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert!(terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title").is_empty());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xb1), "todosViaOwner", "title"),
+        vec!["untouched"]
+    );
+
+    db.delete("users", row(0xa1), Default::default()).unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xb1)]);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xb1), "todosViaOwner", "title"),
+        vec!["untouched"]
+    );
+}
+
 #[test]
 fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let schema = relation_schema();
@@ -178,19 +437,11 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert_eq!(added[0].index, 0);
     assert!(terminal_operations.is_empty());
 
-    let binding_view_key = BindingViewKey::new(
-        prepared_query.shape().shape_id(),
-        prepared_query.binding().binding_id(),
-        RegisterShapeOptions::default().read_view_key(),
-    );
-    db.node
-        .node
-        .borrow_mut()
-        .inject_pending_authoritative_reset_for_test(
-            binding_view_key,
-            std::iter::empty(),
-            GlobalTime(0),
-        );
+    // A local runtime replacement is a legitimate reset boundary.  The old
+    // test injected an unscoped `AuthorityResultKey` into a Local stream,
+    // which has no usage-site receipt and therefore cannot name a
+    // `CoveredInput` closure under INV-SYNC-36.
+    db.invalidate_groove_runtime_for_test();
     assert_eq!(db.refresh_subscriptions().unwrap(), 1);
     let reset = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
@@ -204,7 +455,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert_eq!(
         db.active_groove_subscriptions_for_test(),
         1,
-        "an authoritative reset must replace, not leak, its Groove terminal"
+        "a runtime reset must replace, not leak, its Groove terminal"
     );
 
     db.update(
@@ -265,6 +516,57 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
 ///
 /// This also exercises the bounded-stack peer admission path: the server must
 /// process the membership commit without carrying inactive Subscribe-arm state.
+#[test]
+fn limit_one_subscription_replaces_winner_on_insert_and_retraction() {
+    let schema = relation_schema();
+    let db = open_db(0xc5, AuthorSubject::for_test_bytes([0xc5; 16]), &schema);
+    let prepared_query = prepared(&db, &Query::from("users").limit(1));
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let mut snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert!(snapshot.rows.is_empty());
+
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("later".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.tick().unwrap();
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&snapshot.rows), [row(0xb1)]);
+
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("winner".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let inserted_replacement = block_on(subscription.next_raw()).unwrap();
+    assert!(matches!(
+        &inserted_replacement,
+        SubscriptionEvent::Delta { reset: false, .. }
+    ));
+    apply_subscription_event(&mut snapshot, inserted_replacement);
+    assert_eq!(row_ids(&snapshot.rows), [row(0xa1)]);
+
+    db.delete("users", row(0xa1), Default::default()).unwrap();
+    db.tick().unwrap();
+    let retracted_replacement = block_on(subscription.next_raw()).unwrap();
+    assert!(matches!(
+        &retracted_replacement,
+        SubscriptionEvent::Delta { reset: false, .. }
+    ));
+    apply_subscription_event(&mut snapshot, retracted_replacement);
+    assert_eq!(row_ids(&snapshot.rows), [row(0xb1)]);
+}
+
 #[test]
 fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_shot() {
     let schema = membership_scoped_relation_schema();
@@ -504,95 +806,6 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
             .rows
             .iter()
             .any(|row| row.table() == "messages" && row.row_uuid() == message)
-    );
-}
-
-/// A structured authority reset can arrive after a live catalogue change has
-/// invalidated the local terminal, but before Groove has rebuilt that
-/// terminal's structured collector. The reset still has authoritative root
-/// rows, so its public occurrence sidecar must be rebuilt from those roots
-/// rather than the intentionally cold local collector.
-#[test]
-fn structured_authoritative_reset_rehydrates_with_cold_occurrence_sidecar() {
-    let schema = relation_schema();
-    let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
-    let query = Query::from("users").array_subquery(ArraySubquery::new(
-        "todosViaOwner",
-        "todos",
-        "owner_id",
-        "id",
-    ));
-    let prepared_query = prepared(&db, &query);
-    let opts = ReadOpts::default();
-    let mut subscription = block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
-    let opening = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
-    assert!(opening.rows.is_empty(), "the local collector starts cold");
-
-    let binding_view_key = BindingViewKey::new(
-        prepared_query.shape().shape_id(),
-        prepared_query.binding().binding_id(),
-        RegisterShapeOptions {
-            tier: opts.tier,
-            read_view: opts.read_view,
-            ..RegisterShapeOptions::default()
-        }
-        .read_view_key(),
-    );
-    let member = ResultMemberEntry::from(
-        crate::protocol::RealRowMemberEntry::current_content((
-            "users".to_owned().into(),
-            row(0xc2),
-            TxId::new(TxTime::from(42), NodeUuid::from_bytes([0xc2; 16])),
-        ))
-        .with_row_digest(vec![0xc2]),
-    );
-    let payload_descriptor =
-        RecordDescriptor::new([("id", ValueType::Uuid), ("name", ValueType::String)]);
-    let payload = crate::protocol::ProgramFactEntry::ResultPayload(
-        crate::protocol::ResultMemberPayloadEntry {
-            member: member.clone(),
-            descriptor: groove::records::encode_record_descriptor(&payload_descriptor).unwrap(),
-            record: payload_descriptor
-                .create(&[Value::Uuid(row(0xc2).0), Value::String("alice".to_owned())])
-                .unwrap(),
-        },
-    );
-    db.node
-        .node
-        .borrow_mut()
-        .inject_pending_authoritative_reset_with_program_facts_for_test(
-            binding_view_key,
-            [member],
-            [payload],
-            GlobalTime(42),
-        );
-
-    // Same-version policy activation keeps the authority reset but gives the
-    // stream a replacement prepared-runtime token. Do not create local roots
-    // before this reset: the new terminal must be genuinely cold here.
-    db.invalidate_groove_runtime_for_test();
-    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
-    let mut reset = block_on(subscription.next_raw()).unwrap();
-    while !matches!(reset, SubscriptionEvent::Delta { reset: true, .. }) {
-        reset = block_on(subscription.next_raw()).unwrap();
-    }
-    let SubscriptionEvent::Delta {
-        reset,
-        added,
-        updated,
-        removed,
-        ..
-    } = reset
-    else {
-        panic!("expected rehydrated structured authority reset")
-    };
-    assert!(reset);
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
-    assert_eq!(
-        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
-        vec![row(0xc2)],
-        "the authoritative root survives the cold structured replacement"
     );
 }
 
@@ -1549,10 +1762,28 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         server.server.tick().unwrap();
         client.tick().unwrap();
         if let Some(event) = subscription.try_next_event() {
+            let SubscriptionEvent::Delta {
+                reset,
+                terminal_operations,
+                ..
+            } = &event
+            else {
+                panic!("expected authority-covered receiver delta")
+            };
+            let reset = *reset;
+            let terminal_operations_empty = terminal_operations.is_empty();
             let snapshot = snapshot_from_event(event);
             if terminal_nested_text_values(&snapshot, row(0xa6), "todosViaOwner", "title")
                 == vec!["remote child".to_owned()]
             {
+                assert!(
+                    reset,
+                    "the first scoped covered-input frontier publishes its complete collector tree as a reset"
+                );
+                assert!(
+                    terminal_operations_empty,
+                    "a reset carries the receiver-local collector snapshot rather than replaying its construction patches"
+                );
                 delivered = Some(snapshot);
                 break;
             }

@@ -64,8 +64,6 @@ use crate::tools::{
 type CoreClientDb = CoreDb<CoreStorage>;
 type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
 
-const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
 const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
@@ -93,15 +91,6 @@ impl<F: Future> Future for StackSafeFuture<F> {
             self.inner.as_mut().poll(context)
         })
     }
-}
-
-fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
-    let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER);
-    timeout.checked_mul(multiplier).unwrap_or(timeout)
 }
 
 type StorageBundle = CoreStorage;
@@ -157,25 +146,6 @@ impl Clone for JazzClient {
 struct ClientDb {
     inner: Rc<RefCell<ClientDbInner>>,
     query_decoder: PublicQueryDecoder,
-}
-
-/// Ensures a usage-site coverage attachment is released even when the caller
-/// cancels a one-shot Edge/Global read while it is waiting for coverage.
-struct QueryAttachmentLease {
-    backend: Backend,
-    attachment: crate::db::QueryAttachment,
-}
-
-impl QueryAttachmentLease {
-    fn attachment(&self) -> &crate::db::QueryAttachment {
-        &self.attachment
-    }
-}
-
-impl Drop for QueryAttachmentLease {
-    fn drop(&mut self) {
-        self.backend.detach_query(self.attachment.clone());
-    }
 }
 
 #[derive(Clone)]
@@ -576,29 +546,6 @@ impl Backend {
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
         self.0.prepare_query_for_open_schema(query)
-    }
-
-    fn attach_query(
-        &self,
-        prepared: &crate::db::PreparedQuery,
-        opts: CoreReadOpts,
-    ) -> std::result::Result<crate::db::QueryAttachment, CoreDbError> {
-        self.0.attach_query_with_opts(prepared, opts)
-    }
-
-    fn query_attachment_is_covered(&self, attachment: &crate::db::QueryAttachment) -> bool {
-        self.0.query_attachment_is_covered(attachment)
-    }
-
-    fn detach_query(&self, attachment: crate::db::QueryAttachment) {
-        self.0.detach_query(attachment);
-    }
-
-    fn row_provenance(
-        &self,
-        row: &crate::node::CurrentRow,
-    ) -> std::result::Result<Option<crate::node::RowProvenance>, CoreDbError> {
-        self.0.row_provenance(row)
     }
 
     async fn row_provenance_for_subscription(
@@ -1557,13 +1504,16 @@ impl ClientDbInner {
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
         Ok(db
-            .connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
-                connected.transport,
-                connected.protocol_version,
-                connected.features,
-                None,
-                connected.session_context,
-            )))
+            .connect_upstream(Box::new(
+                WireTransportAdapter::new_with_session_context_and_delegated_sessions(
+                    connected.transport,
+                    connected.protocol_version,
+                    connected.features,
+                    None,
+                    connected.session_context,
+                    connected.permits_delegated_sessions,
+                ),
+            ))
             .await)
     }
 
@@ -1613,55 +1563,113 @@ impl ClientDbInner {
                     .map_err(|error| JazzError::Query(error.to_string()))?,
             )
         };
-        let _attachment = if wait_for_coverage {
-            let attachment = db
-                .attach_query(&prepared, opts.clone())
-                .map_err(|error| JazzError::Query(error.to_string()))?;
-            let attachment = QueryAttachmentLease {
-                backend: db.clone(),
-                attachment,
-            };
-            Self::wait_for_query_coverage(inner, attachment.attachment()).await?;
-            Some(attachment)
+        let rows = if wait_for_coverage {
+            Self::read_remote_one_shot_from_subscription(&db, &prepared, opts).await?
         } else {
-            None
+            db.all(&prepared, opts)
+                .await
+                .map_err(|error| JazzError::Query(error.to_string()))?
         };
-        let rows = db
-            .all(&prepared, opts)
-            .await
-            .map_err(|error| JazzError::Query(error.to_string()))?;
         inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
 
-    async fn wait_for_query_coverage(
-        inner: &Rc<RefCell<Self>>,
-        attachment: &crate::db::QueryAttachment,
-    ) -> Result<()> {
-        if inner
-            .borrow()
-            .backend()?
-            .query_attachment_is_covered(attachment)
-        {
-            return Ok(());
+    /// Evaluate one strict remote usage site through a short-lived local
+    /// maintained subscription. The server supplies only its policy-scoped
+    /// source closure; the subscription's receiver-local Groove graph is the
+    /// sole producer of the rows returned here.
+    ///
+    /// `SubscriptionStream::Drop` queues the same finalization if this future
+    /// is cancelled while waiting. On ordinary success, rejection, or a closed
+    /// stream we explicitly await `close` so its exact coverage owner is
+    /// retired before returning to the caller.
+    async fn read_remote_one_shot_from_subscription(
+        db: &Backend,
+        prepared: &crate::db::PreparedQuery,
+        opts: CoreReadOpts,
+    ) -> Result<Vec<crate::node::CurrentRow>> {
+        let mut stream = db
+            .subscribe(prepared, opts)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
+        let outcome = async {
+            loop {
+                let event = stream.next_event().await.ok_or_else(|| {
+                    JazzError::Query(
+                        "remote one-shot subscription closed before settlement".to_owned(),
+                    )
+                })?;
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    match &event {
+                        CoreSubscriptionEvent::Delta {
+                            reset,
+                            publishable,
+                            added,
+                            updated,
+                            removed,
+                            terminal_operations,
+                            settled,
+                            tier,
+                        } => eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_event reset={reset} publishable={publishable} added={} updated={} removed={} terminal_ops={} settled={settled} tier={tier:?}",
+                            added.len(), updated.len(), removed.len(), terminal_operations.len(),
+                        ),
+                        CoreSubscriptionEvent::Rejected { reason } => eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_rejected reason={reason:?}"
+                        ),
+                        CoreSubscriptionEvent::Closed => eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_closed"
+                        ),
+                    }
+                }
+                match event {
+                    CoreSubscriptionEvent::Delta { settled: true, .. } => {
+                        let snapshot = stream
+                            .settled_receiver_local_snapshot()
+                            .map_err(|error| {
+                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                    eprintln!(
+                                        "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_snapshot_error error={error}"
+                                    );
+                                }
+                                JazzError::Query(error.to_string())
+                            })?;
+                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                            eprintln!(
+                                "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_settled roots={} rows={}",
+                                snapshot.root_count,
+                                snapshot.rows.len(),
+                            );
+                        }
+                        return Ok(snapshot
+                            .rows
+                            .into_iter()
+                            .take(snapshot.root_count)
+                            .collect());
+                    }
+                    CoreSubscriptionEvent::Delta { settled: false, .. } => {}
+                    CoreSubscriptionEvent::Rejected { reason } => {
+                        return Err(JazzError::Query(format!(
+                            "remote one-shot subscription rejected: {reason:?}"
+                        )));
+                    }
+                    CoreSubscriptionEvent::Closed => {
+                        return Err(JazzError::Query(
+                            "remote one-shot subscription closed before settlement".to_owned(),
+                        ));
+                    }
+                }
+            }
         }
-        let deadline =
-            tokio::time::Instant::now() + load_tolerant_test_timeout(QUERY_COVERAGE_TIMEOUT);
-        loop {
-            inner.borrow().ensure_tick_driver_running()?;
-            if inner
-                .borrow()
-                .backend()?
-                .query_attachment_is_covered(attachment)
-            {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(JazzError::Query(
-                    "timed out waiting for query coverage".to_string(),
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        .await;
+        let finalization = stream
+            .close()
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()));
+        match (outcome, finalization) {
+            (Ok(rows), Ok(())) => Ok(rows),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
         }
     }
 
@@ -1852,6 +1860,11 @@ impl ClientDbInner {
                                     },
                                 }
                             }
+                            crate::protocol::SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                                transition,
+                            } => SubscriptionRejectReason::InvalidAuthoritySourceClosure {
+                                transition,
+                            },
                         };
                         let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
                     }
@@ -2488,10 +2501,10 @@ fn aggregate_public_values(
     let Some(aggregate) = &query.aggregate else {
         return Ok(Vec::new());
     };
-    // Aggregate result descriptors are compiler records, not public table
-    // rows. Like all compiler records, their application-facing fields carry
-    // the `user_` prefix. Keep the public label only for diagnostics and
-    // translate the lookup to that physical field name at this boundary.
+    // Aggregate collector records are normalized to the same `CurrentRow`
+    // representation as incremental aggregate updates before they reach this
+    // boundary.  Aggregate aliases remain in their compiler-reserved logical
+    // namespace, nested inside the ordinary physical `user_` cell namespace.
     let mut columns: Vec<(String, String, Option<ColumnType>)> = Vec::new();
     if let Some(group_by) = &aggregate.group_by {
         let idx = table_schema.columns.column_index(group_by).ok_or_else(|| {
@@ -2506,9 +2519,9 @@ fn aggregate_public_values(
             Some(table_schema.columns.columns[idx].column_type.clone()),
         ));
     }
-    // Core stores aggregate fields in canonical order so equivalent queries
-    // can share one shape. Public results retain the caller's declaration
-    // order by resolving each requested alias against that physical record.
+    // The public API preserves the output order requested by the caller.
+    // It resolves those names from the compiler-owned aggregate record, whose
+    // internal order may be canonicalized for shape sharing.
     for output in &aggregate.aggregates {
         let public_name = output.alias.clone();
         columns.push((
@@ -2523,6 +2536,16 @@ fn aggregate_public_values(
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
             let idx = descriptor.field_index(&physical_column).ok_or_else(|| {
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    eprintln!(
+                        "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
+                        descriptor
+                            .fields()
+                            .iter()
+                            .map(|field| field.name.as_deref())
+                            .collect::<Vec<_>>(),
+                    );
+                }
                 JazzError::Query(format!(
                     "aggregate row missing column {public_column} (physical field {physical_column})"
                 ))
@@ -2659,14 +2682,18 @@ impl JazzClient {
     }
 
     fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
-        Self::core_read_opts(Some(tier.legacy_durability_tier()))
+        let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
+        opts.local_updates = match tier {
+            ReadTier::Remote => CoreLocalUpdates::Deferred,
+            ReadTier::LocalFirst | ReadTier::RemoteIfPossible => CoreLocalUpdates::Immediate,
+        };
+        opts
     }
 }
 
 impl PublicQueryDecoder {
     fn core_rows_to_public(
         &self,
-        db: &Backend,
         query: &Query,
         rows: Vec<crate::node::CurrentRow>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
@@ -2745,9 +2772,7 @@ impl PublicQueryDecoder {
                 let values = columns
                     .iter()
                     .map(|column| {
-                        if let Some(value) =
-                            self.core_magic_value(db, table, core_row_id, &row, column)?
-                        {
+                        if let Some(value) = self.core_magic_value(table, &row, column)? {
                             return Ok(value);
                         }
                         let position =
@@ -2790,7 +2815,6 @@ impl PublicQueryDecoder {
 
     fn core_rows_to_query_results(
         &self,
-        db: &Backend,
         query: &Query,
         rows: Vec<crate::node::CurrentRow>,
     ) -> Result<Vec<QueryResult>> {
@@ -2799,7 +2823,7 @@ impl PublicQueryDecoder {
             .map(|row| ResultKey::from_occurrence(crate::db::subscription_row_occurrence_id(row)))
             .collect::<Vec<_>>();
         let names = self.query_result_column_names(query)?;
-        let values = self.core_rows_to_public(db, query, rows)?;
+        let values = self.core_rows_to_public(query, rows)?;
         keys.into_iter()
             .zip(values)
             .map(|(key, (_, values))| {
@@ -2910,12 +2934,20 @@ impl PublicQueryDecoder {
         );
         #[cfg(feature = "testing")]
         let public = {
-            let fields = self
-                .core_rows_to_query_results(db, query, vec![row.row.clone()])
-                .ok()
-                .and_then(|mut results| results.pop())
-                .map(|result| result.fields)
-                .unwrap_or_default();
+            let fields = match self.core_rows_to_query_results(query, vec![row.row.clone()]) {
+                Ok(mut results) => results
+                    .pop()
+                    .map(|result| result.fields)
+                    .unwrap_or_default(),
+                Err(error) => {
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=subscription_public_fields_error error={error}"
+                        );
+                    }
+                    Vec::new()
+                }
+            };
             public.with_fields(fields)
         };
         Ok(public)
@@ -2997,9 +3029,7 @@ impl PublicQueryDecoder {
 impl PublicQueryDecoder {
     fn core_magic_value(
         &self,
-        db: &Backend,
         table: &str,
-        _row_id: CoreRowUuid,
         row: &crate::node::CurrentRow,
         column: &str,
     ) -> Result<Option<Value>> {
@@ -3010,20 +3040,20 @@ impl PublicQueryDecoder {
                 )));
             }
             "$createdAt" | "$updatedAt" | "$createdBy" | "$updatedBy" => {
-                let provenance = db
-                    .row_provenance(row)
+                // A collector may project just one magic column. Decode that
+                // typed field rather than demanding the other three as well.
+                let value = row
+                    .provenance_value(column)
                     .map_err(|error| JazzError::Query(error.to_string()))?;
-                let Some(provenance) = provenance else {
+                let Some(value) = value else {
                     return Err(JazzError::Query(format!(
                         "row missing provenance for magic column {column} on table {table}"
                     )));
                 };
-                match column {
-                    "$createdAt" => Value::Timestamp(provenance.created_at),
-                    "$updatedAt" => Value::Timestamp(provenance.updated_at),
-                    "$createdBy" => Value::Text(provenance.created_by.canonical().to_owned()),
-                    "$updatedBy" => Value::Text(provenance.updated_by.canonical().to_owned()),
-                    _ => unreachable!("matched provenance magic column"),
+                match value {
+                    CoreValue::U64(timestamp) => Value::Timestamp(timestamp),
+                    CoreValue::String(author) => Value::Text(author),
+                    _ => unreachable!("provenance_value returns typed timestamps or authors"),
                 }
             }
             _ => return Ok(None),
@@ -3154,9 +3184,9 @@ impl JazzClient {
 
     /// Subscribe using a product-level read tier.
     ///
-    /// `RemoteIfPossible` remains strict in the native Rust facade because it
-    /// has no public explicit-disconnect state; host bindings can lower it to
-    /// local only after their caller explicitly disconnects.
+    /// `RemoteIfPossible` keeps a strict remote initial gate in the native Rust
+    /// facade because it has no public explicit-disconnect state; host bindings
+    /// can lower it to local only after their caller explicitly disconnects.
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
@@ -3277,15 +3307,18 @@ impl JazzClient {
                 .query_transaction_rows(query.clone(), opts, transaction_id, table, author)
                 .await?
         } else {
-            let wait_for_coverage = matches!(opts.tier, CoreDurabilityTier::Global);
+            // A product `Remote` read lowers to the legacy Edge tier. Both
+            // Edge and Global are strict remote one-shots: they must own a
+            // fresh coverage lifetime and return only after the receiver's
+            // local maintained graph has settled that exact coverage.
+            let wait_for_coverage = opts.tier >= CoreDurabilityTier::Edge;
             self.db
                 .query_rows(query.clone(), opts, table, wait_for_coverage)
                 .await?
         };
-        let db = self.db.inner.borrow().backend_clone()?;
         self.db
             .query_decoder
-            .core_rows_to_query_results(&db, &query, rows)
+            .core_rows_to_query_results(&query, rows)
     }
 
     /// Create a new row in a table.
@@ -3616,8 +3649,9 @@ mod tests {
             .expect("close yielding persistent storage");
     }
 
-    /// Product read tiers lower to the unchanged facade durability contract,
-    /// keeping write durability independent of the read API migration.
+    /// This binding-boundary lowering is asserted directly because its internal
+    /// overlay bit is not independently observable without conflating it with
+    /// remote transport timing. Write durability remains independent.
     #[test]
     fn read_tier_lowers_without_changing_write_durability() {
         assert_eq!(
@@ -3632,6 +3666,18 @@ mod tests {
             ReadTier::RemoteIfPossible.legacy_durability_tier(),
             DurabilityTier::EdgeServer,
             "the native facade has no explicit offline boundary"
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
+            CoreLocalUpdates::Immediate
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::Remote).local_updates,
+            CoreLocalUpdates::Deferred
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::RemoteIfPossible).local_updates,
+            CoreLocalUpdates::Immediate
         );
         assert_eq!(
             core_legacy_read_tier(DurabilityTier::Local),
@@ -4104,39 +4150,63 @@ mod tests {
         assert_eq!(identity.author, CoreAuthorSubject::SYSTEM);
     }
 
+    /// A strict remote one-shot must not return Alice's ambient local row while
+    /// offline: it waits for its transient subscription's exact authority
+    /// closure. Dropping that waiting caller retires the owned coverage.
+    ///
+    /// alice ──local write──► offline local store
+    /// alice ──Remote read──► transient subscription ──wait──► authority
     #[tokio::test(flavor = "current_thread")]
-    async fn cancelled_edge_query_attachment_is_released() {
+    async fn strict_remote_one_shot_uses_transient_subscription_not_ambient_all() {
         let client = JazzClient::connect(make_offline_context(
-            AppId::from_name("cancelled-edge-query-attachment"),
+            AppId::from_name("strict-remote-one-shot-subscription"),
             TempDir::new().expect("tempdir").keep(),
             declared_todo_schema(),
         ))
         .await
         .expect("connect offline client");
-        let (backend, prepared) = {
-            let inner = client.db.inner.borrow();
-            (
-                inner.backend_clone().expect("client is open"),
-                inner
-                    .backend()
-                    .expect("client is open")
-                    .prepare_query(&Query::from("todos"))
-                    .expect("prepare query"),
+        client
+            .upsert(
+                "todos",
+                Uuid::from_u128(0x5151),
+                HashMap::from([
+                    ("title".to_owned(), Value::Text("local only".to_owned())),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
             )
-        };
-        let lease = QueryAttachmentLease {
-            backend: backend.clone(),
-            attachment: backend
-                .attach_query(&prepared, CoreReadOpts::default())
-                .expect("attach query"),
-        };
+            .expect("write local row");
 
-        drop(lease);
+        let mut query =
+            Box::pin(client.query_with_read_tier(Query::from("todos"), ReadTier::Remote));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(
+            matches!(query.as_mut().poll(&mut context), std::task::Poll::Pending),
+            "strict remote must wait rather than silently reading local storage"
+        );
+
+        let backend = client
+            .db
+            .inner
+            .borrow()
+            .backend_clone()
+            .expect("client is open");
+        assert!(
+            backend.0.query_coverage_attachment_counts_for_test().0 > 0,
+            "the pending read must own transient upstream coverage"
+        );
+
+        drop(query);
+        backend
+            .0
+            .tick()
+            .await
+            .expect("drain dropped one-shot cleanup");
 
         assert_eq!(
             backend.0.query_coverage_attachment_counts_for_test(),
             (0, 0),
-            "cancelling the read must release its coverage refcount and usage-site registration"
+            "cancelling the remote one-shot must release its coverage owner"
         );
     }
 

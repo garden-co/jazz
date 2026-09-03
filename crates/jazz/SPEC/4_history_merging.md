@@ -92,6 +92,24 @@ content version with the same sorted parent set already exists (`INV-HIST-5`).
 The merge version dominates all of its parent heads and becomes the current
 content winner when present and accepted (`INV-HIST-6`).
 
+Edges reconcile concurrent mergeable writes as they admit them, including
+independent inserts of the same row ID. An edge's merge is accepted at Edge
+durability and has no global timestamp. Core must not be the first place where
+concurrency already observed by one edge is reconciled: it merges only the
+concurrent heads that remain across edge publications, then establishes Global
+durability. Replaying an edge's already reconciled frontier must not create a
+redundant merge of that frontier.
+
+An edge forwards each admitted transaction together with any merge versions it
+generated as one coherent authority publication. This is a logical admission
+boundary, not a guarantee that a transport delivers everything in one physical
+frame. Core admits the complete publication before looking for remaining
+concurrent heads. In particular, it must not process `A`, then `B`, eagerly
+create its own `M(A,B)`, and only afterward admit the edge's already-generated
+`M(A,B)` from that same publication. Dependency repair and reconnect replay must
+preserve this boundary. Separate edge publications may still leave concurrent
+heads, which core reconciles through the same merge machinery.
+
 The cells of a merge version are computed per column. The default strategy
 (`MergeStrategy::Lww`) fills each column independently: it takes the value from
 the highest-sort-key head that sets that column; if no head sets it, it falls

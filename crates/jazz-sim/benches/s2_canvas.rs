@@ -334,11 +334,14 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             };
             let edge_start = ctx.now_ms();
             let active = &mut participants[active_idx];
+            let policy_claims = raw_claims(active.peer.identity());
             let outcome = block_on(active.peer.ingest_edge_mergeable_commit_unit(
                 &mut active.edge.node,
                 tx,
                 versions,
                 u64::MAX,
+                u64::MAX,
+                policy_claims,
             ))
             .expect("edge ingest");
             let updates =
@@ -687,8 +690,14 @@ fn run_concurrent_live(
     let (edge_dir, mut edge_node) = open_node(node(240), schema.clone());
     install_participant_claims(&mut edge_node, config);
     apply_core_binding(&mut core, &shape, &binding);
-    apply_binding(&mut edge_node, &shape, &binding);
-    let mut policy_peer = PeerState::relay();
+    // This concurrent load fixture distributes one participant-0 read view
+    // (the peers below already use that identity). Register its exact scope
+    // at each receiver; an unscoped registration with the same handle would
+    // conflict when the serving peer installs its authenticated binding.
+    apply_binding(&mut edge_node, &shape, &binding, participant_author(0));
+    // This direct benchmark helper represents one SYSTEM-scoped policy
+    // reader, not a multiplexing transport relay.
+    let mut policy_peer = PeerState::new();
     hydrate_edge_policy_direct(&mut core, &mut edge_node, &mut policy_peer);
 
     let mut writer_nodes = Vec::with_capacity(config.active);
@@ -696,7 +705,7 @@ fn run_concurrent_live(
     for writer_idx in 0..config.active {
         let (dir, mut writer_node) = open_node(node(20 + writer_idx as u8), schema.clone());
         install_claims(&mut writer_node, participant_author(writer_idx));
-        apply_binding(&mut writer_node, &shape, &binding);
+        apply_binding(&mut writer_node, &shape, &binding, participant_author(0));
         writer_nodes.push((dir, writer_node));
         writer_edge_peers.insert(
             writer_idx,
@@ -710,7 +719,7 @@ fn run_concurrent_live(
         let participant_idx = config.active + passive_idx;
         let (dir, mut reader_node) = open_node(node(20 + participant_idx as u8), schema.clone());
         install_claims(&mut reader_node, participant_author(participant_idx));
-        apply_binding(&mut reader_node, &shape, &binding);
+        apply_binding(&mut reader_node, &shape, &binding, participant_author(0));
         passive_reader_positions.push(reader_nodes.len());
         reader_nodes.push((
             format!("p{participant_idx}"),
@@ -755,7 +764,7 @@ fn run_concurrent_live(
     }
 
     let (spy_dir, mut spy_node) = open_node(node(90), schema.clone());
-    apply_binding(&mut spy_node, &shape, &binding);
+    apply_binding(&mut spy_node, &shape, &binding, participant_author(0));
     assert!(rows(&mut spy_node, &shape, &binding).is_empty());
     reader_nodes.push((
         "spy".to_owned(),
@@ -795,7 +804,12 @@ fn run_concurrent_live(
         drop(node);
         reader_handles.push(thread::spawn(move || {
             let mut node = reopen_node(&dir, node_uuid, reader_schema);
-            apply_binding(&mut node, &reader_shape, &reader_binding);
+            apply_binding(
+                &mut node,
+                &reader_shape,
+                &reader_binding,
+                participant_author(0),
+            );
             run_reader_actor(ReaderActorArgs {
                 name,
                 is_spy,
@@ -832,7 +846,12 @@ fn run_concurrent_live(
             for writer_idx in 0..active_count {
                 install_claims(&mut edge_node, participant_author(writer_idx));
             }
-            apply_binding(&mut edge_node, &edge_shape, &edge_binding);
+            apply_binding(
+                &mut edge_node,
+                &edge_shape,
+                &edge_binding,
+                participant_author(0),
+            );
             run_edge_actor(
                 edge_dir,
                 edge_node,
@@ -901,7 +920,12 @@ fn run_concurrent_live(
         writer_handles.push(thread::spawn(move || {
             let mut node = reopen_node(&dir, node(20 + writer_idx as u8), writer_schema);
             install_claims(&mut node, participant_author(writer_idx));
-            apply_binding(&mut node, &writer_shape, &writer_binding);
+            apply_binding(
+                &mut node,
+                &writer_shape,
+                &writer_binding,
+                participant_author(0),
+            );
             run_writer_actor(
                 writer_idx,
                 dir,
@@ -1175,11 +1199,14 @@ fn run_edge_actor(
                 let start = Instant::now();
                 let writer_peer = writer_peers.get_mut(&writer_idx).expect("writer edge peer");
                 let now_ms = epoch.elapsed().as_millis() as u64;
+                let policy_claims = raw_claims(writer_peer.identity());
                 let outcome = block_on(writer_peer.ingest_edge_mergeable_commit_unit(
                     &mut edge_node,
                     tx,
                     versions,
                     now_ms,
+                    now_ms,
+                    policy_claims,
                 ))
                 .expect("edge ingest");
                 let mut updates =
@@ -1472,8 +1499,11 @@ fn hydrate_edge_policy_direct(
     edge_node: &mut NodeState<RocksDbStorage>,
     policy_peer: &mut PeerState,
 ) {
-    let update =
-        block_on(policy_peer.rehydrate_current_rows(core, INVITES)).expect("edge policy rehydrate");
+    let shape = Query::from(INVITES).validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    apply_binding(edge_node, &shape, &binding, AuthorSubject::SYSTEM);
+    let update = block_on(policy_peer.rehydrate_query(core, &shape, &binding))
+        .expect("edge policy rehydrate");
     apply_sync_message_settled(edge_node, update).expect("edge policy apply");
 }
 
@@ -1507,6 +1537,7 @@ fn apply_core_binding(
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .unwrap();
@@ -1660,11 +1691,19 @@ fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec
     }
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            result_member_adds, ..
-        }) => result_member_adds
+            program_fact_adds, ..
+        }) => program_fact_adds
             .iter()
-            .filter_map(|entry| entry.as_row())
-            .filter_map(|(table, _, tx_id)| (table.as_ref() == SHAPES).then_some(tx_id))
+            .filter_map(|entry| match entry {
+                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.version_table.as_str() == SHAPES =>
+                {
+                    Some(input.version.tx)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect(),
         _ => Vec::new(),
     }
@@ -2258,8 +2297,18 @@ fn hydrate(
 ) {
     install_claims(core, participant.peer.identity());
     register_binding(ctx, core, &participant.edge.name, shape, binding);
-    apply_binding(&mut participant.edge.node, shape, binding);
-    apply_binding(&mut participant.node, shape, binding);
+    apply_binding(
+        &mut participant.edge.node,
+        shape,
+        binding,
+        participant.peer.identity(),
+    );
+    apply_binding(
+        &mut participant.node,
+        shape,
+        binding,
+        participant.peer.identity(),
+    );
     let core_update = block_on(
         participant
             .edge
@@ -2287,13 +2336,21 @@ fn hydrate_edge_policy(
     core: &mut NodeState<RocksDbStorage>,
     edge: &mut EdgeRoute,
 ) {
-    let update = block_on(edge.policy_peer.rehydrate_current_rows(core, INVITES)).unwrap();
+    let shape = Query::from(INVITES).validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    apply_binding(&mut edge.node, &shape, &binding, AuthorSubject::SYSTEM);
+    let update = block_on(edge.policy_peer.rehydrate_query(core, &shape, &binding)).unwrap();
     ctx.send("core", &edge.name, update);
     let delivered = ctx.recv(&edge.name);
     apply_sync_message_settled(&mut edge.node, delivered.message).unwrap();
 }
 
-fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, binding: &Binding) {
+fn apply_binding(
+    node: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+) {
     apply_sync_message_settled(
         node,
         SyncMessage::RegisterShape {
@@ -2319,6 +2376,14 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
             },
             values,
             known_state: None,
+            delegated_session: Some(jazz::protocol::DelegatedSessionBinding {
+                identity,
+                claims: if identity == AuthorSubject::SYSTEM {
+                    BTreeMap::new()
+                } else {
+                    raw_claims(identity)
+                },
+            }),
         }),
     )
     .unwrap();
@@ -2356,6 +2421,7 @@ fn register_binding(
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .unwrap();
@@ -2397,7 +2463,9 @@ fn open_participant(
             node: edge_node,
             _dir: edge_dir,
             core_peer: PeerState::client_link(identity),
-            policy_peer: PeerState::relay(),
+            // Policy hydration is invoked directly in this simulation. It
+            // never carries a downstream session through a relay transport.
+            policy_peer: PeerState::new(),
         },
     }
 }
@@ -2649,12 +2717,19 @@ fn is_ancestor(
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            result_member_adds, ..
-        }) => result_member_adds
+            program_fact_adds, ..
+        }) => program_fact_adds
             .iter()
-            .filter_map(|entry| entry.as_row())
-            .filter(|entry| entry.0.as_ref() == table)
-            .count(),
+            .filter_map(|entry| match entry {
+                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.version_table.as_str() == table =>
+                {
+                    Some(input.source_row)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .len(),
         _ => 0,
     }
 }

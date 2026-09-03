@@ -1266,14 +1266,21 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   "edge",
                 ),
               ]);
-              // Local-first deliberately continues to expose the row body
-              // already materialized in this browser.  Only the requested
-              // Edge read above is constrained by the empty remote
-              // authorization membership after revocation.
-              const locallyCachedInvitation = await editor.all(
-                app.invitations.where({ id: editorInvite.id }),
-              );
-              expect(locallyCachedInvitation.map((row) => row.id)).toEqual([editorInvite.id]);
+              // The invitation was actually deleted, not merely withdrawn
+              // from this reader's scope. Its admitted deletion suppresses
+              // local reads too. The undeleted playlist and child instead
+              // remain cached despite losing their remote authorization.
+              await expect(
+                editor.all(app.invitations.where({ id: editorInvite.id })),
+              ).resolves.toEqual([]);
+              expect(
+                (await editor.all(app.playlists.where({ id: playlist.id }))).map((row) => row.id),
+              ).toEqual([playlist.id]);
+              expect(
+                (await editor.all(app.playlist_entries.where({ id: belowWindowEntryId }))).map(
+                  (row) => row.id,
+                ),
+              ).toEqual([belowWindowEntryId]);
               await expect(
                 editor
                   .insert(app.playlist_entries, {

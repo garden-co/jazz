@@ -203,6 +203,26 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       }
       return;
     }
+    case "EnumPayload": {
+      // Keep this byte layout in lockstep with Rust's
+      // `public_api::types::branch::hash_column_type`: payload-case order and
+      // field order are semantic, while a payload field contributes only its
+      // name, type, and nullability.
+      writer.byte(13);
+      writer.u64(columnType.cases.length);
+      for (const entry of columnType.cases) {
+        writer.stringBytes(entry.name);
+        writer.byte(0);
+        writer.u64(entry.fields.length);
+        for (const field of entry.fields) {
+          writer.stringBytes(field.name);
+          writer.byte(0);
+          hashColumnType(writer, field.column_type);
+          writer.byte(field.nullable ? 1 : 0);
+        }
+      }
+      return;
+    }
     case "Timestamp":
       writer.byte(5);
       return;
@@ -210,7 +230,7 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       writer.byte(6);
       return;
     case "Bytea":
-      writer.byte(10);
+      writer.byte(16);
       return;
     case "Json":
       writer.byte(11);
@@ -232,6 +252,9 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       hashColumns(writer, columnType.columns);
       return;
   }
+
+  const exhaustive: never = columnType;
+  throw new Error(`Unhandled column type: ${JSON.stringify(exhaustive)}`);
 }
 
 function uuidBytes(value: string): Uint8Array {

@@ -10,7 +10,8 @@ pub(super) fn current_query_read_set(
     policy_schema: SchemaVersionId,
     tier: DurabilityTier,
     settled_binding_view: Option<BindingViewKey>,
-    settled_requires_result_payload: bool,
+    settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
+    _settled_requires_result_payload: bool,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
         schema_family: SchemaFamilySelection::Current,
@@ -27,8 +28,7 @@ pub(super) fn current_query_read_set(
                     SourceExpr::SettledBindingView {
                         projection: projection.clone(),
                         binding_view,
-                        rows: SettledBindingRows::ResultMembers,
-                        requires_result_payload: settled_requires_result_payload,
+                        authority_result_key: settled_authority_result_key.clone(),
                     }
                 } else {
                     SourceExpr::VisibleCurrent {
@@ -42,16 +42,13 @@ pub(super) fn current_query_read_set(
         })
         .collect::<BTreeMap<_, _>>();
     for source in &shape.auxiliary_sources {
-        if let Some(binding_view) = settled_binding_view
-            && let Some(source_index) = flat_tuple_source_index(source)
-        {
+        if let Some(binding_view) = settled_binding_view {
             sources.insert(
                 source.clone(),
                 SourceExpr::SettledBindingView {
                     projection: projection.clone(),
                     binding_view,
-                    rows: SettledBindingRows::FlatTupleContributor { source_index },
-                    requires_result_payload: settled_requires_result_payload,
+                    authority_result_key: settled_authority_result_key.clone(),
                 },
             );
             continue;
@@ -70,18 +67,6 @@ pub(super) fn current_query_read_set(
         policy_schema,
         sources,
     })
-}
-
-fn flat_tuple_source_index(source: &SourceId) -> Option<usize> {
-    let [SourceRole::Alias(alias)] = source.path.components.as_slice() else {
-        return None;
-    };
-    alias
-        .strip_prefix("flat_join:")?
-        .split_once(':')?
-        .0
-        .parse()
-        .ok()
 }
 
 pub(super) fn historical_query_read_set(
@@ -195,15 +180,12 @@ pub(super) fn query_read_set_for_read_view(
     tier: DurabilityTier,
     read_view: &ReadViewSpec,
     settled_binding_view: Option<BindingViewKey>,
-    aggregate_query: bool,
+    settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
     schema: &JazzSchema,
 ) -> Result<RequestedReadSet, Error> {
-    // A settled binding view stores aggregate output as synthetic result
-    // members, not source-table rows. Re-feeding it through the source graph
-    // would turn an aggregate replacement into an empty source and retract
-    // the public row. Its authoritative result is materialized directly by
-    // the subscription facade instead.
-    let settled_binding_view = (!aggregate_query).then_some(settled_binding_view).flatten();
+    // All receiver programs, including aggregates, consume the authority's
+    // exact source closure. Aggregate results are computed by the ordinary
+    // local graph; they are not a separate authority-provided result payload.
     if settled_binding_view.is_some() {
         // Settled rows are already the authority's effective result for the
         // exact BindingViewKey, whose identity includes the normalized read
@@ -215,6 +197,7 @@ pub(super) fn query_read_set_for_read_view(
             policy_schema,
             tier,
             settled_binding_view,
+            settled_authority_result_key,
             matches!(read_view.source, ReadViewSourceSpec::BranchView { .. }),
         ));
     }
@@ -224,6 +207,7 @@ pub(super) fn query_read_set_for_read_view(
             read_schema,
             policy_schema,
             tier,
+            None,
             None,
             false,
         )),

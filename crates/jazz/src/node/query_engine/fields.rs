@@ -1,4 +1,5 @@
 use super::ClaimPath;
+use crate::schema::TableSchema;
 
 pub(crate) const USER_COLUMN_PREFIX: &str = "user_";
 /// Physical namespace for aggregate result values.
@@ -18,6 +19,29 @@ pub(crate) fn user_column_field(column: &str) -> String {
     format!("{USER_COLUMN_PREFIX}{column}")
 }
 
+/// Canonical physical `CurrentRow` field order. Query readers and public
+/// maintained terminals use the same row representation for shape-default
+/// values, so this belongs to the compiler vocabulary rather than either
+/// materialization path.
+pub(crate) fn current_row_field_names(table: &TableSchema) -> Vec<String> {
+    let mut fields = vec!["row_uuid".to_owned()];
+    fields.extend(
+        table
+            .columns
+            .iter()
+            .map(|column| user_column_field(&column.name)),
+    );
+    fields.extend([
+        "$createdBy".to_owned(),
+        "$createdAt".to_owned(),
+        "$updatedBy".to_owned(),
+        "$updatedAt".to_owned(),
+        "tx_time".to_owned(),
+        "tx_node_id".to_owned(),
+    ]);
+    fields
+}
+
 pub(crate) fn logical_user_column(field: &str) -> &str {
     field.strip_prefix(USER_COLUMN_PREFIX).unwrap_or(field)
 }
@@ -26,6 +50,10 @@ pub(crate) fn aggregate_output_field(output: &str) -> String {
     aggregate_output_column(output)
 }
 
+/// Aggregate values in an application `CurrentRow` use the normal physical
+/// cell namespace.  The unprefixed aggregate field is a compiler-internal
+/// graph record name only; it must be normalized before it crosses the
+/// app-row boundary.
 pub(crate) fn aggregate_output_app_field(output: &str) -> String {
     user_column_field(&aggregate_output_field(output))
 }

@@ -3,10 +3,37 @@
 // same seam: a failed durable commit is not permission to publish an IVM delta,
 // a view, or a fate acknowledgement.
 
+struct TargetedWriteManyFailure {
+    cf: String,
+    key: Vec<u8>,
+    write_through: bool,
+}
+
+fn jazz_class_v1_history_physical_target(
+    logical_cf: &str,
+    logical_key: &[u8],
+) -> (String, Vec<u8>) {
+    assert!(
+        logical_cf.starts_with("jazz_") && logical_cf.ends_with("_history"),
+        "physical history target requires a Jazz history column family"
+    );
+    let logical_cf_bytes = logical_cf.as_bytes();
+    let logical_cf_len =
+        u32::try_from(logical_cf_bytes.len()).expect("Jazz column-family names fit in u32");
+    let mut physical_key =
+        Vec::with_capacity(4 + logical_cf_bytes.len() + logical_key.len());
+    physical_key.extend_from_slice(&logical_cf_len.to_be_bytes());
+    physical_key.extend_from_slice(logical_cf_bytes);
+    physical_key.extend_from_slice(logical_key);
+    ("__groove_class_history".to_owned(), physical_key)
+}
+
 #[derive(Clone)]
 struct FailWriteManyMemoryStorage {
     inner: MemoryStorage,
     fail_on_write_many: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    targeted_write_many_failure:
+        std::rc::Rc<std::cell::RefCell<Option<TargetedWriteManyFailure>>>,
     write_many_calls: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
@@ -15,6 +42,7 @@ impl FailWriteManyMemoryStorage {
         Self {
             inner: MemoryStorage::new(column_families).expect("valid memory storage families"),
             fail_on_write_many: std::rc::Rc::new(std::cell::Cell::new(None)),
+            targeted_write_many_failure: std::rc::Rc::new(std::cell::RefCell::new(None)),
             write_many_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
         }
     }
@@ -26,6 +54,24 @@ impl FailWriteManyMemoryStorage {
         assert!(nth > 0, "write-many failpoint is one-based");
         self.fail_on_write_many
             .set(Some(self.write_many_calls.get() + nth));
+    }
+
+    fn fail_write_many_on_delete(&self, cf: String, key: Vec<u8>) {
+        self.targeted_write_many_failure
+            .replace(Some(TargetedWriteManyFailure {
+                cf,
+                key,
+                write_through: false,
+            }));
+    }
+
+    fn fail_write_many_on_delete_after_write_through(&self, cf: String, key: Vec<u8>) {
+        self.targeted_write_many_failure
+            .replace(Some(TargetedWriteManyFailure {
+                cf,
+                key,
+                write_through: true,
+            }));
     }
 
     fn write_many_call_count(&self) -> usize {
@@ -66,11 +112,48 @@ impl OrderedKvStorage for FailWriteManyMemoryStorage {
     fn write_many(&self, operations: Vec<groove::storage::OwnedWriteOperation>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         let call = self.write_many_calls.get() + 1;
         self.write_many_calls.set(call);
+        let matches_target = self
+            .targeted_write_many_failure
+            .borrow()
+            .as_ref()
+            .is_some_and(|target| {
+                operations.iter().any(|operation| {
+                    matches!(
+                        operation,
+                        groove::storage::OwnedWriteOperation::Delete { cf, key }
+                            if cf == &target.cf && key == &target.key
+                    )
+                })
+            });
+        if matches_target {
+            let target = self
+                .targeted_write_many_failure
+                .borrow_mut()
+                .take()
+                .expect("matching targeted write-many failure must remain armed");
+            if target.write_through {
+                let persisted = self.inner.write_many(operations);
+                return Box::pin(async move {
+                    persisted.await?;
+                    Err(groove::storage::Error::InvalidStorageLayout(
+                        "injected post-write failure".to_owned(),
+                    ))
+                });
+            }
+            return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected durable commit failure".to_owned())) });
+        }
         if self.fail_on_write_many.get() == Some(call) {
             self.fail_on_write_many.set(None);
             return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected durable commit failure".to_owned())) });
         }
         self.inner.write_many(operations)
+    }
+
+    fn approximate_class_bytes(
+        &self,
+        cf: String,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<u64>, groove::storage::Error>> {
+        self.inner.approximate_class_bytes(cf)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -81,10 +164,16 @@ impl OrderedKvStorage for FailWriteManyMemoryStorage {
 impl ReopenableStorage for FailWriteManyMemoryStorage {
     fn reopen(self, column_families: Vec<String>) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
         Box::pin(async move {
-            let Self { inner, fail_on_write_many, write_many_calls } = self;
+            let Self {
+                inner,
+                fail_on_write_many,
+                targeted_write_many_failure,
+                write_many_calls,
+            } = self;
             Ok(Self {
                 inner: inner.reopen(column_families).await?,
                 fail_on_write_many,
+                targeted_write_many_failure,
                 write_many_calls,
             })
         })

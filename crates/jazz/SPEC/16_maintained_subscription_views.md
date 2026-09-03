@@ -18,6 +18,7 @@ Invariant digest:
 - `groove/SPEC/INVARIANTS.md::INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
 - `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
+- `INV-SYNC-36`: An authority synchronizes an exact, authorized input closure, never its application-output terminal. The receiver reconciles that closure with the local inputs permitted by the requested tier and runs the same maintained Groove program used for local changes. Only that receiver-local terminal may publish application rows or ordered structural edits.
 
 ## Details
 
@@ -67,6 +68,13 @@ progress all use that same immutable context. An explicit replacement installs
 one complete replacement context, and every continuation uses that retained
 context; reconciliation MUST NOT substitute the default read view or reconstruct
 selectors from the opaque `ReadViewKey`.
+
+Late-usage cloning and ordinary incremental publication MUST use the same
+canonical runtime recovery path. If catalogue activation invalidates a
+maintained handle, reopening restores the retained read and policy context
+before either path drains it. Existing usages receive the recovered complete
+source closure before the new usage receives its reset; a missing handle is
+not an indefinitely pending clone.
 
 `groove/SPEC/INVARIANTS.md::INV-INC-1` is the mechanism law for this chapter:
 maintained-view ingestion, application, publication, snapshot assembly, diffing,
@@ -124,7 +132,186 @@ terminal cache as a substitute for either fact family. Thus simple roots, join
 results, and nested array relations all share one rule: manifest-admitted inputs
 enter the local graph; terminal rows leave it.
 
-### 16.1.1 Application subscription delta contract
+### 16.1.1 Covered input, one local maintained result
+
+`INV-SYNC-36` fixes the authority/receiver boundary. An authority result is an
+exactly scoped **covered input closure**, not a cached application result. It
+contains the canonical row versions and typed program facts that the authorized
+residual program may observe, together with the witnesses and completeness
+evidence required to trust that closure. A receiver stages those inputs before
+making their membership visible to its maintained graph. A membership or
+relation fact whose referenced row version has not been admitted as part of the
+same exact authority closure is incomplete and cannot advance settlement or
+enter the graph.
+
+A client relay preserves each version witness's physical supplying branch,
+even when the read view projects that version into another logical branch.
+For a strict authority-backed closure, it forwards the selected upstream
+receipt's settlement cut, not its own local committed clock. A newly attached
+usage receives a complete source-manifest reset: a cached cursor or known
+payload inventory does not establish a predecessor input closure for that
+usage. Known payloads may still avoid retransmitting bytes; they cannot remove
+the manifest or turn its opening into an incremental update.
+
+Compiled source-occurrence identities MUST be identical on native and WASM
+hosts. They must not incorporate pointer widths or machine-sized sentinel
+values. Implicit root references use a `reference:<column>` alias, separate
+from explicit `include:<include-index>:<segment-index>` aliases; both are
+root-relative identities under the query's schema.
+
+A source occurrence retains its logical name in the query's read schema; its
+version witness names the immutable row under its authored schema. For example,
+after `users` is renamed to `people`, a `people` source may admit a version
+authored in `users`. The catalogue's permanent physical table ID connects the
+two names. The authority MUST emit the authored coordinate, and the receiver
+MUST resolve the source's physical table and verify the exact authored name,
+row ID, transaction, branch, and layer. Initial, incremental, and resident-body
+recovery paths use the same identity checks. Equal row IDs or similar table
+names alone are never sufficient evidence.
+
+A deletion-register witness is not authorization by itself. Its source
+occurrence MUST also be admitted by the same current policy-filtered
+`IncludeDeleted` preimage, matched to the exact deleted row and deletion
+version identity before the witness enters the covered closure. The register
+supplies the deletion transaction, branch, schema, and layer carrier; the
+preimage supplies the permission to disclose that this row is deleted. A
+coverage withdrawal, a later deletion after revocation, an unapproved cold
+tombstone, or a different deletion winner for the same row therefore cannot be
+reinterpreted as an authorized deletion. A cold subscriber may receive a
+deletion witness when its current policy admits that exact preimage. This does
+not create a historical entitlement: the authority evaluates the current policy
+for the exact source occurrence and uses the ordinary current-row/branch winner
+selection.
+
+Every input change then enters the same receiver-local lowered Groove program:
+
+```text
+exact authority-covered inputs ----+
+                                    +--> one maintained Groove graph --> app output
+eligible local inputs --------------+
+```
+
+The requested tier determines which inputs participate and when the first
+answer may be published; it does not select another evaluator:
+
+- `local-first` evaluates locally known current data plus pending local
+  changes, online or offline. Installing a remote closure does not retire its
+  cached inputs. This is determined by observation tier, not by whether the
+  local node is a trusted backend: a trusted backend may make the same Local
+  read while merely propagating upstream. Remote scope withdrawal is not a
+  stored client-side revocation;
+- `remote` waits for a fresh settled closure for its exact usage-site
+  subscription and evaluates only that closure, without pending local changes.
+  It waits while offline;
+- online `remote-if-possible` evaluates the exact authority inputs with pending
+  edits/deletes applied to those inputs, plus eligible pending new inserts.
+  An edit alone does not admit an existing out-of-scope row. Relationships use
+  only these inputs, without expanding into cached dependency rows. Inserts
+  participate in the ordinary query, including its joins, filters and windows;
+- offline `remote-if-possible` evaluates local knowledge plus pending changes,
+  like `local-first`. It may therefore show cached rows excluded by the last
+  remote closure. Returning online replaces that fallback with fresh authority
+  inputs and the bounded pending overlay. Do not reuse a detached receipt as
+  fresh authority coverage;
+- a local-only internal execution suppresses upstream registration but still
+  uses the same lowered graph over its local source.
+
+In a split foreground/persistent-owner client, the owner's same-scope stored
+data is local knowledge too. A one-shot local-first read from a newly opened
+memory-only foreground must receive the owner's query answer (including a
+confirmed empty answer) before returning. This is local storage delivery, not
+authority settlement: it completes while the owner is offline or while its
+edge/core connection is stalled. Ordinary upstream propagation remains enabled
+when requested. A standalone durable runtime can read its local storage directly
+and does not acquire this foreground delivery prerequisite.
+
+Source membership and stored row state are distinct. Scope withdrawal neither
+deletes nor redacts previously downloaded content. An actually admitted deletion
+version, however, updates locally known row state and suppresses that row in
+ordinary local reads too. Pending delete/restore candidates use the ordinary
+current-winner relation before the query runs: a newer pending restore supersedes
+a pending delete; rejection retracts the rejected candidate and reveals the
+remaining winner. No terminal-side workaround may independently reconcile this
+state. Broader online local dependency expansion is deferred to #2501.
+
+The authority never chooses positions in the receiver's application value.
+Explicit `order_by`, implicit row-id order, stable tie breakers, relation-local
+windows, and stored user-defined ordering data are inputs to the receiving
+query program. Its local Groove collector derives the ordered root and nested
+terminal edits after authority and local inputs have been reconciled. An
+authority-produced root row, nested snapshot, `Insert`, `Update`, `Remove`, or
+`Move` operation MUST NOT cross peer sync as result truth and MUST NOT be
+applied by a facade-side reducer. Such an operation was computed without the
+receiver's eligible local overlay and may name an index that is false for the
+receiver's actual result.
+
+Worked examples:
+
+- **Strict remote root query.** The authority admits rows A and C plus the
+  witnesses proving that closure complete. The receiver installs A and C as
+  its remote source and runs the query's filter and order locally. It does not
+  install an authority-produced `[A, C]` result cache.
+- **Local-first nested insertion.** The authority closure contains children A
+  and C while the receiver has an eligible pending child B. The receiving
+  child collector computes `[A, B, C]`. An authority operation saying “insert C
+  at index 1” would be wrong for this receiver and is therefore never sent.
+- **Remote permission revocation.** A successor authority closure retracts the opaque
+  admission or safe source witness that supported row A. That input retraction
+  enters the same local graph and its collector removes every affected root or
+  descendant occurrence in a remote-scoped result. The client does not
+  re-evaluate the hidden policy, and the authority sends no presentation-level
+  remove. Local-first may still show the cached row; offline fallback may show
+  it again after an online remote-if-possible result excluded it.
+- **Cached Local-first open.** A client can show retained same-scope A plus a
+  pending insert B. A new authority closure containing only C does not evict A
+  from local-first knowledge. Online remote-if-possible instead uses C plus B
+  (if B matches using available query inputs); remote uses only C.
+- **Reconnect.** A fresh usage-site subscription cannot reuse its detached
+  predecessor's result or terminal sequence. It verifies a fresh exact closure,
+  installs it, and lets the local graph publish the corresponding reset.
+
+This rule does not make clients authorization authorities. The serving
+authority still selects and proves the safe closure. The receiver runs only the
+identified residual query over admitted inputs; it does not inspect hidden
+policy rows, supplement missing evidence from unrelated local history, or
+reinterpret an opaque admission. Relays retain and forward closures only under
+their exact policy-scoped authority-result identity.
+
+Remote one-shot reads use the same mechanism for a bounded lifetime: pin the
+same live upstream stream as identical usages in the same admitted scope,
+request fresh coverage, await a newer settled receipt, run the shared
+local program to quiescence, materialize its terminal once, and finalize the
+coverage owner on success, cancellation, or error. They do not inspect an
+equal-shaped predecessor's terminal cache or execute a separate semantic scan.
+Only final-pin release retires the stream. A subsequent usage opens a new wire
+identity; a retired stream's late reply cannot satisfy it. The receiver validates
+one ordered predecessor sequence, not duplicate sequences per local listener.
+A persisted settlement cursor alone cannot restore a claimed source closure:
+the complete source manifest and facts must accompany recovered cache state.
+A new usage after retirement awaits a fresh authority closure instead of lazily
+reviving only the old cursor.
+
+Sharing is determined by the lowered authority request, including its query,
+binding, read view, and policy scope. Downstream local-first and remote reads
+that lower to the same authority request share one upstream stream, despite
+their different local overlay behavior. Each downstream connection and read
+mode holds its own ownership pin. Closing one mode must not retire a stream
+still needed by another; claims refresh must preserve the same sharing rule.
+
+Settlement is downstream of local evaluation. A receiver may report a
+generation settled only after the complete exact closure has been staged, all
+referenced content witnesses are present, the corresponding local Groove tick
+has quiesced, and its locally derived terminal represents that generation.
+Installing carriers, publishing membership, and evaluating the graph are one
+ordered semantic boundary even when storage commits and runtime scheduling use
+several internal steps.
+
+An opening-pending message is only progress: it carries no source changes or
+content witnesses, does not replace the prior closure, and cannot establish
+settlement or a reusable coverage receipt. Even an empty result needs the
+subsequent complete compiler-owned source coverage manifest before it can open.
+
+### 16.1.2 Application subscription delta contract
 
 The application-facing subscription stream is a stream of result deltas. A
 delta contains row additions, row updates, row removals, ordered-position data
@@ -132,6 +319,14 @@ for ordered shapes, relation edge additions/removals where the query includes
 relations, settled/tier metadata, and a `reset` flag. There is no separate
 snapshot event type. The first delivery for a fresh subscription is a reset
 delta from the empty result set; reducing that delta yields the initial view.
+
+The maintained stream owns both this opening and all subsequent changes.
+Bindings must not manufacture an empty opening or supplement the stream with
+an independent one-shot cache read: such a read has no ordering relationship
+with delivered deltas and may overwrite newer results or fail independently.
+An empty opening is a valid result, not a reason to launch a second read.
+Explicit server-rendered hydration snapshots remain a separate initial-display
+facility; they do not replace the live stream's opening contract.
 
 Consumers own the materialized result set. The contract is that applying the
 delta reducer to events in stream order produces the same result as a one-shot
@@ -148,7 +343,7 @@ and add/update changes even when the entering row's stored cells did not change.
 Per-event work is expected to be O(changed rows), not O(result set); this is the
 application-surface form of `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 
-### 16.1.2 Fresh one-shot coverage
+### 16.1.3 Fresh one-shot coverage
 
 A new remote settled one-shot is a new usage site, not a request to inspect
 whatever equal-shape state happens to be materialized locally. Each fresh
@@ -158,12 +353,13 @@ generation advancement alone is insufficient: a late update addressed to an
 already detached equal-shape predecessor must not acknowledge its replacement
 (`INV-SYNC-30`).
 
-This usage-site freshness boundary does not create a second query algebra or
-require a maintained terminal stream for the one-shot. It may still materialize
-and post-process the shared lowered shape. It also leaves synchronous/local
-one-shots unchanged and permits still-live maintained subscriptions to reuse
-their maintained coverage groups; only a new remote settled one-shot must prove
-coverage for its own current wire subscription.
+This usage-site freshness boundary does not create a second query algebra.
+The fresh one-shot owns a transient instance of the same coverage and local
+maintained-evaluation lifecycle, materializes one terminal result, and then
+finalizes it. Synchronous/local one-shots remain local, and a still-live
+maintained subscription may reuse its exact maintained coverage group; only a
+new remote settled one-shot must prove coverage for its own current wire
+subscription.
 
 ### 16.2 Policy composition
 
@@ -173,6 +369,14 @@ the table read policy under the authenticated peer identity, lowered over the
 subscription's visible-current base source. Claim operands are rewritten to
 server-derived parameters before lowering. `claim("user")` is the stable subject
 identity. Recognized claims that do not yet have a runtime value fail closed.
+
+Authority-side source and version-witness terminals retain the routing fields
+needed to partition prepared results by the admitted session, including for
+recursive seed, step, and access rows. Removing claim routes before that
+partition can mix recipients or leave a terminal without its required fields.
+These are internal authority fields: the wire closure contains only source and
+version identities plus their ordinary row bodies, and the client compiles its
+own source descriptors without inheriting the authority's policy claims.
 
 Policy composition is not merely an output filter. Policy dependency tables are
 part of the maintained graph. If a membership row, access row, join witness, or
@@ -340,15 +544,39 @@ is deliberately about terminal values, not relations:
 Groove owns the selected ordered keys and scalar payload for every collection
 slot. It emits the smallest affected path operations without re-encoding an
 unmodified ancestor. One-shot reads and initial hydration still render complete
-terminal rows from that state. The transport carries this generic terminal
-operation vocabulary unchanged; a client applies it to its hydrated terminal
-tree and performs no joins, relation-edge interpretation, or query assembly.
+terminal rows from that state. The local subscription carrier delivers this
+generic terminal vocabulary to its binding's hydrated terminal tree. This is
+not authority-to-client result transport: the receiver evaluates the covered
+inputs locally, as specified above.
 
 This split is required by `INV-INC-1`: replacing a parent containing 20,000
 children after one child insert is observably correct but still performs work
 proportional to accumulated state. Root-addressing alone is insufficient unless
 the changed descendant path is preserved through Groove evaluation and the
 subscription carrier.
+
+The receiver-local decoder obeys the same rule. It retains decoded collection
+state keyed by the compiler's child identities and applies the addressed edit
+without decoding or encoding every sibling. Both the maintained receiver and
+the facade use this reducer. Opening, an explicit full snapshot, and a reset
+may encode complete roots; ordinary child-delta delivery may not. Opening also
+prepares the facade's decoder from the already-decoded terminal state, so the
+first subsequent edit cannot hide a full-collection initialization cost. This
+is process-local derived state, not a storage format or another query evaluator.
+
+A scalar update of an existing occurrence preserves its independently maintained
+child collections. Empty collection placeholders in that scalar payload do not
+mean child removal; explicit child edits own those changes. A remove/reinsert of
+the same occurrence within one atomic terminal batch is likewise a replacement,
+not a child-lifetime boundary. An occurrence absent at the end of the batch loses
+its retained child state. Only compiler-addressed
+collection slots receive this treatment; ordinary array-valued application
+columns remain scalar payload and are replaced normally.
+
+Collection membership edits address the collection path and carry the affected
+child key in the edit. Recursive scalar updates may instead end their path at
+that child key; the decoder verifies it matches the update's key and updates
+that occurrence without dropping its independently maintained descendants.
 
 - Subscription opening: direct `array_subqueries` are accepted at the `Db` facade
   and sync registration surfaces, covered by
@@ -419,6 +647,58 @@ whole-window replacements. A row whose rank changes but remains inside the
 window does not affect Jazz result membership unless the future API explicitly
 projects rank metadata. This keeps `ViewUpdate.result_member_adds/removes`
 aligned with the settled typed result-member model.
+
+#### Retained receiver input pages
+
+Local-first pagination is literal over local knowledge. An offset into an
+authority page is not necessarily the same offset into the receiver's cached
+inputs. Pagination follows the same tier-selected input semantics as filtering,
+ordering, and projection; it has no retained-page exception. This contract was
+settled in [#2502](https://github.com/garden-co/jazz/issues/2502).
+
+The same compiler-owned window stage is used by authority closure publication
+and by the receiver's application collector. A closure for a bounded root or
+parent window is proportional to that requested window; it is never an
+authority terminal snapshot. A live authority-relative receiver therefore
+needs a typed **window-source capability**, not a boolean saying that some
+result happened to be materialized. Cached rows surviving detachment remain
+ordinary local knowledge; they do not transfer that capability to later Local
+queries.
+
+For a live exact-query receiver, that source contract is known at compilation,
+before its `RegisterShape` message has been processed or its opening receipt
+has arrived. A cold and a warm receiver therefore compile the same relative
+window. For example, authority `OFFSET 2 LIMIT 1` over `A,B,C,D` supplies `C`;
+the receiver orders that input and uses relative `OFFSET 0 LIMIT 1`. It does
+not skip two more rows, and it retains the limit when pending inserts join
+those inputs. Ordinary local-first evaluation has no such authority-selected
+source and continues to apply `OFFSET 2` to its local current inputs. Equal
+numeric offsets and limits alone never establish compatible source identity.
+
+That capability contains the exact normalized source occurrence, full
+validated source shape, root/parent partition, user order keys and directions,
+the compiler's deterministic tie keys, window offset/limit, and the
+policy-scoped receipt that supplied it. Only the corresponding authority-relative
+receiver interprets the covered rows as the output of that source window. It
+MUST NOT apply the original absolute offset a second time, sort the page in
+Jazz, search similar registered shapes, or use authority output membership as
+a fallback. A narrower remote query requires its own coverage receipt.
+
+A later Local query applies its complete order/offset/limit to local current
+inputs, even if its numeric window is contained in a previously received remote
+page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
+16–17. Use `remote` for authority-relative pagination, or `remote-if-possible`
+for authority-relative pagination online and literal local fallback offline.
+Pending local rows participate in that local ordering normally; retained remote
+page coordinates must not silently change their rank.
+
+Different source occurrences, partitions, ordering/tie contracts, schemas,
+bindings, policy scopes, or window contracts are incompatible. They must
+open fresh coverage (or use ordinary local-first inputs), even where their
+table names or visible rows happen to match. Detach, revocation, reconnect, and
+new scope admission retire or replace the exact capability atomically with its
+covered source closure. This is the root-level application of the shared
+per-parent window representation established by #1747.
 
 `Aggregate` is the target for grouped summaries. Jazz lowers each group to a
 stable result-row identity derived from the group key and lowers scalar global
@@ -547,6 +827,7 @@ result changes back to the correct parent output.
 
 ## Open Questions
 
+- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand online remote-if-possible inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.

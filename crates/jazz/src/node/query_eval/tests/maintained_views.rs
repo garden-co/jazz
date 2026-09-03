@@ -1,6 +1,63 @@
 //! maintained views query-evaluation tests.
 
 use super::*;
+use futures::executor::block_on;
+
+fn covered_input_rows(update: &SyncMessage, additions: bool) -> BTreeSet<RowUuid> {
+    let SyncMessage::ViewUpdate(payload) = update else {
+        panic!("expected ViewUpdate");
+    };
+    let facts = if additions {
+        &payload.program_fact_adds
+    } else {
+        &payload.program_fact_removes
+    };
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            _ => None,
+        })
+        .collect()
+}
+
+/// These direct controls model an actual trusted backend reader.  The
+/// subscription's immutable policy binding must therefore be installed before
+/// a peer rehydrates it; an unscoped test `Subscribe` followed by a SYSTEM
+/// peer would exercise the deliberately rejected scope-replacement path.
+fn subscribe_query_binding_as_system(
+    node: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    opts: &RegisterShapeOptions,
+) {
+    let values = shape
+        .params()
+        .keys()
+        .map(|name| {
+            binding
+                .values()
+                .get(name)
+                .cloned()
+                .expect("bound parameter")
+        })
+        .collect();
+    node.apply_sync_message_settled(SyncMessage::Subscribe(Subscribe {
+        shape_id: shape.shape_id(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        },
+        values,
+        known_state: None,
+        delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+        }),
+    }))
+    .expect("register SYSTEM-scoped test subscription");
+}
 
 /// A direct maintained-view opening must not wait for a cold source that may
 /// require peer progress after this call returns. The publication owner keeps
@@ -84,16 +141,16 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         ..RegisterShapeOptions::default()
     };
     register_query_shape(&mut server, &shape, opts.clone());
-    subscribe_query_binding(&mut server, &shape, &binding);
+    subscribe_query_binding_as_system(&mut server, &shape, &binding, &opts);
     register_query_shape(&mut client, &shape, opts.clone());
-    subscribe_query_binding(&mut client, &shape, &binding);
+    subscribe_query_binding_as_system(&mut client, &shape, &binding, &opts);
 
     let initial_tx = commit_global_issue(&mut server, 0, "open", author(0), 1);
     let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
+        read_view: opts.read_view_key(),
     };
     let initial = peer
         .rehydrate_query_for_subscription_with_opts(
@@ -108,13 +165,63 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     client
         .apply_sync_message_settled(initial)
         .expect("apply initial settled issues view");
-    let binding_view = *client
-        .query
-        .settled_result_sets
-        .keys()
-        .find(|key| key.shape_id == shape.shape_id() && key.binding_id == binding.binding_id())
-        .expect("applied ViewUpdate registers a settled binding view");
-    assert!(client.has_settled_result_set(binding_view));
+    let authority_result_key = client
+        .authority_result_key_for_subscription(subscription)
+        .expect("applied ViewUpdate registers its exact authority receipt");
+    assert!(client.has_settled_authority_result(&authority_result_key));
+
+    let (
+        strict_receiver,
+        _strict_maintained,
+        _strict_schemas,
+        strict_initial,
+        _strict_tables,
+        strict_received,
+        _strict_inputs,
+    ) = client
+        .open_seeded_relay_edge_subscription_view_with_waker(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            &ReadViewSpec::default(),
+            subscription.read_view,
+            authority_result_key.clone(),
+            None,
+        )
+        .expect("open strict receiver from exact authority closure");
+    assert!(strict_received);
+    assert!(
+        !strict_initial.terminal_operations.is_empty(),
+        "strict receiver installs its initial authority closure before local writes"
+    );
+
+    // Previously downloaded knowledge can be absent from the current remote
+    // scope without being deleted. Local-first must retain it even after an
+    // exact remote receipt is installed; strict remote must not acquire it.
+    commit_global_issue(&mut client, 99, "open", author(99), 99);
+
+    // This source-boundary control deliberately installs an exact remote
+    // receipt before opening the online pending overlay. It distinguishes
+    // covered inputs from unrelated retained storage without timing a network.
+    let (mut online, online_initial) = block_on(
+        client.open_maintained_view_subscription_in_authorization_mode_with_waker(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::ClientLocal,
+            true,
+            None,
+        ),
+    )
+    .expect("open online remote-if-possible source");
+    assert_eq!(
+        online_initial.root_count, 1,
+        "online excludes unrelated cache"
+    );
+    assert!(online.has_covered_input_sources());
 
     let (local_shape, local_binding, local_plan) = client
         .prepare_query_binding_for_link_in_authorization_mode(
@@ -136,8 +243,11 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
             QueryAuthorizationMode::ClientLocal,
         )
         .expect("open client-local maintained issues query");
-    assert_eq!(initial_snapshot.root_count, 1);
-    client.seed_local_maintained_authoritative_generation(&mut local, binding_view);
+    assert_eq!(initial_snapshot.root_count, 2);
+    assert!(
+        !local.has_covered_input_sources(),
+        "local-first reads local knowledge permanently, not a bootstrap that remote scope replaces"
+    );
 
     let updated_tx = client
         .commit_mergeable_settled(
@@ -155,32 +265,420 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
                 ])),
         )
         .expect("commit ordinary local issue update");
-    let _ = updated_tx;
+    assert_eq!(
+        client
+            .current_rows("issues", DurabilityTier::Local)
+            .expect("read local current winner")
+            .into_iter()
+            .find(|row| row.row_uuid() == issue)
+            .and_then(|row| row.cell(client.table("issues").expect("issues table"), "title")),
+        Some(Value::String("updated title".to_owned())),
+        "the local pending/current relation itself selects the new version"
+    );
+    block_on(client.drive_ready_query_runtime()).expect("drive local write through active graphs");
+    let online_update = client
+        .drain_local_maintained_view_subscription(&mut online, Some(authority_result_key.clone()))
+        .expect("drain online pending edit")
+        .expect("online pending edit updates a scoped row");
+    assert_eq!(online.root_occurrence_ids().len(), 1);
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = online_update
+    else {
+        panic!("online overlay uses the same terminal reducer");
+    };
+    assert!(
+        terminal_operations
+            .iter()
+            .any(|operation| match &operation.edit {
+                groove::ivm::TerminalEdit::Update { value, .. }
+                | groove::ivm::TerminalEdit::Insert { value, .. } => {
+                    OwnedRecord::new(value.clone(), operation.root_descriptor.clone())
+                        .get("user_title")
+                        .ok()
+                        == Some(Value::String("updated title".to_owned()))
+                }
+                _ => false,
+            })
+    );
+    assert!(
+        matches!(
+            strict_receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "strict remote receiver must exclude an unacknowledged local successor"
+    );
 
     let update = client
-        .drain_local_maintained_view_subscription(&mut local, Some(binding_view))
+        .drain_local_maintained_view_subscription(&mut local, Some(authority_result_key.clone()))
         .expect("drain client-local maintained update")
         .expect("ordinary content update produces a delta");
-    let LocalMaintainedViewSubscriptionUpdate::Flat {
-        authoritative_membership_changed,
-        added,
-        removed,
-        ..
+    assert_eq!(
+        local.root_occurrence_ids().len(),
+        2,
+        "an authority receipt cannot evict the untouched cached row from local-first"
+    );
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
     } = update
     else {
-        panic!("flat issue query produced a structured maintained update");
+        panic!("public root collector must use the shared structured terminal reducer");
     };
-    assert!(!authoritative_membership_changed);
-    let issue_occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(issue.0));
-    assert!(added.iter().any(|(id, _)| id == &issue_occurrence));
-    assert!(removed.iter().any(|id| id == &issue_occurrence));
-    let updated = added
+    assert!(
+        !terminal_operations.is_empty(),
+        "the ordinary local content update must reach the same terminal reducer"
+    );
+    let updated = terminal_operations
         .iter()
-        .find(|(id, _)| id == &issue_occurrence)
-        .expect("updated issue is paired as an add/remove update");
+        .find_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. }
+            | groove::ivm::TerminalEdit::Update { value, .. } => Some(OwnedRecord::new(
+                value.clone(),
+                operation.root_descriptor.clone(),
+            )),
+            groove::ivm::TerminalEdit::Remove { .. } | groove::ivm::TerminalEdit::Move { .. } => {
+                None
+            }
+        })
+        .expect("local update produces a root payload through the terminal reducer");
     assert_eq!(
-        updated.1.cell(client.table("issues").unwrap(), "title"),
-        Some(Value::String("updated title".to_owned()))
+        updated.get("user_title").expect("decode terminal title"),
+        Value::String("updated title".to_owned())
+    );
+
+    client
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id: updated_tx,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: None,
+        })
+        .expect("reject local successor");
+    let restored = client
+        .drain_local_maintained_view_subscription(&mut local, Some(authority_result_key.clone()))
+        .expect("drain rejected local successor")
+        .expect("rejection restores the authority source through the same graph");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = restored
+    else {
+        panic!("retraction must use the shared structured terminal reducer");
+    };
+    let restored = terminal_operations
+        .iter()
+        .find_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. }
+            | groove::ivm::TerminalEdit::Update { value, .. } => Some(OwnedRecord::new(
+                value.clone(),
+                operation.root_descriptor.clone(),
+            )),
+            groove::ivm::TerminalEdit::Remove { .. } | groove::ivm::TerminalEdit::Move { .. } => {
+                None
+            }
+        })
+        .expect("retraction emits the restored root row");
+    assert_eq!(
+        restored
+            .get("user_title")
+            .expect("decode restored terminal title"),
+        Value::String("issue-0".to_owned()),
+        "retraction removes the local winner and reveals the exact authority carrier"
+    );
+
+    // A newer authority closure arriving while another local successor is
+    // pending is just another input to the same per-source arg-max. It must
+    // deterministically replace that pending winner, not create a second
+    // remote result path.
+    client
+        .commit_mergeable_settled(
+            MergeableCommit::new("issues", issue, 2_500)
+                .made_by(AuthorSubject::SYSTEM)
+                .parents(vec![initial_tx])
+                .cells(BTreeMap::from([
+                    (
+                        "title".to_owned(),
+                        Value::String("second pending title".to_owned()),
+                    ),
+                    ("state".to_owned(), Value::String("open".to_owned())),
+                    ("assignee".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+                    ("priority".to_owned(), Value::U64(0)),
+                ])),
+        )
+        .expect("commit second pending local successor");
+    let _ = client
+        .drain_local_maintained_view_subscription(&mut local, Some(authority_result_key.clone()))
+        .expect("drain second pending local successor")
+        .expect("second pending local successor reaches the shared graph");
+    let authority_update_tx = server
+        .commit_mergeable_settled(
+            MergeableCommit::new("issues", issue, 3_000)
+                .made_by(AuthorSubject::SYSTEM)
+                .parents(vec![initial_tx])
+                .cells(BTreeMap::from([
+                    (
+                        "title".to_owned(),
+                        Value::String("authority title".to_owned()),
+                    ),
+                    ("state".to_owned(), Value::String("open".to_owned())),
+                    ("assignee".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+                    ("priority".to_owned(), Value::U64(0)),
+                ])),
+        )
+        .expect("commit newer authority successor");
+    server
+        .apply_fate_update(
+            authority_update_tx,
+            Fate::Accepted,
+            Some(GlobalTime(2)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept newer authority successor");
+    let authority_update = peer
+        .query_update_for_subscription_with_opts(&mut server, subscription, &shape, &binding, opts)
+        .expect("serve newer authority closure")
+        .expect("authority closure changed");
+    client
+        .apply_sync_message_settled(authority_update)
+        .expect("install newer exact authority closure");
+    let concurrent = client
+        .drain_local_maintained_view_subscription(&mut local, Some(authority_result_key.clone()))
+        .expect("drain concurrent authority successor")
+        .expect("new authority source replaces the pending local winner");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = concurrent
+    else {
+        panic!("authority replacement must use the shared structured terminal reducer");
+    };
+    let concurrent = terminal_operations
+        .iter()
+        .find_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. }
+            | groove::ivm::TerminalEdit::Update { value, .. } => Some(OwnedRecord::new(
+                value.clone(),
+                operation.root_descriptor.clone(),
+            )),
+            groove::ivm::TerminalEdit::Remove { .. } | groove::ivm::TerminalEdit::Move { .. } => {
+                None
+            }
+        })
+        .expect("authority replacement emits the current root row");
+    assert_eq!(
+        concurrent
+            .get("user_title")
+            .expect("decode authority title"),
+        Value::String("authority title".to_owned()),
+        "higher-HLC authority version wins deterministically while the local write remains pending"
+    );
+
+    client
+        .drain_local_maintained_view_subscription(&mut online, Some(authority_result_key.clone()))
+        .expect("catch online receiver up to newest authority input");
+    for id in [99, 100] {
+        client
+            .commit_mergeable_settled(
+                MergeableCommit::new("issues", row(id), 4_000 + id as u64)
+                    .made_by(AuthorSubject::SYSTEM)
+                    .cells(BTreeMap::from([
+                        ("title".to_owned(), Value::String(format!("pending-{id}"))),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+                        ("priority".to_owned(), Value::U64(0)),
+                    ])),
+            )
+            .expect("write pending existing row or new insert");
+        let change = client
+            .drain_local_maintained_view_subscription(
+                &mut online,
+                Some(authority_result_key.clone()),
+            )
+            .expect("drain pending candidate");
+        if id == 99 {
+            assert!(
+                change.is_none(),
+                "editing an existing out-of-scope row must not expand remote inputs"
+            );
+            assert_eq!(online.root_occurrence_ids().len(), 1);
+        } else {
+            assert!(
+                change.is_some(),
+                "a matching pending new insert participates immediately"
+            );
+            let LocalMaintainedViewSubscriptionUpdate::Structured {
+                terminal_operations,
+            } = change.unwrap()
+            else {
+                panic!("new insert uses the shared terminal reducer");
+            };
+            assert!(
+                terminal_operations
+                    .iter()
+                    .any(|operation| match &operation.edit {
+                        groove::ivm::TerminalEdit::Insert { value, .. } =>
+                            OwnedRecord::new(value.clone(), operation.root_descriptor.clone())
+                                .get("user_title")
+                                .ok()
+                                == Some(Value::String("pending-100".to_owned())),
+                        _ => false,
+                    }),
+                "new insert reaches the public terminal"
+            );
+        }
+    }
+
+    let mut pending_register = Vec::new();
+    for (time, deletion, should_remove) in [
+        (5_000, crate::tx::DeletionEvent::Deleted, true),
+        (6_000, crate::tx::DeletionEvent::Restored, false),
+    ] {
+        let tx = client
+            .commit_mergeable_settled(
+                MergeableCommit::new("issues", issue, time)
+                    .made_by(AuthorSubject::SYSTEM)
+                    .deletion(deletion),
+            )
+            .expect("write pending deletion register event");
+        pending_register.push(tx);
+        let change = client
+            .drain_local_maintained_view_subscription(
+                &mut online,
+                Some(authority_result_key.clone()),
+            )
+            .expect("drain pending deletion register event")
+            .expect("pending deletion or restore changes the scoped row");
+        let LocalMaintainedViewSubscriptionUpdate::Structured {
+            terminal_operations,
+        } = change
+        else {
+            panic!("deletion and restore use the shared terminal reducer");
+        };
+        assert!(
+            terminal_operations
+                .iter()
+                .any(|operation| if should_remove {
+                    matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
+                } else {
+                    matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. })
+                }),
+            "newest pending register event determines visibility"
+        );
+    }
+    for (tx, should_remove) in pending_register.into_iter().rev().zip([true, false]) {
+        client
+            .apply_sync_message_settled(SyncMessage::FateUpdate {
+                tx_id: tx,
+                fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+                global_time: None,
+                durability: None,
+            })
+            .expect("reject newest pending register event");
+        let change = client
+            .drain_local_maintained_view_subscription(
+                &mut online,
+                Some(authority_result_key.clone()),
+            )
+            .expect("drain register rejection")
+            .expect("rejection reveals previous register state");
+        let LocalMaintainedViewSubscriptionUpdate::Structured {
+            terminal_operations,
+        } = change
+        else {
+            panic!("register rejection uses the shared terminal reducer");
+        };
+        assert!(
+            terminal_operations
+                .iter()
+                .any(|operation| if should_remove {
+                    matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
+                } else {
+                    matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. })
+                }),
+            "restore rejection reveals delete; delete rejection reveals authority row"
+        );
+    }
+}
+
+/// A relay may open its downstream maintained receiver after the selected
+/// authority ViewUpdate has already become live.  Opening must seed from that
+/// retained exact authority result rather than waiting for a second upstream
+/// delta which may never arrive.
+#[test]
+fn relay_edge_open_after_live_authority_receipt_seeds_initial_membership() {
+    let (_server_dir, mut server) = open_node();
+    let (_client_dir, mut client) = open_node();
+    let issue = row(41);
+    let shape = Query::from("issues")
+        .select(["title", "state", "assignee", "priority"])
+        .validate(&schema())
+        .expect("validate issues query");
+    let binding = shape.bind(BTreeMap::new()).expect("bind issues query");
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    register_query_shape(&mut server, &shape, opts.clone());
+    subscribe_query_binding_as_system(&mut server, &shape, &binding, &opts);
+    register_query_shape(&mut client, &shape, opts.clone());
+    subscribe_query_binding_as_system(&mut client, &shape, &binding, &opts);
+
+    commit_global_issue(&mut server, 41, "open", author(41), 41);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    let mut server_peer = PeerState::edge_client(AuthorSubject::SYSTEM);
+    let authority = server_peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut server,
+            subscription,
+            &shape,
+            &binding,
+            opts,
+        )
+        .expect("serve authority receipt")
+        .expect("authority receipt is ready");
+    client
+        .apply_sync_message_settled(authority)
+        .expect("apply authority receipt before opening relay child");
+    let authority_key = client
+        .authority_result_key_for_subscription(subscription)
+        .expect("exact retained authority receipt");
+
+    let (_receiver, _maintained, _schemas, transitions, _tables, initial_received, _inputs) =
+        client
+            .open_seeded_relay_edge_subscription_view_with_waker(
+                &shape,
+                &binding,
+                AuthorSubject::SYSTEM,
+                &ReadViewSpec::default(),
+                subscription.read_view,
+                authority_key,
+                None,
+            )
+            .expect("open relay child after live authority receipt");
+    assert!(
+        initial_received,
+        "opening must seed from already-live authority membership"
+    );
+    assert!(
+        !transitions.terminal_operations.is_empty(),
+        "the retained CoveredInput closure must seed the receiver-local terminal"
+    );
+    // The receiver may retain internal member bookkeeping, but the public
+    // initial tree comes from its terminal reducer, never authority output.
+    assert!(transitions.result_payload_adds.is_empty());
+    assert!(
+        transitions.terminal_operations.iter().any(|operation| {
+            matches!(
+                &operation.edit,
+                groove::ivm::TerminalEdit::Insert { value, .. }
+                    if OwnedRecord::new(value.clone(), operation.root_descriptor.clone())
+                        .get("row_uuid")
+                        .is_ok_and(|value| value == Value::Uuid(issue.0))
+            )
+        }),
+        "the seeded terminal inserts the authority-authorized row"
     );
 }
 
@@ -301,14 +799,9 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
         .unwrap();
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    assert!(matches!(
-        initial,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            result_member_adds,
-            ..
-        }) if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
-            && result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).all(|(_, row_uuid, _)| row_uuid != resource2)
-    ));
+    let initial_rows = covered_input_rows(&initial, true);
+    assert!(initial_rows.contains(&resource1));
+    assert!(!initial_rows.contains(&resource2));
 
     commit_global_cells(
         &mut core,
@@ -323,26 +816,11 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
         7,
     );
     let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
-    assert!(matches!(
-        grant,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            result_member_adds,
-            result_member_removes,
-            ..
-        }) if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
-            && result_member_removes.is_empty()
-    ));
+    assert!(covered_input_rows(&grant, true).contains(&resource2));
 
     delete_global(&mut core, "teamTeamMemberships", row(302), 18, 8);
     let revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
-    assert!(matches!(
-        revoke,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            result_member_adds,
-            result_member_removes,
-            ..
-        }) if result_member_adds.is_empty()
-            && result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
-            && result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
-    ));
+    let removed = covered_input_rows(&revoke, false);
+    assert!(removed.contains(&resource1));
+    assert!(removed.contains(&resource2));
 }

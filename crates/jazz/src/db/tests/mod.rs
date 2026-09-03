@@ -33,10 +33,10 @@ use crate::legacy_test_future::{
 };
 use crate::protocol::{
     AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
-    BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,
-    PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    ResultMemberEntry, RowVersionRef, ShapeAst, SnapshotRef, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, TableLens,
+    CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp, PeerPayloadInventory,
+    PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RowVersionRef,
+    ShapeAst, SnapshotRef, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
+    VersionBundle, VersionBundleScope, VersionCarrier,
 };
 use crate::protocol_limits::{
     MAX_FETCH_ROW_VERSIONS, MAX_FRAGMENT_REASSEMBLY_AGE_MS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
@@ -77,8 +77,10 @@ use crate::wire::{
 
 use super::peer_connection::{
     PendingRowVersionRepair, SubscriberConnectionState, UpstreamConnectionState,
-    aggregate_authorization_scope_bounds, authorization_scope_receipt_matches_transport_context,
-    authorization_scope_support_options_match, remove_scope_aggregate_member, view_update_is_empty,
+    aggregate_authorization_scope_bounds, authorization_progress_for_view_receipt,
+    authorization_scope_receipt_matches_transport_context,
+    authorization_scope_support_options_match, remove_scope_aggregate_member,
+    send_subscriber_with_sync_context, view_update_is_empty,
 };
 use catalogue::assert_authority_rejects_staged_write;
 use support::block_on;

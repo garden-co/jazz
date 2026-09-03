@@ -8,12 +8,7 @@ const scriptsDir = dirname(thisFile);
 const packageDir = resolve(scriptsDir, "..");
 const repoRoot = resolve(packageDir, "..", "..");
 
-const sourceBinary = join(
-  repoRoot,
-  "target",
-  "release",
-  process.platform === "win32" ? "jazz-tools.exe" : "jazz-tools",
-);
+const sourceBinary = join(repoRoot, "target", "release", "jazz-tools");
 
 stageBinary({
   source: sourceBinary,

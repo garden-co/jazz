@@ -310,13 +310,30 @@ impl SyncBench {
         // links converge to the read-policy view for the link identity.
         assert_eq!(current_rows(&mut self.edge), core_rows);
         assert_eq!(current_rows(&mut self.worker), core_rows);
-        assert_eq!(current_rows(&mut self.ui), ui_expected_rows);
+        // The UI authored the hidden row itself. Losing it from the remote
+        // read scope does not evict that already-known row from local storage.
+        // Check the scoped receiver result, not physical cache contents.
         let ui_rows = self
             .ui
             .subscription_current_rows(TABLE, DurabilityTier::Global)
             .expect("ui subscription");
         let schema = schema();
         let table = &schema.tables[0];
+        let ui_result = ui_rows
+            .iter()
+            .map(|row| {
+                let cells = table
+                    .columns
+                    .iter()
+                    .filter_map(|column| {
+                        row.cell(table, column.name())
+                            .map(|value| (column.name().to_owned(), value))
+                    })
+                    .collect();
+                (row.row_uuid(), cells)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(ui_result, ui_expected_rows);
         assert!(ui_rows.iter().all(|row| {
             row.cell(table, "owner") == Some(Value::String(self.ui_owner.canonical().to_owned()))
         }));
@@ -453,9 +470,12 @@ fn refresh(
     downstream: &mut NodeState<RocksDbStorage>,
     peer: &mut PeerState,
 ) {
-    let update = peer
-        .current_rows_update(upstream, TABLE)
-        .expect("view update");
+    let schema = schema();
+    let (_, _, subscription) = support::table_subscription(&schema, TABLE, peer.identity());
+    if peer.subscription_result_sets(subscription).is_none() {
+        support::register_table_receiver(downstream, &schema, TABLE, peer.identity());
+    }
+    let update = support::table_subscription_update(upstream, peer, &schema, TABLE);
     support::apply_and_settle(downstream, update);
 }
 

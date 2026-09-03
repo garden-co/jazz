@@ -30,12 +30,12 @@ describe("BandChat room admission and authorship", () => {
       claims: {},
       authMode: "external",
     });
-    const ownerProfile = await testApp.seed((db) =>
-      db.insert(app.profiles, { author: ownerAuthor, displayName: "Owner" }),
-    );
-    const guestProfile = await testApp.seed((db) =>
-      db.insert(app.profiles, { author: guestAuthor, displayName: "Guest" }),
-    );
+    const ownerProfile = await owner
+      .insert(app.profiles, { author: ownerAuthor, displayName: "Owner" })
+      .wait({ tier: "edge" });
+    const guestProfile = await guest
+      .insert(app.profiles, { author: guestAuthor, displayName: "Guest" })
+      .wait({ tier: "edge" });
     const room = await owner
       .insert(app.rooms, { name: "Private rehearsal" })
       .wait({ tier: "edge" });

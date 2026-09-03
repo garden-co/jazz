@@ -334,6 +334,82 @@ async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
     server.shutdown().await;
 }
 
+/// Each provenance magic column can be selected independently from a remote
+/// result. Alice's Ed25519-authenticated write keeps its author and millisecond
+/// timestamps even when the other three provenance fields are not projected.
+///
+/// alice --insert--> edge --single-field query result--> alice
+#[tokio::test]
+async fn remote_single_provenance_fields_match_complete_provenance() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = test_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let alice = jazz_testkit::connect(local_first_context(
+                &server,
+                schema,
+                &alice_seed(),
+                ClientStorage::Memory,
+            ))
+            .await
+            .expect("connect alice");
+            let session = Session::new(
+                identity::LOCAL_FIRST_ISSUER,
+                &identity::derive_user_id(&alice_seed()).to_string(),
+            )
+            .with_auth_mode(AuthMode::LocalFirst);
+            let author = session
+                .author_subject()
+                .expect("Alice's author")
+                .canonical()
+                .to_owned();
+            let (row_id, _, tx) = alice
+                .for_session(session)
+                .insert("todos", todo_values("independent provenance fields", false))
+                .expect("insert Alice's todo");
+            support::wait_for_edge_txs(&alice, &[tx.expect("insert transaction")]).await;
+
+            let columns = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
+            let complete = tokio::time::timeout(
+                Duration::from_secs(10),
+                alice.query_with_read_tier(
+                    jazz::query::Query::from("todos").select(columns),
+                    jazz::tools::ReadTier::Remote,
+                ),
+            )
+            .await
+            .expect("complete provenance arrives")
+            .expect("complete provenance query");
+            assert_eq!(complete.len(), 1);
+            assert_eq!(complete[0].0, row_id);
+            assert_eq!(complete[0].1[0], Value::Text(author.clone()));
+            assert_eq!(complete[0].1[2], Value::Text(author));
+            assert!(matches!(complete[0].1[1], Value::Timestamp(value) if value > 0));
+            assert_eq!(complete[0].1[1], complete[0].1[3]);
+
+            for (index, column) in columns.iter().enumerate() {
+                let selected = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    alice.query_with_read_tier(
+                        jazz::query::Query::from("todos").select([*column]),
+                        jazz::tools::ReadTier::Remote,
+                    ),
+                )
+                .await
+                .expect("single provenance field arrives")
+                .expect("single provenance field query");
+                assert_eq!(
+                    selected,
+                    vec![(row_id, vec![complete[0].1[index].clone()])],
+                    "{column}"
+                );
+            }
+            alice.shutdown().await.expect("shutdown Alice");
+            server.shutdown().await;
+        })
+        .await;
+}
+
 /// A local-first client and a default HS256-JWT client share the same server
 /// and converge on each other's rows, each attributed to the matching
 /// principal. Guards the mixed-auth path some apps will run during migration.
