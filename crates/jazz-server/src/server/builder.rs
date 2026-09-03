@@ -1106,6 +1106,39 @@ mod tests {
         }
     }
 
+    /// Records every adapter boundary an edge build could reach. This internal
+    /// test is necessary because the observable security property is that a
+    /// rejected credential never reaches the target-owned transport adapter.
+    struct AdmissionProbeConnector {
+        validation_calls: AtomicUsize,
+        bootstrap_calls: AtomicUsize,
+        connect_calls: AtomicUsize,
+    }
+
+    impl NativeTransportConnector for AdmissionProbeConnector {
+        fn validate_catalogue_bootstrap_url(
+            &self,
+            _server_url: &str,
+            _app_id: AppId,
+        ) -> Result<(), NativeTransportError> {
+            self.validation_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.connect_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            self.bootstrap_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        }
+    }
+
     #[test]
     fn edge_reconnect_delay_is_exponential_and_capped() {
         assert_eq!(edge_reconnect_delay(1), Duration::from_millis(100));
@@ -1728,6 +1761,11 @@ mod tests {
     #[tokio::test]
     async fn builder_rejects_blank_edge_admin_without_exposing_credential() {
         for value in ["", " \t\n"] {
+            let connector = Arc::new(AdmissionProbeConnector {
+                validation_calls: AtomicUsize::new(0),
+                bootstrap_calls: AtomicUsize::new(0),
+                connect_calls: AtomicUsize::new(0),
+            });
             let result = ServerBuilder::new(AppId::from_name("builder-blank-edge-admin"))
                 .with_auth_config(AuthConfig {
                     admin_secret: Some(value.to_owned()),
@@ -1735,6 +1773,7 @@ mod tests {
                 })
                 .with_storage(StorageBackend::InMemory)
                 .with_upstream_url("ws://127.0.0.1:9")
+                .with_native_transport_connector(connector.clone())
                 .build()
                 .await;
             let error = result
@@ -1748,22 +1787,35 @@ mod tests {
                     "validation error must not expose the configured credential"
                 );
             }
+            assert_eq!(connector.validation_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(connector.bootstrap_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(connector.connect_calls.load(Ordering::SeqCst), 0);
         }
     }
 
     #[tokio::test]
     async fn builder_accepts_nonblank_admin_and_backend_secrets() {
-        let result = ServerBuilder::new(AppId::from_name("builder-nonblank-secrets"))
+        let admin_secret = " configured-admin ";
+        let backend_secret = " configured-backend ";
+        let built = ServerBuilder::new(AppId::from_name("builder-nonblank-secrets"))
             .with_auth_config(AuthConfig {
-                admin_secret: Some("configured-admin".to_owned()),
-                backend_secret: Some("configured-backend".to_owned()),
+                admin_secret: Some(admin_secret.to_owned()),
+                backend_secret: Some(backend_secret.to_owned()),
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
             .build()
-            .await;
+            .await
+            .expect("builder accepts nonblank credentials");
 
-        assert!(result.is_ok());
+        assert_eq!(
+            built.state.auth_config.admin_secret.as_deref(),
+            Some(admin_secret)
+        );
+        assert_eq!(
+            built.state.auth_config.backend_secret.as_deref(),
+            Some(backend_secret)
+        );
     }
 
     #[tokio::test]
