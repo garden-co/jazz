@@ -38,6 +38,21 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
 Edge mode is enabled by `--upstream-url`; when set, provide `--admin-secret` or `JAZZ_ADMIN_SECRET`. The edge uses that admin secret for its upstream WebSocket connection.
 
+For forwarded catalogue responses, an edge server uses a 67,108,864-byte (64 MiB)
+default limit for `GET /schemas`. You can override it with
+`JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES`, using a positive decimal `usize`
+value; startup rejects zero, malformed, overflowing, or otherwise
+allocation-invalid values. This setting is read only when `--upstream-url` is
+configured, affects only forwarded `GET /schemas`, and requires a restart.
+Every other forwarded catalogue response has a fixed 8 MiB limit. Invalid values
+are ignored when starting a direct core server without an upstream URL, so this
+edge-only setting does not change core startup or local catalogue behaviour.
+The edge forwarding client is HTTP/1-only and does not follow redirects. Its
+transport safety is exercised with a raw HTTP/1.1 authority (including tiny
+body writes) and an HTTP/2 connection-preface rejection; these are the local
+equivalent of asserting HTTP/1 ALPN selection without requiring test
+certificates.
+
 Cookie-based WebSocket auth is enabled with `--auth-cookie-name` or `JAZZ_AUTH_COOKIE_NAME`. When no
 explicit auth credential is supplied, the sync server reads that named cookie and validates the JWT
 it contains. If your app uses a separate application session cookie, resolve it in your own app server

@@ -17,8 +17,8 @@ use crate::middleware::auth::{
 };
 use crate::server::routes;
 use crate::server::{
-    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, EdgeUpstreamHealth,
-    ServerState, ServerTopology, StoredCatalogue,
+    CatalogueForwardingPolicy, CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage,
+    EdgeUpstreamHealth, ServerState, ServerTopology, StoredCatalogue,
 };
 use jazz::tools::AppId;
 use jazz::tools::native_transport_connector::{
@@ -89,6 +89,7 @@ pub struct ServerBuilder {
     storage_backend: StorageBackend,
     core_server_shell_schema: Option<JazzSchema>,
     upstream_url: Option<String>,
+    catalogue_list_response_limit_bytes: usize,
     edge_cache_budget: Option<EdgeCacheBudget>,
     shutdown_timeout: Duration,
     native_transport_connector: Option<Arc<dyn NativeTransportConnector>>,
@@ -109,6 +110,8 @@ impl ServerBuilder {
             },
             core_server_shell_schema: None,
             upstream_url: None,
+            catalogue_list_response_limit_bytes:
+                crate::server::DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES,
             edge_cache_budget: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             native_transport_connector: None,
@@ -128,6 +131,11 @@ impl ServerBuilder {
 
     pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
         self.upstream_url = Some(upstream_url.into());
+        self
+    }
+    /// Configure the maximum body accepted from the forwarded `/schemas` list.
+    pub fn with_catalogue_list_response_limit_bytes(mut self, limit: usize) -> Self {
+        self.catalogue_list_response_limit_bytes = limit;
         self
     }
 
@@ -209,9 +217,14 @@ impl ServerBuilder {
 
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
         let http_client = reqwest::Client::builder()
+            .http1_only()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .pool_max_idle_per_host(1)
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        let forwarding_policy =
+            CatalogueForwardingPolicy::new(self.catalogue_list_response_limit_bytes)?;
 
         let core_server_shell_storage_config = self.build_core_server_shell_storage_config();
         let core_server_shell = self.build_core_server_shell(
@@ -254,6 +267,7 @@ impl ServerBuilder {
             topology,
             jwt_verifier,
             http_client,
+            forwarding_policy,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             core_server_shell_storage_config,
             storage_factory: self.storage_factory.clone(),

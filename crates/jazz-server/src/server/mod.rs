@@ -75,6 +75,48 @@ pub async fn push_catalogue_in_memory(
 /// small amount of slack for unusual topologies) without giving an
 /// attacker meaningful amplification before the cap bites.
 pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
+pub(crate) const MAX_CATALOGUE_REQUEST_BODY_BYTES: usize = 8 << 20;
+pub(crate) const DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES: usize = 64 << 20;
+pub(crate) const FIXED_CATALOGUE_RESPONSE_LIMIT_BYTES: usize = 8 << 20;
+pub(crate) const FORWARDING_APPLICATION_CHUNK_BYTES: usize = 64 << 10;
+const FORWARDING_TRANSPORT_BYTES: usize = 2 * 1_032_192;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CatalogueForwardingPolicy {
+    pub(crate) list_response_limit_bytes: usize,
+}
+
+impl CatalogueForwardingPolicy {
+    pub(crate) fn new(list_response_limit_bytes: usize) -> Result<Self, String> {
+        let chunks = list_response_limit_bytes
+            .checked_div(FORWARDING_APPLICATION_CHUNK_BYTES)
+            .and_then(|whole| {
+                list_response_limit_bytes
+                    .checked_rem(FORWARDING_APPLICATION_CHUNK_BYTES)
+                    .and_then(|remainder| whole.checked_add(usize::from(remainder != 0)))
+            })
+            .ok_or_else(|| "catalogue forwarding response limit is invalid".to_owned())?;
+        if list_response_limit_bytes == 0 {
+            return Err("catalogue forwarding response limit must be positive".to_owned());
+        }
+        let application_bytes = chunks
+            .checked_mul(FORWARDING_APPLICATION_CHUNK_BYTES)
+            .ok_or_else(|| "catalogue forwarding allocation budget is invalid".to_owned())?;
+        let descriptor_bytes = chunks
+            .checked_mul(std::mem::size_of::<Option<axum::body::Bytes>>())
+            .ok_or_else(|| "catalogue forwarding descriptor budget is invalid".to_owned())?;
+        let _descriptor_layout = std::alloc::Layout::array::<Option<axum::body::Bytes>>(chunks)
+            .map_err(|_| "catalogue forwarding descriptor layout is invalid".to_owned())?;
+        MAX_CATALOGUE_REQUEST_BODY_BYTES
+            .checked_add(application_bytes)
+            .and_then(|value| value.checked_add(descriptor_bytes))
+            .and_then(|value| value.checked_add(FORWARDING_TRANSPORT_BYTES))
+            .ok_or_else(|| "catalogue forwarding allocation budget is invalid".to_owned())?;
+        Ok(Self {
+            list_response_limit_bytes,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServerTopology {
@@ -121,8 +163,12 @@ pub struct ServerState {
     /// Whether this process is the core/global node or an edge syncing upstream.
     pub topology: ServerTopology,
     /// Shared HTTP client for forwarding admin requests to a remote authority.
+    ///
+    /// Replacement clients retain forwarding's application/body/deadline safety
+    /// but do not carry the builder client's bounded HTTP transport allowance.
     pub http_client: reqwest::Client,
-    /// Configured verifier for external JWTs.
+    /// Private bounds and lifecycle policy used by edge catalogue forwarding.
+    pub(crate) forwarding_policy: CatalogueForwardingPolicy,
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
@@ -693,6 +739,10 @@ mod tests {
             http_client: reqwest::Client::builder()
                 .build()
                 .expect("build HTTP client"),
+            forwarding_policy: CatalogueForwardingPolicy::new(
+                DEFAULT_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES,
+            )
+            .expect("default forwarding policy"),
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
             core_server_shell_storage_config: None,

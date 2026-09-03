@@ -27,7 +27,7 @@ use axum::{
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::server::ServerState;
+use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
     admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
@@ -37,12 +37,6 @@ use http::{
 };
 use utils::parse_app_id_param;
 use websocket::ws_handler;
-
-/// Admin catalogue uploads are ordinary JSON requests and must be bounded
-/// before an extractor buffers their bodies. Eight MiB accommodates large
-/// schemas and migration bundles without leaving an unauthenticated memory
-/// amplification path.
-const MAX_ADMIN_REQUEST_BODY_BYTES: usize = 8 << 20;
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,
@@ -104,7 +98,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             "/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
         )
-        .layer(DefaultBodyLimit::max(MAX_ADMIN_REQUEST_BODY_BYTES));
+        .layer(DefaultBodyLimit::max(MAX_CATALOGUE_REQUEST_BODY_BYTES));
     let account_routes = Router::new()
         .route("/register", post(accounts::register))
         .route("/found-local-first", post(accounts::found_local_first))
@@ -149,13 +143,14 @@ mod tests {
     use super::*;
 
     use axum::extract::{Path, Query};
-    use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+    use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
     use axum::response::Json;
 
     use jazz::tools::AppId;
     use jazz::tools::public_schema::{SchemaHash, TableName};
     use jazz::tools::schema_lens::LensOp;
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::server::catalogue::ConnectionSchemaDiagnostics;
     use axum::body;
@@ -170,7 +165,10 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::middleware::AuthConfig;
-    use crate::server::{EdgeUpstreamHealth, ServerBuilder, ServerState, StorageBackend};
+    use crate::server::{
+        EdgeUpstreamHealth, MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerBuilder, ServerState,
+        StorageBackend,
+    };
     use jazz::wire::{
         FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
         WirePeerRole, decode_frame, encode_frame,
@@ -2911,5 +2909,424 @@ mod tests {
         );
         assert_eq!(state.shutdown.active_app_requests(), 0);
         authority_task.abort();
+    }
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_rejects_expanded_canonical_migration() {
+        let state =
+            make_edge_state_with_schema(Schema::new(), "http://127.0.0.1:9".to_owned()).await;
+        let request = oversized_migration_for_test();
+        let error = forward_catalogue_request(
+            &state,
+            "admin-secret",
+            reqwest::Method::POST,
+            "/admin/migrations",
+            Some(CatalogueRequestBody::Migration(&request)),
+        )
+        .await
+        .expect_err("expanded canonical request must be rejected");
+        assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            error.1.0.error,
+            "canonical catalogue request body exceeds the 8388608-byte limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalogue_forwarding_policy_validates_default_and_overflow_limits() {
+        let default = ServerBuilder::new(AppId::from_name("policy-default"))
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("default policy");
+        assert_eq!(
+            default.state.forwarding_policy.list_response_limit_bytes,
+            67_108_864
+        );
+        let explicit = ServerBuilder::new(AppId::from_name("policy-explicit"))
+            .with_storage(StorageBackend::InMemory)
+            .with_catalogue_list_response_limit_bytes(1 << 20)
+            .build()
+            .await
+            .expect("explicit policy");
+        assert_eq!(
+            explicit.state.forwarding_policy.list_response_limit_bytes,
+            1 << 20
+        );
+        let overflow = ServerBuilder::new(AppId::from_name("policy-overflow"))
+            .with_storage(StorageBackend::InMemory)
+            .with_catalogue_list_response_limit_bytes(usize::MAX)
+            .build()
+            .await;
+        assert!(overflow.is_err());
+    }
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_uses_http1_for_raw_authority() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw authority");
+        let address = listener.local_addr().expect("raw authority address");
+        let authority_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept raw authority");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.expect("read raw request");
+                assert!(read > 0, "raw client request ended before headers");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let expected_prefix = format!(
+                "GET /apps/{}/schemas HTTP/1.1\r\n",
+                AppId::from_name("test-app")
+            );
+            assert!(
+                request.starts_with(expected_prefix.as_bytes()),
+                "catalogue forwarding must use HTTP/1.1 on the wire: {request:?}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]")
+                .await
+                .expect("write raw response");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let response = make_test_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .as_ref(),
+            b"[]"
+        );
+        authority_task.await.expect("raw authority task");
+    }
+
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_rejects_h2_preface_on_http1_transport() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind h2 authority");
+        let address = listener.local_addr().expect("h2 authority address");
+        let authority_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept h2 authority");
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request).await.expect("read h1 request");
+            stream
+                .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+                .await
+                .expect("write h2 preface");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let response = make_test_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/schemas"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("h2 rejection body")
+                .windows("failed to reach catalogue upstream".len())
+                .any(|window| window == b"failed to reach catalogue upstream")
+        );
+        authority_task.await.expect("h2 authority task");
+    }
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_rejects_storage_closed_shutdown() {
+        let state =
+            make_edge_state_with_schema(Schema::new(), "http://127.0.0.1:9".to_owned()).await;
+        state.shutdown.request_shutdown();
+        assert_eq!(
+            state.run_shutdown_finalization().await,
+            crate::server::ShutdownPhase::StorageClosed
+        );
+        let error = forward_catalogue_request(
+            &state,
+            "admin-secret",
+            reqwest::Method::POST,
+            "/admin/migrations",
+            None,
+        )
+        .await
+        .expect_err("storage-closed forwarding must be rejected");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            error.1.0.error.contains("cancelled during shutdown"),
+            "unexpected shutdown error: {}",
+            error.1.0.error
+        );
+    }
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_validates_content_type_length() {
+        for (length, accepted) in [(1024usize, true), (1025, false)] {
+            let content_type = HeaderValue::from_bytes(&vec![b'x'; length]).unwrap();
+            let authority_app = axum::Router::new().route(
+                &test_app_route("/schema/{hash}"),
+                get(move || {
+                    let content_type = content_type.clone();
+                    async move {
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, content_type)],
+                            Body::from("ok"),
+                        )
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind content-type authority");
+            let address = listener.local_addr().expect("content-type address");
+            let authority_task = tokio::spawn(async move {
+                axum::serve(listener, authority_app)
+                    .await
+                    .expect("serve content-type authority");
+            });
+            let state =
+                make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+            let result = forward_catalogue_request(
+                &state,
+                "admin-secret",
+                reqwest::Method::GET,
+                "/schema/hash",
+                None,
+            )
+            .await;
+            if accepted {
+                let response = result.expect("1024-byte content type is accepted");
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response.headers()[header::CONTENT_TYPE].as_bytes().len(),
+                    length
+                );
+            } else {
+                assert_eq!(
+                    result.expect_err("1025-byte content type is rejected").0,
+                    StatusCode::BAD_GATEWAY
+                );
+            }
+            authority_task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_does_not_follow_redirects() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect authority");
+        let address = listener.local_addr().expect("redirect address");
+        let authority_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept redirect request");
+            let mut request = [0u8; 512];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read redirect request");
+            stream
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: /other\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("write redirect response");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let response = forward_catalogue_request(
+            &state,
+            "admin-secret",
+            reqwest::Method::GET,
+            "/schemas",
+            None,
+        )
+        .await
+        .expect("redirect response");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        authority_task.await.expect("redirect authority task");
+    }
+
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_handles_tiny_raw_writes_across_chunk_boundary() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tiny-write authority");
+        let address = listener.local_addr().expect("tiny-write address");
+        let authority_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept tiny-write request");
+            let mut request = [0u8; 512];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read tiny-write request");
+            let body_length = 2 * 64 * 1024 + 1;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {body_length}\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write tiny-write headers");
+            for _ in 0..body_length {
+                stream.write_all(b"x").await.expect("write tiny body byte");
+            }
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let response = forward_catalogue_request(
+            &state,
+            "admin-secret",
+            reqwest::Method::GET,
+            "/schema/hash",
+            None,
+        )
+        .await
+        .expect("tiny-write response");
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("tiny-write body");
+        assert_eq!(body.len(), 2 * 64 * 1024 + 1);
+        assert!(body.iter().all(|byte| *byte == b'x'));
+        authority_task.await.expect("tiny-write authority task");
+    }
+
+    #[tokio::test]
+    async fn edge_catalogue_forwarding_reuses_one_http1_connection_lease() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind lease authority");
+        let address = listener.local_addr().expect("lease address");
+        let authority_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept lease connection");
+            for _ in 0..2 {
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 512];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.expect("read lease request");
+                    assert!(read > 0, "lease connection closed between requests");
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                    )
+                    .await
+                    .expect("write lease response");
+            }
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        for _ in 0..2 {
+            let response = forward_catalogue_request(
+                &state,
+                "admin-secret",
+                reqwest::Method::GET,
+                "/schemas",
+                None,
+            )
+            .await
+            .expect("leased response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("leased body")
+                    .as_ref(),
+                b"ok"
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(1), authority_task)
+            .await
+            .expect("lease authority completion")
+            .expect("lease authority task");
+    }
+    #[tokio::test]
+    async fn catalogue_forwarding_without_authority_fails_closed() {
+        let state = make_state_with_schema(Schema::new()).await;
+        let error = forward_catalogue_request(
+            &state,
+            "admin-secret",
+            reqwest::Method::GET,
+            "/schemas",
+            None,
+        )
+        .await
+        .expect_err("core server has no forwarding authority");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(error.1.0.error.contains("without a configured upstream"));
+    }
+    #[tokio::test]
+    async fn edge_catalogue_ingress_cap_blocks_only_oversized_authority_request() {
+        fn padded_migration(length: usize) -> Vec<u8> {
+            let mut value = serde_json::json!({
+                "fromHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "toHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "forward": [],
+                "padding": ""
+            });
+            let base = serde_json::to_vec(&value).unwrap().len();
+            value["padding"] = Value::String("x".repeat(length - base));
+            serde_json::to_vec(&value).unwrap()
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ingress authority");
+        let address = listener.local_addr().expect("ingress authority address");
+        let authority_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept ingress request");
+            let mut request = [0u8; 1024];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read ingress request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write ingress response");
+        });
+        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let app = make_test_router(state);
+        let exact = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri(test_app_route("/admin/migrations"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(padded_migration(
+                        MAX_CATALOGUE_REQUEST_BODY_BYTES,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .expect("exact ingress response");
+        assert_eq!(exact.status(), StatusCode::OK);
+        let oversized = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::POST)
+                    .uri(test_app_route("/admin/migrations"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(padded_migration(
+                        MAX_CATALOGUE_REQUEST_BODY_BYTES + 1,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .expect("oversized ingress response");
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        authority_task.await.expect("ingress authority task");
     }
 }
