@@ -63,11 +63,8 @@ fn native_connector() -> Arc<NativeWebSocketConnector> {
 }
 
 /// Accept the TCP connection but never answer its HTTP upgrade request.
-async fn serve_stalled_http_upgrade() -> (
-    String,
-    tokio::task::JoinHandle<()>,
-    oneshot::Receiver<()>,
-) {
+async fn serve_stalled_http_upgrade() -> (String, tokio::task::JoinHandle<()>, oneshot::Receiver<()>)
+{
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind stalled upgrade listener");
