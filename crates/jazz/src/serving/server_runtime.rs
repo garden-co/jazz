@@ -859,6 +859,7 @@ impl ServerRuntimeHandle {
         trust: CommitUnitTrust,
         negotiated_features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
+        link_admission: crate::serving::ServerLinkAdmission,
     ) -> Result<ServerSession, String> {
         self.run(move |shell| {
             shell
@@ -868,6 +869,7 @@ impl ServerRuntimeHandle {
                     trust,
                     negotiated_features,
                     session_context,
+                    link_admission,
                 )
                 .map_err(|error| error.to_string())
         })
@@ -1228,6 +1230,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
         SyncMessage::SessionClaims { .. } => "SessionClaims",
         SyncMessage::CommitUnit { .. } => "CommitUnit",
+        SyncMessage::AuthorityPublication(_) => "AuthorityPublication",
         SyncMessage::FateUpdate { .. } => "FateUpdate",
         SyncMessage::RegisterShape { .. } => "RegisterShape",
         SyncMessage::Subscribe(_) => "Subscribe",
@@ -1475,6 +1478,7 @@ mod tests {
             },
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }));
         assert_eq!(inbound_frame_phase(&subscribe), "Subscribe");
         assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");

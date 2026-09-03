@@ -1014,7 +1014,7 @@ async fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
     recursive.commit_batch(batch).await.unwrap();
     assert_eq!(
-        expect_recv_vals(&subscription),
+        expect_try_recv_vals(&subscription),
         vec![
             (vec![Value::U64(1), Value::U64(2)], 1),
             (vec![Value::U64(1), Value::U64(3)], 1),
@@ -1401,7 +1401,7 @@ async fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() 
         .unwrap();
     database.flush().await.unwrap();
     assert_eq!(
-        expect_recv_vals(&subscription),
+        expect_try_recv_vals(&subscription),
         [(vec![7_u64.into(), "Blue Train".into()], 1)]
     );
 
@@ -1413,7 +1413,7 @@ async fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() 
     database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
-        expect_recv_vals(&subscription),
+        expect_try_recv_vals(&subscription),
         [(vec![8_u64.into(), "Giant Steps".into()], 1)]
     );
 }
@@ -1725,6 +1725,699 @@ async fn payload_enum_filter_matches_selected_case_and_emits_cross_case_deltas()
             .unwrap(),
         [(vec![3_u64.into()], 1)]
     );
+}
+
+/// Mutable input sources feed the ordinary maintained graph; they are not a
+/// terminal-result side channel. This public-facade test is intentionally
+/// integration-level because it proves the tick, collector, and receiver see
+/// one cross-source frontier rather than an intermediate replacement.
+#[futures_test::test]
+async fn input_source_replacements_are_atomic_idempotent_and_revoke_cleanly() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let left = database.allocate_input_source(descriptor);
+    let right = database.allocate_input_source(descriptor);
+    let graph = GraphBuilder::join(
+        GraphBuilder::input_source(left, descriptor),
+        GraphBuilder::input_source(right, descriptor),
+        ["id"],
+        ["id"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "left_id"),
+        ProjectField::renamed("right.id", "right_id"),
+    ]);
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let one = descriptor.create(&[Value::U64(1)]).unwrap();
+    let two = descriptor.create(&[Value::U64(2)]).unwrap();
+    database
+        .replace_input_sources([
+            InputSourceReplacement {
+                id: right,
+                descriptor,
+                // Deliberately unordered and duplicated: the observable set
+                // is deterministic and must not multiply the join result.
+                records: vec![one.clone(), one.clone()],
+            },
+            InputSourceReplacement {
+                id: left,
+                descriptor,
+                records: vec![one.clone()],
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::U64(1)], 1)]
+    );
+
+    let idempotent = database
+        .replace_input_sources([
+            InputSourceReplacement {
+                id: left,
+                descriptor,
+                records: vec![one.clone()],
+            },
+            InputSourceReplacement {
+                id: right,
+                descriptor,
+                records: vec![one.clone()],
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(idempotent, TickMetrics::default());
+    assert!(subscription.try_recv().is_err());
+
+    database
+        .replace_input_sources([
+            InputSourceReplacement {
+                id: left,
+                descriptor,
+                records: vec![two.clone()],
+            },
+            InputSourceReplacement {
+                id: right,
+                descriptor,
+                records: vec![two],
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![Value::U64(1), Value::U64(1)], -1),
+            (vec![Value::U64(2), Value::U64(2)], 1),
+        ]
+    );
+
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: left,
+            descriptor,
+            records: vec![],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(2), Value::U64(2)], -1)]
+    );
+}
+
+/// An input source can feed both a join and a downstream anti-join in the
+/// same maintained graph (the shape required by a required nested include).
+/// Replacing both sources atomically must not make the anti-join retract a
+/// left row merely because the join arranged it earlier in the same tick.
+#[futures_test::test]
+async fn atomic_input_replacements_do_not_retract_unpublished_anti_join_rows() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let left_descriptor =
+        RecordDescriptor::new([("id", ColumnType::U64), ("key", ColumnType::U64)]);
+    let right_descriptor = RecordDescriptor::new([("key", ColumnType::U64)]);
+    let left = database.allocate_input_source(left_descriptor);
+    let right = database.allocate_input_source(right_descriptor);
+    let left_source = GraphBuilder::input_source(left, left_descriptor);
+    let matched = GraphBuilder::join(
+        left_source.clone(),
+        GraphBuilder::input_source(right, right_descriptor),
+        ["key"],
+        ["key"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.id", "id"),
+        ProjectField::renamed("left.key", "key"),
+    ]);
+    let visible = GraphBuilder::anti_join(left_source, matched, ["key"], ["key"]);
+    let subscription = database.subscribe_one_sink(visible).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let left_record = left_descriptor
+        .create(&[Value::U64(1), Value::U64(7)])
+        .unwrap();
+    let right_record = right_descriptor.create(&[Value::U64(7)]).unwrap();
+
+    for left_first in [true, false] {
+        let left_replacement = InputSourceReplacement {
+            id: left,
+            descriptor: left_descriptor,
+            records: vec![left_record.clone()],
+        };
+        let right_replacement = InputSourceReplacement {
+            id: right,
+            descriptor: right_descriptor,
+            records: vec![right_record.clone()],
+        };
+        if left_first {
+            database
+                .replace_input_sources([left_replacement, right_replacement])
+                .await
+                .unwrap();
+        } else {
+            database
+                .replace_input_sources([right_replacement, left_replacement])
+                .await
+                .unwrap();
+        }
+        assert!(
+            subscription.try_recv().is_err(),
+            "a matching right row suppresses the left row without a spurious retraction"
+        );
+        database
+            .replace_input_sources([
+                InputSourceReplacement {
+                    id: left,
+                    descriptor: left_descriptor,
+                    records: vec![],
+                },
+                InputSourceReplacement {
+                    id: right,
+                    descriptor: right_descriptor,
+                    records: vec![],
+                },
+            ])
+            .await
+            .unwrap();
+        assert!(subscription.try_recv().is_err());
+    }
+}
+
+/// Incremental runtime input changes share the replacement API's atomic
+/// cross-source frontier, but do not require callers to resend untouched
+/// records. This is the primitive used by receiver-side source closures.
+#[futures_test::test]
+async fn input_source_deltas_are_atomic_and_proportional_to_changed_records() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let left = database.allocate_input_source(descriptor);
+    let right = database.allocate_input_source(descriptor);
+    let graph = GraphBuilder::join(
+        GraphBuilder::input_source(left, descriptor),
+        GraphBuilder::input_source(right, descriptor),
+        ["id"],
+        ["id"],
+    );
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let one = descriptor.create(&[Value::U64(1)]).unwrap();
+    let two = descriptor.create(&[Value::U64(2)]).unwrap();
+    database
+        .replace_input_sources([
+            InputSourceReplacement {
+                id: left,
+                descriptor,
+                records: vec![one.clone()],
+            },
+            InputSourceReplacement {
+                id: right,
+                descriptor,
+                records: vec![one.clone()],
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(1), Value::U64(1)], 1)]
+    );
+
+    let metrics = database
+        .apply_input_source_deltas([
+            InputSourceDelta {
+                id: left,
+                descriptor,
+                adds: vec![two.clone()],
+                removes: vec![one.clone()],
+            },
+            InputSourceDelta {
+                id: right,
+                descriptor,
+                adds: vec![two.clone()],
+                removes: vec![one],
+            },
+        ])
+        .await
+        .unwrap();
+    assert!(metrics.records_processed >= 2);
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![Value::U64(1), Value::U64(1)], -1),
+            (vec![Value::U64(2), Value::U64(2)], 1),
+        ],
+        "one tick exposes only old and new join frontiers"
+    );
+    assert_eq!(
+        database
+            .apply_input_source_deltas([InputSourceDelta {
+                id: left,
+                descriptor,
+                adds: vec![two],
+                removes: Vec::new(),
+            }])
+            .await
+            .unwrap(),
+        TickMetrics::default(),
+        "replayed set addition does not advance the input frontier"
+    );
+}
+
+/// Ungrouped aggregates own one empty group. This stays in the ordinary Groove
+/// graph so direct queries, maintained subscriptions, and runtime-owned
+/// covered inputs all observe the same identity transition; no caller creates
+/// a synthetic aggregate record for an empty source.
+#[futures_test::test]
+async fn input_source_ungrouped_aggregate_seeds_and_restores_its_empty_identity() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let source = database.allocate_input_source(descriptor);
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::input_source(source, descriptor),
+        Vec::<String>::new(),
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("count".to_owned()),
+        }],
+    );
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(0)], 1)],
+        "the initial empty input has the SQL aggregate identity"
+    );
+
+    // An explicit complete empty replacement acknowledges the runtime-owned
+    // source frontier but does not duplicate the identity already seeded by
+    // subscription hydration.
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: source,
+            descriptor,
+            records: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let one = descriptor.create(&[Value::U64(1)]).unwrap();
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: source,
+            descriptor,
+            records: vec![one],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(0)], -1), (vec![Value::U64(1)], 1)]
+    );
+
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: source,
+            descriptor,
+            records: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(0)], 1), (vec![Value::U64(1)], -1)],
+        "removing the final input restores the same empty group identity"
+    );
+}
+
+/// Grouped aggregates have no group when their source is empty, unlike the
+/// single logical empty group of an ungrouped aggregate above.
+#[futures_test::test]
+async fn input_source_grouped_aggregate_has_no_empty_group() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("bucket", ColumnType::U64)]);
+    let source = database.allocate_input_source(descriptor);
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::input_source(source, descriptor),
+        ["bucket"],
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("count".to_owned()),
+        }],
+    );
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: source,
+            descriptor,
+            records: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().is_err());
+}
+
+/// Mutable inputs share the binding delta engine with prepared shapes, but
+/// their identity is not a caller-controlled binding name. In particular, a
+/// user may prepare the exact string that older runtimes synthesized for the
+/// next input without stealing its descriptor, records, or lifecycle.
+#[futures_test::test]
+async fn input_source_identity_cannot_collide_with_prepared_binding_name() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let formerly_colliding_name = database
+        .ivm_runtime
+        .next_input_source_legacy_binding_shape();
+
+    let prepared = database
+        .prepare_one_sink(
+            GraphBuilder::binding_source(formerly_colliding_name.clone(), descriptor),
+            formerly_colliding_name.clone(),
+            descriptor,
+            ["id"],
+        )
+        .await
+        .unwrap();
+    let prepared_subscription = database
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(7)])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&prepared_subscription),
+        [(vec![Value::U64(7)], 1)]
+    );
+
+    let input = database.allocate_input_source(descriptor);
+    assert_eq!(input.legacy_binding_shape(), formerly_colliding_name);
+    let input_subscription = database
+        .subscribe_one_sink(GraphBuilder::input_source(input, descriptor))
+        .await
+        .unwrap();
+    assert!(input_subscription.recv().unwrap().is_empty());
+
+    let record = descriptor.create(&[Value::U64(11)]).unwrap();
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id: input,
+            descriptor,
+            records: vec![record],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&input_subscription),
+        [(vec![Value::U64(11)], 1)]
+    );
+    assert!(prepared_subscription.try_recv().is_err());
+
+    database.retire_input_sources([input]).await.unwrap();
+    assert_eq!(
+        expect_recv_vals(&input_subscription),
+        [(vec![Value::U64(11)], -1)]
+    );
+
+    // Retiring the mutable source cannot retire or clear the independently
+    // prepared source that happens to use the same historical string.
+    let second_prepared_subscription = database
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(13)])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&second_prepared_subscription),
+        [(vec![Value::U64(13)], 1)]
+    );
+    assert!(prepared_subscription.try_recv().is_err());
+}
+
+#[futures_test::test]
+async fn input_source_batch_rejects_descriptor_conflicts_before_mutating_any_source() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let u64_descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let string_descriptor = RecordDescriptor::new([("id", ColumnType::String)]);
+    let id = database.allocate_input_source(u64_descriptor);
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::input_source(id, u64_descriptor))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let one = u64_descriptor.create(&[Value::U64(1)]).unwrap();
+    assert!(matches!(
+        database
+            .replace_input_sources([
+                InputSourceReplacement {
+                    id,
+                    descriptor: u64_descriptor,
+                    records: vec![one],
+                },
+                InputSourceReplacement {
+                    id,
+                    descriptor: string_descriptor,
+                    records: vec![],
+                },
+            ])
+            .await,
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::BindingSourceDescriptorMismatch(_)
+        ))
+    ));
+    assert!(subscription.try_recv().is_err());
+
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id,
+            descriptor: u64_descriptor,
+            records: vec![u64_descriptor.create(&[Value::U64(1)]).unwrap()],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        [(vec![Value::U64(1)], 1)]
+    );
+
+    let other = database.allocate_input_source(u64_descriptor);
+    let other_subscription = database
+        .subscribe_one_sink(GraphBuilder::input_source(other, u64_descriptor))
+        .await
+        .unwrap();
+    assert!(other_subscription.recv().unwrap().is_empty());
+    assert!(matches!(
+        database
+            .replace_input_sources([
+                InputSourceReplacement {
+                    id,
+                    descriptor: string_descriptor,
+                    records: vec![],
+                },
+                InputSourceReplacement {
+                    id: other,
+                    descriptor: u64_descriptor,
+                    records: vec![u64_descriptor.create(&[Value::U64(2)]).unwrap()],
+                },
+            ])
+            .await,
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::BindingSourceDescriptorMismatch(_)
+        ))
+    ));
+    assert!(subscription.try_recv().is_err());
+    assert!(other_subscription.try_recv().is_err());
+}
+
+#[futures_test::test]
+async fn input_sources_cannot_cross_runtime_boundaries() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid storage families");
+    let mut owner = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut other = Database::new(albums_schema(), storage).await.unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let id = owner.allocate_input_source(descriptor);
+    assert!(matches!(
+        other
+            .subscribe_one_sink(GraphBuilder::input_source(id, descriptor))
+            .await,
+        Err(Error::IvmRuntime(IvmRuntimeError::ForeignInputSource))
+    ));
+}
+
+#[futures_test::test]
+async fn input_source_descriptor_is_registered_at_graph_compile_and_mismatches_are_recoverable() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let string_descriptor = RecordDescriptor::new([("value", ColumnType::String)]);
+    let u64_descriptor = RecordDescriptor::new([("value", ColumnType::U64)]);
+    let id = database.allocate_input_source(string_descriptor);
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::input_source(id, string_descriptor))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    // A second graph cannot reinterpret an already-compiled source identity.
+    assert!(matches!(
+        database
+            .subscribe_one_sink(GraphBuilder::input_source(id, u64_descriptor))
+            .await,
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::BindingSourceDescriptorMismatch(_)
+        ))
+    ));
+
+    // The rejected replacement is preflight-only: it must neither poison the
+    // database nor install refcounts under the wrong descriptor.
+    assert!(matches!(
+        database
+            .replace_input_sources([InputSourceReplacement {
+                id,
+                descriptor: u64_descriptor,
+                records: vec![u64_descriptor.create(&[Value::U64(7)]).unwrap()],
+            }])
+            .await,
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::BindingSourceDescriptorMismatch(_)
+        ))
+    ));
+    assert!(subscription.try_recv().is_err());
+
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id,
+            descriptor: string_descriptor,
+            records: vec![
+                string_descriptor
+                    .create(&[Value::String("accepted after mismatch".to_owned())])
+                    .unwrap(),
+            ],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        [(vec![Value::String("accepted after mismatch".to_owned())], 1)]
+    );
+}
+
+#[futures_test::test]
+async fn retiring_input_sources_retracts_live_records_and_releases_runtime_state() {
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid storage families"),
+    )
+    .await
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let id = database.allocate_input_source(descriptor);
+    assert_eq!(database.ivm_runtime.active_input_source_state_count(), 1);
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::input_source(id, descriptor))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let record = descriptor.create(&[Value::U64(11)]).unwrap();
+    database
+        .replace_input_sources([InputSourceReplacement {
+            id,
+            descriptor,
+            records: vec![record],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        [(vec![Value::U64(11)], 1)]
+    );
+
+    database.retire_input_sources([id]).await.unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        [(vec![Value::U64(11)], -1)]
+    );
+    assert_eq!(database.ivm_runtime.active_input_source_state_count(), 0);
+    assert!(matches!(
+        database.retire_input_sources([id]).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::InputSourceRetired))
+    ));
+    assert!(matches!(
+        database
+            .replace_input_sources([InputSourceReplacement {
+                id,
+                descriptor,
+                records: vec![],
+            }])
+            .await,
+        Err(Error::IvmRuntime(IvmRuntimeError::InputSourceRetired))
+    ));
+
+    // Retired identities have no tombstone map: allocation is monotone, while
+    // active source state returns to its baseline after each short-lived use.
+    for _ in 0..16 {
+        let transient = database.allocate_input_source(descriptor);
+        database.retire_input_sources([transient]).await.unwrap();
+        assert_eq!(database.ivm_runtime.active_input_source_state_count(), 0);
+    }
+}
+
+#[futures_test::test]
+async fn input_source_retirement_rejects_foreign_runtime_identity() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid storage families");
+    let descriptor = RecordDescriptor::new([("id", ColumnType::U64)]);
+    let mut owner = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut other = Database::new(albums_schema(), storage).await.unwrap();
+    let foreign = owner.allocate_input_source(descriptor);
+    assert!(matches!(
+        other.retire_input_sources([foreign]).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::ForeignInputSource))
+    ));
 }
 
 mod parameters;

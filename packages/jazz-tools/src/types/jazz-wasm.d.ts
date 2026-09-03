@@ -66,12 +66,12 @@ declare module "jazz-wasm" {
     base?: unknown;
   };
 
-  export type UpsertOptions = WriteOptions & {
-    branch?: unknown;
-  };
+  export type UpsertOptions = UpdateOptions;
 
   export type DeleteOptions = UpdateOptions;
-  export type RestoreOptions = UpsertOptions;
+  export type RestoreOptions = WriteOptions & {
+    branch?: unknown;
+  };
 
   export class WasmTx {
     insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
@@ -109,7 +109,13 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmDb;
-    static openBrowser(pageStore: unknown, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
+    /** Host-only relay open; `storageOwner` is supplied by broker ownership admission. */
+    static openBrowser(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+      storageOwner: string,
+    ): Promise<WasmDb>;
     static openBrowserWithSelfSignedProof(
       pageStore: unknown,
       schema: Uint8Array,
@@ -117,6 +123,7 @@ declare module "jazz-wasm" {
       token: string,
       appId: string,
       claimedAuthor: string,
+      storageOwner: string,
     ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
@@ -219,6 +226,23 @@ declare module "jazz-wasm" {
 
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
+    /** All backend read entrypoints require openMemoryAsBackend. */
+    allForBackend(query: WasmPreparedQuery, opts: unknown): Promise<Uint8Array>;
+    allInTransactionForBackend(
+      query: WasmPreparedQuery,
+      tx: WasmTx,
+      opts: unknown,
+    ): Promise<Uint8Array>;
+    allRelationSnapshotForBackend(query: WasmPreparedQuery, opts: unknown): Promise<Uint8Array>;
+    allRelationSnapshotInTransactionForBackend(
+      query: WasmPreparedQuery,
+      tx: WasmTx,
+      opts: unknown,
+    ): Promise<Uint8Array>;
+    allRelationQueryForBackend(queryJson: string, opts: unknown): Promise<Uint8Array>;
+    attachQueryForBackend(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
+    subscribeForBackend(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
+    subscribeRelationQueryForBackend(queryJson: string, opts: unknown): ReadableStream<unknown>;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
     allRelationQuery(queryJson: string, opts: unknown): Promise<Uint8Array>;
@@ -292,7 +316,6 @@ declare module "jazz-wasm" {
     foregroundTxTimeHighWater(): bigint;
     /** @internal Foreground node-lease bootstrap only. */
     seedForegroundTxTimeHighWater(highWater: bigint): void;
-    setRelayAuthoritySessionOwner(): void;
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
     close(): Promise<boolean>;

@@ -78,7 +78,7 @@ impl Gather {
         self
     }
 
-    /// Stop after at most `max_depth` recursive steps.
+    /// Stop after at most `max_depth` recursive steps. Zero evaluates only the seed.
     pub fn max_depth(mut self, max_depth: usize) -> Self {
         self.bound = RecursionBound::MaxDepth(max_depth);
         self
@@ -495,7 +495,7 @@ impl Query {
 
     /// Require the row referenced by `parent_column` to be readable under the
     /// parent table's composed read policy, with a bound for recursion through
-    /// the same inheritance atom.
+    /// the same inheritance atom. Zero performs no inheritance hop and denies.
     pub fn inherits_with_depth(
         mut self,
         parent_column: impl Into<String>,
@@ -525,7 +525,8 @@ impl Query {
     }
 
     /// Require the row referenced by `parent_column` to satisfy the parent
-    /// policy for `operation`, with a bound for recursive inheritance.
+    /// policy for `operation`, with a bound for recursive inheritance. Zero
+    /// performs no inheritance hop and denies.
     pub fn inherits_operation_with_depth(
         mut self,
         parent_column: impl Into<String>,

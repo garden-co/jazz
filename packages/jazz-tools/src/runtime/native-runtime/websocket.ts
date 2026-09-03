@@ -15,6 +15,25 @@ export type WireError = {
   message: string;
 };
 
+/** A valid structured server error received before wire negotiation completed. */
+export class PreHelloWireError extends Error {
+  readonly wireError: WireError;
+
+  constructor(wireError: WireError) {
+    super(`websocket ${wireError.code} before server hello: ${wireError.message}`);
+    this.name = "PreHelloWireError";
+    this.wireError = wireError;
+  }
+}
+
+export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
+  return (
+    error instanceof PreHelloWireError &&
+    error.wireError.code === "not_ready" &&
+    error.wireError.retry === "later"
+  );
+}
+
 export type WebSocketNegotiation = {
   protocolVersion: number;
   features: number;
@@ -27,6 +46,8 @@ export type WebSocketCarrierOptions = {
   /** Features supported by the native runtime that will receive this link. */
   features?: number;
   authJson?: string;
+  /** Requested only by the durable, scope-admitted browser relay host. */
+  requestedLink?: "scope_isolated_client_relay";
   onFrame: WebSocketFrameHandler;
   onError?: WebSocketErrorHandler;
   onTerminal?: WebSocketTerminalHandler;
@@ -78,22 +99,60 @@ export const CLIENT_WIRE_FEATURES =
 const MAX_WEBSOCKET_BATCH_BYTES = 1 << 20;
 const POSTCARD_FRAME_LENGTH_RESERVE = 5;
 const POSTCARD_BATCH_LENGTH_RESERVE = 5;
+// Keep these fixed protocol limits aligned with jazz::protocol_limits. The
+// browser implementation cannot import the Rust core, so this boundary spells
+// them out beside the matching postcard carrier decoder.
+const MAX_WIRE_FRAME_BYTES = 2 * 1024 * 1024;
+const MAX_WIRE_BATCH_FRAMES = 4_096;
 
 export function webSocketUrl(serverUrl: string, appId: string): string {
   return httpUrlToWs(serverUrl, appId);
 }
 
 export function encodeWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
+  assertWebSocketFrameBatch(frames);
   const writer = new PostcardWriter();
   writer.vec((itemWriter, index) => itemWriter.bytes(frames[index]!), frames.length);
-  return writer.finish();
+  const batch = writer.finish();
+  if (batch.byteLength > MAX_WIRE_FRAME_BYTES) {
+    throw new Error(
+      `websocket frame batch exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`,
+    );
+  }
+  return batch;
 }
 
 export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
+  if (batch.byteLength > MAX_WIRE_FRAME_BYTES) {
+    throw new Error(
+      `websocket frame batch exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`,
+    );
+  }
   const reader = new PostcardReader(batch);
-  const frames = reader.readVec((itemReader) => itemReader.bytes());
+  const count = reader.u64();
+  if (count === 0 || count > MAX_WIRE_BATCH_FRAMES) {
+    throw new Error(`websocket frame batch exceeds frame-count limit of ${MAX_WIRE_BATCH_FRAMES}`);
+  }
+
+  // Do not use `readVec`: its Array.from({ length }) allocates against the
+  // untrusted count before a protocol adapter can apply this carrier limit.
+  const frames: Uint8Array[] = [];
+  for (let index = 0; index < count; index += 1) {
+    frames.push(reader.bytesAtMost(MAX_WIRE_FRAME_BYTES, "websocket frame"));
+  }
   assertReaderDone(reader, "websocket frame batch");
   return frames;
+}
+
+function assertWebSocketFrameBatch(frames: readonly Uint8Array[]): void {
+  if (frames.length === 0 || frames.length > MAX_WIRE_BATCH_FRAMES) {
+    throw new Error(`websocket frame batch exceeds frame-count limit of ${MAX_WIRE_BATCH_FRAMES}`);
+  }
+  for (const frame of frames) {
+    if (frame.byteLength > MAX_WIRE_FRAME_BYTES) {
+      throw new Error(`websocket frame exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`);
+    }
+  }
 }
 
 export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Array {
@@ -188,7 +247,13 @@ export class WebSocketCarrier {
     });
     void waitForOpen(this.socket).then(
       () => {
-        this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
+        this.socket.send(
+          encodeWebSocketPrelude(
+            options.authJson ?? "{}",
+            options.peerIdentity,
+            options.requestedLink,
+          ),
+        );
         this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
       },
       (error) => {
@@ -241,7 +306,11 @@ export class WebSocketCarrier {
     let batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
     for (const frame of frames) {
       const frameBytes = frame.byteLength + POSTCARD_FRAME_LENGTH_RESERVE;
-      if (batch.length > 0 && batchBytes + frameBytes > MAX_WEBSOCKET_BATCH_BYTES) {
+      if (
+        batch.length > 0 &&
+        (batch.length >= MAX_WIRE_BATCH_FRAMES ||
+          batchBytes + frameBytes > MAX_WEBSOCKET_BATCH_BYTES)
+      ) {
         this.socket.send(encodeWebSocketFrameBatch(batch));
         batch = [];
         batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
@@ -301,6 +370,9 @@ export class WebSocketCarrier {
             this.close();
             return;
           }
+          this.reportTerminal(error, new PreHelloWireError(error));
+          this.close();
+          return;
         }
         this.reportTerminal(
           {
@@ -393,7 +465,11 @@ function websocketCloseDetails(event: unknown): { code?: number; reason?: string
   };
 }
 
-export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {
+export function encodeWebSocketPrelude(
+  authJson: string,
+  peerIdentity: Uint8Array,
+  requestedLink?: "scope_isolated_client_relay",
+): string {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
   const peerAuthor = new TextDecoder().decode(peerIdentity);
   const sub = authSub(auth) ?? canonicalAuthorSubjectPart(peerAuthor) ?? peerAuthor;
@@ -402,6 +478,7 @@ export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Arra
     ...auth,
     auth: { ...auth, sub },
     sub,
+    ...(requestedLink ? { requested_link: requestedLink } : {}),
   });
 }
 
@@ -422,8 +499,52 @@ export function peerIdentityForWebSocketAuth(
   fallbackIdentity: Uint8Array,
 ): Uint8Array {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
+  // A credential-only backend connection is the trusted SYSTEM serving
+  // authority. Its raw-core backend open already uses this identity, and the
+  // WebSocket prelude must agree: otherwise the server attaches remote query
+  // coverage as the adapter's incidental local fallback author and evaluates
+  // row policies for that author. A backend session remains an explicit
+  // end-user serving subject and is handled by `canonicalAuthorForWebSocketAuth`.
+  if (
+    typeof auth.backend_secret === "string" &&
+    !auth.admin_secret &&
+    !hasUsableBackendSession(auth)
+  ) {
+    return new TextEncoder().encode(canonicalAuthorSubject("urn:jazz:system", "system"));
+  }
   const canonical = canonicalAuthorForWebSocketAuth(auth);
   return canonical ? new TextEncoder().encode(canonical) : fallbackIdentity;
+}
+
+/**
+ * Normalize credentials at the native transport boundary. A backend open is
+ * SYSTEM unless it deliberately supplies a backend session; an incidental
+ * bearer token would otherwise make the server select Session admission while
+ * the local raw-core database remains SYSTEM.
+ */
+export function normalizeBackendWebSocketAuth(authJson: string): string {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  if (
+    typeof auth.backend_secret === "string" &&
+    !auth.admin_secret &&
+    !hasUsableBackendSession(auth)
+  ) {
+    delete auth.jwt_token;
+  }
+  return JSON.stringify(auth);
+}
+
+function hasUsableBackendSession(auth: Record<string, unknown>): boolean {
+  const session = auth.backend_session as { issuer?: unknown; user_id?: unknown } | null;
+  return (
+    session !== null &&
+    typeof session === "object" &&
+    !Array.isArray(session) &&
+    typeof session.issuer === "string" &&
+    typeof session.user_id === "string" &&
+    isUsableSubject(session.issuer) &&
+    isUsableSubject(session.user_id)
+  );
 }
 
 function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string | null {
@@ -436,17 +557,8 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
   // backend secret. It carries the same public Session wire fields as a
   // server-side impersonation request, so it uses the same canonical author.
   // It also has the server's highest session-authentication precedence.
-  const session = auth.backend_session as { issuer?: unknown; user_id?: unknown } | null;
-  if (
-    typeof auth.backend_secret === "string" &&
-    session !== null &&
-    typeof session === "object" &&
-    !Array.isArray(session) &&
-    typeof session.issuer === "string" &&
-    typeof session.user_id === "string" &&
-    isUsableSubject(session.issuer) &&
-    isUsableSubject(session.user_id)
-  ) {
+  if (typeof auth.backend_secret === "string" && hasUsableBackendSession(auth)) {
+    const session = auth.backend_session as { issuer: string; user_id: string };
     return canonicalAuthorSubject(session.issuer, session.user_id);
   }
 
@@ -519,8 +631,10 @@ function wireErrorCodeName(tag: number): string {
       return "backpressure";
     case 5:
       return "internal";
+    case 6:
+      return "not_ready";
     default:
-      return `unknown_${tag}`;
+      throw new Error(`unknown WireErrorCode discriminant ${tag}`);
   }
 }
 
@@ -535,7 +649,7 @@ function wireRetryName(tag: number): string {
     case 3:
       return "later";
     default:
-      return `unknown_${tag}`;
+      throw new Error(`unknown WireRetry discriminant ${tag}`);
   }
 }
 

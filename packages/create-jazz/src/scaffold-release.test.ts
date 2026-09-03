@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { scaffold } from "./scaffold.js";
+import { readSourceSnapshot, scaffold } from "./scaffold.js";
 
 const { tigedMock } = vi.hoisted(() => ({ tigedMock: vi.fn() }));
 
@@ -63,6 +63,57 @@ describe("scaffold() release source snapshots", () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       `https://raw.githubusercontent.com/garden-co/jazz/refs/tags/${releaseRef}/pnpm-workspace.yaml`,
       expect.anything(),
+    );
+  });
+
+  it("uses a bundled preview commit for both starter and workspace metadata", async () => {
+    const previewPackage = path.join(tmpRoot, "preview-package");
+    const commit = "a".repeat(40);
+    fs.mkdirSync(previewPackage);
+    fs.writeFileSync(
+      path.join(previewPackage, "package.json"),
+      JSON.stringify({ version: packageVersion }),
+    );
+    fs.writeFileSync(
+      path.join(previewPackage, "jazz-source-snapshot.json"),
+      JSON.stringify({ schema: 1, packageVersion, commit }),
+    );
+
+    await scaffold(
+      {
+        appName: "preview-app",
+        targetDir,
+        pm: null,
+        starter: "next-betterauth",
+        git: false,
+      },
+      readSourceSnapshot(previewPackage),
+    );
+
+    expect(tigedMock).toHaveBeenCalledWith(`garden-co/jazz/starters/next-betterauth#${commit}`, {
+      disableCache: true,
+    });
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      `https://raw.githubusercontent.com/garden-co/jazz/${commit}/pnpm-workspace.yaml`,
+      expect.anything(),
+    );
+  });
+
+  it("rejects absent or mismatched preview receipts without falling back", () => {
+    const previewPackage = path.join(tmpRoot, "invalid-preview-package");
+    fs.mkdirSync(previewPackage);
+    fs.writeFileSync(
+      path.join(previewPackage, "package.json"),
+      JSON.stringify({ version: packageVersion }),
+    );
+    fs.writeFileSync(
+      path.join(previewPackage, "jazz-source-snapshot.json"),
+      JSON.stringify({ schema: 1, packageVersion: "2.0.0-alpha.other", commit: "a".repeat(40) }),
+    );
+    expect(() => readSourceSnapshot(previewPackage)).toThrow(/refusing to fall back/i);
+    fs.writeFileSync(path.join(previewPackage, "jazz-source-snapshot.json"), "not json");
+    expect(() => readSourceSnapshot(previewPackage)).toThrow(
+      /invalid bundled preview source snapshot/i,
     );
   });
 

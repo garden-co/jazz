@@ -227,11 +227,15 @@ fn deliver_client_unit(
 ) {
     if let SyncMessage::CommitUnit { tx, versions } = unit.clone() {
         let start = std::time::Instant::now();
+        // The locally constructed peer is SYSTEM and has no admitted claims.
+        let policy_claims = BTreeMap::new();
         let outcome = jazz::db::block_on(client.edge_peer.ingest_edge_mergeable_commit_unit(
             &mut client.edge,
             tx,
             versions,
             u64::MAX,
+            u64::MAX,
+            policy_claims,
         ))
         .unwrap();
         settle_outcome(&mut client.edge, outcome).unwrap();

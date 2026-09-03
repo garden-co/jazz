@@ -1,6 +1,21 @@
 {
   "format": "jazz-wire-frame-artifact-corpus-v1",
-  "error_frame_hex": "0202000d66697874757265206572726f72",
+  "error_frames": [
+    {
+      "name": "malformed frame",
+      "frame_hex": "0202000d66697874757265206572726f72",
+      "code": "malformed_frame",
+      "retry": "never",
+      "message": "fixture error"
+    },
+    {
+      "name": "runtime bootstrap not ready",
+      "frame_hex": "02060317636174616c6f67756520626f6f74737472617070696e67",
+      "code": "not_ready",
+      "retry": "later",
+      "message": "catalogue bootstrapping"
+    }
+  ],
   "rejections": [
     {
       "name": "trailing complete hello",

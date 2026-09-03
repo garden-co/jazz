@@ -24,7 +24,7 @@ Invariant digest:
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
 - `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated ident...
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
-- `INV-RLS-11`: Relay peer links MUST use AuthorSubject::SYSTEM; edge-client peer links MUST use the terminated client AuthorSubject for policy-composed reads.
+- `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; edge-client peer links MUST use the terminated client AuthorSubject for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
@@ -53,6 +53,7 @@ Invariant digest:
   Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
   the reserved system issuer. Local intern handles MUST never become wire,
   storage, query, equality, or ordering values.
+- `INV-RLS-24`: Client mutation staging MUST NOT issue a definitive read- or write-policy verdict from partial local state. Update/upsert read visibility and write policy are enforced by the fate authority against its complete admitted policy inputs.
 
 ## Details
 
@@ -203,6 +204,16 @@ versioning its target still depends on that target row. Trusted/internal paths
 may inspect the authoritative row as policy evidence, but that implementation
 privilege does not make a read-hidden row updateable by a session.
 
+The first physical overlay for a branch-view update or existing-target upsert
+has no target-row history predecessor even though it read an inherited source.
+Every non-root mergeable branch version has mandatory canonical branch-write
+intent (ch. 11), so an omitted or relabelled copy cannot be admitted as an
+ordinary insert. Its v1 branch-view copy descriptor is the only additional proof that
+may satisfy this rule: the authority re-resolves its exact live or frozen source
+and evaluates that source's ordinary read policy. The client does not evaluate
+or receive policy support, and the descriptor is not a causal dependency,
+exclusive read set, or CAS precondition.
+
 An upsert asks whether its target row exists. If there is a current target row,
 that is a read and an upsert MUST be rejected unless the writer may read it. If
 there is no target row, a table with no read policy may take the insert path; a
@@ -246,7 +257,7 @@ are worth keeping distinct:
 | `made_by` (author)                       | who a mutation is _attributed_ to (`Transaction.made_by`)    | provenance (`$createdBy`); _not_ necessarily the permission subject |
 | authenticated identity (`AuthorSubject`) | who a connection authenticated as                            | the subject read/write policies are evaluated against               |
 | attribution-only                         | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13)                        |
-| `AuthorSubject::SYSTEM`                  | the system identity                                          | bypasses all policies; relay links carry it (§7.3)                  |
+| `AuthorSubject::SYSTEM`                  | a trusted internal system principal                          | bypasses all policies; never implied by relay transport (§7.3)      |
 
 At the facade boundary, attributed writes are core-only unless `made_by ==
 authenticated identity`. This prevents a client from forging another user's
@@ -258,9 +269,13 @@ itself and store user attribution (`INV-RLS-17`, `INV-API-29`).
 Read policy is enforced at the point where data leaves an upstream node. For
 each peer identity, the upstream node narrows what it emits before producing any
 result-row add/remove, version bundle, rehydrate output, or query update
-(`INV-RLS-5`). A relay link carries `AuthorSubject::SYSTEM` and therefore does not
-narrow; an edge-client link narrows under its terminated `AuthorSubject`
-(`INV-RLS-11`, ch. 9).
+(`INV-RLS-5`). Generic, unbound relay traffic has no permission subject and is
+not a user query that can be policy-composed. A scope-isolated client relay
+instead forwards an upstream
+request with a topology-assigned immutable delegated foreground-session binding;
+the edge/core authority narrows under that admitted binding, not under SYSTEM
+and not under claims supplied by the relay. An edge-client link similarly
+narrows under its terminated `AuthorSubject` (`INV-RLS-11`, ch. 9).
 
 Include modes participate in this narrowing rather than sitting outside it. A
 required include — an `Include` with `JoinMode::Inner` or `require: true` — counts
@@ -278,6 +293,16 @@ redact a copy already delivered to a receiving node (`INV-RLS-6`). A receiving
 node does not re-filter its own local reads or subscriptions by policy. The spec
 therefore makes no post-delivery confidentiality promise against a node that
 already received data: revocation is forward-looking sync narrowing.
+
+A client relay does not become an authority by retaining an authority-selected
+result. A scope-isolated relay may publish retained rows and repair payloads to
+an exactly same-scope foreground without re-running policy. For Edge/Global
+results it must use the exact policy-scoped membership emitted by the authority;
+for Local results it uses retained knowledge, including previously delivered
+rows that a later authority result removes. A multiplexed relay must keep each
+policy binding's authoritative membership separate and may not treat possession
+of a cached row as permission to reveal it to another scope (ch. 9,
+`INV-EDGE-21..24`).
 
 effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references
@@ -347,6 +372,23 @@ seed reachability by projecting its own `id` column from rows where
 `identity_key = claim(sub)`. The seed relation is an ordinary closure input. A
 grant, revoke, or seed-column update flows through normal IVM deltas and updates
 maintained subscriptions without rehydrating the whole view.
+
+The canonical relation IR for a set-valued seed projects both the seed
+membership's group key and each filtered recursive edge's parent key as the
+scalar `id` frontier. The recursive step does not join the parent key back to
+the seed table: a reachable parent need not have its own seed-membership or
+output-table row. Seed and edge predicates are evaluated before their projected
+keys enter the frontier.
+
+Reachability deduplicates projected keys at every step, so cycles terminate.
+`MaxDepth(N)` is a semantic cutoff: the seed is depth zero, rows reached by
+exactly `N` edges are included, and an otherwise valid `N + 1` frontier is
+excluded without being treated as evaluator non-convergence. Consequently,
+`MaxDepth(0)` is seed-only and MUST NOT admit a one-hop authorization grant.
+The evaluator's independent fixpoint safety limit may still report genuine
+non-convergence. An empty seed is a live maintained relation, not a completed
+subscription; later seed grants, revokes, seed-key moves, filtered edge grants,
+and edge revokes produce ordinary maintained deltas.
 
 `inherits(parent_col)` is also an atom. A child row is readable when the parent
 row referenced by `parent_col` is readable under the parent's composed read

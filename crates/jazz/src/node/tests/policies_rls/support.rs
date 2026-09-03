@@ -29,13 +29,41 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    let mut result_member_adds = result_member_adds;
-    let mut result_member_removes = result_member_removes;
+    // Peer updates carry the exact source closure. The receiving maintained
+    // graph, rather than the authority, derives result membership; a root
+    // source occurrence is therefore the peer-wire equivalent of these
+    // single-table result assertions.
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    let mut result_member_adds = program_fact_adds
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
+            {
+                Some((input.version_table.clone(), input.source_row, input.version.tx))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut result_member_removes = program_fact_removes
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
+            {
+                Some((input.version_table.clone(), input.source_row, input.version.tx))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     result_member_adds.sort();
     result_member_removes.sort();
     let mut expected_adds = expected_adds

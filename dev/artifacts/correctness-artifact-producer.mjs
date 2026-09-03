@@ -19,6 +19,20 @@ const shaPattern = /^[a-f0-9]{40}$/;
 const hashPattern = /^[a-f0-9]{64}$/;
 const sourceTreePattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const snapshotFingerprintPattern = /^[a-f0-9]{64}-[a-f0-9]{64}$/;
+const generatedNativeExpectations = [
+  {
+    kind: "WASM",
+    manifestField: "wasmFingerprint",
+    path: "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts",
+    exportName: "EXPECTED_WASM_ARTIFACT_FINGERPRINT",
+  },
+  {
+    kind: "NAPI",
+    manifestField: "napiFingerprint",
+    path: "packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts",
+    exportName: "EXPECTED_NAPI_ARTIFACT_FINGERPRINT",
+  },
+];
 
 // These are producer-owned build products.  They must never make an otherwise
 // identical source checkout appear dirty merely because a producer has run.
@@ -102,6 +116,26 @@ function validateShape(manifest) {
     throw new Error("correctness artifacts: producer manifest has an invalid identity");
 }
 
+// Jazz Tools compiles these generated modules into the consumer runtime. They
+// are intentionally excluded from source identity because artifact production
+// rewrites them, but that exclusion must not let a restored release value
+// validate a different sealed local snapshot.
+function verifyGeneratedNativeExpectations(root, manifest) {
+  for (const expectation of generatedNativeExpectations) {
+    const path = join(root, expectation.path);
+    realFile(path, `${expectation.kind} generated fingerprint expectation`);
+    const source = readFileSync(path, "utf8");
+    const actual = new RegExp(
+      `export const ${expectation.exportName}\\s*=\\s*\\n?\\s*"([a-f0-9]{64})"\\s+as const;`,
+    ).exec(source)?.[1];
+    const expected = manifest[expectation.manifestField];
+    if (actual !== expected)
+      throw new Error(
+        `correctness artifacts: generated ${expectation.kind} fingerprint expectation differs from sealed snapshot (expected ${expected}, found ${actual ?? "missing"})`,
+      );
+  }
+}
+
 /** Write after every native producer has completed and the pair is snapshotted. */
 export function writeCorrectnessArtifactProducerManifest(rootInput, snapshot, expectedSource) {
   const root = resolve(rootInput);
@@ -152,6 +186,7 @@ export function verifyCorrectnessArtifactSnapshot(rootInput) {
     manifest.napiGeneration !== snapshot.napiGeneration
   )
     throw new Error("correctness artifacts: producer manifest does not match sealed snapshot");
+  verifyGeneratedNativeExpectations(root, manifest);
   return { ...manifest, snapshot };
 }
 

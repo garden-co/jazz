@@ -589,6 +589,463 @@ async fn present_staged_receipt_has_no_implicit_ttl_and_is_accepted_atomically()
 }
 
 #[futures_test::test]
+async fn resident_large_value_acceptance_blocks_stale_eviction_and_reclamation() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let live_chunks = chunks.len();
+
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref)],
+    );
+    insert.accept_large_value(staged.id);
+    let applied = database.apply_batch(insert).await.unwrap();
+
+    assert!(!database.evict_staged_large_value(staged.id).await.unwrap());
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(chunks.len(), live_chunks);
+
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+    assert_eq!(chunks.len(), live_chunks);
+}
+
+/// A resident publication owns the lifecycle guard until its ordered write is
+/// durable. Eviction of an unrelated receipt is maintenance and must defer
+/// immediately rather than waiting on the guard whose persistence this caller
+/// still has to drive.
+#[futures_test::test]
+async fn cross_receipt_eviction_defers_until_resident_publication_is_durable() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let accepted = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![1; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let eviction_target = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![2; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    assert_ne!(accepted.id, eviction_target.id);
+    assert_ne!(accepted.value_ref.root, eviction_target.value_ref.root);
+
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(accepted.value_ref)],
+    );
+    insert.accept_large_value(accepted.id);
+    let applied = database.apply_batch(insert).await.unwrap();
+
+    let mut eviction = Box::pin(database.evict_staged_large_value(eviction_target.id));
+    match futures::poll!(eviction.as_mut()) {
+        Poll::Ready(Ok(false)) => {}
+        Poll::Ready(other) => panic!("resident-guarded eviction returned {other:?}"),
+        Poll::Pending => panic!("eviction waited on this database's resident lifecycle guard"),
+    }
+    drop(eviction);
+    assert!(
+        database
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                staged_large_value_key(eviction_target.id),
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "deferral must not move an unrelated receipt ahead of the resident publication",
+    );
+
+    database
+        .finish_persistence(applied.persist().await)
+        .unwrap();
+    assert!(
+        database
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                staged_large_value_key(accepted.id),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "the resident publication's accepted receipt becomes durable before deferred maintenance",
+    );
+    assert!(
+        database
+            .evict_staged_large_value(eviction_target.id)
+            .await
+            .unwrap(),
+        "maintenance retries after the resident frontier releases its guard",
+    );
+}
+
+#[futures_test::test]
+async fn reclamation_uses_durable_zero_and_resident_references_as_a_veto() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![13; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let value_ref = staged.value_ref.clone();
+    let root_node_key = large_value_node_key(&value_ref.root).unwrap();
+    let root_reclaim_key = large_value_reclaim_key(&value_ref.root).unwrap();
+
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(value_ref.clone())],
+    );
+    insert.accept_large_value(staged.id);
+    database.commit_batch(insert).await.unwrap();
+    let live_chunks = chunks.len();
+
+    let mut first_delete = database.open_batch();
+    first_delete.delete("objects", PrimaryKeyValue::U64(1));
+    database.commit_batch(first_delete).await.unwrap();
+    assert!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_reclaim_key.clone(),)
+            .await
+            .unwrap()
+            .is_some(),
+        "durable zero queues the root"
+    );
+
+    let mut first_activation = database.open_batch();
+    first_activation.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(value_ref.clone())],
+    );
+    let first_activation = database.apply_batch(first_activation).await.unwrap();
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0,
+        "resident activation vetoes durable-zero reclamation"
+    );
+    assert_eq!(chunks.len(), live_chunks);
+    assert!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_reclaim_key.clone(),)
+            .await
+            .unwrap()
+            .is_some(),
+        "the resident veto retains durable queue work"
+    );
+
+    database
+        .finish_persistence(first_activation.persist().await)
+        .unwrap();
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0,
+        "durable and resident positive references only clear stale queue work"
+    );
+    assert_eq!(chunks.len(), live_chunks);
+    assert!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_reclaim_key.clone(),)
+            .await
+            .unwrap()
+            .is_none(),
+        "the durable-positive stale queue entry is cleared"
+    );
+
+    let mut second_delete = database.open_batch();
+    second_delete.delete("objects", PrimaryKeyValue::U64(2));
+    database.commit_batch(second_delete).await.unwrap();
+
+    let mut second_activation = database.open_batch();
+    second_activation.insert(
+        "objects",
+        vec![Value::U64(3), Value::Large(value_ref.clone())],
+    );
+    let second_activation = database.apply_batch(second_activation).await.unwrap();
+    database
+        .finish_persistence(second_activation.persist().await)
+        .unwrap();
+    assert!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_reclaim_key.clone(),)
+            .await
+            .unwrap()
+            .is_some(),
+        "positive transitions deliberately leave queue cleanup to the reclaimer"
+    );
+
+    let mut pending_delete = database.open_batch();
+    pending_delete.delete("objects", PrimaryKeyValue::U64(3));
+    let pending_delete = database.apply_batch(pending_delete).await.unwrap();
+    let durable_root = decode_large_value_node_references(
+        &database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_node_key.clone())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let resident_root = decode_large_value_node_references(
+        &database
+            .resident_storage()
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_node_key)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(durable_root.references > 0);
+    assert_eq!(resident_root.references, 0);
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0,
+        "a resident deactivation cannot turn a stale queue entry into authority"
+    );
+    assert_eq!(chunks.len(), live_chunks);
+    assert!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_reclaim_key.clone(),)
+            .await
+            .unwrap()
+            .is_some(),
+        "the stale queue remains resumable for the pending durable-zero transition"
+    );
+
+    database
+        .finish_persistence(pending_delete.persist().await)
+        .unwrap();
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        live_chunks,
+        "only durable zero without a resident veto authorizes deletion"
+    );
+    assert_eq!(chunks.len(), 0);
+    assert!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_reclaim_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Point-read counts are an internal performance receipt because the public
+/// reclaim result cannot distinguish one durable metadata fetch from two. The
+/// common no-overlay path must reuse its durable value as the resident view.
+#[futures_test::test]
+async fn reclaim_without_a_staged_override_fetches_node_metadata_once() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let (storage, control) = TestStorage::controlled(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![0x5a; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        chunks.len(),
+        1,
+        "the receipt needs exactly one reclaim node"
+    );
+    assert!(database.evict_staged_large_value(staged.id).await.unwrap());
+
+    let reads_before_reclaim = control.point_read_count();
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        1,
+    );
+    assert_eq!(
+        control.point_read_count() - reads_before_reclaim,
+        1,
+        "a missing staged override must not fetch the same durable node twice",
+    );
+    assert_eq!(chunks.len(), 0);
+}
+
+#[futures_test::test]
+async fn large_value_eviction_and_reclamation_retry_failed_metadata_persistence() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let (storage, control) = TestStorage::controlled(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![21; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let root_reclaim_key = large_value_reclaim_key(&staged.value_ref.root).unwrap();
+    let live_chunks = chunks.len();
+
+    control.fail_next(TestStorageOperation::WriteMany);
+    let error = database
+        .evict_staged_large_value(staged.id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Storage(error) if error.to_string().contains("injected WriteMany failure"))
+    );
+    assert_eq!(
+        database.staged_large_values().await.unwrap(),
+        vec![staged.clone()]
+    );
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0,
+        "a failed eviction metadata transaction creates no deletion authority"
+    );
+    assert_eq!(chunks.len(), live_chunks);
+
+    assert!(database.evict_staged_large_value(staged.id).await.unwrap());
+    assert!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_reclaim_key.clone(),)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    control.fail_next(TestStorageOperation::WriteMany);
+    let error = database
+        .reclaim_orphaned_large_value_chunks(1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Storage(error) if error.to_string().contains("injected WriteMany failure"))
+    );
+    assert_eq!(
+        chunks.len(),
+        live_chunks - 1,
+        "the injected failure occurs after the hash-guarded chunk delete"
+    );
+
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(1)
+            .await
+            .unwrap(),
+        1,
+        "retry idempotently settles metadata for the already deleted chunk"
+    );
+    assert_eq!(chunks.len(), live_chunks - 1);
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        live_chunks - 1
+    );
+    assert_eq!(chunks.len(), 0);
+    assert!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_reclaim_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[futures_test::test]
 async fn direct_consolidation_stages_a_derived_descriptor_with_reused_base_nodes() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",

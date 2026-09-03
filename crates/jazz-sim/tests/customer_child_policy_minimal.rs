@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, Transport,
+    CommitUnitTrust, Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+    Transport,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
@@ -340,9 +341,18 @@ fn child_policy_reaches_client_through_relay() {
     let relay_core = duplex();
     let client_relay = duplex();
     let _relay_upstream = jazz::db::block_on(relay.connect_upstream(relay_core.left));
-    let _core_sub = core.accept_subscriber(relay_core.right, AuthorSubject::SYSTEM);
+    // The relay is the authentication boundary for its downstream member.
+    // It may delegate that immutable admitted session to core only over an
+    // explicitly trusted backend link.
+    let _core_sub = core.accept_subscriber_with_claims_and_trust(
+        relay_core.right,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let _client_upstream = jazz::db::block_on(client.connect_upstream(client_relay.left));
-    let _relay_sub = relay.accept_subscriber(client_relay.right, member);
+    let _relay_sub =
+        relay.accept_subscriber_with_claims(client_relay.right, member, session_claims());
 
     let mut subscriptions = Vec::new();
     for table in [

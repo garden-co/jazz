@@ -57,6 +57,10 @@ pub struct ConnectedNativeTransport {
     pub protocol_version: u16,
     pub features: u64,
     pub session_context: Option<ConnectionSessionContext>,
+    /// Set only by an adapter that opened an authenticated SYSTEM backend
+    /// link. It permits forwarding downstream policy bindings to the remote
+    /// authority; ordinary session links must leave it false.
+    pub permits_delegated_sessions: bool,
     /// Resolves exactly once when the established adapter pump stops.
     pub terminal: NativeTransportTerminalFuture,
 }
@@ -152,6 +156,7 @@ mod tests {
                     protocol_version: 1,
                     features: 0,
                     session_context: None,
+                    permits_delegated_sessions: false,
                     terminal: Box::pin(std::future::pending()),
                 })
             })

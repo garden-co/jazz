@@ -460,6 +460,122 @@ fn subscription_reset_preserves_ordered_window_rank() {
 }
 
 #[test]
+fn subscription_reset_preserves_ordered_flat_join_window_with_duplicate_roots() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("ownerId", "users"),
+            ),
+    );
+    let db = open_db(0xc4, AuthorSubject::for_test_bytes([0xc4; 16]), &schema);
+    for (id, name) in [(0xa1, "alice"), (0xb1, "maria"), (0xc1, "zoe")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (id, owner) in [(0x11, 0xa1), (0x22, 0xa1), (0x33, 0xb1), (0x44, 0xc1)] {
+        db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(format!("todo-{id:x}"))),
+                (
+                    "ownerId".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::Uuid(row(owner).0)))),
+                ),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    // The selected window is maria, then Alice's two distinct joined
+    // occurrences. Opaque terminal key map order would instead put Alice
+    // before maria, so this specifically proves materialization follows the
+    // lowered CollectBy sequence after custom sort, offset, and limit.
+    let query = Query::from("users")
+        .join_via_column("todos", "ownerId", "id", [])
+        .order_by("name", OrderDirection::Desc)
+        .offset(1)
+        .limit(3);
+    assert_eq!(
+        row_ids(&prepared_read(&db, &query)),
+        vec![row(0xb1), row(0xa1), row(0xa1)],
+        "the direct query establishes the lowered collector order",
+    );
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("flat join subscription must open with a delta");
+    };
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![row(0xb1), row(0xa1), row(0xa1)],
+    );
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xb1).0),
+                [ObjectId::from_uuid(row(0x33).0)],
+            ),
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xa1).0),
+                [ObjectId::from_uuid(row(0x11).0)],
+            ),
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xa1).0),
+                [ObjectId::from_uuid(row(0x22).0)],
+            ),
+        ]
+    );
+    block_on(subscription.close()).unwrap();
+
+    // A non-key order update stays within the unwindowed result but changes
+    // its rank. Groove emits an exact opaque-key Move; the public subscription
+    // reducer consumes root terminal edits into indexed `updated` rows (only
+    // descendant terminal edits cross this API boundary).
+    let move_query = Query::from("users")
+        .join_via_column("todos", "ownerId", "id", [])
+        .order_by("name", OrderDirection::Desc);
+    let mut moved = prepared_subscribe(&db, &move_query, ReadOpts::default()).unwrap();
+    let _initial = block_on(moved.next_raw()).unwrap();
+    db.update(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("zzzz".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta { updated, .. } = block_on(moved.next_raw()).unwrap() else {
+        panic!("rank change must publish a structured delta");
+    };
+    assert!(updated.iter().any(|output| {
+        output.row.row_uuid() == row(0xb1)
+            && output.previous_index == Some(1)
+            && output.index == 0
+            && output.row.cell_at(0) == Some(Value::String("zzzz".to_owned()))
+    }));
+}
+
+#[test]
 fn simple_prepared_current_write_query_uses_lowered_plan() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -1540,22 +1656,28 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        result_member_adds,
+        program_fact_adds,
         ..
     }) = message
     else {
         panic!("expected include subscription view update, got {message:?}");
     };
     assert_eq!(served, subscription);
-    let tables = result_member_adds
+    let tables = program_fact_adds
         .iter()
-        .filter_map(|member| member.as_real_row().map(|row| row.table.as_str()))
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
+                Some(input.version_table.as_str())
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>();
     assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
 
@@ -1564,27 +1686,40 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
         .send(SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        result_member_adds,
+        program_fact_adds,
         ..
     }) = message
     else {
         panic!("expected reopened include subscription view update, got {message:?}");
     };
     assert_eq!(served, subscription);
-    let tables = result_member_adds
+    let tables = program_fact_adds
         .iter()
-        .filter_map(|member| member.as_real_row().map(|row| row.table.as_str()))
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
+                Some(input.version_table.as_str())
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>();
     assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
 }

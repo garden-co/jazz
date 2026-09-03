@@ -63,6 +63,10 @@ export type SubscriptionRejectedChunk = {
     | {
         type: "ServerFailure";
         code: string;
+      }
+    | {
+        type: "InvalidAuthoritySourceClosure";
+        transition: string;
       };
 };
 export type SubscriptionStreamChunk =
@@ -773,6 +777,21 @@ export class PostcardReader {
 
   bytes(withLength = true): Uint8Array {
     const length = withLength ? this.u64() : 16;
+    return this.bytesOfLength(length);
+  }
+
+  /**
+   * Read a postcard byte string only after admitting its declared length.
+   *
+   * Protocol adapters use this before retaining attacker-controlled byte
+   * strings. `bytesOfLength` also verifies that the admitted length remains
+   * within the physical carrier.
+   */
+  bytesAtMost(maxLength: number, label: string): Uint8Array {
+    const length = this.u64();
+    if (length > maxLength) {
+      throw new Error(`${label} exceeds maximum length of ${maxLength} bytes`);
+    }
     return this.bytesOfLength(length);
   }
 

@@ -116,6 +116,7 @@ fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy(
 
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
+    register_whole_table_receiver(&mut reader, "todos");
     reader.apply_sync_message_settled(update).unwrap();
     assert_current_title(
         &mut reader,

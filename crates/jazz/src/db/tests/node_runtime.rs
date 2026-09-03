@@ -933,16 +933,17 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
             matches!(
                 message,
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                    result_member_adds,
+                    program_fact_adds,
                     settled_through,
                     ..
                 }) if *settled_through > GlobalTime(0)
-                    && result_member_adds.iter().any(|member| {
-                        member.as_row().is_some_and(|(table, row_uuid, tx_id)| {
-                            table.as_str() == "todos"
-                                && row_uuid == row(0xd5)
-                                && tx_id == write.tx_id
-                        })
+                    && program_fact_adds.iter().any(|fact| {
+                        matches!(fact,
+                            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                                if input.version_table.as_str() == "todos"
+                                    && input.source_row == row(0xd5)
+                                    && input.version.tx == write.tx_id
+                        )
                     })
             )
         })
@@ -1035,6 +1036,118 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
             .count(),
         1,
         "a quiet follow-up tick does not replay the same upload"
+    );
+}
+
+/// Edge admission compares a client HLC's Unix-millisecond physical component
+/// with the authority wall clock, not with the process-relative retry timer.
+/// This needs the real connection topology: direct NodeState admission never
+/// exercises the served-client edge path where retry timing is also available.
+#[test]
+fn edge_admits_client_write_with_current_unix_timestamp() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let edge = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xd7, alice, &schema);
+
+    let (client_transport, edge_client_transport) = duplex();
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_client_transport,
+            alice,
+            test_provider_claims(alice),
+            CommitUnitTrust::Session,
+        );
+
+    let unix_now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test clock is after Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("Unix milliseconds fit u64");
+    let write = client
+        .insert(
+            "todos",
+            cells("current timestamp", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd8)),
+                updated_at_ms: Some(unix_now_ms),
+                ..Default::default()
+            },
+        )
+        .expect("client creates a current-time local write");
+
+    client.tick().expect("client uploads the write");
+    for _ in 0..8 {
+        edge.tick().expect("edge services the client write");
+        if matches!(
+            crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id)),
+            Some((Fate::Accepted, None, DurabilityTier::Edge))
+        ) {
+            break;
+        }
+    }
+
+    let edge_state = crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id));
+    assert!(
+        matches!(
+            edge_state,
+            Some((Fate::Accepted, None, DurabilityTier::Edge))
+        ),
+        "a current Unix-time client write becomes Edge durable instead of being compared to the retry timer; observed {edge_state:?}"
+    );
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == write.tx_id),
+        "the admitted Edge write is retained for its upstream authority"
+    );
+
+    let future = client
+        .insert(
+            "todos",
+            cells("future timestamp", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd9)),
+                updated_at_ms: Some(
+                    unix_now_ms
+                        .saturating_add(crate::node::SKEW_TOLERANCE_MS)
+                        .saturating_add(10_000),
+                ),
+                ..Default::default()
+            },
+        )
+        .expect("client creates a far-future local write");
+    client.tick().expect("client uploads the far-future write");
+    for _ in 0..8 {
+        edge.tick().expect("edge services the far-future write");
+        if matches!(
+            crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id)),
+            Some((
+                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+                None,
+                DurabilityTier::Local
+            ))
+        ) {
+            break;
+        }
+    }
+    let future_state =
+        crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id));
+    assert!(
+        matches!(
+            future_state,
+            Some((
+                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+                None,
+                DurabilityTier::Local
+            ))
+        ),
+        "the same Edge path retains forward-skew rejection; observed {future_state:?}"
     );
 }
 
@@ -1910,10 +2023,9 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    // The subscriber registers the whole-table query shape; explicit
-    // current-row serving then sends the facade-level initial snapshot.
+    // The ordinary whole-table subscription owns its initial snapshot.
     client.tick().unwrap();
-    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+    server.tick().unwrap();
     client.tick().unwrap();
 
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -1931,6 +2043,40 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     client.tick().unwrap();
     assert_eq!(prepared_read(&client, &query).len(), 3);
 
+    // Resume and a fresh ordinary subscription publish the same exact
+    // CoveredInput closure at the three-row frontier.
+    let full_server = open_core(0x6e, AuthorSubject::SYSTEM, &schema);
+    seed(&full_server, "todos", cells("first", false, owner));
+    seed(&full_server, "todos", cells("second", false, owner));
+    seed(&full_server, "todos", cells("third", true, owner));
+    let full_client = open_db(0xc2, client_author, &schema);
+    let (full_client_transport, full_server_transport) = duplex();
+    let _full_upstream = crate::db::block_on(full_client.connect_upstream(full_client_transport));
+    let full_subscriber = full_server.accept_subscriber(full_server_transport, client_author);
+    let mut full_subscription =
+        prepared_subscribe(&full_client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(full_subscription.next_raw()).unwrap()).is_empty());
+    full_client.tick().unwrap();
+    full_server.tick().unwrap();
+    full_client.tick().unwrap();
+    assert_eq!(
+        delta_rows(block_on(full_subscription.next_raw()).unwrap())
+            .0
+            .len(),
+        3
+    );
+    let covered_full_bytes = full_subscriber.borrow().last_resume_bytes().unwrap();
+    let full_policy = match &full_subscriber.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .coverage_groups
+            .values()
+            .next()
+            .expect("fresh control owns one coverage group")
+            .policy_binding
+            .clone(),
+        ConnectionLink::Upstream(_) => unreachable!("fresh authority link is a subscriber"),
+    };
+
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = duplex();
     let _resumed_upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1941,19 +2087,80 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     client.tick().unwrap();
 
     let resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    let resume_policy = match &resumed.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .coverage_groups
+            .values()
+            .next()
+            .expect("resumed connection owns one coverage group")
+            .policy_binding
+            .clone(),
+        ConnectionLink::Upstream(_) => unreachable!("resumed authority link is a subscriber"),
+    };
+    assert_eq!(
+        resume_policy, full_policy,
+        "resume and the full-response control must use the same authenticated policy scope"
+    );
     assert!(
         resume_bytes > 0,
         "resume catch-up should send a bounded non-empty response after cursor resume"
     );
     assert!(
-        resume_bytes <= full_bytes,
-        "resume catch-up should stay bounded by the initial full response: full={full_bytes}, resume={resume_bytes}"
+        resume_bytes <= covered_full_bytes,
+        "resume must not exceed the equivalent fresh CoveredInput response: legacy_current_rows={full_bytes}, covered_full={covered_full_bytes}, resume={resume_bytes}"
     );
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
         prepared_read(&client, &query)
             .iter()
             .any(|row| row.row_uuid() == third)
+    );
+}
+
+#[test]
+fn current_rows_uses_its_connection_claim_snapshot_not_the_author_cache() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let admitted = BTreeMap::from([(
+        crate::query::provider_claim_key("session"),
+        Value::String("admitted".to_owned()),
+    )]);
+    let stale = BTreeMap::from([(
+        crate::query::provider_claim_key("session"),
+        Value::String("stale sibling".to_owned()),
+    )]);
+    let client = open_db(0xc1, author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, author, admitted.clone());
+    let query = Query::from("todos");
+    let attachment = client
+        .attach_query_with_opts(&prepared(&client, &query), global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+
+    // Simulate another connection for the same subject updating the legacy
+    // identity-keyed compatibility cache after this link was authenticated.
+    server.node().borrow_mut().set_session_claims(author, stale);
+    subscriber.borrow_mut().tick().unwrap();
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        panic!("ordinary server connection must remain a subscriber link");
+    };
+    let coverage = state
+        .served
+        .get(&attachment.subscription())
+        .expect("ordinary usage must be admitted");
+    let group = state
+        .coverage_groups
+        .get(coverage)
+        .expect("ordinary usage must retain a coverage group");
+    assert_eq!(
+        group.policy_binding,
+        (author, admitted),
+        "ordinary whole-table serving must use the exact session claims admitted on this connection"
     );
 }
 
@@ -1977,7 +2184,7 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
-    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+    server.tick().unwrap();
     client.tick().unwrap();
 
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -1995,6 +2202,41 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     client.tick().unwrap();
     assert_eq!(prepared_read(&client, &query).len(), 3);
 
+    // The byte transport follows the same semantic distinction as the in-memory
+    // transport above: bound resume against the corresponding CoveredInput
+    // full response, not against the legacy current-row snapshot.
+    let full_server = open_core(0x6e, AuthorSubject::SYSTEM, &schema);
+    seed(&full_server, "todos", cells("first", false, owner));
+    seed(&full_server, "todos", cells("second", false, owner));
+    seed(&full_server, "todos", cells("third", true, owner));
+    let full_client = open_db(0xc2, client_author, &schema);
+    let (full_client_transport, full_server_transport) = byte_duplex_with_session(client_author, 3);
+    let _full_upstream = crate::db::block_on(full_client.connect_upstream(full_client_transport));
+    let full_subscriber = full_server.accept_subscriber(full_server_transport, client_author);
+    let mut full_subscription =
+        prepared_subscribe(&full_client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(full_subscription.next_raw()).unwrap()).is_empty());
+    full_client.tick().unwrap();
+    full_server.tick().unwrap();
+    full_client.tick().unwrap();
+    assert_eq!(
+        delta_rows(block_on(full_subscription.next_raw()).unwrap())
+            .0
+            .len(),
+        3
+    );
+    let covered_full_bytes = full_subscriber.borrow().last_resume_bytes().unwrap();
+    let full_policy = match &full_subscriber.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .coverage_groups
+            .values()
+            .next()
+            .expect("fresh control owns one coverage group")
+            .policy_binding
+            .clone(),
+        ConnectionLink::Upstream(_) => unreachable!("fresh authority link is a subscriber"),
+    };
+
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = byte_duplex_with_session(client_author, 2);
     let _resumed_upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -2005,13 +2247,27 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     client.tick().unwrap();
 
     let resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    let resume_policy = match &resumed.borrow().link {
+        ConnectionLink::Subscriber(state) => state
+            .coverage_groups
+            .values()
+            .next()
+            .expect("resumed connection owns one coverage group")
+            .policy_binding
+            .clone(),
+        ConnectionLink::Upstream(_) => unreachable!("resumed authority link is a subscriber"),
+    };
+    assert_eq!(
+        resume_policy, full_policy,
+        "byte-wire resume and its full-response control must use the same authenticated policy scope"
+    );
     assert!(
         resume_bytes > 0,
         "byte-wire resume catch-up should send a bounded non-empty response after cursor resume"
     );
     assert!(
-        resume_bytes <= full_bytes,
-        "byte-wire resume catch-up should stay bounded by the initial full response: full={full_bytes}, resume={resume_bytes}"
+        resume_bytes <= covered_full_bytes,
+        "byte-wire resume must not exceed the equivalent fresh CoveredInput response: legacy_current_rows={full_bytes}, covered_full={covered_full_bytes}, resume={resume_bytes}"
     );
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
@@ -2070,17 +2326,47 @@ fn connect_upstream_waits_for_active_node_state_borrow() {
     let _connection = crate::db::block_on(connection);
 }
 
+/// Test-only marker for an authenticated SYSTEM backend transport. Ordinary
+/// session links must not send `SessionClaims`: their authenticated handshake
+/// is the authority for those claims.
+struct DelegationCapableTransport {
+    inner: Box<dyn Transport>,
+}
+
+impl Transport for DelegationCapableTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), crate::wire::TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        true
+    }
+}
+
 // SessionClaims has no distinct public state once the receiving NodeState has
-// ignored an identical map, so wire-count coverage must inspect the transport.
-// The policy-visible integration coverage lives above this facade; this test
-// protects the otherwise unobservable wire-chatter contract.
+// ignored an identical map, so wire-count coverage must inspect a delegation-
+// capable backend transport. The policy-visible integration coverage lives
+// above this facade; this test protects its otherwise unobservable wire-
+// chatter contract without granting the same ability to ordinary sessions.
 #[test]
-fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
+fn repeated_identical_session_claims_emit_once_on_a_delegation_capable_connection() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::db::block_on(client.connect_upstream(Box::new(
+        DelegationCapableTransport {
+            inner: client_transport,
+        },
+    )));
     let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
     client.set_test_provider_claims(client_author, claims.clone());
     client.set_test_provider_claims(client_author, claims);
@@ -2096,11 +2382,30 @@ fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
     );
 }
 
+#[test]
+fn ordinary_session_links_do_not_forward_claims() {
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    client.set_test_provider_claims(
+        client_author,
+        BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]),
+    );
+    client.tick().unwrap();
+
+    assert!(
+        upstream_transport.try_recv().is_none(),
+        "ordinary session links must rely on their authenticated handshake, not smuggle SessionClaims"
+    );
+}
+
 // This is lower-level for the same reason as the wire-count test above. In
 // particular, it is the regression that a global deduplication would miss:
 // each newly attached transport must receive the current map independently.
 #[test]
-fn current_session_claims_reach_late_and_reconnected_upstreams() {
+fn current_session_claims_reach_late_and_reconnected_delegation_capable_upstreams() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
@@ -2112,7 +2417,11 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
 
     client.set_test_provider_claims(client_author, claims.clone());
     let (first_transport, mut first_upstream_transport) = duplex();
-    let first_upstream = crate::db::block_on(client.connect_upstream(first_transport));
+    let first_upstream = crate::db::block_on(client.connect_upstream(Box::new(
+        DelegationCapableTransport {
+            inner: first_transport,
+        },
+    )));
     client.tick().unwrap();
     assert!(matches!(
         first_upstream_transport.try_recv(),
@@ -2125,7 +2434,11 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
     assert!(client.detach_connection(&first_upstream));
 
     let (reconnected_transport, mut reconnected_upstream_transport) = duplex();
-    let _reconnected_upstream = crate::db::block_on(client.connect_upstream(reconnected_transport));
+    let _reconnected_upstream = crate::db::block_on(client.connect_upstream(Box::new(
+        DelegationCapableTransport {
+            inner: reconnected_transport,
+        },
+    )));
     client.tick().unwrap();
     assert!(matches!(
         reconnected_upstream_transport.try_recv(),
@@ -2136,12 +2449,16 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
 }
 
 #[test]
-fn changed_session_claims_advance_delivery_after_an_identical_call() {
+fn changed_session_claims_advance_delivery_on_a_delegation_capable_connection() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::db::block_on(client.connect_upstream(Box::new(
+        DelegationCapableTransport {
+            inner: client_transport,
+        },
+    )));
     let reader = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
     let writer = BTreeMap::from([("role".to_owned(), Value::String("writer".to_owned()))]);
     let reader_admitted = BTreeMap::from([(

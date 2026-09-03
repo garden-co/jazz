@@ -5,8 +5,8 @@
 //! [`crate::node::open_tx`], and [`crate::protocol`]. Merge and currency rules
 //! are grounded in `jazz/README.md`.
 
-use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
-use crate::protocol::BranchKey;
+use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowUuid, SchemaVersionId};
+use crate::protocol::{BranchKey, SnapshotRef};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};
@@ -54,6 +54,85 @@ pub struct ContributionMergeProvenance {
     pub target: BranchKey,
     /// Field-grained substitutions emitted by this transaction.
     pub substitutions: Vec<ContributionSubstitution>,
+    /// Non-causal authorization evidence for a first head overlay copied from
+    /// an inherited branch-view row.  It deliberately shares the existing
+    /// non-causal transaction-provenance carrier with calculated merge
+    /// substitutions: neither form is a history edge, merge dependency, read
+    /// set, or CAS condition.
+    pub branch_view_copies: Vec<BranchViewCopyEvidence>,
+    /// Mandatory, canonical operation classification for every non-root
+    /// branch write in this transaction. This is authorization metadata, not
+    /// a history edge or a caller-trusted hint: admission matches it to the
+    /// exact authored version and independently proves the declared case.
+    #[serde(default)]
+    pub branch_write_intents: Vec<BranchWriteIntent>,
+}
+
+/// Version-one operation intent for one branch-local row version.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchWriteIntent {
+    /// Explicit durable layout version for this intent.
+    pub version: u8,
+    /// Stable physical table identity, paired with the schema that authored
+    /// the version so renamed logical tables remain resolvable.
+    pub physical_table_id: PhysicalTableId,
+    /// Schema version that supplied the logical coordinate.
+    pub authored_schema: SchemaVersionId,
+    /// Row coordinate within the physical table and head.
+    pub row_uuid: RowUuid,
+    /// Canonical exact target head coordinate.
+    pub head: BranchKey,
+    /// Authority-verifiable operation classification.
+    pub operation: BranchWriteOperation,
+}
+
+/// The authority-verifiable meaning of a branch-local write.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum BranchWriteOperation {
+    /// A parentless exact-head write. Concurrent inserts may already exist
+    /// when it reaches the authority; this is not an absence/CAS precondition.
+    ExactHeadInsert,
+    /// A write replacing an already-present exact head row.
+    ExactHeadUpdate,
+    /// A first head overlay that copied an inherited source from a view base.
+    ViewUpdateCopy(BranchViewCopyEvidence),
+}
+
+/// Version-one, authority-verifiable logical source of a first head overlay.
+///
+/// A physical first write in `head` has no legal cross-branch history parent.
+/// This descriptor therefore records the independently verifiable *logical*
+/// source used for read-for-write authorization without changing causality.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchViewCopyEvidence {
+    /// Explicit durable schema for this evidence; never infer a serializer
+    /// layout or unversioned variant from the enclosing transaction.
+    pub version: u8,
+    /// Newly materialized target branch coordinate.
+    pub head: BranchKey,
+    /// Live or frozen branch-view base from which the source was selected.
+    pub base: BranchViewCopyBase,
+    /// Logical table containing the inherited source row.
+    pub table: String,
+    /// Logical row identity copied into the head.
+    pub row_uuid: RowUuid,
+    /// Exact admitted source content-version identity.
+    pub source_version: TxId,
+}
+
+/// Canonical branch coordinates of the inherited source, with the only two
+/// branch-view base modes represented explicitly.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum BranchViewCopyBase {
+    /// Read the current winner in this base branch.
+    Current(BranchKey),
+    /// Read the winner at this exact frozen base snapshot.
+    Snapshot {
+        /// Base branch projected through the write schema.
+        branch: BranchKey,
+        /// Exact frozen frontier used to select the inherited source.
+        snapshot: SnapshotRef,
+    },
 }
 
 impl ContributionMergeProvenance {
@@ -81,18 +160,130 @@ impl ContributionMergeProvenance {
             source,
             target,
             substitutions,
+            branch_view_copies: Vec::new(),
+            branch_write_intents: Vec::new(),
         })
+    }
+
+    /// Construct the non-causal provenance carried by an inherited
+    /// branch-view update or existing-target upsert.
+    pub fn branch_view_copy(evidence: BranchViewCopyEvidence) -> Self {
+        Self {
+            // Calculated contribution merges use these coordinates as part of
+            // their substitution algebra. A branch-view copy is only
+            // authorization evidence, and its per-write coordinates live in
+            // `branch_view_copies`; do not accidentally make a multi-table
+            // branch-view transaction pretend it has one shared source or
+            // target branch.
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: vec![evidence],
+            branch_write_intents: Vec::new(),
+        }
     }
 
     /// Reject non-canonical or incomplete provenance received from a helper.
     pub fn validate(&self) -> Result<(), &'static str> {
+        // These keys are later encoded into durable Groove records. Validate
+        // every ordinary contribution coordinate before any caller can reach
+        // the infallible `canonical_bytes` encoder through a transaction that
+        // also happens to carry branch-write intent metadata.
+        if self.source.try_canonical_bytes().is_err()
+            || self.target.try_canonical_bytes().is_err()
+            || self.substitutions.iter().any(|substitution| {
+                substitution
+                    .target
+                    .branch_key
+                    .try_canonical_bytes()
+                    .is_err()
+                    || substitution
+                        .sources
+                        .iter()
+                        .any(|source| source.coordinate.branch_key.try_canonical_bytes().is_err())
+            })
+        {
+            return Err("contribution provenance branch key is invalid");
+        }
         let canonical = Self::canonical(
             self.source.clone(),
             self.target.clone(),
             self.substitutions.clone(),
         )?;
-        if &canonical != self {
+        // Contribution substitutions retain their own canonical contract even
+        // when a transaction also carries branch-write metadata. Do not let
+        // the latter bypass duplicate-source/target validation.
+        if canonical.source != self.source
+            || canonical.target != self.target
+            || canonical.substitutions != self.substitutions
+        {
             return Err("contribution merge provenance must be canonical");
+        }
+        if !self.branch_view_copies.is_empty()
+            && (!self.substitutions.is_empty()
+                || self.source != BranchKey::default()
+                || self.target != BranchKey::default())
+        {
+            return Err("branch-view copy evidence must not carry contribution substitutions");
+        }
+        let mut seen = BTreeSet::new();
+        for evidence in &self.branch_view_copies {
+            if evidence.version != 1
+                || !seen.insert((
+                    evidence.table.clone(),
+                    evidence.row_uuid,
+                    evidence.head.clone(),
+                ))
+            {
+                return Err("branch-view copy evidence must be canonical v1 provenance");
+            }
+        }
+        let mut intents = self.branch_write_intents.clone();
+        intents.sort_by(|left, right| {
+            (
+                left.physical_table_id,
+                left.authored_schema,
+                left.row_uuid,
+                &left.head,
+            )
+                .cmp(&(
+                    right.physical_table_id,
+                    right.authored_schema,
+                    right.row_uuid,
+                    &right.head,
+                ))
+        });
+        if intents != self.branch_write_intents
+            || intents.windows(2).any(|pair| {
+                pair[0].physical_table_id == pair[1].physical_table_id
+                    && pair[0].authored_schema == pair[1].authored_schema
+                    && pair[0].row_uuid == pair[1].row_uuid
+                    && pair[0].head == pair[1].head
+            })
+            || intents
+                .iter()
+                .any(|intent| intent.version != 1 || intent.head.values.is_empty())
+        {
+            return Err("branch write intents must be canonical v1 coordinates");
+        }
+        // The storage representation de-duplicates copy payloads and has
+        // ViewUpdateCopy intents refer to them by index. Make the side-list
+        // the exact ordered projection of already-canonical intents. This
+        // binds the indirection by full value (not merely table/row/head),
+        // makes every copy used exactly once, and gives the on-disk indices a
+        // single canonical order independent of public write order.
+        let mut expected_copies = Vec::new();
+        for intent in &self.branch_write_intents {
+            let BranchWriteOperation::ViewUpdateCopy(evidence) = &intent.operation else {
+                continue;
+            };
+            if evidence.row_uuid != intent.row_uuid || evidence.head != intent.head {
+                return Err("branch write copy evidence is not bound to its intent");
+            }
+            expected_copies.push(evidence.clone());
+        }
+        if self.branch_view_copies != expected_copies {
+            return Err("branch write copy evidence must be the canonical intent projection");
         }
         Ok(())
     }
@@ -965,6 +1156,144 @@ mod contribution_tests {
             }],
         )
         .unwrap()
+    }
+
+    fn branch_intent(row: u8) -> BranchWriteIntent {
+        BranchWriteIntent {
+            version: 1,
+            physical_table_id: PhysicalTableId(1),
+            authored_schema: SchemaVersionId(uuid::Uuid::from_bytes([1; 16])),
+            row_uuid: RowUuid::from_bytes([row; 16]),
+            head: BranchKey {
+                values: vec![(
+                    "branch".to_owned(),
+                    crate::protocol::BranchColumnValue::from(Value::Uuid(uuid::Uuid::from_bytes(
+                        [2; 16],
+                    ))),
+                )],
+            },
+            operation: BranchWriteOperation::ExactHeadInsert,
+        }
+    }
+
+    fn view_copy_intent(row: u8) -> (BranchViewCopyEvidence, BranchWriteIntent) {
+        let mut intent = branch_intent(row);
+        let evidence = BranchViewCopyEvidence {
+            version: 1,
+            head: intent.head.clone(),
+            base: BranchViewCopyBase::Current(BranchKey::default()),
+            table: "todos".to_owned(),
+            row_uuid: intent.row_uuid,
+            source_version: tx(u64::from(row)),
+        };
+        intent.operation = BranchWriteOperation::ViewUpdateCopy(evidence.clone());
+        (evidence, intent)
+    }
+
+    #[test]
+    fn branch_write_intents_reject_noncanonical_order_and_duplicates() {
+        let mut provenance = ContributionMergeProvenance {
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: Vec::new(),
+            branch_write_intents: vec![branch_intent(2), branch_intent(1)],
+        };
+        assert!(provenance.validate().is_err());
+        provenance
+            .branch_write_intents
+            .sort_by_key(|intent| intent.row_uuid);
+        assert!(provenance.validate().is_ok());
+        provenance.branch_write_intents.push(branch_intent(1));
+        assert!(provenance.validate().is_err());
+    }
+
+    #[test]
+    fn branch_write_copy_evidence_is_exact_canonical_intent_projection() {
+        let (stored, intent) = view_copy_intent(7);
+        let mut provenance = ContributionMergeProvenance {
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: vec![stored.clone()],
+            branch_write_intents: vec![intent.clone()],
+        };
+        assert!(provenance.validate().is_ok());
+
+        // Same coordinate, different source: accepting the intent but storing
+        // this side-list entry would alter authority-admitted meaning on reopen.
+        let mut different_source = stored.clone();
+        different_source.source_version = tx(99);
+        provenance.branch_write_intents[0].operation =
+            BranchWriteOperation::ViewUpdateCopy(different_source);
+        assert!(provenance.validate().is_err());
+
+        let mut different_base = stored.clone();
+        different_base.base = BranchViewCopyBase::Snapshot {
+            branch: BranchKey::default(),
+            snapshot: SnapshotRef {
+                owner: NodeUuid::from_bytes([8; 16]),
+                global_base: GlobalTime(0),
+                local_base: TxTime::from(8),
+                dots: Vec::new(),
+            },
+        };
+        provenance.branch_write_intents[0].operation =
+            BranchWriteOperation::ViewUpdateCopy(different_base);
+        assert!(provenance.validate().is_err());
+
+        let mut different_version = stored.clone();
+        different_version.version = 2;
+        provenance.branch_write_intents[0].operation =
+            BranchWriteOperation::ViewUpdateCopy(different_version);
+        assert!(provenance.validate().is_err());
+
+        provenance.branch_write_intents[0] = intent;
+        provenance.branch_view_copies.push(stored);
+        assert!(provenance.validate().is_err(), "orphan copy must reject");
+    }
+
+    #[test]
+    fn branch_metadata_cannot_bypass_ordinary_contribution_key_validation() {
+        let (evidence, intent) = view_copy_intent(9);
+        let provenance = ContributionMergeProvenance {
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: vec![evidence],
+            branch_write_intents: vec![intent],
+        };
+        let malformed_key = || BranchKey {
+            values: vec![
+                (
+                    "z".to_owned(),
+                    crate::protocol::BranchColumnValue(vec![1, u8::MAX]),
+                ),
+                (
+                    "a".to_owned(),
+                    crate::protocol::BranchColumnValue(vec![1, u8::MAX]),
+                ),
+            ],
+        };
+        let mut malformed_source = provenance.clone();
+        malformed_source.source = malformed_key();
+        assert!(malformed_source.validate().is_err());
+
+        let mut malformed_target = provenance.clone();
+        malformed_target.target = malformed_key();
+        assert!(malformed_target.validate().is_err());
+
+        let mut malformed_substitution = provenance.clone();
+        let mut target = coordinate("target");
+        target.branch_key = malformed_key();
+        malformed_substitution.substitutions = vec![ContributionSubstitution {
+            target: target.clone(),
+            sources: vec![ContributionDot {
+                tx_id: tx(10),
+                coordinate: target,
+            }],
+        }];
+        assert!(malformed_substitution.validate().is_err());
     }
 
     #[test]

@@ -22,8 +22,9 @@ use super::query_engine::{
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
-    BranchKey, ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
-    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
+    BranchKey, CoveredInputEntry, ProgramFactEntry, ProgramSourceId, RealRowMemberEntry,
+    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer,
+    RowVersionRefEntry, SyntheticReplacementToken,
 };
 use crate::schema::{RuntimeSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
@@ -32,6 +33,66 @@ use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
 type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan>;
+
+/// Coalesce source-closure changes emitted by independently drained terminals.
+///
+/// The first observation supplies the state before this drain, and each later
+/// observation replaces only the final state. This keeps peer output a set
+/// delta even when one drain removes and re-adds the same covered input.
+fn record_peer_source_fact_change(
+    changes: &mut BTreeMap<ProgramFactEntry, (bool, bool)>,
+    fact: ProgramFactEntry,
+    is_present: bool,
+) {
+    changes
+        .entry(fact)
+        .and_modify(|(_, final_state)| *final_state = is_present)
+        .or_insert((!is_present, is_present));
+}
+
+fn append_net_peer_source_fact_changes(
+    transitions: &mut ResultTransitions,
+    changes: BTreeMap<ProgramFactEntry, (bool, bool)>,
+) {
+    for (fact, (was_present, is_present)) in changes {
+        if was_present == is_present {
+            continue;
+        }
+        if is_present {
+            transitions.program_fact_adds.push(fact);
+        } else {
+            transitions.program_fact_removes.push(fact);
+        }
+    }
+}
+
+fn record_source_fact_transition(
+    transitions: &mut ResultTransitions,
+    fact: ProgramFactEntry,
+    is_present: bool,
+) {
+    if fact.is_peer_source_closure_fact() {
+        transitions
+            .source_fact_presence_changes
+            .push((fact.clone(), is_present));
+    }
+    if is_present {
+        transitions.program_fact_adds.push(fact);
+    } else {
+        transitions.program_fact_removes.push(fact);
+    }
+}
+
+/// Distinguishes independent maintained terminals that can witness the same
+/// peer source fact. Their union, rather than a summed terminal refcount, is
+/// the exact receiver closure: a replacement witness disappearing must not
+/// retract a still-live version witness (or vice versa).
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SourceFactOrigin {
+    Version,
+    Replacement,
+    ProgramFact,
+}
 
 #[derive(Clone, Debug)]
 struct VersionDecodePlan {
@@ -52,6 +113,10 @@ struct VersionDecodePlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
+    /// The immutable resolved read-view identity of this maintained program.
+    /// Terminal row members must retain it so distinct branch views never
+    /// collapse when their source row and transaction coincide.
+    read_view: crate::protocol::ReadViewKey,
     result_weights: BTreeMap<ResultMemberEntry, i64>,
     /// Result memberships already exposed to the subscription consumer. A
     /// result-current terminal can advance before the companion content
@@ -62,10 +127,19 @@ pub(crate) struct MaintainedSubscriptionView {
     /// this separate from `result_payloads`: the latter records the raw
     /// result-terminal state while a membership waits for its content witness.
     published_result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
-    /// Incrementally maintained collector output. The key is the root row and
-    /// the encoded tree so a -/+ replacement for one root never requires
-    /// touching the rendered trees for other roots.
-    structured_app_rows: BTreeMap<RowUuid, BTreeMap<Vec<u8>, i64>>,
+    /// Incrementally maintained collector output, keyed by the opaque Groove
+    /// terminal key and then encoded tree. A public root UUID is not a
+    /// sufficient identity: one flat relation can contain several occurrences
+    /// of that root with distinct joined descendants.
+    structured_app_rows: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, i64>>,
+    /// Runtime terminal edits address roots by their opaque Groove key. Keep
+    /// the compiler-emitted association solely to target a root's descendants;
+    /// it must never be used to collapse retained occurrence records.
+    structured_root_keys: BTreeMap<Vec<u8>, RowUuid>,
+    /// Exact collector order for root terminal keys. Root UUIDs are not a
+    /// sequence key: one flat relation can validly contain more than one
+    /// occurrence of the same root.
+    structured_root_key_order: Vec<Vec<u8>>,
     structured_app_row_descriptor: Option<RecordDescriptor>,
     /// Whether this maintained subscription retains the recursive app-row
     /// collector. Flat unordered subscriptions release it after their reset;
@@ -79,6 +153,12 @@ pub(crate) struct MaintainedSubscriptionView {
     /// version identity. They do not emit a live Stream-B witness when a head
     /// deletion or rejection exposes the inherited member.
     inline_content_branch_keys: BTreeSet<Vec<u8>>,
+    /// Exact active source-closure facts, independent of the transient
+    /// multisink batches used to reach the current graph state. Peer
+    /// publication diffs this set against its acknowledged predecessor so a
+    /// +/− pair observed in one drain is never serialized as an ambiguous
+    /// ordered operation.
+    source_fact_weights: BTreeMap<ProgramFactEntry, BTreeMap<SourceFactOrigin, i64>>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -86,15 +166,19 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
+            read_view: Default::default(),
             result_weights: BTreeMap::new(),
             published_result_members: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             published_result_payloads: BTreeMap::new(),
             structured_app_rows: BTreeMap::new(),
+            structured_root_keys: BTreeMap::new(),
+            structured_root_key_order: Vec::new(),
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
             inline_content_branch_keys: BTreeSet::new(),
+            source_fact_weights: BTreeMap::new(),
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
         }
@@ -175,8 +259,12 @@ pub(crate) struct ResultTransitions {
     pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
-    /// Generic Groove terminal patches. These bypass relation/result assembly
-    /// and are forwarded unchanged to the subscription boundary.
+    /// Ordered source-closure presence transitions observed while evaluating
+    /// one terminal. `apply_multisink_deltas` uses this private stream to
+    /// retain the real terminal order while coalescing one complete drain.
+    pub(crate) source_fact_presence_changes: Vec<(ProgramFactEntry, bool)>,
+    /// Groove terminal patches are local binding output. They never enter a
+    /// peer `ViewUpdate`, whose contract is the covered input closure only.
     pub(crate) terminal_operations: Vec<TerminalOperation>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_result_delta_batches: usize,
@@ -200,10 +288,23 @@ pub(crate) enum DecodedMaintainedEvent {
         synthetic: super::query_engine::SyntheticResultMembershipSchema,
         value_fields: Vec<String>,
     },
-    VersionContent(VersionRow),
-    VersionDeletion(VersionRow),
-    ReplacementContent(VersionRow),
-    ReplacementDeletion(VersionRow),
+    VersionContent {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
+    VersionDeletion {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
+    ReplacementContent {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
+    ReplacementDeletion {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
+    ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry),
     RelationEdge(RelationEdgeEntry),
     StructuredAppRow {
         root: RowUuid,
@@ -224,21 +325,28 @@ enum MaintainedTerminalKind {
     VersionDeletion(VersionWitnessSchema),
     ReplacementContent(VersionWitnessSchema),
     ReplacementDeletion(VersionWitnessSchema),
+    ProgramSourceCoverage(super::query_engine::ProgramSourceCoverageSchema),
     RelationEdge(RelationEdgeSchema),
-    StructuredAppRows {
+    /// A compiler-lowered public root collector. Its initial state and later
+    /// positional edits are both owned by Groove's terminal reducer.
+    RootCollectorAppRows {
         schema: AppRowSchema,
         layout: TerminalRootLayout,
     },
-    /// Public aggregate rows are a one-shot output sibling. Maintained state
-    /// is driven by the typed AggregateResult fact terminal instead.
-    IgnoredAggregateAppRows,
+    /// Ordinary relational app-row tuples. These have no terminal position
+    /// stream and remain on the membership/materialization bridge.
+    DirectAppRows(AppRowSchema),
+    /// Compiler-owned aggregate app rows. The same local terminal drives its
+    /// reset state and subsequent replacements; derived aggregate results are
+    /// never accepted from an authority snapshot.
+    AggregateAppRows(AggregateResultSchema),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EventIdentity {
     Result(ResultMemberEntry),
-    Version(VersionIdentity),
-    Replacement(ReplacementKey, VersionIdentity),
+    Version(ProgramSourceId, VersionIdentity),
+    Replacement(ProgramSourceId, ReplacementKey, VersionIdentity),
     ProgramFact(ProgramFactEntry),
     StructuredAppRow(RowUuid, Vec<u8>),
 }
@@ -252,13 +360,27 @@ enum NetEvent {
         super::query_engine::SyntheticResultMembershipSchema,
         Vec<String>,
     ),
-    Version(VersionIdentity, VersionRow),
-    Replacement(ReplacementKey, VersionIdentity, VersionRow),
+    Version(ProgramSourceId, VersionIdentity, VersionRow),
+    Replacement(ProgramSourceId, ReplacementKey, VersionIdentity, VersionRow),
     ProgramFact(ProgramFactEntry),
     StructuredAppRow(RowUuid, OwnedRecord),
 }
 
+/// Root collector keys begin with the root source occurrence. For the common
+/// single-root shape that occurrence is one ordered UUID scalar. Retained
+/// snapshots predate an in-memory key map, so this lets a later remove/move
+/// address that already-materialized root without reopening the query.
+fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
+    (key.first() == Some(&10))
+        .then(|| uuid::Uuid::from_slice(key.get(1..17)?).ok())
+        .flatten()
+        .map(RowUuid)
+}
+
 impl MaintainedSubscriptionView {
+    pub(crate) fn set_read_view(&mut self, read_view: crate::protocol::ReadViewKey) {
+        self.read_view = read_view;
+    }
     pub(crate) fn uses_storage_backed_result_materialization(&self) -> bool {
         self.storage_backed_result_materialization
     }
@@ -287,9 +409,6 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
-        if matches!(kind, MaintainedTerminalKind::IgnoredAggregateAppRows) {
-            return Ok(ResultTransitions::default());
-        }
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
         // Deletion witnesses are part of the membership proof: a current-row
         // anti-join can become empty solely because its deletion-register
@@ -307,6 +426,7 @@ impl MaintainedSubscriptionView {
                     tables,
                     node_aliases,
                     &mut decode_plan_cache,
+                    self.read_view,
                 )
                 .map(|event| (event, weight))
             })
@@ -328,26 +448,99 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
+        // A single IVM drain may touch the same source fact through more than
+        // one terminal. Record only the first pre-state and final post-state
+        // for each touched peer fact, then publish the net closure change.
+        // This is deliberately proportional to changed facts: cloning the
+        // whole active closure here would turn every incremental tick into a
+        // snapshot-sized operation.
+        let mut peer_source_fact_changes = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         for (sink, terminal) in &deltas.terminal_sinks {
-            if let MaintainedTerminalKind::StructuredAppRows { layout, .. } = schemas.get(sink)? {
-                for operation in &terminal.operations {
-                    transitions
-                        .terminal_operations
-                        .push(rebind_terminal_operation_to_layout(operation, layout)?);
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+                && !terminal.operations.is_empty()
+            {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=terminal_operations sink={sink} kind={:?} operations={}",
+                    schemas.get(sink)?,
+                    terminal.operations.len(),
+                );
+            }
+            if let MaintainedTerminalKind::RootCollectorAppRows { layout, .. } =
+                schemas.get(sink)?
+            {
+                let operations = terminal
+                    .operations
+                    .iter()
+                    .map(|operation| rebind_terminal_operation_to_layout(operation, layout))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // A root removal can share its batch with descendants which
+                // are being retracted beneath it. Fold every root first, then
+                // skip only those now-unreachable descendants. This mirrors
+                // the facade reducer and keeps malformed descendants for an
+                // otherwise retained root fail-closed.
+                let removed_roots = operations
+                    .iter()
+                    .filter(|operation| operation.path.is_empty())
+                    .filter_map(|operation| {
+                        matches!(operation.edit, TerminalEdit::Remove { .. })
+                            .then_some(operation.root_key.clone())
+                    })
+                    .collect::<BTreeSet<_>>();
+                for operation in operations
+                    .iter()
+                    .filter(|operation| operation.path.is_empty())
+                    .chain(
+                        operations
+                            .iter()
+                            .filter(|operation| !operation.path.is_empty()),
+                    )
+                {
+                    if !operation.path.is_empty()
+                        && removed_roots.contains(operation.root_key.as_slice())
+                    {
+                        continue;
+                    }
+                    self.apply_structured_terminal_operation(&operation)?;
+                    transitions.terminal_operations.push(operation.clone());
                 }
             }
         }
         for (sink, deltas) in deltas.sinks {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() && !deltas.is_empty() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=terminal_sink sink={sink} kind={:?} records={}",
+                    schemas.get(&sink)?,
+                    deltas.deltas.len(),
+                );
+            }
+            // The root collector's positional terminal is the sole owner of
+            // retained app-row state. Its ordinary sink delta is the same
+            // fact stream without an occurrence key; applying it here would
+            // either duplicate an occurrence or collapse siblings sharing a
+            // public root UUID.
+            if matches!(
+                schemas.get(&sink)?,
+                MaintainedTerminalKind::RootCollectorAppRows { .. }
+            ) {
+                continue;
+            }
             let delta_transitions =
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
-            transitions
-                .program_fact_adds
-                .extend(delta_transitions.program_fact_adds);
-            transitions
-                .program_fact_removes
-                .extend(delta_transitions.program_fact_removes);
+            for (fact, is_present) in delta_transitions.source_fact_presence_changes {
+                record_peer_source_fact_change(&mut peer_source_fact_changes, fact, is_present);
+            }
+            for fact in delta_transitions.program_fact_adds {
+                if !fact.is_peer_source_closure_fact() {
+                    transitions.program_fact_adds.push(fact);
+                }
+            }
+            for fact in delta_transitions.program_fact_removes {
+                if !fact.is_peer_source_closure_fact() {
+                    transitions.program_fact_removes.push(fact);
+                }
+            }
             transitions
                 .result_payload_adds
                 .extend(delta_transitions.result_payload_adds);
@@ -359,7 +552,22 @@ impl MaintainedSubscriptionView {
             transitions.requires_authoritative_membership_reconcile |=
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
+        append_net_peer_source_fact_changes(&mut transitions, peer_source_fact_changes);
         self.finalize_multisink_transitions(&mut transitions, node_aliases);
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+            && (!transitions.adds.is_empty()
+                || !transitions.program_fact_adds.is_empty()
+                || !transitions.program_fact_removes.is_empty())
+        {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=maintained_transition adds={} removes={} fact_adds={} fact_removes={} terminal_ops={}",
+                transitions.adds.len(),
+                transitions.removes.len(),
+                transitions.program_fact_adds.len(),
+                transitions.program_fact_removes.len(),
+                transitions.terminal_operations.len(),
+            );
+        }
         Ok(transitions)
     }
 
@@ -410,20 +618,23 @@ impl MaintainedSubscriptionView {
                     synthetic,
                     value_fields,
                 } => NetEvent::AggregateResult(member, payload, synthetic, value_fields),
-                DecodedMaintainedEvent::VersionContent(row)
-                | DecodedMaintainedEvent::VersionDeletion(row) => {
+                DecodedMaintainedEvent::VersionContent { source, row }
+                | DecodedMaintainedEvent::VersionDeletion { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
-                    NetEvent::Version(identity, row)
+                    NetEvent::Version(source, identity, row)
                 }
-                DecodedMaintainedEvent::ReplacementContent(row) => {
+                DecodedMaintainedEvent::ReplacementContent { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
                     let key = ReplacementKey::for_row(&row, VersionLayer::Content);
-                    NetEvent::Replacement(key, identity, row)
+                    NetEvent::Replacement(source, key, identity, row)
                 }
-                DecodedMaintainedEvent::ReplacementDeletion(row) => {
+                DecodedMaintainedEvent::ReplacementDeletion { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
                     let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
-                    NetEvent::Replacement(key, identity, row)
+                    NetEvent::Replacement(source, key, identity, row)
+                }
+                DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => {
+                    NetEvent::ProgramFact(ProgramFactEntry::ProgramSourceCoverage(coverage))
                 }
                 DecodedMaintainedEvent::RelationEdge(edge) => {
                     NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
@@ -443,6 +654,11 @@ impl MaintainedSubscriptionView {
             if weight == 0 {
                 continue;
             }
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=apply_decoded_event event={event:?} weight={weight}"
+                );
+            }
             match event {
                 NetEvent::Result(entry, payload) => {
                     self.apply_result_delta(entry, payload, weight, &mut transitions);
@@ -457,24 +673,59 @@ impl MaintainedSubscriptionView {
                         &mut transitions,
                     )?;
                 }
-                NetEvent::Version(identity, row) => {
+                NetEvent::Version(source, identity, row) => {
+                    let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.versions
                         .apply_delta(identity, row, weight, node_aliases)?;
+                    if let Some(is_present) = self.apply_source_fact_delta(
+                        SourceFactOrigin::Version,
+                        ProgramFactEntry::CoveredInput(covered_input.clone()),
+                        weight,
+                    ) {
+                        record_source_fact_transition(
+                            &mut transitions,
+                            ProgramFactEntry::CoveredInput(covered_input),
+                            is_present,
+                        );
+                    }
                 }
-                NetEvent::Replacement(key, identity, row) => {
+                NetEvent::Replacement(source, key, identity, row) => {
+                    let covered_input = covered_input_for_version(source, &row, node_aliases)?;
                     self.replacements
                         .apply_delta(key, identity, row, weight, node_aliases)?;
+                    if let Some(is_present) = self.apply_source_fact_delta(
+                        SourceFactOrigin::Replacement,
+                        ProgramFactEntry::CoveredInput(covered_input.clone()),
+                        weight,
+                    ) {
+                        record_source_fact_transition(
+                            &mut transitions,
+                            ProgramFactEntry::CoveredInput(covered_input),
+                            is_present,
+                        );
+                    }
                 }
                 NetEvent::ProgramFact(fact) => {
-                    if weight > 0 {
-                        transitions.program_fact_adds.push(fact);
-                    } else {
-                        transitions.program_fact_removes.push(fact);
+                    if let Some(is_present) = self.apply_source_fact_delta(
+                        SourceFactOrigin::ProgramFact,
+                        fact.clone(),
+                        weight,
+                    ) {
+                        record_source_fact_transition(&mut transitions, fact, is_present)
                     }
                 }
                 NetEvent::StructuredAppRow(root, record) => {
                     if self.retains_structured_app_rows {
-                        self.apply_structured_app_row_delta(root, record, weight);
+                        // Direct app rows have no Groove positional terminal,
+                        // so their public root remains their only identity.
+                        // Root-collector rows never reach this branch; they
+                        // retain the exact opaque terminal key above.
+                        let terminal_key = root.0.as_bytes().to_vec();
+                        self.structured_root_keys.insert(terminal_key.clone(), root);
+                        self.apply_structured_app_row_delta(terminal_key.clone(), record, weight);
+                        if !self.structured_root_key_order.contains(&terminal_key) {
+                            self.structured_root_key_order.push(terminal_key);
+                        }
                     }
                 }
             }
@@ -486,36 +737,48 @@ impl MaintainedSubscriptionView {
         self.versions.versions_by_tx(tx_id)
     }
 
-    /// Source records whose row identities occur in visible flat tuples.
-    /// The caller resolves each maintained record back to its authored history
-    /// version before publishing the result-to-contributor admission fact.
-    pub(crate) fn tuple_source_versions_for_members(
-        &self,
-        members: &[ResultMemberEntry],
-        source_tables: &[String],
-    ) -> Vec<(ResultMemberEntry, usize, VersionRow)> {
-        let mut tuples = Vec::new();
-        for member in members {
-            let Some(occurrence) = member.output_occurrence_id() else {
-                continue;
-            };
-            for (source_index, source) in occurrence.joined_sources().iter().enumerate() {
-                let Some(source_table) = source_tables.get(source_index) else {
-                    continue;
-                };
-                let source_row = RowUuid(*source.uuid());
-                for weighted in self.versions.by_identity.values() {
-                    if weighted.weight > 0
-                        && weighted.row.deletion().is_none()
-                        && weighted.row.table() == source_table
-                        && weighted.row.row_uuid() == source_row
-                    {
-                        tuples.push((member.clone(), source_index, weighted.row.clone()));
-                    }
-                }
-            }
+    /// The final peer-safe source closure after every drained terminal batch.
+    /// This intentionally exposes neither rendered result rows nor internal
+    /// proof/relationship facts.
+    pub(crate) fn active_peer_source_closure_facts(&self) -> BTreeSet<ProgramFactEntry> {
+        self.source_fact_weights
+            .iter()
+            .filter(|(fact, weights)| {
+                weights.values().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
+            })
+            .map(|(fact, _)| fact.clone())
+            .collect()
+    }
+
+    /// Apply one terminal's reference delta to a peer source fact. The wire
+    /// closure is a set, so only the aggregate 0→1 / 1→0 presence changes
+    /// may become peer additions/removals; independent source occurrences
+    /// commonly reference the same exact fact.
+    fn apply_source_fact_delta(
+        &mut self,
+        origin: SourceFactOrigin,
+        fact: ProgramFactEntry,
+        weight: i64,
+    ) -> Option<bool> {
+        let was_present = self
+            .source_fact_weights
+            .get(&fact)
+            .is_some_and(|weights| weights.values().any(|weight| *weight > 0));
+        let weights = self.source_fact_weights.entry(fact.clone()).or_default();
+        let next = weights.get(&origin).copied().unwrap_or(0) + weight;
+        if next == 0 {
+            weights.remove(&origin);
+        } else {
+            weights.insert(origin, next);
         }
-        tuples
+        if weights.is_empty() {
+            self.source_fact_weights.remove(&fact);
+        }
+        let is_present = self
+            .source_fact_weights
+            .get(&fact)
+            .is_some_and(|weights| weights.values().any(|weight| *weight > 0));
+        (was_present != is_present).then_some(is_present)
     }
 
     pub(crate) fn replacement_for(
@@ -604,18 +867,6 @@ impl MaintainedSubscriptionView {
         }
     }
 
-    pub(crate) fn payload_facts_for_members(
-        &self,
-        members: &[ResultMemberEntry],
-    ) -> Vec<ProgramFactEntry> {
-        members
-            .iter()
-            .filter_map(|member| self.result_payloads.get(member))
-            .cloned()
-            .map(ProgramFactEntry::ResultPayload)
-            .collect()
-    }
-
     /// Current positive result memberships, including unchanged members during
     /// a non-reset rehydrate. Tuple-source admissions are a closure over this
     /// set, not merely over the membership delta.
@@ -627,23 +878,68 @@ impl MaintainedSubscriptionView {
             .collect()
     }
 
-    /// Returns the collector's current recursive row for one changed root.
-    ///
-    /// The incremental update builder uses this to replace just that root.
-    pub(crate) fn structured_app_row(&self, root: RowUuid) -> Option<OwnedRecord> {
+    /// Current memberships that have crossed the result/content witness
+    /// boundary and are therefore safe to expose to a subscription consumer.
+    /// Cold runtime recovery uses this complete set to reconcile a retained
+    /// downstream membership without reopening the just-hydrated view.
+    pub(crate) fn published_result_members(&self) -> &BTreeSet<ResultMemberEntry> {
+        &self.published_result_members
+    }
+
+    /// Returns the collector's current recursive row for one opaque terminal
+    /// key.
+    fn structured_app_row_for_terminal_key(&self, terminal_key: &[u8]) -> Option<OwnedRecord> {
         let descriptor = self.structured_app_row_descriptor?;
         self.structured_app_rows
-            .get(&root)?
+            .get(terminal_key)?
             .iter()
             .filter(|(_, weight)| **weight > 0)
             .map(|(raw, _)| OwnedRecord::new(raw.clone(), descriptor))
             .next()
     }
 
+    /// Returns the collector row for a public root only when it has one
+    /// occurrence. Callers that materialize a flat relation must use the
+    /// opaque-key accessor below: a root UUID cannot select among siblings.
+    #[cfg(test)]
+    pub(crate) fn structured_app_row(&self, root: RowUuid) -> Option<OwnedRecord> {
+        let mut rows = self
+            .structured_root_key_order
+            .iter()
+            .filter(|key| self.structured_root_keys.get(*key) == Some(&root))
+            .filter_map(|key| self.structured_app_row_for_terminal_key(key));
+        let row = rows.next()?;
+        rows.next().is_none().then_some(row)
+    }
+
+    #[cfg(test)]
     pub(crate) fn structured_app_rows(&self) -> Vec<(RowUuid, OwnedRecord)> {
-        self.structured_app_rows
-            .keys()
-            .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
+        self.structured_root_key_order
+            .iter()
+            .filter_map(|key| {
+                self.structured_root_keys.get(key).and_then(|root| {
+                    self.structured_app_row_for_terminal_key(key)
+                        .map(|record| (*root, record))
+                })
+            })
+            .collect()
+    }
+
+    /// Return one retained collector row for every opaque terminal key.
+    ///
+    /// A flat relation may legitimately produce multiple occurrences of the
+    /// same root row.  The public row record does not encode its joined
+    /// occurrence, so its `RowUuid` is insufficient as a snapshot key; the
+    /// collector's opaque key is the only exact association.
+    pub(crate) fn structured_app_rows_by_terminal_key(&self) -> Vec<(Vec<u8>, OwnedRecord)> {
+        self.structured_root_key_order
+            .iter()
+            .filter_map(|key| {
+                self.structured_root_keys
+                    .get(key)
+                    .and_then(|_| self.structured_app_row_for_terminal_key(key))
+                    .map(|record| (key.clone(), record))
+            })
             .collect()
     }
 
@@ -653,13 +949,23 @@ impl MaintainedSubscriptionView {
     /// and version witnesses.
     pub(crate) fn discard_structured_app_rows(&mut self) {
         self.structured_app_rows.clear();
+        self.structured_root_keys.clear();
+        self.structured_root_key_order.clear();
         self.structured_app_row_descriptor = None;
         self.retains_structured_app_rows = false;
     }
 
-    fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
+    fn apply_structured_app_row_delta(
+        &mut self,
+        terminal_key: Vec<u8>,
+        record: OwnedRecord,
+        weight: i64,
+    ) {
         self.structured_app_row_descriptor = Some(*record.descriptor());
-        let records = self.structured_app_rows.entry(root).or_default();
+        let records = self
+            .structured_app_rows
+            .entry(terminal_key.clone())
+            .or_default();
         let new_weight = records.get(record.raw()).copied().unwrap_or(0) + weight;
         if new_weight == 0 {
             records.remove(record.raw());
@@ -667,50 +973,130 @@ impl MaintainedSubscriptionView {
             records.insert(record.into_raw(), new_weight);
         }
         if records.is_empty() {
-            self.structured_app_rows.remove(&root);
+            self.structured_app_rows.remove(&terminal_key);
         }
     }
 
-    /// Rebase aggregate terminal state after an authoritative remote reset.
-    /// The local IVM may still emit the matching before/after pair while its
-    /// source catches up; retaining an obsolete synthetic revision here would
-    /// otherwise turn that harmless pair into a later public removal.
-    pub(crate) fn replace_aggregate_result_state(
+    /// Fold root terminal edits into the same retained collector tree used by
+    /// an initial/reset snapshot. This is deliberately receiver-local: it
+    /// never re-runs the query or reads authority output.
+    fn apply_structured_terminal_operation(
         &mut self,
-        members: &BTreeSet<ResultMemberEntry>,
-        facts: &BTreeSet<ProgramFactEntry>,
-    ) {
-        self.result_weights
-            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
-        self.result_payloads
-            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
-        for member in members {
-            if matches!(member, ResultMemberEntry::Synthetic { .. }) {
-                self.result_weights.insert(member.clone(), 1);
+        operation: &TerminalOperation,
+    ) -> Result<(), super::Error> {
+        // A descendant edit has the root collector's key, but its value is a
+        // nested element rather than an app-row record. Resolve its retained
+        // root before looking at the edit: attempting to decode that element
+        // as a root is both invalid and would create a second snapshot path.
+        if !operation.path.is_empty() {
+            let _root = self
+                .structured_root_keys
+                .get(&operation.root_key)
+                .copied()
+                .or_else(|| terminal_root_uuid_from_key(&operation.root_key))
+                .ok_or(super::Error::InvalidStoredValue(
+                    "terminal descendant operation addresses an unknown root key",
+                ))?;
+            let descriptor =
+                self.structured_app_row_descriptor
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "terminal descendant operation arrived before its root collector record",
+                    ))?;
+            if descriptor != operation.root_descriptor {
+                return Err(super::Error::InvalidStoredValue(
+                    "terminal descendant descriptor disagrees with retained collector layout",
+                ));
             }
-        }
-        for fact in facts {
-            let ProgramFactEntry::ResultPayload(payload) = fact else {
-                continue;
-            };
-            if matches!(payload.member, ResultMemberEntry::Synthetic { .. }) {
-                self.result_payloads
-                    .insert(payload.member.clone(), payload.clone());
-            }
-        }
-        // An authoritative reset has already published these aggregate
-        // members through its replacement snapshot. Do not re-emit them when
-        // the next unrelated multisink delta is drained.
-        self.published_result_members
-            .retain(|member| !matches!(member, ResultMemberEntry::Synthetic { .. }));
-        self.published_result_members.extend(
-            self.result_weights
+            let records = self
+                .structured_app_rows
+                .get_mut(&operation.root_key)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "terminal descendant operation addressed an absent retained root",
+                ))?;
+            let mut candidates = records
                 .iter()
-                .filter(|(member, weight)| {
-                    matches!(member, ResultMemberEntry::Synthetic { .. }) && **weight > 0
-                })
-                .map(|(member, _)| member.clone()),
-        );
+                .filter(|(_, weight)| **weight > 0)
+                .map(|(raw, weight)| (raw.clone(), *weight));
+            let (raw, weight) = candidates.next().ok_or(super::Error::InvalidStoredValue(
+                "terminal descendant operation addressed a non-positive retained root",
+            ))?;
+            if candidates.next().is_some() {
+                return Err(super::Error::InvalidStoredValue(
+                    "terminal descendant operation addressed an ambiguous retained root",
+                ));
+            }
+            let updated = crate::db::apply_terminal_descendant_record(
+                OwnedRecord::new(raw.clone(), descriptor),
+                operation,
+            )
+            .map_err(|_| {
+                super::Error::InvalidStoredValue("invalid collector descendant terminal operation")
+            })?;
+            records.remove(&raw);
+            records.insert(updated.into_raw(), weight);
+            return Ok(());
+        }
+        let _root = match &operation.edit {
+            TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
+                let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
+                let index = operation.root_descriptor.field_index("row_uuid").ok_or(
+                    super::Error::InvalidStoredValue(
+                        "root collector terminal operation has no row_uuid",
+                    ),
+                )?;
+                let root = RowUuid(record.borrowed().get_uuid(index)?);
+                self.structured_root_keys
+                    .insert(operation.root_key.clone(), root);
+                root
+            }
+            TerminalEdit::Remove { .. } | TerminalEdit::Move { .. } => self
+                .structured_root_keys
+                .get(&operation.root_key)
+                .copied()
+                .or_else(|| terminal_root_uuid_from_key(&operation.root_key))
+                .ok_or(super::Error::InvalidStoredValue(
+                    "root collector terminal edit addresses an unknown root key",
+                ))?,
+        };
+        match &operation.edit {
+            TerminalEdit::Insert { index, value, .. } => {
+                let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
+                self.structured_app_rows.remove(&operation.root_key);
+                self.apply_structured_app_row_delta(operation.root_key.clone(), record, 1);
+                self.structured_root_key_order
+                    .retain(|key| key != &operation.root_key);
+                self.structured_root_key_order.insert(
+                    (*index).min(self.structured_root_key_order.len()),
+                    operation.root_key.clone(),
+                );
+            }
+            TerminalEdit::Update { value, .. } => {
+                let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
+                self.structured_app_rows.remove(&operation.root_key);
+                self.apply_structured_app_row_delta(operation.root_key.clone(), record, 1);
+            }
+            TerminalEdit::Remove { .. } => {
+                self.structured_root_keys.remove(&operation.root_key);
+                self.structured_root_key_order
+                    .retain(|key| key != &operation.root_key);
+                self.structured_app_rows.remove(&operation.root_key);
+            }
+            TerminalEdit::Move { index, .. } => {
+                let key_previous = self
+                    .structured_root_key_order
+                    .iter()
+                    .position(|key| key == &operation.root_key)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "root collector terminal move addresses an absent root key",
+                    ))?;
+                self.structured_root_key_order.remove(key_previous);
+                self.structured_root_key_order.insert(
+                    (*index).min(self.structured_root_key_order.len()),
+                    operation.root_key.clone(),
+                );
+            }
+        }
+        Ok(())
     }
 
     fn reconcile_publishable_result_members(
@@ -906,6 +1292,37 @@ impl MaintainedSubscriptionView {
     }
 }
 
+/// Preserve the exact source occurrence that made a maintained program
+/// advance. This intentionally names input rows rather than collector output:
+/// a retained result member can change because a nested child, a sort key, or
+/// a deletion-register witness advanced while the output membership did not.
+fn covered_input_for_version(
+    source: ProgramSourceId,
+    row: &VersionRow,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+) -> Result<CoveredInputEntry, super::Error> {
+    let tx = version_tx_id_from_aliases(row, node_aliases).ok_or(
+        super::Error::InvalidStoredValue("covered input tx node alias must exist"),
+    )?;
+    let branch_or_prefix = row.branch_key().canonical_bytes();
+    Ok(CoveredInputEntry {
+        source,
+        version_table: row.table().to_owned().into(),
+        source_row: row.row_uuid(),
+        version: RowVersionRefEntry {
+            tx,
+            schema_version: None,
+            layer: match row.layer() {
+                VersionLayer::Content => ResultRowLayer::Content,
+                VersionLayer::Deletion => ResultRowLayer::Deletion,
+            },
+            batch: Some(tx),
+            branch_or_prefix: (!branch_or_prefix.is_empty()).then_some(branch_or_prefix),
+            row_digest: None,
+        },
+    })
+}
+
 /// Rebind a runtime terminal operation to its early-bound prepared layout.
 ///
 /// The runtime may tighten a root field from `Nullable(T)` to `T` after an
@@ -1098,20 +1515,29 @@ impl MaintainedTerminalSchemas {
         let mut sinks = BTreeMap::new();
         for terminal in &program.lowered.terminals {
             if let OutputTerminalSchema::AppRows(rows) = &terminal.output {
-                if rows.descriptor.field_index("row_uuid").is_some() {
-                    sinks.insert(
-                        terminal.sink.clone(),
-                        MaintainedTerminalKind::StructuredAppRows {
+                let kind = match &rows.terminal {
+                    crate::node::query_engine::AppRowTerminal::RootCollector => {
+                        if rows.descriptor.field_index("row_uuid").is_none() {
+                            panic!("public root collector app-row terminal has no row_uuid");
+                        }
+                        MaintainedTerminalKind::RootCollectorAppRows {
                             schema: rows.clone(),
                             layout: terminal_root_layout(rows),
-                        },
-                    );
-                } else {
-                    sinks.insert(
-                        terminal.sink.clone(),
-                        MaintainedTerminalKind::IgnoredAggregateAppRows,
-                    );
-                }
+                        }
+                    }
+                    crate::node::query_engine::AppRowTerminal::Direct
+                        if rows.descriptor.field_index("row_uuid").is_some() =>
+                    {
+                        MaintainedTerminalKind::DirectAppRows(rows.clone())
+                    }
+                    crate::node::query_engine::AppRowTerminal::Aggregate(schema) => {
+                        MaintainedTerminalKind::AggregateAppRows(schema.clone())
+                    }
+                    crate::node::query_engine::AppRowTerminal::Direct => {
+                        panic!("direct app-row terminal has no row_uuid")
+                    }
+                };
+                sinks.insert(terminal.sink.clone(), kind);
                 continue;
             };
             let OutputTerminalSchema::Fact(fact) = &terminal.output else {
@@ -1128,6 +1554,13 @@ impl MaintainedTerminalSchemas {
                     ProgramFactTerminal::Primary,
                     ProgramFactSchema::AggregateResult(schema),
                 ) => Some(MaintainedTerminalKind::AggregateResult(schema.clone())),
+                (
+                    ProgramFactKey::ProgramSourceCoverage(_),
+                    ProgramFactTerminal::Primary,
+                    ProgramFactSchema::ProgramSourceCoverage(schema),
+                ) => Some(MaintainedTerminalKind::ProgramSourceCoverage(
+                    schema.clone(),
+                )),
                 (
                     ProgramFactKey::RelationEdges,
                     ProgramFactTerminal::Primary,
@@ -1182,9 +1615,15 @@ impl MaintainedTerminalSchemas {
 
     pub(crate) fn terminal_root_layout(&self) -> Option<&TerminalRootLayout> {
         self.sinks.values().find_map(|kind| match kind {
-            MaintainedTerminalKind::StructuredAppRows { layout, .. } => Some(layout),
+            MaintainedTerminalKind::RootCollectorAppRows { layout, .. } => Some(layout),
             _ => None,
         })
+    }
+
+    pub(crate) fn has_root_collector(&self) -> bool {
+        self.sinks
+            .values()
+            .any(|kind| matches!(kind, MaintainedTerminalKind::RootCollectorAppRows { .. }))
     }
 }
 
@@ -1298,10 +1737,11 @@ fn decode_typed_terminal_record(
     tables: &TableSchemas,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     decode_plan_cache: &mut VersionDecodePlanCache,
+    read_view: crate::protocol::ReadViewKey,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
-        MaintainedTerminalKind::IgnoredAggregateAppRows => {
-            unreachable!("ignored aggregate app-row terminals are filtered before record decoding")
+        MaintainedTerminalKind::AggregateAppRows(schema) => {
+            decode_aggregate_app_row(record, schema)
         }
         MaintainedTerminalKind::ResultCurrent(schema) => {
             let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
@@ -1422,6 +1862,7 @@ fn decode_typed_terminal_record(
             ))
             .with_occurrence_id(occurrence_id)
             .with_settle_position(settle_position);
+            member.read_view = read_view;
             member.branch_or_prefix = branch_or_prefix;
             let member: ResultMemberEntry = match flat_join_digest {
                 Some(digest) => member.with_row_digest(digest),
@@ -1490,31 +1931,69 @@ fn decode_typed_terminal_record(
                     .collect(),
             })
         }
+        MaintainedTerminalKind::ProgramSourceCoverage(schema) => {
+            let complete = match record.get_idx(field_idx(record, "complete")?)? {
+                Value::Bool(complete) => complete,
+                _ => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "program-source coverage complete field must be bool",
+                    ));
+                }
+            };
+            if complete != schema.complete {
+                return Err(super::Error::InvalidStoredValue(
+                    "program-source coverage terminal disagrees with compiled schema",
+                ));
+            }
+            Ok(DecodedMaintainedEvent::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source: schema.source.clone(),
+                    complete,
+                },
+            ))
+        }
         MaintainedTerminalKind::VersionContent(schema) => {
             validate_witness_event_kind(record, "version_content")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
-                .map(DecodedMaintainedEvent::VersionContent)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::VersionContent {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
         }
         MaintainedTerminalKind::VersionDeletion(schema) => {
             validate_witness_event_kind(record, "version_deletion")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
-                .map(DecodedMaintainedEvent::VersionDeletion)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::VersionDeletion {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
         }
         MaintainedTerminalKind::ReplacementContent(schema) => {
             validate_witness_event_kind(record, "replacement_content")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
-                .map(DecodedMaintainedEvent::ReplacementContent)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::ReplacementContent {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
         }
         MaintainedTerminalKind::ReplacementDeletion(schema) => {
             validate_witness_event_kind(record, "replacement_deletion")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
-                .map(DecodedMaintainedEvent::ReplacementDeletion)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::ReplacementDeletion {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
         }
         MaintainedTerminalKind::RelationEdge(schema) => {
             decode_typed_relation_edge(record, schema, tables, node_aliases)
                 .map(DecodedMaintainedEvent::RelationEdge)
         }
-        MaintainedTerminalKind::StructuredAppRows { schema, .. } => {
+        MaintainedTerminalKind::RootCollectorAppRows { schema, .. }
+        | MaintainedTerminalKind::DirectAppRows(schema) => {
             let root = RowUuid(record.get_uuid(field_idx(record, "row_uuid")?)?);
             Ok(DecodedMaintainedEvent::StructuredAppRow {
                 root,
@@ -1522,6 +2001,81 @@ fn decode_typed_terminal_record(
             })
         }
     }
+}
+
+/// Decode the aggregate graph's sole application terminal into the synthetic
+/// member/payload pair used by the maintained reducer.  The member identity is
+/// derived from the group key (or the one ungrouped empty group) and the
+/// replacement token from the aggregate value; neither is an authority-sent
+/// result row.
+fn decode_aggregate_app_row(
+    record: BorrowedRecord<'_>,
+    schema: &AggregateResultSchema,
+) -> Result<DecodedMaintainedEvent, super::Error> {
+    if schema.group_key_fields.len() > 1 {
+        return Err(super::Error::InvalidStoredValue(
+            "aggregate app-row terminal has unsupported multi-column group identity",
+        ));
+    }
+    let descriptor = record.descriptor();
+    let (row_value, row_type) = match schema.group_key_fields.first() {
+        Some(group) => {
+            let index =
+                descriptor
+                    .field_index(&group.name)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "aggregate app-row terminal is missing group identity",
+                    ))?;
+            let field = descriptor
+                .fields()
+                .get(index)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate app-row group descriptor is missing",
+                ))?;
+            (record.get_idx(index)?, field.value_type.clone())
+        }
+        None => (Value::String("global".to_owned()), ValueType::String),
+    };
+    let row = settled_result_value_storage_bytes(&row_value, &row_type)?;
+    let (replacement_value, replacement_type) = match schema.value_fields.first() {
+        Some(output) => {
+            let index =
+                descriptor
+                    .field_index(&output.name)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "aggregate app-row terminal is missing aggregate output",
+                    ))?;
+            let field = descriptor
+                .fields()
+                .get(index)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate app-row output descriptor is missing",
+                ))?;
+            (record.get_idx(index)?, field.value_type.clone())
+        }
+        None => (Value::String("empty".to_owned()), ValueType::String),
+    };
+    let replacement = settled_result_value_storage_bytes(&replacement_value, &replacement_type)?;
+    let member = ResultMemberEntry::Synthetic {
+        table: "aggregate_result".to_owned(),
+        row,
+        replacement: SyntheticReplacementToken::from_encoded_record(replacement),
+    };
+    let payload = ResultMemberPayloadEntry {
+        member: member.clone(),
+        descriptor: encode_record_descriptor(&descriptor)?,
+        record: record.raw().to_vec(),
+    };
+    Ok(DecodedMaintainedEvent::AggregateResult {
+        member,
+        payload,
+        synthetic: schema.synthetic.clone(),
+        value_fields: schema
+            .value_fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect(),
+    })
 }
 
 /// Domain separation for the durable flat-join result revision.
@@ -2301,9 +2855,11 @@ impl NetEvent {
         match self {
             Self::Result(entry, _) => EventIdentity::Result(entry.clone()),
             Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
-            Self::Version(identity, _) => EventIdentity::Version(identity.clone()),
-            Self::Replacement(key, identity, _) => {
-                EventIdentity::Replacement(key.clone(), identity.clone())
+            Self::Version(source, identity, _) => {
+                EventIdentity::Version(source.clone(), identity.clone())
+            }
+            Self::Replacement(source, key, identity, _) => {
+                EventIdentity::Replacement(source.clone(), key.clone(), identity.clone())
             }
             Self::ProgramFact(fact) => EventIdentity::ProgramFact(fact.clone()),
             Self::StructuredAppRow(root, record) => {
@@ -2346,7 +2902,7 @@ fn replacement_winner(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use groove::ivm::RecordDelta;
     use groove::records::{Value, ValueType};
@@ -2633,6 +3189,7 @@ mod tests {
                 ),
                 ("__jazz_include_project".to_owned(), "project".to_owned()),
             ]),
+            terminal: crate::node::query_engine::AppRowTerminal::RootCollector,
         };
         let layout = terminal_root_layout(&rows);
         assert_eq!(
@@ -2675,6 +3232,101 @@ mod tests {
             public_fields: Vec::new(),
             carrier: TerminalRootCarrier::Logical,
         }
+    }
+
+    // This reducer test deliberately works below the public query API. The
+    // runtime hands it opaque terminal keys after CollectBy has already
+    // applied sort/window semantics, and a public root UUID cannot express
+    // two flat occurrences of that root with different joined payloads.
+    #[test]
+    fn collector_terminal_keys_preserve_same_root_payloads_order_and_edits() {
+        let descriptor =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+        let root = row(0x81);
+        let first_key = vec![0x10, 0x01];
+        let second_key = vec![0x10, 0x02];
+        let record = |title: &str| {
+            descriptor
+                .create(&[Value::Uuid(root.0), Value::String(title.to_owned())])
+                .unwrap()
+        };
+        let insert = |key: Vec<u8>, index, value| TerminalOperation {
+            root_descriptor: descriptor,
+            root_key: key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Insert { key, index, value },
+        };
+        let update = |key: Vec<u8>, value| TerminalOperation {
+            root_descriptor: descriptor,
+            root_key: key.clone(),
+            path: Vec::new(),
+            edit: TerminalEdit::Update { key, value },
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        // These indices are the already-lowered CollectBy order (for example
+        // a query's custom sort after offset/limit), not map-key order.
+        maintained
+            .apply_structured_terminal_operation(&insert(second_key.clone(), 0, record("second")))
+            .unwrap();
+        maintained
+            .apply_structured_terminal_operation(&insert(first_key.clone(), 1, record("first")))
+            .unwrap();
+        let titles = |view: &MaintainedSubscriptionView| {
+            view.structured_app_rows_by_terminal_key()
+                .into_iter()
+                .map(|(key, row)| {
+                    let Value::String(title) = row.borrowed().get("title").unwrap() else {
+                        panic!("test record keeps a string title");
+                    };
+                    (key, title)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&maintained),
+            vec![
+                (second_key.clone(), "second".to_owned()),
+                (first_key.clone(), "first".to_owned()),
+            ]
+        );
+
+        // An occurrence-local replacement must leave its same-root sibling
+        // intact, then its move must retain the collector's declared order.
+        maintained
+            .apply_structured_terminal_operation(&update(
+                first_key.clone(),
+                record("first updated"),
+            ))
+            .unwrap();
+        maintained
+            .apply_structured_terminal_operation(&TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: first_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Move {
+                    key: first_key.clone(),
+                    index: 0,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            titles(&maintained),
+            vec![
+                (first_key.clone(), "first updated".to_owned()),
+                (second_key.clone(), "second".to_owned()),
+            ]
+        );
+
+        maintained
+            .apply_structured_terminal_operation(&TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: first_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Remove { key: first_key },
+            })
+            .unwrap();
+        assert_eq!(titles(&maintained), vec![(second_key, "second".to_owned())]);
     }
 
     #[test]
@@ -2803,6 +3455,10 @@ mod tests {
 
     fn witness_schema() -> VersionWitnessSchema {
         VersionWitnessSchema {
+            source: ProgramSourceId {
+                table: "todos".to_owned().into(),
+                path: vec![crate::protocol::ProgramSourceRole::Root],
+            },
             descriptor: RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
             identity: crate::node::query_engine::VersionIdentityFields {
                 table_field: "table".to_owned(),
@@ -2900,6 +3556,251 @@ mod tests {
         ("todos".to_owned().into(), row_uuid, tx(1, time))
     }
 
+    fn test_source() -> ProgramSourceId {
+        ProgramSourceId {
+            table: "todos".to_owned().into(),
+            path: vec![crate::protocol::ProgramSourceRole::Root],
+        }
+    }
+
+    fn version_content(row: VersionRow) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::VersionContent {
+            source: test_source(),
+            row,
+        }
+    }
+
+    fn version_deletion(row: VersionRow) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::VersionDeletion {
+            source: test_source(),
+            row,
+        }
+    }
+
+    #[test]
+    fn shared_covered_input_publishes_only_first_add_and_final_remove() {
+        let aliases = aliases();
+        let row = version(row(0x51), 10, "shared source");
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(test_source(), &row, &aliases)
+                .expect("test version has a registered node alias"),
+        );
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        // Two independent terminals can reach the same exact source version.
+        // The peer closure is a set: the second witness is not a second add,
+        // and removing either witness must retain the other.
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1),
+            Some(true)
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), 1),
+            None
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), 1),
+            None
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1),
+            None
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), -1),
+            None
+        );
+        assert_eq!(
+            maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), -1),
+            Some(false)
+        );
+        assert!(maintained.source_fact_weights.is_empty());
+    }
+
+    #[test]
+    fn source_fact_changes_coalesce_remove_readd_within_one_drain() {
+        let aliases = aliases();
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(
+                test_source(),
+                &version(row(0x52), 11, "coalesced"),
+                &aliases,
+            )
+            .expect("test version has a registered node alias"),
+        );
+        let mut changes = BTreeMap::new();
+
+        // A sink can retract a source while another sink in the same drain
+        // re-establishes it. Neither ordering leaks an overlapping wire
+        // remove/add pair because the peer sees only the drain's net closure.
+        record_peer_source_fact_change(&mut changes, fact.clone(), false);
+        record_peer_source_fact_change(&mut changes, fact.clone(), true);
+        let mut transitions = ResultTransitions::default();
+        append_net_peer_source_fact_changes(&mut transitions, changes);
+        assert!(transitions.program_fact_adds.is_empty());
+        assert!(transitions.program_fact_removes.is_empty());
+
+        let mut changes = BTreeMap::new();
+        record_peer_source_fact_change(&mut changes, fact.clone(), true);
+        record_peer_source_fact_change(&mut changes, fact.clone(), false);
+        let mut transitions = ResultTransitions::default();
+        append_net_peer_source_fact_changes(&mut transitions, changes);
+        assert!(transitions.program_fact_adds.is_empty());
+        assert!(transitions.program_fact_removes.is_empty());
+    }
+
+    #[test]
+    fn multisink_shared_source_fact_retracts_only_after_its_last_terminal() {
+        let descriptor = RecordDescriptor::new([("complete", ValueType::Bool)]);
+        let source = test_source();
+        let coverage_schema = super::super::query_engine::ProgramSourceCoverageSchema {
+            source: source.clone(),
+            complete: true,
+            routing_param_fields: BTreeSet::new(),
+        };
+        let schemas = MaintainedTerminalSchemas {
+            sinks: BTreeMap::from([
+                (
+                    "source-a".to_owned(),
+                    MaintainedTerminalKind::ProgramSourceCoverage(coverage_schema.clone()),
+                ),
+                (
+                    "source-b".to_owned(),
+                    MaintainedTerminalKind::ProgramSourceCoverage(coverage_schema),
+                ),
+            ]),
+        };
+        let tables = BTreeMap::new();
+        let deltas = |weight| RecordDeltas {
+            descriptor,
+            deltas: vec![RecordDelta {
+                record: descriptor.create(&[Value::Bool(true)]).unwrap().into(),
+                weight,
+            }],
+        };
+        let fact =
+            ProgramFactEntry::ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry {
+                source,
+                complete: true,
+            });
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        let initial = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([
+                        ("source-a".to_owned(), deltas(1)),
+                        ("source-b".to_owned(), deltas(1)),
+                    ]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(initial.program_fact_adds, vec![fact.clone()]);
+        assert!(initial.program_fact_removes.is_empty());
+
+        let retain = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([("source-a".to_owned(), deltas(-1))]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert!(retain.program_fact_adds.is_empty());
+        assert!(retain.program_fact_removes.is_empty());
+        assert!(
+            maintained
+                .active_peer_source_closure_facts()
+                .contains(&fact)
+        );
+
+        let retract = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([("source-b".to_owned(), deltas(-1))]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert!(retract.program_fact_adds.is_empty());
+        assert_eq!(retract.program_fact_removes, vec![fact.clone()]);
+
+        let readd = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([("source-a".to_owned(), deltas(1))]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(readd.program_fact_adds, vec![fact.clone()]);
+
+        // This is one real multisink drain: source-a leaves while source-b
+        // takes over the same exact fact. The peer must receive neither an
+        // ordered remove/add pair nor a spurious reset.
+        let handoff = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([
+                        ("source-a".to_owned(), deltas(-1)),
+                        ("source-b".to_owned(), deltas(1)),
+                    ]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert!(handoff.program_fact_adds.is_empty());
+        assert!(handoff.program_fact_removes.is_empty());
+        assert!(
+            maintained
+                .active_peer_source_closure_facts()
+                .contains(&fact)
+        );
+
+        let final_retract = maintained
+            .apply_multisink_deltas(
+                MultisinkDeltas {
+                    sinks: BTreeMap::from([("source-b".to_owned(), deltas(-1))]),
+                    terminal_sinks: BTreeMap::new(),
+                },
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(final_retract.program_fact_removes, vec![fact]);
+    }
+
+    fn replacement_content(row: VersionRow) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::ReplacementContent {
+            source: test_source(),
+            row,
+        }
+    }
+
+    fn replacement_deletion(row: VersionRow) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::ReplacementDeletion {
+            source: test_source(),
+            row,
+        }
+    }
+
     fn result_current(member: ResultMemberEntry) -> DecodedMaintainedEvent {
         DecodedMaintainedEvent::ResultCurrent {
             payload: ResultMemberPayloadEntry {
@@ -2956,10 +3857,7 @@ mod tests {
 
         let mut second = maintained
             .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
-                    1,
-                )],
+                [(version_content(version(row(1), 10, "ready")), 1)],
                 &aliases,
             )
             .unwrap();
@@ -3074,10 +3972,7 @@ mod tests {
 
         let mut content = maintained
             .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
-                    1,
-                )],
+                [(version_content(version(row(1), 10, "ready")), 1)],
                 &aliases,
             )
             .unwrap();
@@ -3094,10 +3989,7 @@ mod tests {
         // stream halves; restoring that witness emits the current pair again.
         let mut content_retraction = maintained
             .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
-                    -1,
-                )],
+                [(version_content(version(row(1), 10, "ready")), -1)],
                 &aliases,
             )
             .unwrap();
@@ -3112,10 +4004,7 @@ mod tests {
 
         let mut content_restore = maintained
             .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
-                    1,
-                )],
+                [(version_content(version(row(1), 10, "ready")), 1)],
                 &aliases,
             )
             .unwrap();
@@ -3335,8 +4224,8 @@ mod tests {
         maintained
             .apply_decoded_deltas(
                 [
-                    (DecodedMaintainedEvent::VersionContent(version_b.clone()), 1),
-                    (DecodedMaintainedEvent::VersionContent(version_a.clone()), 1),
+                    (version_content(version_b.clone()), 1),
+                    (version_content(version_a.clone()), 1),
                 ],
                 &aliases,
             )
@@ -3363,13 +4252,7 @@ mod tests {
         );
 
         maintained
-            .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::VersionContent(version_a.clone()),
-                    -1,
-                )],
-                &aliases,
-            )
+            .apply_decoded_deltas([(version_content(version_a.clone()), -1)], &aliases)
             .unwrap();
         assert_eq!(
             maintained.versions_by_tx(tx_id),
@@ -3387,10 +4270,7 @@ mod tests {
         let mut maintained = MaintainedSubscriptionView::default();
 
         maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ReplacementContent(old.clone()), 1)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(replacement_content(old.clone()), 1)], &aliases)
             .unwrap();
         assert_eq!(
             maintained.replacement_for("todos", row_uuid).0,
@@ -3400,8 +4280,8 @@ mod tests {
         maintained
             .apply_decoded_deltas(
                 [
-                    (DecodedMaintainedEvent::ReplacementContent(old), -1),
-                    (DecodedMaintainedEvent::ReplacementContent(new.clone()), 1),
+                    (replacement_content(old), -1),
+                    (replacement_content(new.clone()), 1),
                 ],
                 &aliases,
             )
@@ -3412,13 +4292,7 @@ mod tests {
         );
 
         maintained
-            .apply_decoded_deltas(
-                [(
-                    DecodedMaintainedEvent::ReplacementDeletion(deletion.clone()),
-                    1,
-                )],
-                &aliases,
-            )
+            .apply_decoded_deltas([(replacement_deletion(deletion.clone()), 1)], &aliases)
             .unwrap();
         assert_eq!(
             maintained.replacement_for("todos", row_uuid),
@@ -3434,18 +4308,12 @@ mod tests {
         let mut maintained = MaintainedSubscriptionView::default();
 
         maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::VersionDeletion(version.clone()), 1)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(version_deletion(version.clone()), 1)], &aliases)
             .unwrap();
         assert_eq!(maintained.versions_by_tx(tx_id), vec![version.clone()]);
 
         maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::VersionDeletion(version), -1)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(version_deletion(version), -1)], &aliases)
             .unwrap();
         assert!(maintained.versions_by_tx(tx_id).is_empty());
         assert!(!maintained.versions.by_tx.contains_key(&tx_id));

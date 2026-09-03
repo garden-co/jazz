@@ -13,10 +13,49 @@ use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::node::query_engine::left_field;
 use crate::protocol::{
-    ContributingMembersEntry, KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry,
-    RealRowMemberEntry, ResultMemberEntry, RowVersionRef, VersionBundle, VersionBundleRef,
-    VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
+    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry,
+    RowVersionRef, VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
+    build_version_carriers_from_singletons,
 };
+
+fn apply_covered_input_closure_admission_delta(
+    state: &mut AuthorityResultState,
+    cleared: bool,
+    adds: &[ProgramFactEntry],
+    removes: &[ProgramFactEntry],
+) {
+    if cleared {
+        state.covered_input_sources.clear();
+        state.covered_input_versions.clear();
+    }
+    for fact in removes {
+        match fact {
+            ProgramFactEntry::ProgramSourceCoverage(coverage) => {
+                state.covered_input_sources.remove(&coverage.source);
+            }
+            ProgramFactEntry::CoveredInput(input) => {
+                let key = (input.source.clone(), input.source_row);
+                if state.covered_input_versions.get(&key) == Some(input) {
+                    state.covered_input_versions.remove(&key);
+                }
+            }
+            _ => {}
+        }
+    }
+    for fact in adds {
+        match fact {
+            ProgramFactEntry::ProgramSourceCoverage(coverage) => {
+                state.covered_input_sources.insert(coverage.source.clone());
+            }
+            ProgramFactEntry::CoveredInput(input) => {
+                state
+                    .covered_input_versions
+                    .insert((input.source.clone(), input.source_row), input.clone());
+            }
+            _ => {}
+        }
+    }
+}
 
 fn maintained_view_tx_versions_contain_winner(
     tx_versions: &[VersionRow],
@@ -160,6 +199,22 @@ fn version_bundle_refs_for_carriers(
     Ok(refs)
 }
 
+/// Preserve the usage-site handle while converting a structurally malformed
+/// authority payload into the only client-visible source-closure diagnostic.
+/// Operational storage, transaction, and compiler errors must continue to
+/// fail the peer tick rather than being misreported as a terminal stream
+/// error.
+fn invalid_authority_source_closure_error(subscription: SubscriptionKey, error: Error) -> Error {
+    match error {
+        error @ Error::InvalidAuthoritySourceClosure { .. } => error,
+        Error::MalformedViewUpdate(reason) => Error::InvalidAuthoritySourceClosure {
+            subscription,
+            transition: format!("authority source-closure payload failed validation: {reason}"),
+        },
+        error => error,
+    }
+}
+
 fn version_bundle_record_key(
     version: &VersionRecord,
 ) -> (String, BranchKey, RowUuid, SchemaVersionId, bool) {
@@ -193,56 +248,23 @@ fn content_row_members_for_bundle(
         .collect()
 }
 
-fn relation_edge_version_rows_for_bundle(
+/// Versions named by the maintained program's covered-input stream. Unlike a
+/// relation edge, this witness changes for an in-place nested update or an
+/// order-key replacement even when the public member set remains unchanged.
+fn covered_input_version_rows_for_bundle(
     facts: &[ProgramFactEntry],
 ) -> BTreeSet<(String, RowUuid, TxId)> {
     facts
         .iter()
         .filter_map(|fact| match fact {
-            ProgramFactEntry::RelationEdge(edge) => Some(edge),
+            ProgramFactEntry::CoveredInput(input) => Some((
+                input.version_table.to_string(),
+                input.source_row,
+                input.version.tx,
+            )),
             _ => None,
         })
-        .flat_map(|edge| {
-            [
-                edge.source_version
-                    .as_ref()
-                    .map(|version| (edge.source_table.to_string(), edge.source_row, version.tx)),
-                edge.target_version
-                    .as_ref()
-                    .map(|version| (edge.target_table.to_string(), edge.target_row, version.tx)),
-            ]
-        })
-        .flatten()
         .collect()
-}
-
-/// Source vocabulary required to turn maintained flat-tuple membership into
-/// canonical contributor facts. Construct this from the validated query rather
-/// than independently from its result rows: an empty vocabulary on a flat join
-/// produces a payload that renders once but cannot be reconstructed afterward.
-pub(crate) struct FlatTupleSourceTables(Vec<String>);
-
-impl FlatTupleSourceTables {
-    pub(crate) fn for_query(shape: &ValidatedQuery) -> Self {
-        Self(
-            shape
-                .query()
-                .flat_join
-                .as_ref()
-                .map(|flat_join| {
-                    flat_join
-                        .sources
-                        .iter()
-                        .map(|source| source.table.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
-        )
-    }
-
-    pub(crate) fn as_slice(&self) -> &[String] {
-        &self.0
-    }
 }
 
 pub(crate) struct MaintainedViewBundleInputs<'a> {
@@ -257,12 +279,6 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     /// use refreshed rows as a write base for later exclusive transactions.
     pub(crate) complete_exclusive_payloads: bool,
     pub(crate) previous_result_set: BTreeSet<TxId>,
-    /// Facts previously admitted on this subscription. Result-to-contributor
-    /// admissions are retired with their result member, rather than becoming
-    /// a durable general-history grant.
-    pub(crate) previous_program_facts: BTreeSet<ProgramFactEntry>,
-    /// Declared flat-join source table for each contributor position.
-    pub(crate) flat_tuple_source_tables: FlatTupleSourceTables,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
@@ -523,15 +539,24 @@ where
         table: &str,
     ) -> Result<SyncMessage, Error> {
         let subscription = self.whole_table_subscription_key(table)?;
-        self.view_update_for_current_rows_with_peer_payload_inventory(
-            table,
-            subscription,
-            [],
-            [],
-            [],
-            AuthorSubject::SYSTEM,
-        )
-        .await
+        let mut update = self
+            .view_update_for_current_rows_with_peer_payload_inventory(
+                table,
+                subscription,
+                [],
+                [],
+                [],
+                AuthorSubject::SYSTEM,
+            )
+            .await?;
+        let SyncMessage::ViewUpdate(payload) = &mut update else {
+            unreachable!("current-row view builder always returns ViewUpdate");
+        };
+        // The direct cold helper represents a receiver's first receipt.  It
+        // must therefore establish a replacement closure; the reusable
+        // peer-rehydrate builder below deliberately remains incremental.
+        payload.reset_result_set = true;
+        Ok(update)
     }
 
     /// Build a current-row view update using the peer's payload inventory.
@@ -670,8 +695,6 @@ where
                 known_state: None,
                 complete_exclusive_payloads: false,
                 previous_result_set,
-                previous_program_facts: BTreeSet::new(),
-                flat_tuple_source_tables: FlatTupleSourceTables::for_query(shape),
                 identity,
                 tier,
                 maintained_facts: &maintained,
@@ -694,10 +717,8 @@ where
             previous_result_set: _previous_result_set,
             result_member_adds,
             result_member_removes,
-            mut program_fact_adds,
-            mut program_fact_removes,
-            previous_program_facts,
-            flat_tuple_source_tables,
+            program_fact_adds,
+            program_fact_removes,
             identity: _identity,
             tier,
             maintained_facts,
@@ -711,78 +732,15 @@ where
         // already use it.
         let allow_storage_witness_fallback = allow_storage_witness_fallback
             || maintained_facts.uses_storage_backed_result_materialization();
-        program_fact_adds.extend(maintained_facts.payload_facts_for_members(&result_member_adds));
-        let tuple_source_versions = maintained_facts.tuple_source_versions_for_members(
-            &maintained_facts.active_result_members(),
-            flat_tuple_source_tables.as_slice(),
-        );
-        let mut desired_tuple_source_facts = BTreeMap::new();
-        for (result, source_index, maintained_version) in &tuple_source_versions {
-            let canonical = self
-                .canonical_history_version_for_maintained_witness(&maintained_version)
-                .await?;
-            let tx = self.version_tx_id(&canonical)?;
-            let schema_version = self
-                .schema_version_for_alias(canonical.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "flat tuple source witness schema version alias must exist",
-                ))?;
-            let mut contributor = RealRowMemberEntry::current_content((
-                canonical.table.clone(),
-                canonical.row_uuid(),
-                tx,
-            ));
-            contributor.schema_version = Some(schema_version);
-            let fact = ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
-                result: result.clone(),
-                contributor: contributor.into(),
-                batch: Some(tx),
-                role: Some(format!("flat_tuple_source:{source_index}")),
-            });
-            desired_tuple_source_facts.insert(fact, maintained_version.clone());
-        }
-        let previous_tuple_source_facts = previous_program_facts
-            .into_iter()
-            .filter(|fact| {
-                matches!(
-                    fact,
-                    ProgramFactEntry::ContributingMembers(contribution)
-                        if contribution
-                            .role
-                            .as_deref()
-                            .is_some_and(|role| role.starts_with("flat_tuple_source:"))
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        let tuple_source_bundle_rows = desired_tuple_source_facts
-            .iter()
-            .filter(|(fact, _)| !previous_tuple_source_facts.contains(*fact))
-            .map(|(_, version)| {
-                Ok((
-                    version.table().to_owned(),
-                    version.row_uuid(),
-                    self.version_tx_id(version)?,
-                ))
-            })
-            .collect::<Result<BTreeSet<_>, Error>>()?;
-        program_fact_adds.extend(
-            desired_tuple_source_facts
-                .keys()
-                .filter(|fact| !previous_tuple_source_facts.contains(*fact))
-                .cloned(),
-        );
-        program_fact_removes.extend(
-            previous_tuple_source_facts
-                .into_iter()
-                .filter(|fact| !desired_tuple_source_facts.contains_key(fact)),
-        );
         let program_fact_adds = program_fact_adds
             .into_iter()
+            .filter(ProgramFactEntry::is_peer_source_closure_fact)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         let program_fact_removes = program_fact_removes
             .into_iter()
+            .filter(ProgramFactEntry::is_peer_source_closure_fact)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -813,27 +771,6 @@ where
             )
             | None => BTreeSet::new(),
         };
-        // Exact-known declarations name canonical authored versions, while the
-        // maintained source index is keyed by its read-schema table label.
-        // Translate that declaration back to the source label used to select
-        // bundle bodies (e.g. canonical `users` -> maintained `people`).
-        let mut known_tuple_source_bundle_rows = BTreeSet::new();
-        for (_, _, maintained_version) in &tuple_source_versions {
-            let canonical = self
-                .canonical_history_version_for_maintained_witness(maintained_version)
-                .await?;
-            let tx = self.version_tx_id(&canonical)?;
-            if known_state_exact_refs.contains(&RowVersionRef::new(
-                canonical.table().to_owned(),
-                canonical.row_uuid(),
-                tx,
-            )) {
-                known_tuple_source_bundle_rows.insert((
-                    maintained_version.table().to_owned(),
-                    maintained_version.row_uuid(),
-                ));
-            }
-        }
         let skipped_known_state_rows = result_member_adds
             .iter()
             .filter_map(|member| {
@@ -853,18 +790,12 @@ where
                 }
                 None
             })
-            .chain(known_tuple_source_bundle_rows)
             .collect::<BTreeSet<_>>();
-        let relation_edge_add_rows = relation_edge_version_rows_for_bundle(&program_fact_adds);
+        let covered_input_add_rows = covered_input_version_rows_for_bundle(&program_fact_adds);
         let wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
-            .chain(relation_edge_add_rows)
-            // The contributor fact names canonical authored history; the
-            // maintained index is keyed by the source graph's read-schema
-            // label. Ship that exact retained witness and normalize it to
-            // canonical history only at the wire boundary below.
-            .chain(tuple_source_bundle_rows)
+            .chain(covered_input_add_rows)
             .fold(
                 BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
                 |mut by_tx, (table, row_uuid, tx_id)| {
@@ -984,8 +915,7 @@ where
                 }
             }
             if tx_versions.iter().any(|version| {
-                version.deletion().is_none()
-                    && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
+                wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
             }) {
                 let stored_tx = self
                     .query_transaction_memo(*tx_id, &mut context)
@@ -1251,9 +1181,11 @@ where
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                result_member_adds: result_member_adds.into_iter().collect(),
-                result_member_removes: result_member_removes.into_iter().collect(),
-                terminal_operations: Vec::new(),
+                // Result members are local maintained-terminal state. Peer
+                // frames carry only the source closure from which another
+                // receiver derives those terminals itself.
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
                 program_fact_adds,
                 program_fact_removes,
             },
@@ -1262,9 +1194,28 @@ where
 
     /// Apply a downstream current-row view update.
     pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
-        self.validate_received_view_update_global_time_durability(&update)?;
-        self.validate_view_update_payloads(std::slice::from_ref(&update))?;
-        self.apply_view_update_inner(update, None).await
+        self.validate_received_view_update_global_time_durability(&update)
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        self.validate_view_update_payloads(std::slice::from_ref(&update))
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        let compiled_source_caches = self
+            .validate_covered_input_closure_admission(std::slice::from_ref(&update))
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        let bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        let preflight = self
+            .preflight_view_bundle_conflicts(&bundle_refs)
+            .await
+            .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        self.validate_covered_input_body_witnesses(
+            std::slice::from_ref(&update),
+            &preflight.bundles,
+        )
+        .await
+        .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
+        self.apply_view_update_inner(update, None).await?;
+        self.install_compiled_covered_input_source_caches(compiled_source_caches);
+        Ok(())
     }
 
     pub(crate) async fn apply_view_updates_in_batch(
@@ -1275,28 +1226,43 @@ where
             return Ok(());
         }
         for update in &updates {
-            self.validate_received_view_update_global_time_durability(update)?;
+            self.validate_received_view_update_global_time_durability(update)
+                .map_err(|error| {
+                    invalid_authority_source_closure_error(update.subscription, error)
+                })?;
         }
         // A receiver tick is one atomic protocol frame. Validate every row
         // descriptor before the first reset can change flush cadence, or a
         // preceding valid bundle can advance clocks, allocate aliases, or
         // stage history before a later malformed bundle rejects the frame.
-        self.validate_view_update_payloads(&updates)?;
+        for update in &updates {
+            self.validate_view_update_payloads(std::slice::from_ref(update))
+                .map_err(|error| {
+                    invalid_authority_source_closure_error(update.subscription, error)
+                })?;
+        }
+        let compiled_source_caches = self.validate_covered_input_closure_admission(&updates)?;
         let mut all_bundle_refs = Vec::new();
         let mut bulk_candidates = Vec::new();
-        let mut initial_hydration_binding_views =
-            self.query.initial_hydration_binding_views.clone();
+        let mut initial_hydration_authority_results = self
+            .query
+            .authority_results
+            .iter()
+            .filter_map(|(key, state)| state.initial_hydration.then_some(key.clone()))
+            .collect::<BTreeSet<_>>();
         for update in &updates {
-            let Ok(binding_view_key) = self.binding_view_key_for_subscription(update.subscription)
+            let version_bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
+            all_bundle_refs.extend(version_bundle_refs.iter().copied());
+            let Ok(authority_result_key) =
+                self.authority_result_key_for_subscription(update.subscription)
             else {
                 continue;
             };
             if update.reset_result_set {
-                initial_hydration_binding_views.insert(binding_view_key);
+                initial_hydration_authority_results.insert(authority_result_key.clone());
             }
-            let version_bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
-            all_bundle_refs.extend(version_bundle_refs.iter().copied());
-            let in_initial_hydration = initial_hydration_binding_views.contains(&binding_view_key);
+            let in_initial_hydration =
+                initial_hydration_authority_results.contains(&authority_result_key);
             if update.reset_result_set
                 && update.peer_complete_tx_payload_refs.is_empty()
                 && update.result_member_removes.is_empty()
@@ -1307,11 +1273,20 @@ where
                 && version_bundle_refs.is_empty()
                 && (!update.reset_result_set || update.peer_complete_tx_payload_refs.is_empty())
             {
-                initial_hydration_binding_views.remove(&binding_view_key);
+                initial_hydration_authority_results.remove(&authority_result_key);
             }
         }
         let preflight = self
             .preflight_view_bundle_conflicts(&all_bundle_refs)
+            .await?;
+        // A CoveredInput is not merely a selection hint: it names immutable
+        // bytes the receiver will later install into a local runtime source.
+        // Validate that each added coordinate is backed by either a body in
+        // this atomic receiver frame or a previously admitted complete
+        // payload explicitly referenced by its sender inventory. This closes
+        // the old ResultMember witness boundary without accepting a new
+        // source-input bypass.
+        self.validate_covered_input_body_witnesses(&updates, &preflight.bundles)
             .await?;
         let bulk_candidate_tx_ids = bulk_candidates
             .iter()
@@ -1396,8 +1371,35 @@ where
             self.apply_view_update_inner(update, Some(&preloaded_tx_ids))
                 .await?;
         }
-        if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
+        self.install_compiled_covered_input_source_caches(compiled_source_caches);
+        if self.initial_sync_flush_active
+            && self
+                .query
+                .authority_results
+                .values()
+                .all(|state| !state.initial_hydration)
+        {
             self.finish_initial_sync_flush_cadence().await?;
+        }
+        Ok(())
+    }
+
+    /// Persist immutable bodies carried by a stale authority link without
+    /// accepting that link's source closure as an authority receipt.
+    ///
+    /// A replacement upstream can have a later receipt selected while an old
+    /// transport still has a frame in flight. Its bodies are ordinary
+    /// immutable replication data and may be needed for the selected link's
+    /// later exact closure, but its covered-input facts must not mutate the
+    /// selected receiver frontier or derived terminal.
+    pub(crate) async fn ingest_unselected_authority_view_bundles(
+        &mut self,
+        carriers: &[VersionCarrier],
+    ) -> Result<(), Error> {
+        let bundle_refs = version_bundle_refs_for_carriers(carriers)?;
+        let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
+        for bundle in preflight.bundles.values() {
+            self.ingest_view_bundle(bundle.clone()).await?;
         }
         Ok(())
     }
@@ -1406,6 +1408,66 @@ where
     /// storage or in-memory receiver state.
     fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
         for update in updates {
+            // An opening-pending marker makes no source or body claim. It
+            // must not mutate a prior closure while withholding settlement.
+            if update.opening_pending
+                && (!update.program_fact_adds.is_empty()
+                    || !update.program_fact_removes.is_empty()
+                    || !update.version_carriers.is_empty()
+                    || !update.peer_complete_tx_payload_refs.is_empty())
+            {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "opening-pending marker carries source data".to_owned(),
+                });
+            }
+            // INV-SYNC-36 has one peer result model: the authority sends an
+            // exact covered source closure and the receiver derives its own
+            // terminal. Result-member deltas and payload rows are authority
+            // output, not receiver input; accepting either would revive the
+            // retired snapshot/materialization bypass.
+            if !update.result_member_adds.is_empty() || !update.result_member_removes.is_empty() {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "authority view update carries retired result members".to_owned(),
+                });
+            }
+            if update
+                .program_fact_adds
+                .iter()
+                .chain(&update.program_fact_removes)
+                .any(|fact| !fact.is_peer_source_closure_fact())
+            {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "authority view update carries a non-source closure fact"
+                        .to_owned(),
+                });
+            }
+            let added_facts = update.program_fact_adds.iter().collect::<BTreeSet<_>>();
+            if added_facts.len() != update.program_fact_adds.len() {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "duplicate source-closure addition".to_owned(),
+                });
+            }
+            let removed_facts = update.program_fact_removes.iter().collect::<BTreeSet<_>>();
+            if removed_facts.len() != update.program_fact_removes.len() {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "duplicate source-closure removal".to_owned(),
+                });
+            }
+            if update
+                .program_fact_removes
+                .iter()
+                .any(|fact| added_facts.contains(fact))
+            {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "overlapping source-closure add and remove".to_owned(),
+                });
+            }
             for bundle in version_bundle_refs_for_carriers(&update.version_carriers)? {
                 // This preflight runs before bulk-reset selection, alias
                 // allocation, clock advancement, or receiver staging. The
@@ -1416,6 +1478,325 @@ where
             }
         }
         Ok(())
+    }
+
+    /// A reset with no source facts is an opening/coverage stamp, not proof
+    /// that a previously claimed exact closure became empty. The closure
+    /// state, rather than retired authority result members, owns that choice.
+    fn reset_replaces_authority_source_closure(
+        reset_result_set: bool,
+        has_source_facts: bool,
+        opening_pending: bool,
+        state: Option<&AuthorityResultState>,
+    ) -> bool {
+        reset_result_set
+            && !opening_pending
+            && (has_source_facts
+                || !matches!(
+                    state.map(|state| state.source_closure),
+                    Some(crate::node::AuthoritySourceClosure::Claimed { .. })
+                ))
+    }
+
+    /// Preflight only the source keys touched by an authority closure delta.
+    /// The receipt keeps indexes for these two exactness constraints, so an
+    /// ordinary successor remains O(changed), rather than cloning or scanning
+    /// its retained closure.
+    fn validate_covered_input_closure_admission(
+        &mut self,
+        updates: &[ViewUpdateParts],
+    ) -> Result<BTreeMap<AuthorityResultKey, BTreeSet<ProgramSourceId>>, Error> {
+        let mut compiled_source_caches = BTreeMap::new();
+        let mut overlays = BTreeMap::<
+            AuthorityResultKey,
+            (
+                bool,
+                BTreeMap<crate::protocol::ProgramSourceId, bool>,
+                BTreeMap<
+                    (crate::protocol::ProgramSourceId, RowUuid),
+                    Option<crate::protocol::CoveredInputEntry>,
+                >,
+            ),
+        >::new();
+        for update in updates {
+            let Ok(authority_result_key) =
+                self.authority_result_key_for_subscription(update.subscription)
+            else {
+                // A detached subscription is a benign late-frame drop. Its
+                // normal admission path records that metric below.
+                continue;
+            };
+            let compiled_sources = if let Some(compiled) = self
+                .query
+                .authority_results
+                .get(&authority_result_key)
+                .and_then(|state| state.compiled_covered_input_sources.as_ref())
+            {
+                compiled
+            } else if let Some(compiled) = compiled_source_caches.get(&authority_result_key) {
+                compiled
+            } else {
+                let compiled = self
+                    .compiled_covered_input_sources_for_subscription(update.subscription)
+                    .map_err(|error| {
+                        invalid_authority_source_closure_error(update.subscription, error)
+                    })?;
+                compiled_source_caches.insert(authority_result_key.clone(), compiled);
+                compiled_source_caches
+                    .get(&authority_result_key)
+                    .expect("staged compiler source cache was installed")
+            };
+            let overlay = overlays.entry(authority_result_key.clone()).or_default();
+            let state = self.query.authority_results.get(&authority_result_key);
+            let invalid = |transition| Error::InvalidAuthoritySourceClosure {
+                subscription: update.subscription,
+                transition,
+            };
+            let reset_replaces = Self::reset_replaces_authority_source_closure(
+                update.reset_result_set,
+                !update.program_fact_adds.is_empty() || !update.program_fact_removes.is_empty(),
+                update.opening_pending,
+                state,
+            );
+            if reset_replaces {
+                overlay.0 = true;
+                overlay.1.clear();
+                overlay.2.clear();
+            }
+            for fact in &update.program_fact_removes {
+                match fact {
+                    ProgramFactEntry::ProgramSourceCoverage(coverage) => {
+                        let _ = coverage;
+                        return Err(invalid(format!(
+                            "source coverage removal is reset-only: {:?}",
+                            coverage.source
+                        )));
+                    }
+                    ProgramFactEntry::CoveredInput(input) => {
+                        let key = (input.source.clone(), input.source_row);
+                        let current = match overlay.2.get(&key) {
+                            Some(current) => current.clone(),
+                            None if overlay.0 => None,
+                            None => state
+                                .and_then(|state| state.covered_input_versions.get(&key).cloned()),
+                        };
+                        if current.as_ref() != Some(input) {
+                            return Err(invalid(format!(
+                                "covered input removal is absent from predecessor closure: {:?}",
+                                input.source
+                            )));
+                        }
+                        overlay.2.insert(key, None);
+                    }
+                    _ => {}
+                }
+            }
+            // Closure deltas are sets, not ordered instruction streams. Install
+            // coverage additions before validating the added content members.
+            for fact in &update.program_fact_adds {
+                if let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact {
+                    if !reset_replaces {
+                        return Err(invalid("source coverage addition is reset-only".to_owned()));
+                    }
+                    if !coverage.complete {
+                        return Err(invalid("source coverage is incomplete".to_owned()));
+                    }
+                    if !compiled_sources.contains(&coverage.source) {
+                        return Err(invalid(format!(
+                            "source coverage names no compiled source occurrence: {:?}",
+                            coverage.source
+                        )));
+                    }
+                    overlay.1.insert(coverage.source.clone(), true);
+                }
+            }
+            // A reset is the sole full-closure claim. Its manifest must name
+            // every compiler-owned receiver source, including sources with no
+            // current content rows; incremental frames remain O(changed).
+            if reset_replaces
+                && (overlay.1.len() != compiled_sources.len()
+                    || !compiled_sources
+                        .iter()
+                        .all(|source| overlay.1.get(source).copied() == Some(true)))
+            {
+                return Err(invalid(format!(
+                    "reset source coverage does not exactly match compiled source set: expected {compiled_sources:?}, received {:?} (receiver is scope relay: {})",
+                    overlay.1,
+                    self.client_relay_scope().is_some()
+                )));
+            }
+            for fact in &update.program_fact_adds {
+                if let ProgramFactEntry::CoveredInput(input) = fact {
+                    if !compiled_sources.contains(&input.source) {
+                        return Err(invalid(format!(
+                            "covered input names no compiled source occurrence: {:?}",
+                            input.source
+                        )));
+                    }
+                    let source_is_covered =
+                        overlay.1.get(&input.source).copied().unwrap_or_else(|| {
+                            !overlay.0
+                                && state.is_some_and(|state| {
+                                    state.covered_input_sources.contains(&input.source)
+                                })
+                        });
+                    if !source_is_covered {
+                        return Err(invalid(format!(
+                            "covered input names a source absent from its coverage manifest: {:?}",
+                            input.source
+                        )));
+                    }
+                    let key = (input.source.clone(), input.source_row);
+                    let current = match overlay.2.get(&key) {
+                        Some(current) => current.clone(),
+                        None if overlay.0 => None,
+                        None => {
+                            state.and_then(|state| state.covered_input_versions.get(&key).cloned())
+                        }
+                    };
+                    if current.is_some() {
+                        return Err(invalid(format!(
+                            "covered input addition already has a predecessor member: {:?}",
+                            input.source
+                        )));
+                    }
+                    overlay.2.insert(key, Some(input.clone()));
+                }
+            }
+        }
+        Ok(compiled_source_caches)
+    }
+
+    fn install_compiled_covered_input_source_caches(
+        &mut self,
+        caches: BTreeMap<AuthorityResultKey, BTreeSet<ProgramSourceId>>,
+    ) {
+        for (key, compiled) in caches {
+            self.query
+                .authority_results
+                .entry(key)
+                .or_default()
+                .compiled_covered_input_sources = Some(compiled);
+        }
+    }
+
+    async fn validate_covered_input_body_witnesses(
+        &mut self,
+        updates: &[ViewUpdateParts],
+        staged_bundles: &BTreeMap<TxId, VersionBundle>,
+    ) -> Result<(), Error> {
+        let referenced_complete_payloads = updates
+            .iter()
+            .flat_map(|update| update.peer_complete_tx_payload_refs.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let mut admitted_versions = staged_bundles
+            .values()
+            .flat_map(|bundle| {
+                bundle.versions.iter().map(move |version| {
+                    (
+                        bundle.tx.tx_id,
+                        version.table().to_owned(),
+                        version.row_uuid(),
+                        if version.deletion().is_some() {
+                            crate::protocol::ResultRowLayer::Deletion
+                        } else {
+                            crate::protocol::ResultRowLayer::Content
+                        },
+                        version.branch_key().canonical_bytes(),
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+
+        // Complete-payload inventory references are the only valid exception
+        // to a same-frame body: the receiver already admitted that complete
+        // immutable transaction on this link. Re-read its stored bodies before
+        // accepting a source coordinate, rather than trusting the sender's
+        // declaration alone.
+        for tx_id in &referenced_complete_payloads {
+            for version in self.query_versions_for_tx(*tx_id).await? {
+                admitted_versions.insert((
+                    *tx_id,
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                    match version.layer() {
+                        VersionLayer::Content => crate::protocol::ResultRowLayer::Content,
+                        VersionLayer::Deletion => crate::protocol::ResultRowLayer::Deletion,
+                    },
+                    version.branch_key().canonical_bytes(),
+                ));
+            }
+        }
+
+        for update in updates {
+            for input in update
+                .program_fact_adds
+                .iter()
+                .filter_map(|fact| match fact {
+                    ProgramFactEntry::CoveredInput(input) => Some(input),
+                    _ => None,
+                })
+            {
+                let coordinate = (
+                    input.version.tx,
+                    input.version_table.to_string(),
+                    input.source_row,
+                    input.version.layer,
+                    input.version.branch_or_prefix.clone().unwrap_or_default(),
+                );
+                let staged_body_witness = admitted_versions.contains(&coordinate);
+                // A known-state repair may have admitted this exact immutable
+                // body in its own request/response frame before the later view
+                // frame that consumes it. Use the same physical lookup, concrete
+                // layer, and canonical-branch check as receiver materialization;
+                // a merely matching tx/row name is not evidence.
+                let resident_body_witness = if staged_body_witness {
+                    false
+                } else {
+                    self.covered_input_has_resident_body(input).await?
+                };
+                if input.version.batch != Some(input.version.tx)
+                    || (!staged_body_witness && !resident_body_witness)
+                {
+                    return Err(Error::InvalidAuthoritySourceClosure {
+                        subscription: update.subscription,
+                        transition: "covered input is not witnessed by admitted payload".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn covered_input_has_resident_body(
+        &mut self,
+        input: &crate::protocol::CoveredInputEntry,
+    ) -> Result<bool, Error> {
+        let Some(tx_node_alias) = self.node_aliases.get(&input.version.tx.node).copied() else {
+            return Ok(false);
+        };
+        if self.query_transaction(input.version.tx).await?.is_none() {
+            return Ok(false);
+        }
+        let layer = match input.version.layer {
+            crate::protocol::ResultRowLayer::Content => VersionLayer::Content,
+            crate::protocol::ResultRowLayer::Deletion => VersionLayer::Deletion,
+            crate::protocol::ResultRowLayer::ContentOrDeletion => return Ok(false),
+        };
+        let Some(version) = self
+            .query_version_by_alias(
+                input.version_table.as_str(),
+                input.source_row,
+                layer,
+                input.version.tx.time,
+                tx_node_alias,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        Ok(version.branch_key().canonical_bytes()
+            == input.version.branch_or_prefix.clone().unwrap_or_default())
     }
 
     async fn apply_view_update_inner(
@@ -1434,7 +1815,6 @@ where
             opening_pending,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         } = update;
@@ -1469,6 +1849,12 @@ where
             }
             Err(error) => return Err(error),
         };
+        #[cfg(not(debug_assertions))]
+        let _ = &binding_view_key;
+        // Wire updates name a usage subscription only.  Resolve the complete
+        // policy-scoped authority identity captured when that subscription was
+        // admitted; never reconstruct or share it through BindingViewKey.
+        let authority_result_key = self.authority_result_key_for_subscription(subscription)?;
         let preflight = if preloaded_tx_ids.is_none() {
             Some(
                 self.preflight_view_bundle_conflicts(&version_bundle_refs)
@@ -1510,28 +1896,29 @@ where
             BTreeSet::new()
         };
         if reset_result_set {
-            self.query
-                .pending_terminal_operations_by_binding_view
-                .remove(&binding_view_key);
-            self.query
-                .initial_hydration_binding_views
-                .insert(binding_view_key);
+            let state = self
+                .query
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default();
+            state.initial_hydration = true;
         }
-        if !terminal_operations.is_empty() {
-            self.query
-                .pending_terminal_operations_by_binding_view
-                .entry(binding_view_key)
-                .or_default()
-                .extend(terminal_operations);
-        }
+        self.query
+            .authority_results
+            .entry(authority_result_key.clone())
+            .or_default()
+            .deferred_publication = defer_settlement;
         if defer_settlement {
+            // A newer deferred update supersedes any earlier complete
+            // handoff for this *exact* authority receipt. Its membership may
+            // be useful while the authority finishes the update, but neither
+            // it nor a sibling policy scope may justify a known-state claim
+            // until a non-deferred completion arrives.
             self.query
-                .deferred_publication_binding_views
-                .insert(binding_view_key);
-        } else {
-            self.query
-                .deferred_publication_binding_views
-                .remove(&binding_view_key);
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .live_settled = false;
         }
         let row_result_adds = result_member_adds
             .iter()
@@ -1577,39 +1964,23 @@ where
             &row_result_adds,
         )
         .await?;
-        let empty_reset = reset_result_set
-            && version_bundles_is_empty
-            && peer_complete_tx_payload_refs.is_empty()
-            && result_member_adds.is_empty()
-            && result_member_removes.is_empty()
-            && program_fact_adds.is_empty()
-            && program_fact_removes.is_empty();
         let persisted_member_adds = result_member_adds.clone();
         let persisted_member_removes = result_member_removes.clone();
         let persisted_fact_adds = program_fact_adds.clone();
         let persisted_fact_removes = program_fact_removes.clone();
-        // A reset only replaces shared canonical state when it carries the
-        // snapshot that will replace it. Empty resets from short-lived duplicate
-        // usage subscriptions are coverage stamps; letting them clear non-empty
-        // shared state makes later one-shot reads less settled than before.
-        let preserve_existing_shared_state = empty_reset
-            && self
-                .query
-                .settled_result_sets
-                .get(&binding_view_key)
-                .is_some_and(|members| !members.is_empty());
-        let reset_cleared_shared_state = reset_result_set && !preserve_existing_shared_state;
+        let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
+            reset_result_set,
+            !program_fact_adds.is_empty() || !program_fact_removes.is_empty(),
+            opening_pending,
+            self.query.authority_results.get(&authority_result_key),
+        );
         if reset_cleared_shared_state {
-            self.clear_settled_result_view(binding_view_key);
-            self.query.settled_program_facts.remove(&binding_view_key);
-            self.query
-                .settled_through_by_binding_view
-                .remove(&binding_view_key);
+            self.clear_settled_result_view(authority_result_key.clone());
         }
         if reset_result_set {
             self.query
-                .settled_result_sets
-                .entry(binding_view_key)
+                .authority_results
+                .entry(authority_result_key.clone())
                 .or_default();
         }
         let mut result_members_need_rewrite = false;
@@ -1617,13 +1988,14 @@ where
         let fact_rewrite;
         {
             for member in result_member_removes {
-                if self.remove_settled_result_member_indexed(binding_view_key, &member) {
+                if self.remove_settled_result_member_indexed(authority_result_key.clone(), &member)
+                {
                     continue;
                 }
                 if let Some(occurrence_id) = member.output_occurrence_id()
                     && self
                         .remove_settled_result_member_for_occurrence_indexed(
-                            binding_view_key,
+                            authority_result_key.clone(),
                             occurrence_id,
                         )
                         .is_some()
@@ -1635,58 +2007,84 @@ where
                 if let Some(occurrence_id) = member.output_occurrence_id() {
                     result_members_need_rewrite |= self
                         .remove_settled_result_member_for_occurrence_indexed(
-                            binding_view_key,
+                            authority_result_key.clone(),
                             occurrence_id,
                         )
                         .is_some();
                 }
-                self.insert_settled_result_member_indexed(binding_view_key, member);
+                self.insert_settled_result_member_indexed(authority_result_key.clone(), member);
             }
             member_rewrite = if result_members_need_rewrite {
                 Some(
                     self.query
-                        .settled_result_sets
-                        .get(&binding_view_key)
-                        .cloned()
+                        .authority_results
+                        .get(&authority_result_key)
+                        .map(|state| state.settled_result_set.clone())
                         .unwrap_or_default(),
                 )
             } else {
                 None
             };
 
-            let program_facts = self
+            let program_facts = &mut self
                 .query
-                .settled_program_facts
-                .entry(binding_view_key)
-                .or_default();
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .settled_program_facts;
             for fact in program_fact_removes {
                 program_facts.remove(&fact);
             }
             program_facts.extend(program_fact_adds);
             fact_rewrite = None;
         }
+        let state = self
+            .query
+            .authority_results
+            .entry(authority_result_key.clone())
+            .or_default();
+        apply_covered_input_closure_admission_delta(
+            state,
+            reset_cleared_shared_state,
+            &persisted_fact_adds,
+            &persisted_fact_removes,
+        );
         if synthetic_result_changed
             && self
                 .query
-                .initial_hydration_binding_views
-                .contains(&binding_view_key)
+                .authority_results
+                .get(&authority_result_key)
+                .is_some_and(|state| state.initial_hydration)
         {
             self.query
-                .pending_authoritative_reset_binding_views
-                .insert(binding_view_key);
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .pending_authoritative_reset = true;
         }
-        if !defer_settlement {
-            self.query
-                .settled_through_by_binding_view
-                .insert(binding_view_key, settled_through);
+        if !defer_settlement && !opening_pending {
+            let state = self
+                .query
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default();
+            // A complete inbound receipt makes this exact result live for
+            // the current process even when it has no usable fast cursor.
+            // `GlobalTime::default()` is the protocol's cursorless settlement
+            // marker: it permits an exact known-state declaration but must
+            // not claim a fast current-membership position.
+            state.live_settled = true;
+            state.settled_through = (settled_through.0 != 0).then_some(settled_through);
             // A reset is an authoritative membership rebuild, including when
             // it carries retractions. The public subscription materializes its
             // replacement snapshot below, rather than attempting to apply a
             // removal after the reset has cleared the cached result set.
-            if reset_result_set && !preserve_existing_shared_state {
+            if reset_cleared_shared_state {
                 self.query
-                    .pending_authoritative_reset_binding_views
-                    .insert(binding_view_key);
+                    .authority_results
+                    .entry(authority_result_key.clone())
+                    .or_default()
+                    .pending_authoritative_reset = true;
             }
         }
         // Diagnostic-only: the duplicate-content-version scan feeds a
@@ -1695,9 +2093,9 @@ where
         {
             if let Some((occurrence_id, first, second)) = self
                 .query
-                .settled_result_sets
-                .get(&binding_view_key)
-                .and_then(duplicate_output_occurrence_result_set)
+                .authority_results
+                .get(&authority_result_key)
+                .and_then(|state| duplicate_output_occurrence_result_set(&state.settled_result_set))
             {
                 debug_assert!(
                     first == second,
@@ -1705,9 +2103,9 @@ where
                 );
             }
         }
-        if !defer_settlement {
-            self.persist_settled_result_state_delta(
-                binding_view_key,
+        if !defer_settlement && !opening_pending {
+            self.persist_settled_result_state_delta_for_authority_result(
+                authority_result_key.clone(),
                 reset_cleared_shared_state,
                 &persisted_member_adds,
                 &persisted_member_removes,
@@ -1717,41 +2115,109 @@ where
                 fact_rewrite.as_ref(),
             )
             .await?;
-            self.persist_known_state_fact(binding_view_key, settled_through)
-                .await?;
         }
         if self
             .query
-            .initial_hydration_binding_views
-            .contains(&binding_view_key)
+            .authority_results
+            .get(&authority_result_key)
+            .is_some_and(|state| state.initial_hydration)
             && version_bundles_is_empty
             && (!reset_result_set || peer_complete_tx_payload_refs.is_empty())
             && !defer_settlement
+            && !opening_pending
         {
             self.query
-                .initial_hydration_binding_views
-                .remove(&binding_view_key);
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .initial_hydration = false;
         }
         if let Some(progress) = authorization_progress {
             self.query
-                .authorization_progress_by_binding_view
-                .insert(binding_view_key, progress);
+                .authority_results
+                .entry(authority_result_key.clone())
+                .or_default()
+                .authorization_progress = Some(progress);
         }
-        if opening_pending {
-            self.query
-                .pending_opening_binding_views
-                .insert(binding_view_key);
-        } else {
-            self.query
-                .pending_opening_binding_views
-                .remove(&binding_view_key);
-        }
-        let generation = self
+        self.query
+            .authority_results
+            .entry(authority_result_key.clone())
+            .or_default()
+            .pending_opening = opening_pending;
+        let state = self
             .query
-            .applied_view_update_generations
-            .entry(binding_view_key)
+            .authority_results
+            .entry(authority_result_key.clone())
             .or_default();
-        *generation = generation.wrapping_add(1);
+        state.applied_view_update_generation = state.applied_view_update_generation.wrapping_add(1);
+        // In the current wire contract, a non-deferred reset is the single
+        // frame that claims a complete replacement frontier.  Do not infer an
+        // empty closure from an opened result container or an incremental
+        // frame: receiver-local maintained graphs must wait for this marker.
+        // The receiver validates the exact compiler-owned coverage set before
+        // it installs the replacement, so this marker never makes a partial
+        // closure publishable.
+        if reset_result_set && !defer_settlement && !opening_pending {
+            state.source_closure = crate::node::AuthoritySourceClosure::Claimed {
+                generation: state.applied_view_update_generation,
+            };
+            state.source_incrementals.clear();
+        } else if !defer_settlement && !opening_pending {
+            // Normal source updates retain their predecessor closure and are
+            // applied as descriptor-bound runtime input deltas. They must not
+            // be re-labelled as a complete reset merely because an authority
+            // state map happens to contain the current closure.
+            let adds: BTreeSet<_> = persisted_fact_adds
+                .iter()
+                .filter(|fact| fact.is_peer_source_closure_fact())
+                .cloned()
+                .collect();
+            let removes: BTreeSet<_> = persisted_fact_removes
+                .iter()
+                .filter(|fact| fact.is_peer_source_closure_fact())
+                .cloned()
+                .collect();
+            if !adds.is_empty() || !removes.is_empty() {
+                let crate::node::AuthoritySourceClosure::Claimed {
+                    generation: predecessor_generation,
+                } = state.source_closure
+                else {
+                    return Err(Error::InvalidStoredValue(
+                        "incremental source closure arrived before a reset closure",
+                    ));
+                };
+                let generation = state.applied_view_update_generation;
+                state
+                    .source_incrementals
+                    .push(crate::node::AuthoritySourceIncremental {
+                        predecessor_generation,
+                        generation,
+                        adds,
+                        removes,
+                    });
+                state.source_closure = crate::node::AuthoritySourceClosure::Claimed { generation };
+            }
+        }
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=view_update_applied node={:?} reset={reset_result_set} deferred={defer_settlement} generation={} facts={} closure={:?}",
+                self.node_uuid,
+                state.applied_view_update_generation,
+                state.settled_program_facts.len(),
+                state.source_closure,
+            );
+        }
+        // Persist the closure receipt only after this frame has established
+        // whether it is an exact reset or a successor delta. Persisting
+        // earlier would leave a reopened receiver with facts but no claimed
+        // generation, forcing it to treat a durable exact closure as pending.
+        if !defer_settlement && !opening_pending {
+            self.persist_known_state_fact_for_authority_result(
+                authority_result_key,
+                settled_through,
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -2142,7 +2608,38 @@ where
             contribution_merge,
             ..
         } = stored_tx.tx.clone();
-        let scope = if usize::try_from(n_total_writes).ok() == Some(tx_versions.len()) {
+        // A structured result can reach the same immutable version through
+        // more than one retained fact (for example, a root's nested relation
+        // and the relation's sender witness). A wire bundle describes a set of
+        // row versions, not those traversal paths: canonicalize it before
+        // deriving its declared view-scoped cardinality.
+        let mut versions = BTreeMap::new();
+        for version in tx_versions {
+            // A maintained terminal may use a current-row source projected for
+            // query evaluation, but a VersionRecord is replicated history, not
+            // query output. Resolve its identity back to the stored authored
+            // row before crossing the wire boundary (INV-DATA-16/18,
+            // INV-SYNC-16, and C.3's byte-fidelity rule).
+            let canonical = if source == MaintainedBundleVersionSource::ExactStorage {
+                version.clone()
+            } else {
+                self.canonical_history_version_for_maintained_witness(version)
+                    .await?
+            };
+            let record = self.version_record_from_row(&canonical)?;
+            let key = version_bundle_record_key(&record);
+            match versions.get(&key) {
+                Some(existing) if existing != &record => {
+                    return Err(Error::ConflictingCommitUnit(tx_id));
+                }
+                Some(_) => {}
+                None => {
+                    versions.insert(key, record);
+                }
+            }
+        }
+        let versions = versions.into_values().collect::<Vec<_>>();
+        let scope = if usize::try_from(n_total_writes).ok() == Some(versions.len()) {
             crate::protocol::VersionBundleScope::CompleteTransaction
         } else {
             crate::protocol::VersionBundleScope::ViewScoped
@@ -2152,7 +2649,7 @@ where
             kind,
             n_total_writes: match scope {
                 crate::protocol::VersionBundleScope::CompleteTransaction => n_total_writes,
-                crate::protocol::VersionBundleScope::ViewScoped => tx_versions
+                crate::protocol::VersionBundleScope::ViewScoped => versions
                     .len()
                     .try_into()
                     .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?,
@@ -2166,21 +2663,6 @@ where
             user_metadata_json,
             contribution_merge,
         };
-        let mut versions = Vec::with_capacity(tx_versions.len());
-        for version in tx_versions {
-            // A maintained terminal may use a current-row source projected for
-            // query evaluation, but a VersionRecord is replicated history, not
-            // query output. Resolve its identity back to the stored authored
-            // row before crossing the wire boundary (INV-DATA-16/18,
-            // INV-SYNC-16, and C.3's byte-fidelity rule).
-            let canonical = if source == MaintainedBundleVersionSource::ExactStorage {
-                version.clone()
-            } else {
-                self.canonical_history_version_for_maintained_witness(version)
-                    .await?
-            };
-            versions.push(self.version_record_from_row(&canonical)?);
-        }
         Ok(VersionBundle {
             tx: tx_payload,
             versions,

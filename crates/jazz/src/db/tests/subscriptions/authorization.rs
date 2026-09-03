@@ -2,6 +2,28 @@
 
 use super::*;
 
+struct TrustedBackendRelayTransport {
+    inner: Box<dyn crate::db::Transport>,
+}
+
+impl crate::db::Transport for TrustedBackendRelayTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), crate::wire::TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<crate::db::ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        true
+    }
+}
+
 #[test]
 fn maintained_physical_point_subscriptions_keep_policy_scopes_live() {
     let schema = owner_read_schema();
@@ -1014,10 +1036,21 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i"), ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    let mut remote = prepared_subscribe(
+        &client,
+        &Query::from("res_i"),
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            local_updates: LocalUpdates::Deferred,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
+    assert!(opened_rows(block_on(remote.next_event()).unwrap()).is_empty());
     while let Some(event) = subscription.try_next_event() {
         if let SubscriptionEvent::Delta {
             added,
@@ -1044,6 +1077,8 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     client.tick().unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![resource]);
+    let (remote_added, _, _) = delta_rows(block_on(remote.next_event()).unwrap());
+    assert_eq!(row_ids(&remote_added), vec![resource]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
@@ -1057,7 +1092,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(remote.next_event()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -1065,6 +1100,22 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
             .into_iter()
             .map(|row| row.row_uuid)
             .collect::<Vec<_>>(),
+        vec![resource]
+    );
+    while let Some(event) = subscription.try_next_event() {
+        if let SubscriptionEvent::Delta { removed, .. } = event {
+            assert!(
+                removed.is_empty(),
+                "scope withdrawal is not a local-first revocation"
+            );
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(
+            &client,
+            &Query::from("res_i"),
+            ReadOpts::default()
+        )),
         vec![resource]
     );
 }
@@ -1169,9 +1220,17 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
         prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
+    let remote_opts = ReadOpts {
+        tier: DurabilityTier::Edge,
+        local_updates: LocalUpdates::Deferred,
+        ..ReadOpts::default()
+    };
+    let mut remote =
+        prepared_subscribe(&client, &Query::from("resources"), remote_opts.clone()).unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
+    assert!(opened_rows(block_on(remote.next_event()).unwrap()).is_empty());
     while let Some(event) = subscription.try_next_event() {
         let (added, updated, removed) = match event {
             SubscriptionEvent::Delta {
@@ -1209,6 +1268,18 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
+    let (remote_added, remote_updated, remote_removed) =
+        delta_rows(block_on(remote.next_event()).unwrap());
+    assert_eq!(row_ids(&remote_added), vec![resource]);
+    assert!(remote_updated.is_empty());
+    assert!(remote_removed.is_empty());
+    let mut remote_late =
+        prepared_subscribe(&client, &Query::from("resources"), remote_opts).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(remote_late.next_event()).unwrap())),
+        vec![resource]
+    );
+
     let mut late_subscription =
         prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
     assert_eq!(
@@ -1231,7 +1302,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     server.tick().unwrap();
     client.tick().unwrap();
     let (added, updated, removed) = delta_rows(
-        subscription
+        remote
             .try_next_event()
             .expect("identity-key revoke must publish during the completed tick cycle"),
     );
@@ -1245,7 +1316,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
         vec![resource]
     );
     let (added, updated, removed) = delta_rows(
-        late_subscription
+        remote_late
             .try_next_event()
             .expect("late subscription must publish the identity-key revoke"),
     );
@@ -1256,6 +1327,23 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
             .into_iter()
             .map(|row| row.row_uuid)
             .collect::<Vec<_>>(),
+        vec![resource]
+    );
+    // Authority withdrawal is not a deletion of locally cached content.
+    for local in [&mut subscription, &mut late_subscription] {
+        while let Some(event) = local.try_next_event() {
+            let (added, updated, removed) = delta_rows(event);
+            assert!(added.is_empty());
+            assert!(updated.is_empty());
+            assert!(removed.is_empty());
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(
+            &client,
+            &Query::from("resources"),
+            ReadOpts::default()
+        )),
         vec![resource]
     );
 }
@@ -1308,12 +1396,24 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i_child"), ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    let mut remote = prepared_subscribe(
+        &client,
+        &Query::from("res_i_child"),
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            local_updates: LocalUpdates::Deferred,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![child]);
+    let remote_open = block_on(remote.next_event()).unwrap();
+    assert_eq!(row_ids(&opened_rows(remote_open)), vec![child]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
@@ -1327,7 +1427,7 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(remote.next_event()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -1335,6 +1435,22 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
             .into_iter()
             .map(|row| row.row_uuid)
             .collect::<Vec<_>>(),
+        vec![child]
+    );
+    while let Some(event) = subscription.try_next_event() {
+        if let SubscriptionEvent::Delta { removed, .. } = event {
+            assert!(
+                removed.is_empty(),
+                "scope withdrawal must not retract cached local-first content"
+            );
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(
+            &client,
+            &Query::from("res_i_child"),
+            ReadOpts::default()
+        )),
         vec![child]
     );
 }
@@ -1799,6 +1915,14 @@ fn seed_recursive_reachable_read_fixture(
     server: &CoreDb,
     member: AuthorSubject,
 ) -> (RowUuid, RowUuid) {
+    seed_recursive_reachable_read_fixture_with_group_entries(server, member, 42)
+}
+
+fn seed_recursive_reachable_read_fixture_with_group_entries(
+    server: &CoreDb,
+    member: AuthorSubject,
+    group_entry_count: u8,
+) -> (RowUuid, RowUuid) {
     let direct_doc = row(0xd1);
     let inherited_doc = row(0xd2);
     let hidden_doc = row(0xd3);
@@ -1854,7 +1978,7 @@ fn seed_recursive_reachable_read_fixture(
             resource_access_test_cells(hidden_doc, hidden_team, false),
         )
         .unwrap();
-    for i in 0..42 {
+    for i in 0..group_entry_count {
         let member = if i == 0 { member_team } else { parent_team };
         let target = parent_team;
         server
@@ -1907,7 +2031,12 @@ fn served_subscription_rows_for_author_with_claims(
         .set_test_provider_claims(author, claims.clone());
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, author);
+    // This direct test models an authenticated reader, not a trusted backend
+    // connection.  The provider cache above supports local test setup but is
+    // not wire/session admission evidence; bind the exact claims that the
+    // policy is expected to evaluate for this subscription.
+    let _subscriber =
+        server.accept_subscriber_with_claims(server_transport, author, claims.clone());
     server
         .node()
         .borrow_mut()
@@ -1976,36 +2105,106 @@ fn served_many_subscription_rows_for_author(
         subscriptions.push(((*table).to_owned(), subscription));
     }
 
-    client.tick().unwrap();
-    server.tick().unwrap();
-    client.tick().unwrap();
-
-    subscriptions
-        .into_iter()
-        .map(|(table, mut subscription)| {
-            let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
-            assert!(updated.is_empty());
-            assert!(removed.is_empty());
-            (table, row_ids(&added))
-        })
+    // A covered-input receipt is installed source-by-source, then its local
+    // receiver graph ticks and emits the terminal reset.  Do not turn a
+    // missing event after one transport round into an unbounded `next_raw`
+    // wait: multiple subscriptions may receive their independent closures in
+    // separate turns.  This bound is deliberately part of the fixture so a
+    // receipt/wake regression fails diagnostically rather than hanging the
+    // whole authorization suite.
+    let mut rows = tables
+        .iter()
+        .map(|table| ((*table).to_owned(), BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut received = BTreeSet::new();
+    for _ in 0..20 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        for (table, subscription) in &mut subscriptions {
+            while let Some(event) = subscription.try_next_event() {
+                let SubscriptionEvent::Delta {
+                    reset,
+                    added,
+                    updated,
+                    removed,
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                received.insert(table.clone());
+                let table_rows = rows.get_mut(table).expect("tracked subscription table");
+                if reset {
+                    table_rows.clear();
+                }
+                for row in removed {
+                    table_rows.remove(&row.row_uuid);
+                }
+                for row in added.into_iter().chain(updated) {
+                    table_rows.insert(row.row_uuid());
+                }
+            }
+        }
+        if received.len() == subscriptions.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        received.len(),
+        subscriptions.len(),
+        "all subscriptions must receive a bounded covered-input terminal receipt; missing={:?}",
+        tables
+            .iter()
+            .filter(|table| !received.contains(**table))
+            .collect::<Vec<_>>()
+    );
+    rows.into_iter()
+        .map(|(table, rows)| (table, rows.into_iter().collect()))
         .collect()
 }
 
-fn served_group_entry_rows_via_relay(
+fn served_table_rows_via_relay(
     schema: &JazzSchema,
     server: &CoreDb,
     author: AuthorSubject,
+    table: &str,
 ) -> (Vec<RowUuid>, usize, usize) {
     let relay = open_db(0x71, AuthorSubject::SYSTEM, schema);
     let client = open_db(0x72, author, schema);
+    let mut downstream_claims = test_provider_claims(author);
+    // This extra admitted claim is irrelevant to the policy itself. It proves
+    // the relay forwards this connection's immutable snapshot rather than
+    // reconstructing claims from the client node's author-keyed cache.
+    downstream_claims.insert(
+        crate::query::provider_claim_key("relay_fixture"),
+        Value::String("delegated".to_owned()),
+    );
     let (relay_transport, core_transport) = duplex();
-    let _relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
-    let _core_subscriber = server.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
+    let _relay_upstream = crate::db::block_on(relay.connect_upstream(Box::new(
+        TrustedBackendRelayTransport {
+            inner: relay_transport,
+        },
+    )));
+    // A relay sends its downstream session's immutable policy binding to its
+    // upstream. Model the same scope-isolated admission that the serving
+    // boundary performs in production: a generic SYSTEM/trusted link cannot
+    // self-assert this subject's claims.
+    let core_subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        core_transport,
+        author,
+        downstream_claims.clone(),
+        1,
+    );
     let (client_transport, relay_sub_transport) = duplex();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _relay_subscriber = relay.accept_subscriber(relay_sub_transport, author);
+    // The relay is the downstream client's authentication boundary.  Its
+    // receiving connection therefore gets the actual session claims instead
+    // of the empty claims used by the generic test transport helper.
+    let _relay_subscriber =
+        relay.accept_subscriber_with_claims(relay_sub_transport, author, downstream_claims.clone());
 
-    let query = Query::from("group_entry");
+    let query = Query::from(table);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     let mut rows = BTreeSet::new();
@@ -2034,15 +2233,94 @@ fn served_group_entry_rows_via_relay(
             }
         }
     }
-    let client_query = client.prepare_query(&Query::from("group_entry")).unwrap();
+    let client_query = client.prepare_query(&Query::from(table)).unwrap();
     let client_one_shot = block_on(client.all(&client_query, ReadOpts::default()))
         .unwrap()
         .len();
-    let relay_query = relay.prepare_query(&Query::from("group_entry")).unwrap();
+    let relay_query = relay.prepare_query(&Query::from(table)).unwrap();
     let relay_one_shot = block_on(relay.all(&relay_query, ReadOpts::default()))
         .unwrap()
         .len();
+    let expected_delegated_binding = (author, downstream_claims);
+    let connection = core_subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        panic!("relay's core-facing connection must be a subscriber link");
+    };
+    assert!(
+        state
+            .coverage_groups
+            .values()
+            .any(|group| group.policy_binding == expected_delegated_binding),
+        "the core must retain the downstream session's delegated policy binding"
+    );
     (rows.into_iter().collect(), client_one_shot, relay_one_shot)
+}
+
+/// A browser worker is a relay, but not a trusted backend: its upstream
+/// session is the same authenticated session as its foreground client.  It
+/// must therefore receive the authority's direct policy binding without
+/// trying to forward either delegated-session or SessionClaims frames.
+fn served_table_rows_via_ordinary_browser_worker(
+    schema: &JazzSchema,
+    server: &CoreDb,
+    author: AuthorSubject,
+    table: &str,
+) -> Vec<RowUuid> {
+    let worker = open_db(0x73, author, schema);
+    let client = open_db(0x74, author, schema);
+    let claims = test_provider_claims(author);
+    let (worker_transport, core_transport) = duplex();
+    let _worker_upstream = crate::db::block_on(worker.connect_upstream(worker_transport));
+    let core_subscriber =
+        server.accept_subscriber_with_claims(core_transport, author, claims.clone());
+    let (client_transport, worker_sub_transport) = duplex();
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _worker_subscriber =
+        worker.accept_subscriber_with_claims(worker_sub_transport, author, claims.clone());
+
+    let query = Query::from(table);
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    let mut rows = BTreeSet::new();
+    for _ in 0..20 {
+        client.tick().unwrap();
+        worker.tick().unwrap();
+        server.server.tick().unwrap();
+        worker.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                updated,
+                removed,
+                ..
+            } = event
+            {
+                if reset {
+                    rows.clear();
+                }
+                for row in removed {
+                    rows.remove(&row.row_uuid);
+                }
+                for row in added.into_iter().chain(updated) {
+                    rows.insert(row.row_uuid());
+                }
+            }
+        }
+    }
+    let connection = core_subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        panic!("browser worker's core-facing connection must be a subscriber link");
+    };
+    assert!(
+        state
+            .coverage_groups
+            .values()
+            .any(|group| group.policy_binding == (author, claims.clone())),
+        "the core must use the worker upstream's authenticated session binding"
+    );
+    rows.into_iter().collect()
 }
 
 #[test]
@@ -2078,11 +2356,46 @@ fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity(
         (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>()
     );
     let (relay_rows, client_one_shot, relay_one_shot) =
-        served_group_entry_rows_via_relay(&schema, &server, member);
+        served_table_rows_via_relay(&schema, &server, member, "group_entry");
     assert_eq!(relay_one_shot, 42);
     assert_eq!(client_one_shot, 42);
     assert_eq!(
         relay_rows,
         (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>()
+    );
+    let (spy_relay_rows, spy_client_one_shot, spy_relay_one_shot) =
+        served_table_rows_via_relay(&schema, &server, spy, "res_a");
+    assert_eq!(spy_relay_one_shot, 0);
+    assert_eq!(spy_client_one_shot, 0);
+    assert!(spy_relay_rows.is_empty());
+
+    assert_eq!(
+        served_table_rows_via_ordinary_browser_worker(&schema, &server, member, "group_entry"),
+        (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>(),
+        "an ordinary browser-worker relay receives its authenticated session's authority view"
+    );
+}
+
+/// Keep the scoped covered-input reset path bounded on the same recursive
+/// policy topology.  The larger fixture above exercises throughput; this
+/// deliberately small variant catches a receipt/reopen feedback cycle without
+/// making the diagnosis depend on forty-two independent history witnesses.
+#[test]
+fn recursive_reachable_scoped_receiver_settles_once_on_small_frontier() {
+    let schema = benchmark_shaped_recursive_reachable_read_schema();
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x12; 16]);
+    let (direct_doc, inherited_doc) =
+        seed_recursive_reachable_read_fixture_with_group_entries(&server, member, 2);
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "res_a"),
+        vec![direct_doc, inherited_doc],
+        "the recursive policy result must settle from its covered closure"
+    );
+    assert_eq!(
+        served_table_rows_via_ordinary_browser_worker(&schema, &server, member, "group_entry"),
+        vec![row(0xc1), row(0xc2)],
+        "a worker relay must forward one scoped closure, not repeatedly reopen it"
     );
 }
