@@ -394,14 +394,20 @@ impl WebSocketTransport {
         wake: Arc<dyn Fn() + Send + Sync>,
         bootstrap_catalogue: bool,
     ) -> Result<Self, WebSocketClientError> {
+        let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = connect_async_with_config(url, Some(client_websocket_config()), false)
-            .await
-            .map_err(WebSocketClientError::Connect)?;
+        let (mut ws, _) = tokio::time::timeout_at(
+            deadline,
+            connect_async_with_config(url, Some(client_websocket_config()), false),
+        )
+        .await
+        .map_err(|_| WebSocketClientError::HandshakeTimeout)?
+        .map_err(WebSocketClientError::Connect)?;
 
         let prelude = encode_prelude(peer_identity, auth, bootstrap_catalogue)?;
-        ws.send(Message::Binary(prelude.into()))
+        tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
+            .map_err(|_| WebSocketClientError::HandshakeTimeout)?
             .map_err(WebSocketClientError::Send)?;
 
         let client_endpoint = WireAuthorityEndpoint {
@@ -421,11 +427,12 @@ impl WebSocketTransport {
         let encoded_hello = encode_frame(&hello).map_err(WebSocketClientError::EncodeHello)?;
         let batch = postcard::to_allocvec(&vec![encoded_hello])
             .map_err(WebSocketClientError::EncodeHello)?;
-        ws.send(Message::Binary(batch.into()))
+        tokio::time::timeout_at(deadline, ws.send(Message::Binary(batch.into())))
             .await
+            .map_err(|_| WebSocketClientError::HandshakeTimeout)?
             .map_err(WebSocketClientError::Send)?;
 
-        let server_hello = receive_server_hello(&mut ws).await?;
+        let server_hello = receive_server_hello(&mut ws, deadline).await?;
         let mut negotiated = negotiate_wire(&server_hello, current_wire_features())
             .map_err(WebSocketClientError::Negotiation)?;
         // Receipt semantics require an admitted authority endpoint, not merely
@@ -646,13 +653,13 @@ async fn receive_server_hello(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
+    deadline: tokio::time::Instant,
 ) -> Result<WireHello, WebSocketClientError> {
-    let message = tokio::time::timeout(WS_CLIENT_HANDSHAKE_TIMEOUT, ws.next())
+    let message = tokio::time::timeout_at(deadline, ws.next())
         .await
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
         .ok_or(WebSocketClientError::ClosedDuringHandshake)?
         .map_err(WebSocketClientError::Receive)?;
-
     let Message::Binary(bytes) = message else {
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     };

@@ -14,6 +14,7 @@ use jazz::tools::{AppContext, ClientStorage, JazzClient};
 use jazz::wire::WireTransport as _;
 use jazz_native_transport::{NativeWebSocketConnector, WebSocketClientError, WebSocketTransport};
 use jazz_server::{AuthConfig, BuiltServer, ServerBuilder, ServerState, StorageBackend};
+use tokio::sync::oneshot;
 
 async fn serve(builder: ServerBuilder) -> (String, tokio::task::JoinHandle<()>) {
     let built = builder
@@ -59,6 +60,150 @@ fn transport_auth(secret: &str) -> jazz::tools::websocket_prelude_auth::AuthConf
 
 fn native_connector() -> Arc<NativeWebSocketConnector> {
     Arc::new(NativeWebSocketConnector)
+}
+
+/// Accept the TCP connection but never answer its HTTP upgrade request.
+async fn serve_stalled_http_upgrade() -> (String, tokio::task::JoinHandle<()>, oneshot::Receiver<()>)
+{
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalled upgrade listener");
+    let address = listener.local_addr().expect("stalled listener address");
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept stalled upgrade");
+        let _ = accepted_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    (format!("http://{address}"), task, accepted_rx)
+}
+
+/// Spend most of the connection budget before completing the HTTP upgrade,
+/// then keep the WebSocket open without returning the wire hello.
+async fn serve_stalled_server_hello() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    oneshot::Receiver<()>,
+    oneshot::Receiver<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalled hello listener");
+    let address = listener
+        .local_addr()
+        .expect("stalled hello listener address");
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let (upgraded_tx, upgraded_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept stalled hello");
+        let _ = accepted_tx.send(());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete delayed websocket upgrade");
+        let _ = upgraded_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    (format!("http://{address}"), task, accepted_rx, upgraded_rx)
+}
+
+#[tokio::test]
+async fn stalled_http_upgrade_reports_handshake_timeout() {
+    let app_id = AppId::from_name("adapter-stalled-http-upgrade");
+    let (url, task, accepted) = serve_stalled_http_upgrade().await;
+    let mut connection = tokio::spawn(async move {
+        WebSocketTransport::connect(
+            url,
+            app_id,
+            jazz::ids::AuthorSubject::SYSTEM,
+            transport_auth("secret"),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), accepted)
+        .await
+        .expect("client opens loopback TCP connection")
+        .expect("stalled upgrade server remains alive");
+    let result = match tokio::time::timeout(Duration::from_secs(6), &mut connection).await {
+        Ok(result) => result.expect("connector task"),
+        Err(_) => {
+            connection.abort();
+            task.abort();
+            panic!("establishment timeout remains bounded");
+        }
+    };
+    task.abort();
+
+    let error = result.expect_err("stalled upgrade must fail");
+    assert!(
+        matches!(&error, WebSocketClientError::HandshakeTimeout),
+        "stalled upgrade must report typed handshake timeout: {error}"
+    );
+}
+
+#[tokio::test]
+async fn stalled_server_hello_uses_the_original_establishment_deadline() {
+    let app_id = AppId::from_name("adapter-stalled-server-hello");
+    let (url, task, accepted, upgraded) = serve_stalled_server_hello().await;
+    let mut connection = tokio::spawn(async move {
+        WebSocketTransport::connect(
+            url,
+            app_id,
+            jazz::ids::AuthorSubject::SYSTEM,
+            transport_auth("secret"),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), accepted)
+        .await
+        .expect("client opens loopback TCP connection")
+        .expect("stalled hello server remains alive");
+    tokio::time::timeout(Duration::from_secs(4), upgraded)
+        .await
+        .expect("server completes delayed WebSocket upgrade")
+        .expect("stalled hello server remains alive");
+
+    let result = match tokio::time::timeout(Duration::from_secs(3), &mut connection).await {
+        Ok(result) => result.expect("connector task"),
+        Err(_) => {
+            connection.abort();
+            task.abort();
+            panic!("server hello must share the original establishment deadline");
+        }
+    };
+    task.abort();
+
+    let error = result.expect_err("missing server hello must fail");
+    assert!(
+        matches!(&error, WebSocketClientError::HandshakeTimeout),
+        "stalled server hello must report typed handshake timeout: {error}"
+    );
+}
+
+#[tokio::test]
+async fn refused_tcp_connection_remains_connect_error() {
+    // Reserve a loopback port, then release it without ever accepting. This
+    // distinguishes an immediate TCP failure from the bounded HTTP upgrade.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind refusal test listener");
+    let address = listener
+        .local_addr()
+        .expect("refusal test listener address");
+    drop(listener);
+
+    let error = WebSocketTransport::connect(
+        format!("http://{address}"),
+        AppId::from_name("adapter-refused-tcp-connection"),
+        jazz::ids::AuthorSubject::SYSTEM,
+        transport_auth("secret"),
+    )
+    .await
+    .expect_err("closed loopback port must refuse TCP connection");
+    assert!(
+        matches!(error, WebSocketClientError::Connect(_)),
+        "immediate TCP refusal must retain its connect classification: {error}"
+    );
 }
 
 #[tokio::test]
