@@ -346,13 +346,24 @@ only as typed non-causal provenance.
 Every non-root mergeable branch version carries one canonical **branch write
 intent v1**, keyed by its stable physical table identity, authored schema,
 `RowUuid`, and exact head key. The intent is sorted and unique by that exact
-version coordinate. It distinguishes a genuinely absent exact-head insert, an
+version coordinate. It distinguishes a parentless exact-head insert, an
 exact-head update, and a branch-view copy. Missing, duplicate, malformed, or
 mismatched intent rejects the transaction; a sender cannot relabel a view copy
 as an insert by omitting optional provenance. The authority validates branch
 keys against the authored physical table before storage, so hostile unknown,
 missing, wrongly typed, or reordered components are malformed input rather
 than codec failures.
+
+An exact-head insert describes the author's independent creation, not an
+authority-side absence precondition. Two offline writers may insert the same
+`RowUuid` into the same exact branch; both admissible writes contribute to the
+ordinary merge result, just as they do outside a branch. Arrival order does not
+turn the second insert into an automatic conflict or a compare-and-set failure.
+This does not bypass permissions: when the authority knows existing content at
+that head, the ordinary read-for-write and update policy checks still apply.
+The insert intent must remain parentless and bound to its exact physical
+coordinate. Branch-view copy evidence retains its separate source validation
+requirements below.
 
 For a mergeable update or existing-target upsert that creates that first head
 overlay, its branch-write intent carries **branch-view copy evidence v1**. It names the

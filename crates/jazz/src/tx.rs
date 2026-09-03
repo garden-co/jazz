@@ -89,7 +89,8 @@ pub struct BranchWriteIntent {
 /// The authority-verifiable meaning of a branch-local write.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum BranchWriteOperation {
-    /// A genuinely new row at this exact physical head.
+    /// A parentless exact-head write. Concurrent inserts may already exist
+    /// when it reaches the authority; this is not an absence/CAS precondition.
     ExactHeadInsert,
     /// A write replacing an already-present exact head row.
     ExactHeadUpdate,

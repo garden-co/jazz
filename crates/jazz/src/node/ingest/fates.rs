@@ -504,9 +504,9 @@ where
                             == Some(intent.physical_table_id)
                     })
                     .collect::<Vec<_>>();
-                let Some(version) = matching_versions.first().copied() else {
+                if matching_versions.is_empty() {
                     return Ok(false);
-                };
+                }
                 match &intent.operation {
                     crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence) => {
                         if matching_versions.iter().any(|version| {
@@ -526,28 +526,15 @@ where
                         }
                     }
                     crate::tx::BranchWriteOperation::ExactHeadInsert => {
+                        // This classifies the author's parentless write, not
+                        // an absence precondition at admission. Independent
+                        // offline inserts into the same head merge normally.
+                        // The ordinary policy checks below still require read
+                        // and update permission if an existing head is known.
                         if matching_versions
                             .iter()
                             .any(|version| !version.parents().is_empty())
                         {
-                            return Ok(false);
-                        }
-                        let (content, deletions) = self
-                            .branch_winners_for_schema(
-                                version.table(),
-                                version.schema_version(),
-                                DurabilityTier::Local,
-                                version.branch_key(),
-                                None,
-                            )
-                            .await?;
-                        let existing = content
-                            .get(&version.row_uuid())
-                            .into_iter()
-                            .chain(deletions.get(&version.row_uuid()))
-                            .map(|winner| self.version_tx_id(winner))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        if existing.into_iter().any(|winner| winner != tx.tx_id) {
                             return Ok(false);
                         }
                     }

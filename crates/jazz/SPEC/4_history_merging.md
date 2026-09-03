@@ -92,6 +92,14 @@ content version with the same sorted parent set already exists (`INV-HIST-5`).
 The merge version dominates all of its parent heads and becomes the current
 content winner when present and accepted (`INV-HIST-6`).
 
+Edges reconcile concurrent mergeable writes as they admit them, including
+independent inserts of the same row ID. An edge's merge is accepted at Edge
+durability and has no global timestamp. Core must not be the first place where
+concurrency already observed by one edge is reconciled: it merges only the
+concurrent heads that remain across edge publications, then establishes Global
+durability. Replaying an edge's already reconciled frontier must not create a
+redundant merge of that frontier.
+
 The cells of a merge version are computed per column. The default strategy
 (`MergeStrategy::Lww`) fills each column independently: it takes the value from
 the highest-sort-key head that sets that column; if no head sets it, it falls

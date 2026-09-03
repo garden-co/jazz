@@ -45,6 +45,63 @@ fn immediate_branch_commit_unit_matches_durable_replay() {
 }
 
 #[test]
+fn concurrent_branch_inserts_merge_without_bypassing_read_or_update_policy() {
+    for (can_read, can_update) in [(true, true), (false, true), (true, false)] {
+        let policy = |allowed| if allowed { PublicPolicyExpr::True } else { PublicPolicyExpr::False };
+        let schema = build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(public_all_policies()
+                        .with_select(policy(can_read))
+                        .with_update(Some(policy(can_update)), PublicPolicyExpr::True)),
+            ),
+        );
+        let (_left_dir, mut left) = open_node_with_schema(node(0xb5), schema.clone());
+        let (_right_dir, mut right) = open_node_with_schema(node(0xb6), schema.clone());
+        let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0xb7), schema);
+        let shared_row = row(0xbd);
+        let commit = |title| MergeableCommit::new("todos", shared_row, 10)
+            .branch(branch_selector(0xa4))
+            .made_by(user(0xb8))
+            .cells(BTreeMap::from([("title".to_owned(), v(title))]));
+        let (left_tx, left_unit) = left.commit_mergeable_unit_settled(commit("left")).unwrap();
+        let (right_tx, right_unit) = right.commit_mergeable_unit_settled(commit("right")).unwrap();
+        let first = core.apply_sync_message_settled(left_unit).unwrap();
+        assert!(first.iter().any(|receipt| matches!(receipt,
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == left_tx
+        )), "first insert must be admitted without requiring prior read access: {first:?}");
+        let expected = if can_read && can_update {
+            Fate::Accepted
+        } else {
+            Fate::Rejected(RejectionReason::AuthorizationDenied)
+        };
+        let second = core.apply_sync_message_settled(right_unit).unwrap();
+        assert!(second.iter().any(|receipt| matches!(receipt,
+            SyncMessage::FateUpdate { tx_id, fate, .. } if *tx_id == right_tx && *fate == expected
+        )), "read={can_read}, update={can_update}: {second:?}");
+        if expected == Fate::Accepted {
+            let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+            assert_eq!(frontier.len(), 1);
+            let heads = merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap();
+            assert_eq!(heads.len(), 1, "both admitted inserts must produce one merge head");
+            let merge_tx = *heads.iter().next().unwrap();
+            assert_ne!(merge_tx, left_tx);
+            assert_ne!(merge_tx, right_tx);
+            let SyncMessage::CommitUnit { versions, .. } = core.commit_unit_for(merge_tx).unwrap() else {
+                panic!("expected merge commit unit");
+            };
+            assert_eq!(versions.len(), 1);
+            assert_eq!(versions[0].parents(), &[left_tx, right_tx]);
+        } else {
+            assert!(core.query_versions_for_tx(right_tx).unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
 fn merge_heads_match_history_for_first_and_subsequent_authored_versions() {
     let schema = two_column_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0xa0), schema);
