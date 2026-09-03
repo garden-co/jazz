@@ -5146,4 +5146,15 @@ mod authority_storage_codec_tests {
         }
         assert!(program_fact_from_storage_bytes(&postcard::to_allocvec(&fact).unwrap()).is_err());
     }
+    #[test]
+    fn output_root_membership_codec_round_trips_with_appended_tag() {
+        let fact = ProgramFactEntry::OutputRootMembership(OutputRootMembershipEntry {
+            member: fixture_member(),
+        });
+        let encoded = program_fact_storage_bytes(&fact).unwrap();
+        assert_eq!(&encoded[..4], PROGRAM_FACT_STORAGE_MAGIC);
+        assert_eq!(encoded[4], PROGRAM_FACT_STORAGE_VERSION);
+        assert_eq!(encoded[5], 15);
+        assert_eq!(program_fact_from_storage_bytes(&encoded).unwrap(), fact);
+    }
 }
