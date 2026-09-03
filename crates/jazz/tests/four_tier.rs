@@ -378,13 +378,12 @@ fn refresh(
     peer: &mut PeerState,
 ) {
     install_uuid_sub_claim(upstream, peer.identity());
-    let subscription = whole_table_key(&schema(), "todos");
-    // This test harness models a system-scoped core/edge replication link.
-    // Relay serving normally receives this immutable binding from admission;
-    // keep the direct helper equally explicit rather than inferring SYSTEM
-    // from the relay transport role.
-    peer.set_subscription_policy_binding(subscription, (peer.identity(), BTreeMap::new()));
-    let update = block_on(peer.current_rows_update(upstream, "todos")).unwrap();
+    let update = block_on(common::direct_query_update(
+        upstream,
+        peer,
+        &schema(),
+        "todos",
+    ));
     apply_message(downstream, update);
 }
 
@@ -472,6 +471,21 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
         }
     }
 
+    for (receiver, identity) in [
+        (&mut edge, AuthorSubject::SYSTEM),
+        (&mut worker, AuthorSubject::SYSTEM),
+        (&mut ui, ui_author),
+    ] {
+        block_on(common::register_direct_receiver(
+            receiver,
+            &schema,
+            "todos",
+            jazz::protocol::DelegatedSessionBinding {
+                identity,
+                claims: BTreeMap::new(),
+            },
+        ));
+    }
     refresh(&mut core, &mut edge, &mut core_to_edge);
     refresh(&mut edge, &mut worker, &mut edge_to_worker);
     refresh(&mut worker, &mut ui, &mut worker_to_ui);
@@ -616,6 +630,15 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
     // settlement makes them visible there. Do not model this as a SYSTEM
     // identity on a generic relay: an actual relay transport has no identity
     // and can serve only a server-admitted foreground binding.
+    block_on(common::register_direct_receiver(
+        &mut client,
+        &schema,
+        "todos",
+        jazz::protocol::DelegatedSessionBinding {
+            identity: client_author,
+            claims: BTreeMap::new(),
+        },
+    ));
     refresh(&mut edge, &mut client, &mut edge_to_client);
 
     let expected_all = vec![
@@ -1275,13 +1298,32 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     );
 
     let mut core_to_edge = PeerState::relay();
-    let invite_subscription = whole_table_key(&access_write_policy_schema(), "canvasInvites");
+    let invite_subscription =
+        common::direct_subscription(&schema, "canvasInvites", AuthorSubject::SYSTEM);
     core_to_edge.set_subscription_policy_binding(
         invite_subscription,
         (AuthorSubject::SYSTEM, BTreeMap::new()),
     );
-    let grant_update =
-        block_on(core_to_edge.current_rows_update(&mut core, "canvasInvites")).unwrap();
+    block_on(common::register_direct_receiver(
+        &mut edge,
+        &schema,
+        "canvasInvites",
+        jazz::protocol::DelegatedSessionBinding {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+        },
+    ));
+    let grant_shape = Query::from("canvasInvites").validate(&schema).unwrap();
+    let grant_binding = grant_shape.bind(BTreeMap::new()).unwrap();
+    let grant_update = block_on(core_to_edge.rehydrate_query_for_subscription_with_opts(
+        &mut core,
+        invite_subscription,
+        &grant_shape,
+        &grant_binding,
+        Default::default(),
+    ))
+    .unwrap()
+    .expect("synchronous fixture storage finishes initial hydration");
     apply_message(&mut edge, grant_update);
 
     let (tx_id, unit) = block_on(async {
@@ -1344,16 +1386,19 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         }
     ));
 
-    let shape = Query::from("canvases").validate(&schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
+    block_on(common::register_direct_receiver(
+        &mut core,
+        &schema,
+        "canvases",
+        jazz::protocol::DelegatedSessionBinding {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+        },
+    ));
     apply_message(
         &mut core,
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            subscription: SubscriptionKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-                read_view: Default::default(),
-            },
+            subscription: common::direct_subscription(&schema, "canvases", AuthorSubject::SYSTEM),
             settled_through: jazz::time::GlobalTime(0),
             reset_result_set: false,
             version_carriers: vec![jazz::protocol::VersionCarrier::Bundle(VersionBundle {
