@@ -596,7 +596,11 @@ mod tests {
             None
         );
         assert_eq!(
-            column_then_table.translate_table_and_column("accounts", "retired", Direction::Backward),
+            column_then_table.translate_table_and_column(
+                "accounts",
+                "retired",
+                Direction::Backward
+            ),
             Some(("users".to_string(), "retired".to_string()))
         );
 
@@ -633,7 +637,11 @@ mod tests {
             Some(("accounts".to_string(), "address".to_string()))
         );
         assert_eq!(
-            table_then_column.translate_table_and_column("accounts", "address", Direction::Backward),
+            table_then_column.translate_table_and_column(
+                "accounts",
+                "address",
+                Direction::Backward
+            ),
             Some(("users".to_string(), "email".to_string()))
         );
         assert_eq!(
@@ -645,7 +653,11 @@ mod tests {
             None
         );
         assert_eq!(
-            table_then_column.translate_table_and_column("accounts", "retired", Direction::Backward),
+            table_then_column.translate_table_and_column(
+                "accounts",
+                "retired",
+                Direction::Backward
+            ),
             Some(("users".to_string(), "retired".to_string()))
         );
     }
