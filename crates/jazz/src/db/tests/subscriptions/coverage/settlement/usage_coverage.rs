@@ -104,7 +104,7 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     client.node.set_non_durable_client();
-    let (client_transport, mut authority_transport) = duplex();
+    let (client_transport, _authority_transport) = duplex();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -119,29 +119,14 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
         )
         .unwrap();
     client.tick().unwrap();
-    let subscription = loop {
-        match authority_transport.try_recv().unwrap() {
-            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
-            _ => continue,
-        }
-    };
-    authority_transport
-        .send(SyncMessage::ViewUpdate(
-            crate::protocol::ViewUpdatePayload {
-                subscription,
-                settled_through: GlobalTime(1),
-                reset_result_set: true,
-                version_carriers: Vec::new(),
-                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
-            },
-        ))
-        .unwrap();
-    client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&attachment));
+    let propagating = client
+        .attach_query_with_opts(&prepared, ReadOpts::default())
+        .unwrap();
+    assert!(
+        client.query_attachment_is_covered(&propagating),
+        "Local-first propagation must not wait for an authority response"
+    );
 
     assert!(client.detach_connection(&upstream));
     assert!(
@@ -149,6 +134,8 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
         "Local coverage remains process-local and does not depend on authority continuity"
     );
     client.detach_query(attachment);
+    assert!(client.query_attachment_is_covered(&propagating));
+    client.detach_query(propagating);
 }
 
 #[test]

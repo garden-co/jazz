@@ -723,8 +723,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             Value::Uuid(chat.0),
         )]))
         .expect("bind normal-member message query without include");
-    // This is a durable ordinary client read, unlike the invite relay above:
-    // its public client-local selector consumes the authoritative Global view.
+    // Model a host that registered its upstream read at Global. NodeState
+    // receives that selected tier explicitly; it does not infer it from storage.
     let normal_opts = RegisterShapeOptions::default();
     register_query_shape(
         &mut normal_client,
@@ -785,7 +785,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         normal_client.client_settled_binding_view_key_for_query(
             &simple_message_shape,
             &simple_message_binding,
-            DurabilityTier::Edge,
+            normal_opts.tier,
             &ReadViewSpec::default(),
         ),
         Some(normal_simple_authority.binding_view),
@@ -796,7 +796,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             .query_rows_for_client(
                 &simple_message_shape,
                 &simple_message_binding,
-                DurabilityTier::Edge,
+                normal_opts.tier,
                 identity,
             )
             .expect("client materializes the private seed message without include")
@@ -933,7 +933,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .prepare_query_binding_for_link_in_authorization_mode(
             &message_shape,
             &message_binding,
-            DurabilityTier::Edge,
+            normal_opts.tier,
             identity,
             QueryAuthorizationMode::ClientLocal,
         )
@@ -943,7 +943,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             &local_shape,
             &local_binding,
             identity,
-            DurabilityTier::Edge,
+            normal_opts.tier,
             &ReadViewSpec::default(),
             Some(local_plan),
             QueryAuthorizationMode::ClientLocal,
@@ -957,7 +957,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .query_relation_snapshot_for_client(
             &message_shape,
             &message_binding,
-            DurabilityTier::Edge,
+            normal_opts.tier,
             identity,
             &ReadViewSpec::default(),
         )
@@ -968,12 +968,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     );
     assert_eq!(
         normal_client
-            .query_rows_for_client(
-                &message_shape,
-                &message_binding,
-                DurabilityTier::Edge,
-                identity,
-            )
+            .query_rows_for_client(&message_shape, &message_binding, normal_opts.tier, identity,)
             .expect("client materializes normal-member message include/order snapshot")
             .iter()
             .map(|row| row.row_uuid())

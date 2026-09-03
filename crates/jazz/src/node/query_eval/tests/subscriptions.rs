@@ -1137,11 +1137,15 @@ fn authority_result_key_is_explicit_and_does_not_replace_direct_edge_source() {
             DurabilityTier::Edge,
             &ReadViewSpec::default(),
         )
-        .expect("durable direct Edge reads use their upstream Global source");
+        .expect("NodeState preserves the host-selected authority tier");
     let expected_ordinary = BindingViewKey::new(
         shape.shape_id(),
         binding.binding_id(),
-        RegisterShapeOptions::default().read_view_key(),
+        RegisterShapeOptions {
+            tier: DurabilityTier::Edge,
+            ..RegisterShapeOptions::default()
+        }
+        .read_view_key(),
     );
     assert_eq!(ordinary_direct, expected_ordinary);
 

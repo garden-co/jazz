@@ -123,6 +123,7 @@ where
             &prepared.binding,
             upstream_opts,
             self.identity.author,
+            effective_read_tier(&opts) >= DurabilityTier::Edge,
         )
     }
 
@@ -146,7 +147,13 @@ where
                 upstream_opts.tier,
                 author,
             ))?;
-        self.attach_or_refresh_query_coverage(&shape, &binding, upstream_opts, author)
+        self.attach_or_refresh_query_coverage(
+            &shape,
+            &binding,
+            upstream_opts,
+            author,
+            effective_read_tier(&opts) >= DurabilityTier::Edge,
+        )
     }
 
     fn attach_or_refresh_query_coverage(
@@ -155,8 +162,8 @@ where
         binding: &Binding,
         upstream_opts: RegisterShapeOptions,
         identity: AuthorSubject,
+        requires_current_authority_receipt: bool,
     ) -> Result<QueryAttachment, Error> {
-        let requires_current_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
         let binding_view = BindingViewKey::new(
             shape.shape_id(),
             binding.binding_id(),
@@ -318,9 +325,14 @@ where
         self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
-    /// Return whether each usage-site attachment has observed a newer logical
-    /// server receipt than the one it captured during registration.
+    /// Local reads are immediately ready. For remote reads, require a newer
+    /// logical server receipt than the one captured during registration.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
+        // Propagation may register a remote stream for a Local read, but that
+        // stream must never gate evaluation against ordinary local knowledge.
+        if !attachment.requires_current_authority_receipt {
+            return true;
+        }
         let node = self.node.node.borrow();
         let active_receipts = self.node.active_authority_view_receipts.borrow();
         let has_current_authority_receipt = active_receipts.as_ref().is_some_and(|receipts| {

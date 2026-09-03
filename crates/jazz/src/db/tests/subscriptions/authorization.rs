@@ -1220,9 +1220,17 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
         prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
+    let remote_opts = ReadOpts {
+        tier: DurabilityTier::Edge,
+        local_updates: LocalUpdates::Deferred,
+        ..ReadOpts::default()
+    };
+    let mut remote =
+        prepared_subscribe(&client, &Query::from("resources"), remote_opts.clone()).unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
+    assert!(opened_rows(block_on(remote.next_event()).unwrap()).is_empty());
     while let Some(event) = subscription.try_next_event() {
         let (added, updated, removed) = match event {
             SubscriptionEvent::Delta {
@@ -1260,6 +1268,18 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
+    let (remote_added, remote_updated, remote_removed) =
+        delta_rows(block_on(remote.next_event()).unwrap());
+    assert_eq!(row_ids(&remote_added), vec![resource]);
+    assert!(remote_updated.is_empty());
+    assert!(remote_removed.is_empty());
+    let mut remote_late =
+        prepared_subscribe(&client, &Query::from("resources"), remote_opts).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(remote_late.next_event()).unwrap())),
+        vec![resource]
+    );
+
     let mut late_subscription =
         prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
     assert_eq!(
@@ -1282,7 +1302,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     server.tick().unwrap();
     client.tick().unwrap();
     let (added, updated, removed) = delta_rows(
-        subscription
+        remote
             .try_next_event()
             .expect("identity-key revoke must publish during the completed tick cycle"),
     );
@@ -1296,7 +1316,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
         vec![resource]
     );
     let (added, updated, removed) = delta_rows(
-        late_subscription
+        remote_late
             .try_next_event()
             .expect("late subscription must publish the identity-key revoke"),
     );
@@ -1307,6 +1327,23 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
             .into_iter()
             .map(|row| row.row_uuid)
             .collect::<Vec<_>>(),
+        vec![resource]
+    );
+    // Authority withdrawal is not a deletion of locally cached content.
+    for local in [&mut subscription, &mut late_subscription] {
+        while let Some(event) = local.try_next_event() {
+            let (added, updated, removed) = delta_rows(event);
+            assert!(added.is_empty());
+            assert!(updated.is_empty());
+            assert!(removed.is_empty());
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(
+            &client,
+            &Query::from("resources"),
+            ReadOpts::default()
+        )),
         vec![resource]
     );
 }
