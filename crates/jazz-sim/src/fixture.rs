@@ -548,6 +548,138 @@ where
     Ok(())
 }
 
+/// Query-control adapter for simulator transports that drive transaction
+/// admission separately. It serves the Db's real usage-site handles; commit
+/// units and other messages remain owned by the scenario's transport driver.
+pub struct DirectDbQueryServer {
+    session: jazz::protocol::DelegatedSessionBinding,
+    opened: std::collections::BTreeSet<jazz::protocol::SubscriptionKey>,
+    shapes: BTreeMap<
+        jazz::query::ShapeId,
+        (
+            jazz::query::ValidatedQuery,
+            jazz::protocol::RegisterShapeOptions,
+        ),
+    >,
+    subscriptions: BTreeMap<
+        jazz::protocol::SubscriptionKey,
+        (
+            jazz::query::ValidatedQuery,
+            jazz::query::Binding,
+            jazz::protocol::RegisterShapeOptions,
+        ),
+    >,
+}
+
+impl DirectDbQueryServer {
+    /// The session authenticated by the fixture's connection. Plain client
+    /// subscriptions need not carry an additional delegated-session field.
+    pub fn new(session: jazz::protocol::DelegatedSessionBinding) -> Self {
+        Self {
+            session,
+            opened: Default::default(),
+            shapes: Default::default(),
+            subscriptions: Default::default(),
+        }
+    }
+    /// Consume query controls only. Returning false leaves the message with
+    /// the caller; in particular a queued commit must never be discarded.
+    pub fn handle<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        peer: &mut PeerState,
+        schema: &jazz::schema::JazzSchema,
+        message: &SyncMessage,
+    ) -> Result<bool, NodeError>
+    where
+        S: OrderedKvStorage + ReopenableStorage,
+    {
+        match message {
+            SyncMessage::RegisterShape {
+                shape_id,
+                ast,
+                opts,
+            } => {
+                let query = ast.query().expect("scenario uses ordinary query ASTs");
+                let shape = query.validate(schema).expect("scenario query validates");
+                assert_eq!(*shape_id, shape.shape_id());
+                self.shapes.insert(*shape_id, (shape, opts.clone()));
+            }
+            SyncMessage::Subscribe(request) => {
+                let (shape, opts) = self
+                    .shapes
+                    .get(&request.shape_id)
+                    .expect("Db sends RegisterShape before Subscribe");
+                assert_eq!(shape.params().len(), request.values.len());
+                let binding = shape
+                    .bind(
+                        shape
+                            .params()
+                            .keys()
+                            .cloned()
+                            .zip(request.values.iter().cloned())
+                            .collect(),
+                    )
+                    .expect("Db binding matches its shape");
+                let session = request.delegated_session.as_ref().unwrap_or(&self.session);
+                peer.set_subscription_policy_binding(
+                    request.subscription,
+                    (session.identity, session.claims.clone()),
+                );
+                self.subscriptions
+                    .insert(request.subscription, (shape.clone(), binding, opts.clone()));
+            }
+            SyncMessage::Unsubscribe { subscription } => {
+                self.subscriptions.remove(subscription);
+                self.opened.remove(subscription);
+                peer.forget_subscription_with_node(node, *subscription);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Publish ordinary query updates after the upstream state has settled.
+    pub fn updates<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        peer: &mut PeerState,
+    ) -> Result<Vec<SyncMessage>, NodeError>
+    where
+        S: OrderedKvStorage + ReopenableStorage,
+    {
+        let updates: Vec<Option<SyncMessage>> = self
+            .subscriptions
+            .iter()
+            .map(|(subscription, (shape, binding, opts))| {
+                if self.opened.contains(subscription) {
+                    jazz::db::block_on(peer.query_update_for_subscription_with_opts(
+                        node,
+                        *subscription,
+                        shape,
+                        binding,
+                        opts.clone(),
+                    ))
+                } else {
+                    let update =
+                        jazz::db::block_on(peer.rehydrate_query_for_subscription_with_opts(
+                            node,
+                            *subscription,
+                            shape,
+                            binding,
+                            opts.clone(),
+                        ))?;
+                    if update.is_some() {
+                        self.opened.insert(*subscription);
+                    }
+                    Ok(update)
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(updates.into_iter().flatten().collect())
+    }
+}
+
 /// Ingest, persist, and settle one authority commit unit.
 pub fn ingest_commit_unit_settled<S>(
     node: &mut NodeState<S>,
