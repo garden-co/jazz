@@ -1389,9 +1389,14 @@ async fn resident_recursive_limit_discards_staged_closure() {
         .subscribe_one_sink(reachability_graph(1))
         .await
         .unwrap();
+    let mut reopened = subscription.recv().unwrap().to_values().unwrap();
+    reopened.sort_by_key(|(values, _)| format!("{values:?}"));
     assert_eq!(
-        subscription.recv().unwrap().to_values().unwrap(),
-        [(vec![Value::U64(1), Value::U64(2)], 1)],
-        "a fresh resident subscription must not inherit the failed staged closure"
+        reopened,
+        [
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ],
+        "a fresh resident subscription rebuilds from committed base rows, not the failed closure"
     );
 }
