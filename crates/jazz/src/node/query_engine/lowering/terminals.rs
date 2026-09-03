@@ -2769,20 +2769,29 @@ fn content_version_witness_graph_from_visible_graph(
     event_kind: &str,
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
-    let Some(content_version) = &source.content_version else {
-        let mut fields = inline_version_witness_fields_for_tagged_rows(source, event_kind)?;
-        fields.extend(
-            routing_param_fields
-                .iter()
-                .cloned()
-                .map(ProjectField::named),
-        );
-        return Ok(visible_graph.project_fields(fields));
+    // Visibility can be a wide join tuple, not a source-shaped record. Resolve
+    // its exact row/version keys back to complete witnesses in both storage
+    // and covered-input realizations. Never reopen an unrestricted source as
+    // the publication: the visibility join below is required in both cases.
+    let (witness_source, witness_fields) = match &source.content_version {
+        Some(content_version) => (
+            content_version.graph.clone(),
+            unprefixed_version_witness_fields_for_tagged_rows(source, event_kind)?,
+        ),
+        None => (
+            source.graph.clone(),
+            inline_version_witness_fields_for_tagged_rows(source, event_kind)?,
+        ),
     };
+    let witness_names = witness_fields
+        .iter()
+        .map(|field| field.output_name.clone())
+        .collect::<Vec<_>>();
+    let witnesses = witness_source.project_fields(witness_fields);
     let version = version_witness_fields(&source.row_shape)?;
     if routing_param_fields.is_empty() {
         return Ok(GraphBuilder::semi_join(
-            content_version.graph.clone(),
+            witnesses,
             visible_graph,
             ["row_uuid", "tx_time", "tx_node_id"],
             [
@@ -2790,12 +2799,12 @@ fn content_version_witness_graph_from_visible_graph(
                 version.tx_time_field.clone(),
                 version.tx_node_field.clone(),
             ],
-        )
-        .project_fields(unprefixed_version_witness_fields_for_tagged_rows(
-            source, event_kind,
-        )?));
+        ));
     }
-    let mut fields = prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "right.")?;
+    let mut fields = witness_names
+        .into_iter()
+        .map(|field| ProjectField::renamed(format!("right.{field}"), field))
+        .collect::<Vec<_>>();
     fields.extend(
         routing_param_fields
             .iter()
@@ -2803,7 +2812,7 @@ fn content_version_witness_graph_from_visible_graph(
     );
     Ok(GraphBuilder::join(
         visible_graph,
-        content_version.graph.clone(),
+        witnesses,
         [
             source.row_shape.row_uuid_field.clone(),
             version.tx_time_field.clone(),
