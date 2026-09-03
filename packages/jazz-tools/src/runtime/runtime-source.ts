@@ -48,7 +48,7 @@ export interface BrowserWorkerConnection {
   deleteStorage(): Promise<void>;
   flushLocal(): Promise<void>;
   waitForPendingWrites(): Promise<void>;
-  openInspectorControlPort(): Promise<MessagePort>;
+  openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort>;
   shutdown(): Promise<void>;
   /** Present only after an authenticated Inspector control-port attachment. */
   getAuthenticatedInspectorAttachmentPhysicalDbName?(): string | null;

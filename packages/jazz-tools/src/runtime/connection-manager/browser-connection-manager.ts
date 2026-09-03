@@ -14,6 +14,7 @@ import {
 } from "./types.js";
 import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/browser-control-registry.js";
 import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js";
+import { waitForInspectorOpening } from "../native-runtime/inspector-control-lifecycle.js";
 
 /**
  * Every persistent browser tab is an in-memory client of one SharedWorker
@@ -85,7 +86,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.observedConfigurationAdmissionFailure = null;
     this.unregisterInspectorControl?.();
     this.unregisterInspectorControl = registerBrowserInspectorControl(
-      () => connection.openInspectorControlPort(),
+      (signal) => connection.openInspectorControlPort(signal),
       () => this.host.config,
     );
     this.initialExplicitOfflineStateKnown = false;
@@ -276,10 +277,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     await this.storageReset;
   }
 
-  override async openInspectorControlPort(): Promise<MessagePort> {
-    await this.connectionReady;
+  override async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
+    await waitForInspectorOpening(this.connectionReady ?? Promise.resolve(), signal);
     if (!this.connection) throw new Error("Shared browser runtime is not connected");
-    return this.connection.openInspectorControlPort();
+    return this.connection.openInspectorControlPort(signal);
   }
 
   private beginStorageReset(connection: BrowserWorkerConnection): void {
