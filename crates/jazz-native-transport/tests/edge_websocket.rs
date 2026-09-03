@@ -78,6 +78,35 @@ async fn serve_stalled_http_upgrade() -> (String, tokio::task::JoinHandle<()>, o
     (format!("http://{address}"), task, accepted_rx)
 }
 
+/// Spend most of the connection budget before completing the HTTP upgrade,
+/// then keep the WebSocket open without returning the wire hello.
+async fn serve_stalled_server_hello() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    oneshot::Receiver<()>,
+    oneshot::Receiver<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalled hello listener");
+    let address = listener
+        .local_addr()
+        .expect("stalled hello listener address");
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let (upgraded_tx, upgraded_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept stalled hello");
+        let _ = accepted_tx.send(());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete delayed websocket upgrade");
+        let _ = upgraded_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    (format!("http://{address}"), task, accepted_rx, upgraded_rx)
+}
+
 #[tokio::test]
 async fn stalled_http_upgrade_reports_handshake_timeout() {
     let app_id = AppId::from_name("adapter-stalled-http-upgrade");
@@ -109,6 +138,45 @@ async fn stalled_http_upgrade_reports_handshake_timeout() {
     assert!(
         matches!(&error, WebSocketClientError::HandshakeTimeout),
         "stalled upgrade must report typed handshake timeout: {error}"
+    );
+}
+
+#[tokio::test]
+async fn stalled_server_hello_uses_the_original_establishment_deadline() {
+    let app_id = AppId::from_name("adapter-stalled-server-hello");
+    let (url, task, accepted, upgraded) = serve_stalled_server_hello().await;
+    let mut connection = tokio::spawn(async move {
+        WebSocketTransport::connect(
+            url,
+            app_id,
+            jazz::ids::AuthorSubject::SYSTEM,
+            transport_auth("secret"),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), accepted)
+        .await
+        .expect("client opens loopback TCP connection")
+        .expect("stalled hello server remains alive");
+    tokio::time::timeout(Duration::from_secs(4), upgraded)
+        .await
+        .expect("server completes delayed WebSocket upgrade")
+        .expect("stalled hello server remains alive");
+
+    let result = match tokio::time::timeout(Duration::from_secs(3), &mut connection).await {
+        Ok(result) => result.expect("connector task"),
+        Err(_) => {
+            connection.abort();
+            task.abort();
+            panic!("server hello must share the original establishment deadline");
+        }
+    };
+    task.abort();
+
+    let error = result.expect_err("missing server hello must fail");
+    assert!(
+        matches!(&error, WebSocketClientError::HandshakeTimeout),
+        "stalled server hello must report typed handshake timeout: {error}"
     );
 }
 
