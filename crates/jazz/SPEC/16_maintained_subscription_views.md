@@ -623,19 +623,19 @@ aligned with the settled typed result-member model.
 
 #### Retained receiver input pages
 
-The interaction of this retained-page contract with literal local-first
-pagination is under clarification in [#2502](https://github.com/garden-co/jazz/issues/2502).
-In particular, an offset into an authority page is not necessarily the same
-offset into the receiver's currently cached inputs. That question is not
-permission to infer authority result positions from partial local data.
+Local-first pagination is literal over local knowledge. An offset into an
+authority page is not necessarily the same offset into the receiver's cached
+inputs. The draft interpretation and its pagination UX implications remain
+flagged for review in [#2502](https://github.com/garden-co/jazz/issues/2502).
 
 The same compiler-owned window stage is used by authority closure publication
 and by the receiver's application collector. A closure for a bounded root or
 parent window is proportional to that requested window; it is never an
-authority terminal snapshot. Consequently a non-durable receiver that keeps a
-page after its authority usage site detaches retains a typed **window-source
-capability**, not a boolean saying that some result happened to be
-materialized.
+authority terminal snapshot. A live authority-relative receiver therefore
+needs a typed **window-source capability**, not a boolean saying that some
+result happened to be materialized. Cached rows surviving detachment remain
+ordinary local knowledge; they do not transfer that capability to later Local
+queries.
 
 For a live exact-query receiver, that source contract is known at compilation,
 before its `RegisterShape` message has been processed or its opening receipt
@@ -650,16 +650,22 @@ numeric offsets and limits alone never establish compatible source identity.
 That capability contains the exact normalized source occurrence, full
 validated source shape, root/parent partition, user order keys and directions,
 the compiler's deterministic tie keys, window offset/limit, and the
-policy-scoped receipt that supplied it. A later Local lowering may reuse it
-only when its own compiler-owned descriptor is exactly the same apart from a
-window wholly contained by the retained page. It then treats the retained rows
-as the output of the source window and applies its requested offset relative to
-that page. It MUST NOT apply the original absolute offset a second time, sort
-the page in Jazz, search similar registered shapes, or use authority output
-membership as a fallback.
+policy-scoped receipt that supplied it. Only the corresponding authority-relative
+receiver interprets the covered rows as the output of that source window. It
+MUST NOT apply the original absolute offset a second time, sort the page in
+Jazz, search similar registered shapes, or use authority output membership as
+a fallback. A narrower remote query requires its own coverage receipt.
+
+A later Local query applies its complete order/offset/limit to local current
+inputs, even if its numeric window is contained in a previously received remote
+page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
+16–17. Use `remote` for authority-relative pagination, or `remote-if-possible`
+for authority-relative pagination online and literal local fallback offline.
+Pending local rows participate in that local ordering normally; retained remote
+page coordinates must not silently change their rank.
 
 Different source occurrences, partitions, ordering/tie contracts, schemas,
-bindings, policy scopes, or non-contained windows are incompatible. They must
+bindings, policy scopes, or window contracts are incompatible. They must
 open fresh coverage (or use ordinary local-first inputs), even where their
 table names or visible rows happen to match. Detach, revocation, reconnect, and
 new scope admission retire or replace the exact capability atomically with its

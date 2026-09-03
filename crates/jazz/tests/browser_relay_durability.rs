@@ -3536,17 +3536,16 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
     );
 }
 
-/// A browser worker must rebase a narrower one-shot page against a received
-/// authority window instead of applying that page's absolute offset twice.
-/// Alice first subscribes to positions 8..24, then asks for positions 8..10;
-/// the latter must remain the first two members of the received window.
+/// Alice's authority-relative receiver applies the remote page offset once.
+/// A later local-first query instead counts over her locally cached rows: a
+/// cached remote page must not silently change the local coordinate system.
 ///
 /// ```text
 /// core Global page 8..24 ──► worker ──► main Edge page 8..24
-/// main later Local page 8..10 ──► materialized page 8..24
+/// main later Local offset 8/limit 2 over cached 8..24 ──► positions 16..18
 /// ```
 #[test]
-fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
+fn browser_relay_distinguishes_authority_windows_from_literal_local_pagination() {
     // This receipt seeds and propagates several independently maintained
     // browser/worker/core views. Give only its test thread the normal 2 MiB
     // stack plus a 4 MiB margin, rather than changing the process-wide test
@@ -3554,13 +3553,13 @@ fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
     std::thread::Builder::new()
         .name("browser-relay-window-receipt".to_owned())
         .stack_size(6 * 1024 * 1024)
-        .spawn(browser_relay_keeps_offset_window_membership_on_large_stack)
+        .spawn(browser_relay_distinguishes_authority_and_local_windows_on_large_stack)
         .expect("spawn browser relay window receipt")
         .join()
         .expect("browser relay window receipt panicked");
 }
 
-fn browser_relay_keeps_offset_window_membership_on_large_stack() {
+fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xc2; 16]);
     let main_thread = open_db(0x1c, alice, &schema);
@@ -3647,8 +3646,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     );
     assert_eq!(
         row_ids(&local_rows),
-        row_ids(&edge_rows),
-        "the browser cache must materialize the authoritative result membership without applying the offset again",
+        todo_ids[16..24].to_vec(),
+        "Local offset 8 is evaluated over the cached positions 8..24, independently of remote page coordinates",
     );
 
     let contained_local = main_thread
@@ -3670,8 +3669,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
             ))
             .expect("read a contained local window without its own edge subscription"),
         ),
-        todo_ids[8..10].to_vec(),
-        "a narrower Local read derives its relative slice from the received authority window",
+        todo_ids[16..18].to_vec(),
+        "a narrower Local read still counts from the beginning of local knowledge",
     );
 
     let narrower = main_thread
@@ -3768,8 +3767,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
             ))
             .expect("read shifted contained local window"),
         ),
-        todo_ids[7..9].to_vec(),
-        "a local subwindow is invalidated with the authority window it derives from",
+        todo_ids[15..17].to_vec(),
+        "Local counts over cached positions 7..24: the newly received position 7 shifts its local offset, while cached position 23 remains known",
     );
 
     // Mirror a browser `db.all({ tier: "edge" })`: it releases the broad
@@ -3784,9 +3783,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
         main_thread.tick().expect("apply broad window cleanup");
     }
 
-    // A later Local one-shot must recognize that the overlay is only the
-    // materialized 8..24 page. It starts at the same absolute offset, so it
-    // must slice relative to that page instead of returning positions 16/17.
+    // Detaching authority coverage does not give later Local queries remote
+    // coordinates. They still count over ordinary cached positions 7..24.
     let same_offset_one_shot = main_thread
         .prepare_query(
             &Query::from("todos")
@@ -3806,12 +3804,12 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
             ))
             .expect("read same-offset local one-shot after broad coverage release"),
         ),
-        todo_ids[7..9].to_vec(),
-        "same-offset Local page is relative to the materialized authority page",
+        todo_ids[15..17].to_vec(),
+        "detaching authority coverage leaves the literal Local coordinate system unchanged",
     );
 
     // The retained page is deliberately not an Edge receipt. A fresh Edge
-    // usage site must clear the local-only interpretation and wait for a new
+    // usage site must wait for a new
     // authority response instead of treating detached membership as current
     // authorization coverage.
     let fresh_edge_read = main_thread
