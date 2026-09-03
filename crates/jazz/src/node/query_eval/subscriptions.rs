@@ -1015,7 +1015,10 @@ where
             })
             .unwrap_or_else(|| AuthorityResultKey::unscoped(binding_view_key));
         if !self.has_settled_authority_result(&authority_result_key) {
-            let _ = self.load_known_state_fact(binding_view_key).await?;
+            // An absent/retired live receipt cannot be recreated from its
+            // durable cursor alone: that cursor does not restore the source
+            // manifest or facts. Full startup recovery loads these together;
+            // a new usage here must instead await a fresh authority closure.
             // Slow exact declarations are still known-state declarations: they
             // must describe a binding view the server has previously settled
             // for this client. A purely local first subscription could include

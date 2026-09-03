@@ -248,6 +248,10 @@ equal-shaped predecessor's terminal cache or execute a separate semantic scan.
 Only final-pin release retires the stream. A subsequent usage opens a new wire
 identity; a retired stream's late reply cannot satisfy it. The receiver validates
 one ordered predecessor sequence, not duplicate sequences per local listener.
+A persisted settlement cursor alone cannot restore a claimed source closure:
+the complete source manifest and facts must accompany recovered cache state.
+A new usage after retirement awaits a fresh authority closure instead of lazily
+reviving only the old cursor.
 
 Sharing is determined by the lowered authority request, including its query,
 binding, read view, and policy scope. Downstream local-first and remote reads

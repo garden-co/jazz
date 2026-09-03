@@ -40,8 +40,7 @@ fn covered_input_for_row(
     row_uuid: RowUuid,
 ) -> crate::protocol::CoveredInputEntry {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        program_fact_adds,
-        ..
+        program_fact_adds, ..
     }) = update
     else {
         panic!("expected view update");
@@ -264,9 +263,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
         "removals must not request repair bodies because the removed version may be policy-invisible"
     );
     reader.apply_sync_message_settled(removal).unwrap();
-    assert!(
-        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).is_empty()
-    );
+    assert!(receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).is_empty());
     assert_eq!(
         reader.settled_through_for_authority_result(&authority_result_key),
         Some(GlobalTime(2))
@@ -305,9 +302,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
             .is_empty()
     );
     reader.apply_sync_message_settled(removal).unwrap();
-    assert!(
-        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).is_empty()
-    );
+    assert!(receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).is_empty());
     assert_eq!(
         reader.settled_through_for_authority_result(&authority_result_key),
         Some(GlobalTime(3))
@@ -380,17 +375,19 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
     );
 
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription: duplicate_subscription,
-            settled_through: GlobalTime(2),
-            reset_result_set: true,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        }))
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription: duplicate_subscription,
+                settled_through: GlobalTime(2),
+                reset_result_set: true,
+                version_carriers: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ))
         .unwrap();
 
     assert_eq!(
@@ -503,7 +500,9 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     register_shape_binding(&mut reader, &shape, &binding);
 
     let (tx_a, unit_a) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row_a, 10).cells(title_cells("known")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row_a, 10).cells(title_cells("known")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: commit_a,
@@ -524,7 +523,9 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
         .unwrap();
 
     let (tx_b, unit_b) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row_b, 20).cells(title_cells("new")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row_b, 20).cells(title_cells("new")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: commit_b,
@@ -921,7 +922,9 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     let values = Vec::new();
 
     let (tx_a, unit_a) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row_a, 10).cells(title_cells("local")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row_a, 10).cells(title_cells("local")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: tx_a_record,
@@ -950,7 +953,10 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     // not completed its live authority handoff, so it cannot declare even an
     // exact known state yet.
     let authority_message = system_authority_reset(&mut core, &shape, &binding, subscription);
-    assert_eq!(covered_input_for_row(&authority_message, row_a).version.tx, tx_a);
+    assert_eq!(
+        covered_input_for_row(&authority_message, row_a).version.tx,
+        tx_a
+    );
     let mut deferred_authority = view_update_parts(authority_message.clone(), true);
     deferred_authority.settled_through = GlobalTime::default();
     reader.apply_view_update(deferred_authority).unwrap();
@@ -1009,8 +1015,8 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         .unwrap()
         .expect("expected view update");
     let control_bundles = version_bundles_for_update(&control_update);
-    let control_inputs = [row_a, row_b]
-        .map(|row_uuid| covered_input_for_row(&control_update, row_uuid));
+    let control_inputs =
+        [row_a, row_b].map(|row_uuid| covered_input_for_row(&control_update, row_uuid));
     assert_eq!(control_inputs[0].version.tx, tx_a);
     assert_eq!(control_inputs[1].version.tx, tx_b);
     assert_eq!(control_bundles.len(), 2);
@@ -1081,6 +1087,44 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         None,
         "detaching the exact receipt must retire its live settlement evidence"
     );
+}
+
+#[test]
+fn retired_empty_read_does_not_resurrect_a_marker_without_its_source_closure() {
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let reset = system_authority_reset(&mut core, &shape, &binding, subscription);
+    reader.apply_sync_message_settled(reset).unwrap();
+    assert!(receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).is_empty());
+    reader.apply_unsubscribe(subscription);
+
+    assert_eq!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &[],
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        None
+    );
+    assert!(
+        reader.query.authority_results.values().all(|state| {
+            !matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
+        }),
+        "a retired cursor must not resurrect a claimed closure without its source manifest"
+    );
+
+    register_shape_binding(&mut reader, &shape, &binding);
+    let reset = system_authority_reset(&mut core, &shape, &binding, subscription);
+    reader.apply_sync_message_settled(reset).unwrap();
+    assert!(receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).is_empty());
 }
 
 #[test]
@@ -1272,13 +1316,19 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    assert!(facts.iter().all(crate::protocol::ProgramFactEntry::is_peer_source_closure_fact));
+    assert!(
+        facts
+            .iter()
+            .all(crate::protocol::ProgramFactEntry::is_peer_source_closure_fact)
+    );
     reader.apply_sync_message_settled(reset.clone()).unwrap();
-    assert!(reader
-        .query
-        .authority_results
-        .values()
-        .any(|state| state.settled_program_facts == facts));
+    assert!(
+        reader
+            .query
+            .authority_results
+            .values()
+            .any(|state| state.settled_program_facts == facts)
+    );
 
     let mut removal = reset_payload.clone();
     removal.reset_result_set = false;
@@ -1286,38 +1336,53 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
     removal.program_fact_adds.clear();
     // A live transition removes covered inputs, never the compiler's manifest.
     // Even an empty result retains complete coverage of its declared sources.
-    removal.program_fact_removes = facts.iter().filter(|fact| matches!(
-        fact, crate::protocol::ProgramFactEntry::CoveredInput(_)
-    )).cloned().collect();
-    let manifest = facts.iter().filter(|fact| matches!(
-        fact, crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
-    )).cloned().collect::<BTreeSet<_>>();
+    removal.program_fact_removes = facts
+        .iter()
+        .filter(|fact| matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_)))
+        .cloned()
+        .collect();
+    let manifest = facts
+        .iter()
+        .filter(|fact| {
+            matches!(
+                fact,
+                crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
+            )
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
     reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(removal))
         .unwrap();
-    assert!(reader
-        .query
-        .authority_results
-        .values()
-        .any(|state| state.settled_program_facts == manifest));
+    assert!(
+        reader
+            .query
+            .authority_results
+            .values()
+            .any(|state| state.settled_program_facts == manifest)
+    );
     reader.apply_sync_message_settled(reset).unwrap();
     let settled_facts_store = reader
         .database
         .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
         .unwrap();
-    let durable_facts = futures::executor::block_on(settled_facts_store.prefix_entries(&[]))
-        .unwrap();
+    let durable_facts =
+        futures::executor::block_on(settled_facts_store.prefix_entries(&[])).unwrap();
     assert_eq!(durable_facts.len(), facts.len());
-    assert!(durable_facts
-        .iter()
-        .all(|entry| matches!(entry.key.last(), Some(Value::Bytes(digest)) if digest.len() == 32)));
+    assert!(
+        durable_facts.iter().all(
+            |entry| matches!(entry.key.last(), Some(Value::Bytes(digest)) if digest.len() == 32)
+        )
+    );
     drop(reader);
     let reopened = open_node_at(&reader_dir, schema());
-    assert!(reopened
-        .query
-        .authority_results
-        .values()
-        .any(|state| state.settled_program_facts == facts));
+    assert!(
+        reopened
+            .query
+            .authority_results
+            .values()
+            .any(|state| state.settled_program_facts == facts)
+    );
 }
 
 #[test]
@@ -1349,7 +1414,13 @@ fn covered_input_reset_never_populates_retired_result_member_storage() {
     assert!(entries.is_empty());
     drop(reader);
     let reopened = open_node_at(&reader_dir, schema());
-    assert!(reopened.query.authority_results.values().all(|state| state.settled_result_set.is_empty()));
+    assert!(
+        reopened
+            .query
+            .authority_results
+            .values()
+            .all(|state| state.settled_result_set.is_empty())
+    );
 }
 
 #[test]
@@ -1393,11 +1464,11 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
         .key;
     *corrupt_key.last_mut().expect("fact digest key component") = Value::Bytes(vec![0xff; 32]);
     futures::executor::block_on(corrupt_store.set(
-            &corrupt_key,
-            &[Value::Bytes(
-                crate::node::codec::program_fact_storage_bytes(&fact).unwrap(),
-            )],
-        ))
+        &corrupt_key,
+        &[Value::Bytes(
+            crate::node::codec::program_fact_storage_bytes(&fact).unwrap(),
+        )],
+    ))
     .unwrap();
     assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());
     assert!(reader.query.settled_program_facts.is_empty());

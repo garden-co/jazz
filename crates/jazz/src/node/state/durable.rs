@@ -487,14 +487,15 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false)
-            .await
+        self.below_global_transaction_ids(Some(author), false).await
     }
 
     /// Edge-host recovery includes accepted writes from every originating
     /// client, plus edge-generated merges; it is not local-author recovery.
     #[cfg(any(test, feature = "runtime"))]
-    pub(crate) async fn pending_edge_authority_transaction_ids(&mut self) -> Result<Vec<TxId>, Error> {
+    pub(crate) async fn pending_edge_authority_transaction_ids(
+        &mut self,
+    ) -> Result<Vec<TxId>, Error> {
         self.below_global_transaction_ids(None, true).await
     }
 
@@ -523,8 +524,11 @@ where
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
             if author.is_some_and(|author| made_by != author)
-                || if edge_only { fate != 1 || durability != DurabilityTier::Edge }
-                   else { !(fate == 0 || fate == 1) || durability >= DurabilityTier::Global }
+                || if edge_only {
+                    fate != 1 || durability != DurabilityTier::Edge
+                } else {
+                    !(fate == 0 || fate == 1) || durability >= DurabilityTier::Global
+                }
             {
                 continue;
             }
@@ -645,60 +649,6 @@ where
             )
             .await?;
         Ok(())
-    }
-
-    pub(crate) async fn load_known_state_fact(
-        &mut self,
-        binding_view_key: BindingViewKey,
-    ) -> Result<Option<GlobalTime>, Error> {
-        let authority_result_key = AuthorityResultKey::unscoped(binding_view_key);
-        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        let Some(record) = store
-            .get(&known_state_fact_key(&authority_result_key))
-            .await?
-        else {
-            return Ok(None);
-        };
-        let settled_through = match record.get_idx(0)? {
-            Value::U64(value) => GlobalTime(value),
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "known-state settled-through must be u64",
-                ));
-            }
-        };
-        self.query
-            .authority_results
-            .entry(authority_result_key)
-            .or_default()
-            .settled_through = (settled_through.0 != 0).then_some(settled_through);
-        if let Value::U64(progress) = record.get_idx(1)?
-            && progress != u64::MAX
-        {
-            self.query
-                .authority_results
-                .entry(AuthorityResultKey::unscoped(binding_view_key))
-                .or_default()
-                .authorization_progress = Some(progress);
-        }
-        let closure_generation = match record.get_idx(2)? {
-            Value::U64(generation) => generation,
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "known-state source-closure generation must be u64",
-                ));
-            }
-        };
-        if closure_generation != 0 {
-            self.query
-                .authority_results
-                .entry(AuthorityResultKey::unscoped(binding_view_key))
-                .or_default()
-                .source_closure = crate::node::AuthoritySourceClosure::Claimed {
-                generation: closure_generation,
-            };
-        }
-        Ok(Some(settled_through))
     }
 
     pub(crate) async fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {

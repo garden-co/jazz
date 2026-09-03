@@ -3756,13 +3756,14 @@ where
                                             session_claim_binding.as_ref().expect("subscriber claims").0,
                                             session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
                                         );
+                                        let authorization_mode = node.peer_query_authorization_mode();
                                         node.ensure_peer_maintained_subscription_view_supported(
                                             shape,
                                             &binding,
                                             opts.tier,
                                             permission_subject,
                                             &opts.read_view,
-                                            QueryAuthorizationMode::TrustedServing,
+                                            authorization_mode,
                                         )
                                         .await
                                     };
@@ -4081,13 +4082,14 @@ where
                                     session_claim_binding.as_ref().expect("subscriber claims").0,
                                     session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
                                 );
+                                let authorization_mode = node.peer_query_authorization_mode();
                                 node.ensure_peer_maintained_subscription_view_supported(
                                     &shape,
                                     &binding,
                                     opts.tier,
                                     subscription_policy_binding.0,
                                     &opts.read_view,
-                                    QueryAuthorizationMode::TrustedServing,
+                                    authorization_mode,
                                 )
                                 .await
                             };

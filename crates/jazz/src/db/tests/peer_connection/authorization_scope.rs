@@ -166,6 +166,140 @@ fn scope_relays_forward_new_rows_after_empty_subscription_settlement() {
     }
 }
 
+#[test]
+fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
+    let creator = public_session_eq("$createdBy", &["user"]);
+    let room_read = PublicPolicyExpr::or(vec![
+        creator.clone(),
+        public_exists(
+            "members",
+            [
+                public_outer_eq("room", "id"),
+                public_session_eq("author", &["user"]),
+            ],
+        ),
+    ]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("rooms")
+                    .column("name", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(room_read)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(creator.clone()), creator),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("room", "rooms")
+                    .column("author", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::Inherits {
+                                operation: PublicOperation::Select,
+                                via_column: "room".into(),
+                                max_depth: None,
+                            })
+                            .with_insert(PublicPolicyExpr::Inherits {
+                                operation: PublicOperation::Update,
+                                via_column: "room".into(),
+                                max_depth: None,
+                            }),
+                    ),
+            ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let core = open_core(0x70, AuthorSubject::SYSTEM, &schema);
+    let alice_relay = open_db(0x71, alice, &schema);
+    let bob_relay = open_db(0x72, bob, &schema);
+    let alice_fg = open_db(0x73, alice, &schema);
+    let bob_fg = open_db(0x74, bob, &schema);
+    for (relay, foreground, author) in
+        [(&alice_relay, &alice_fg, alice), (&bob_relay, &bob_fg, bob)]
+    {
+        relay.set_relay_authority_session_owner_for_test();
+        foreground.set_non_durable_client();
+        let (up, down) = duplex();
+        block_on(relay.connect_upstream(up));
+        core.accept_scope_isolated_relay_subscriber(down, author, BTreeMap::new(), 1);
+        let (up, down) = duplex();
+        block_on(foreground.connect_upstream(up));
+        relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    }
+    let query = Query::from("rooms").order_by("name", OrderDirection::Asc);
+    let local = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let mut bob_rooms = prepared_subscribe(&bob_fg, &query, local.clone()).unwrap();
+    let drive = || {
+        for _ in 0..32 {
+            alice_fg.tick().unwrap();
+            bob_fg.tick().unwrap();
+            alice_relay.tick().unwrap();
+            bob_relay.tick().unwrap();
+            core.tick().unwrap();
+        }
+    };
+    drive();
+    let room = row(0x75);
+    let write = alice_fg
+        .insert_with_id_attributed(
+            alice,
+            "rooms",
+            room,
+            BTreeMap::from([("name".into(), Value::String("Owner room".into()))]),
+        )
+        .unwrap();
+    drive();
+    assert_eq!(
+        block_on(write.write_state()).unwrap().durability,
+        DurabilityTier::Global
+    );
+    while let Some(event) = bob_rooms.try_next_event() {
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            assert!(
+                added.is_empty(),
+                "the uninvited reader must not see the room"
+            );
+        }
+    }
+    let invite = alice_fg
+        .insert_with_id_attributed(
+            alice,
+            "members",
+            row(0x76),
+            BTreeMap::from([
+                ("room".into(), Value::Uuid(room.0)),
+                ("author".into(), Value::String(bob.canonical().into())),
+            ]),
+        )
+        .unwrap();
+    drive();
+    assert_eq!(
+        block_on(invite.write_state()).unwrap().durability,
+        DurabilityTier::Global
+    );
+    let mut saw_room = false;
+    while let Some(event) = bob_rooms.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            saw_room |= added.iter().any(|value| value.row.row_uuid() == room);
+        }
+    }
+    assert!(
+        saw_room,
+        "a newly admitted existing room must flow through relay to foreground"
+    );
+}
+
 /// Peer updates disclose the exact authority-approved source closure. A client
 /// derives result membership locally, so protocol-facing tests inspect source
 /// inputs rather than the retired authority-rendered member payload.

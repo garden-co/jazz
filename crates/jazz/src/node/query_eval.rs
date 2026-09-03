@@ -3256,6 +3256,11 @@ where
         ),
         Error,
     > {
+        // A scope-isolated client relay serves already admitted local data.
+        // It is not an authority and may not re-evaluate policies using its
+        // deliberately incomplete support-row cache. Strict remote children
+        // use the same ClientLocal mode with an exact covered-input source.
+        let authorization_mode = self.peer_query_authorization_mode();
         self.open_seeded_maintained_subscription_view_in_authorization_mode(
             shape,
             binding,
@@ -3263,7 +3268,7 @@ where
             tier,
             read_view,
             read_view_key,
-            QueryAuthorizationMode::TrustedServing,
+            authorization_mode,
             None,
             None,
             PreparedClaimBindingMode::Strict,
@@ -3283,6 +3288,14 @@ where
                 )
             },
         )
+    }
+
+    pub(crate) fn peer_query_authorization_mode(&self) -> QueryAuthorizationMode {
+        if self.client_relay_scope().is_some() {
+            QueryAuthorizationMode::ClientLocal
+        } else {
+            QueryAuthorizationMode::TrustedServing
+        }
     }
 
     /// Re-publish an Edge window from a durable relay to its non-durable
