@@ -49,20 +49,35 @@ Invariant digest:
 - `INV-API-34`: An edge outbox MUST retain an edge-accepted upload until an authenticated terminal rejection or an `Accepted` receipt carrying both Global durability and an authority-assigned `GlobalTime` for that `TxId` arrives directly from the currently admitted upstream fate authority; a featureless/unnegotiated link, local acceptance, hydrated state, staged/replayed updates, and receipts from detached or superseded authorities MUST NOT release it.
 - `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
 
-  A durable browser relay is the narrow topology exception to the exact-node
-  recovery test: it also schedules unsettled transactions made by the same
-  canonical author that it durably accepted from its paired main-tab client,
-  whose node intentionally differs from the worker node. This relay exception
-  does not authorize general same-author recovery by ordinary databases and
-  does not weaken the exact node-and-author definition above outside the paired
-  browser client/worker boundary.
+Identical active usages in one admitted authority scope MUST share one upstream
+wire subscription: equality includes the query, bound values, serving options,
+and admitted policy/session scope. Local listeners and one-shot readers pin that
+stream independently. A fresh remote one-shot captures the current receipt and
+requests a refresh on the shared stream; it cannot complete from the receipt it
+captured. Dropping one pin MUST NOT unsubscribe or invalidate another pin. After
+the final pin is released, a later usage opens a new wire identity and cannot
+inherit a late reply to the retired stream. Different scopes MUST NOT coalesce.
 
-  A terminal server or protocol transport failure is not an authority fate. A
-  durable browser worker MUST relay it only to currently initialized foreground
-  peers so their active Edge/Global waits and remote subscriptions reject with
-  that transport error; Local durability remains valid. The worker MUST NOT
-  fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
-  replay that transient foreground error to a peer attached later.
+For example, two listeners for the same room receive one upstream transition
+from inputs `{A}` to `{B}`, fanned out locally. They do not receive two wire
+transitions that both remove A against one shared predecessor. Strict transition
+validation remains unchanged: removing an absent input within that one ordered
+stream is an error, not a replay to tolerate.
+
+A durable browser relay is the narrow topology exception to the exact-node
+recovery test: it also schedules unsettled transactions made by the same
+canonical author that it durably accepted from its paired main-tab client,
+whose node intentionally differs from the worker node. This relay exception
+does not authorize general same-author recovery by ordinary databases and
+does not weaken the exact node-and-author definition above outside the paired
+browser client/worker boundary.
+
+A terminal server or protocol transport failure is not an authority fate. A
+durable browser worker MUST relay it only to currently initialized foreground
+peers so their active Edge/Global waits and remote subscriptions reject with
+that transport error; Local durability remains valid. The worker MUST NOT
+fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
+replay that transient foreground error to a peer attached later.
 
 - `INV-API-35`: Once a local mutation is durably persisted or its ordered publication is owned by the node runtime, the mutation API MUST return its committed `WriteHandle`/`TxId`; a later resident-subscription refresh failure MUST be emitted through the subscription error channel and MUST NOT be returned as a generic mutation or peer-ingest failure.
 - `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
@@ -218,8 +233,9 @@ wait.
 
 Repeated settled reads require a freshness proof, not merely a locally
 materialized result from an earlier request. Each newly initiated `Edge` or
-`Global` one-shot owns a fresh usage-site subscription and waits for settled
-authority coverage addressed to that exact subscription. A late update for a
+`Global` one-shot pins the shared live subscription and waits for a newer settled
+authority receipt following its refresh request. If no live pin remains, it opens
+a fresh wire subscription. A late update for a
 detached predecessor cannot satisfy the new read, even when its shape, binding,
 and options are identical. Synchronous and local-tier reads retain their local
 semantics, and still-live maintained subscriptions may continue sharing their

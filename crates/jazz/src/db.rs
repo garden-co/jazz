@@ -2083,7 +2083,6 @@ struct PendingUpstreamSubscription {
 struct QueryCoverageRegistration {
     coverage: CoverageKey,
     subscription: PendingUpstreamSubscription,
-    owns_subscription: bool,
     ref_count: usize,
 }
 

@@ -233,11 +233,15 @@ policy rows, supplement missing evidence from unrelated local history, or
 reinterpret an opaque admission. Relays retain and forward closures only under
 their exact policy-scoped authority-result identity.
 
-Remote one-shot reads use the same mechanism for a bounded lifetime: register a
-fresh usage-site coverage owner, await its exact settled closure, run the shared
+Remote one-shot reads use the same mechanism for a bounded lifetime: pin the
+same live upstream stream as identical usages in the same admitted scope,
+request fresh coverage, await a newer settled receipt, run the shared
 local program to quiescence, materialize its terminal once, and finalize the
 coverage owner on success, cancellation, or error. They do not inspect an
 equal-shaped predecessor's terminal cache or execute a separate semantic scan.
+Only final-pin release retires the stream. A subsequent usage opens a new wire
+identity; a retired stream's late reply cannot satisfy it. The receiver validates
+one ordered predecessor sequence, not duplicate sequences per local listener.
 
 Settlement is downstream of local evaluation. A receiver may report a
 generation settled only after the complete exact closure has been staged, all

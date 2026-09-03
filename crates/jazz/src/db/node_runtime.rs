@@ -1136,6 +1136,12 @@ where
                     .remove(&handle.coverage);
                 drop(refcounts);
                 node.apply_unsubscribe(handle.subscription);
+                self.coverage_refresh_generations
+                    .borrow_mut()
+                    .remove(&handle.coverage);
+                if let Some(receipts) = self.active_authority_view_receipts.borrow_mut().as_mut() {
+                    receipts.subscriptions.remove(&handle.subscription);
+                }
                 self.latest_coverage_subscriptions
                     .borrow_mut()
                     .retain(|coverage, subscription| {

@@ -137,7 +137,11 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
             break;
         }
     }
+    // Both pins now use one ordered wire stream. Hold delivery, but preserve
+    // its FIFO order: the earlier delta precedes the refresh reset.
+    let refresh_updates = server_sent.borrow_mut().drain(..).collect::<Vec<_>>();
     server_sent.borrow_mut().extend(held_first_usage_updates);
+    server_sent.borrow_mut().extend(refresh_updates);
 
     let second_update = server_sent
         .borrow()
@@ -1212,64 +1216,54 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
 }
 
 #[test]
-fn duplicate_usage_delivers_drained_canonical_delta_to_every_established_sibling_first() {
+fn identical_live_usages_share_one_ordered_upstream_transition() {
+    // Public streams assert the result; the tapped wire additionally proves
+    // that sharing happens before delivery, not through replay tolerance.
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
     let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
     let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc2, client_author, &schema);
     let stale = row(0x63);
+    let fresh = row(0x64);
     server
         .insert_with_id("todos", stale, cells("live", false, owner))
         .unwrap();
-
-    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let (client_transport, server_transport, _, server_sent) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos").filter(eq(col("title"), lit("live")));
     let prepared = prepared(&client, &query);
-    let first_attachment = client
+    let mut first = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let mut second = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let first_read = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
-    let first_subscription = first_attachment.subscription();
-    client.tick().unwrap();
-    for _ in 0..32 {
-        subscriber.borrow_mut().tick().unwrap();
-        upstream.borrow_mut().tick().unwrap();
-        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![stale] {
-            break;
-        }
-    }
-
-    let second_attachment = client
+    let second_read = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
-    let second_subscription = second_attachment.subscription();
+    assert_eq!(first_read.subscription(), second_read.subscription());
     client.tick().unwrap();
-    let mut second_opening_received = false;
-    for _ in 0..32 {
-        subscriber.borrow_mut().tick().unwrap();
-        second_opening_received = server_sent.borrow().iter().any(|message| {
-            matches!(
-                message,
-                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                    subscription,
-                    ..
-                }) if *subscription == second_subscription
-            )
-        });
-        upstream.borrow_mut().tick().unwrap();
-        if second_opening_received {
-            break;
-        }
-    }
-    assert!(
-        second_opening_received,
-        "second usage must receive its own opening view before the client consumes it"
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(first.next_event()).unwrap())),
+        vec![stale]
     );
-    assert_ne!(first_subscription, second_subscription);
+    assert_eq!(
+        row_ids(&opened_rows(block_on(second.next_event()).unwrap())),
+        vec![stale]
+    );
+    assert!(client.query_attachment_is_covered(&first_read));
+    assert!(client.query_attachment_is_covered(&second_read));
+    {
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert_eq!(state.served.len(), 1);
+    }
     server_sent.borrow_mut().clear();
-
     server
         .update(
             "todos",
@@ -1277,117 +1271,106 @@ fn duplicate_usage_delivers_drained_canonical_delta_to_every_established_sibling
             BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
         )
         .unwrap();
-    let fresh = row(0x64);
     server
         .insert_with_id("todos", fresh, cells("live", false, owner))
         .unwrap();
-
-    let clone_attachment = client
+    // A new one-shot joins during the change and requests fresh coverage on
+    // the same stream. It must not reset either existing listener's history.
+    let refresh = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
-    let clone_subscription = clone_attachment.subscription();
+    assert_eq!(refresh.subscription(), first_read.subscription());
+    assert!(!client.query_attachment_is_covered(&refresh));
     client.tick().unwrap();
-    for _ in 0..32 {
-        subscriber.borrow_mut().tick().unwrap();
-        if server_sent.borrow().iter().any(|message| {
-            matches!(
-                message,
-                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                    subscription,
-                    reset_result_set: true,
-                    ..
-                }) if *subscription == clone_subscription
-            )
-        }) {
-            break;
-        }
-    }
-
-    let messages = server_sent.borrow();
-    let sibling_updates = [first_subscription, second_subscription].map(|sibling| {
-        messages
+    server.tick().unwrap();
+    {
+        let messages = server_sent.borrow();
+        let updates = messages
             .iter()
-            .enumerate()
-            .filter_map(|(index, message)| match message {
-                SyncMessage::ViewUpdate(payload) if payload.subscription == sibling => {
-                    Some((index, payload))
-                }
+            .filter_map(|message| match message {
+                SyncMessage::ViewUpdate(update) => Some(update),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-    });
-    let clone_updates = messages
-        .iter()
-        .enumerate()
-        .filter_map(|(index, message)| match message {
-            SyncMessage::ViewUpdate(payload) if payload.subscription == clone_subscription => {
-                Some((index, payload))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(sibling_updates[0].len(), 1);
-    assert_eq!(sibling_updates[1].len(), 1);
-    assert_eq!(clone_updates.len(), 1);
-    let (clone_index, clone_update) = clone_updates[0];
-    for updates in &sibling_updates {
-        let (sibling_index, sibling_update) = updates[0];
-        assert!(
-            sibling_index < clone_index,
-            "every canonical sibling delta must precede completion of the new clone"
-        );
-        assert!(!sibling_update.reset_result_set);
+            .collect::<Vec<_>>();
         assert_eq!(
-            covered_input_rows(&sibling_update.program_fact_adds),
+            updates.len(),
+            1,
+            "refresh has one shared successor, not one per listener"
+        );
+        assert_eq!(
+            covered_input_rows(&updates[0].program_fact_adds),
             vec![fresh]
         );
-        assert_eq!(
-            covered_input_rows(&sibling_update.program_fact_removes),
-            vec![stale]
-        );
-        assert_eq!(
-            sibling_update.peer_payload_inventory.authorization_progress,
-            sibling_updates[0][0]
-                .1
-                .peer_payload_inventory
-                .authorization_progress,
-            "sibling fanout must stamp one canonical authorization generation"
-        );
-    }
-    assert!(
-        messages.iter().all(|message| !matches!(
-            message,
-            SyncMessage::AuthorizationScopeReceipt { subscription, .. }
-                if [first_subscription, second_subscription, clone_subscription]
-                    .contains(subscription)
-        )),
-        "ordinary query usages must not acquire unpaired authorization-scope receipts"
-    );
-    if clone_update.reset_result_set {
-        assert!(covered_input_rows(&clone_update.program_fact_removes).is_empty());
-    } else {
-        assert_eq!(
-            covered_input_rows(&clone_update.program_fact_removes),
-            vec![stale]
-        );
-    }
-    assert_eq!(
-        covered_input_rows(&clone_update.program_fact_adds),
-        vec![fresh]
-    );
-    drop(messages);
-
-    for _ in 0..32 {
-        upstream.borrow_mut().tick().unwrap();
-        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![fresh] {
-            break;
+        if !updates[0].reset_result_set {
+            assert_eq!(
+                covered_input_rows(&updates[0].program_fact_removes),
+                vec![stale]
+            );
         }
+    }
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&refresh));
+    for stream in [&mut first, &mut second] {
+        // Refresh publishes a full reset, replacing the prior listener value.
+        let event = block_on(stream.next_event()).unwrap();
+        assert!(matches!(
+            &event,
+            SubscriptionEvent::Delta { reset: true, .. }
+        ));
+        assert_eq!(row_ids(&opened_rows(event)), vec![fresh]);
     }
     assert_eq!(
         row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
-        vec![fresh],
-        "both established usages and the clone must converge"
+        vec![fresh]
     );
+    server_sent.borrow_mut().clear();
+    server
+        .update(
+            "todos",
+            fresh,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    server.tick().unwrap();
+    let removals = server_sent
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => {
+                Some(covered_input_rows(&update.program_fact_removes))
+            }
+            _ => None,
+        })
+        .flatten()
+        .filter(|row| *row == fresh)
+        .count();
+    assert_eq!(removals, 1, "ordinary removal is transmitted only once");
+    client.tick().unwrap();
+    for stream in [&mut first, &mut second] {
+        let (added, updated, removed) = delta_rows(block_on(stream.next_event()).unwrap());
+        assert!(added.is_empty());
+        assert!(updated.is_empty());
+        assert_eq!(
+            removed
+                .into_iter()
+                .map(|row| row.row_uuid)
+                .collect::<Vec<_>>(),
+            vec![fresh]
+        );
+    }
+    client.detach_query(first_read);
+    client.detach_query(second_read);
+    assert!(client.query_attachment_is_covered(&refresh));
+    client.detach_query(refresh);
+    drop(first);
+    drop(second);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!()
+    };
+    assert!(state.served.is_empty());
 }
 
 #[test]
@@ -1419,10 +1402,27 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
             break;
         }
     }
-    let second_attachment = client
-        .attach_query_with_opts(&prepared, global_subscribe_opts())
-        .unwrap();
-    let second_subscription = second_attachment.subscription();
+    // Deliberately exercise server fanout at the protocol seam. Ordinary Db
+    // usages coalesce; these extra wire consumers have no receiver state in
+    // this client and must not be applied to its first stream's predecessor.
+    let second_subscription = SubscriptionKey {
+        binding_id: BindingId(uuid::Uuid::from_bytes([0xd2; 16])),
+        ..first_subscription
+    };
+    client_sent
+        .borrow_mut()
+        .push_back(SyncMessage::Subscribe(Subscribe {
+            shape_id: prepared.shape.shape_id(),
+            subscription: second_subscription,
+            values: prepared
+                .shape
+                .params()
+                .keys()
+                .map(|name| prepared.binding.values()[name].clone())
+                .collect(),
+            known_state: None,
+            delegated_session: None,
+        }));
     client.tick().unwrap();
     let mut second_opening_received = false;
     for _ in 0..32 {
@@ -1460,10 +1460,24 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         .unwrap();
 
     crate::peer::fail_next_cloned_subscription_reset_for_test();
-    let failed_attachment = client
-        .attach_query_with_opts(&prepared, global_subscribe_opts())
-        .unwrap();
-    let failed_subscription = failed_attachment.subscription();
+    let failed_subscription = SubscriptionKey {
+        binding_id: BindingId(uuid::Uuid::from_bytes([0xd3; 16])),
+        ..first_subscription
+    };
+    client_sent
+        .borrow_mut()
+        .push_back(SyncMessage::Subscribe(Subscribe {
+            shape_id: prepared.shape.shape_id(),
+            subscription: failed_subscription,
+            values: prepared
+                .shape
+                .params()
+                .keys()
+                .map(|name| prepared.binding.values()[name].clone())
+                .collect(),
+            known_state: None,
+            delegated_session: None,
+        }));
     client.tick().unwrap();
     let failed_subscribe = client_sent
         .borrow()

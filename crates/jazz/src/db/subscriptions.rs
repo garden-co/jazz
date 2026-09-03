@@ -180,10 +180,8 @@ where
             .borrow()
             .applied_authority_result_generation(&AuthorityResultKey::unscoped(binding_view));
         let coverage = coverage_key(shape, binding, upstream_opts.clone());
-        // Edge/Global one-shots may borrow a still-live maintained stream:
-        // refreshing that exact wire subscription cannot be confused with a
-        // detached predecessor. Otherwise they own a fresh subscription key.
-        // Local-only usage retains the existing coverage-reuse semantics.
+        // All live usages pin one stream. One-shot freshness is a newer
+        // receipt on that stream, not another stream with the same inputs.
         if self
             .node
             .upstream_coverage_refcounts
@@ -195,18 +193,6 @@ where
                 .borrow()
                 .get(&coverage)
                 .copied()
-            && !self
-                .node
-                .query_coverage_registrations
-                .borrow()
-                .contains_key(&subscription)
-            && (!requires_current_authority_receipt
-                || self
-                    .node
-                    .upstream_subscription_owners
-                    .borrow()
-                    .get(&subscription)
-                    .is_some_and(|owners| owners.iter().any(|owner| owner.strong_count() > 0)))
         {
             *self
                 .node
@@ -222,7 +208,7 @@ where
                 identity,
                 policy_binding: None,
             };
-            self.register_query_coverage(coverage.clone(), pending_subscription.clone(), false);
+            self.register_query_coverage(coverage.clone(), pending_subscription.clone());
             let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
             if refreshes.get(&coverage).copied() != Some(required_after) {
                 refreshes.insert(coverage.clone(), required_after);
@@ -262,7 +248,6 @@ where
                 identity,
                 policy_binding: None,
             },
-            true,
         );
         Ok(QueryAttachment {
             subscriptions: vec![subscription],
@@ -277,7 +262,6 @@ where
         &self,
         coverage: CoverageKey,
         subscription: PendingUpstreamSubscription,
-        owns_subscription: bool,
     ) {
         let mut registrations = self.node.query_coverage_registrations.borrow_mut();
         registrations
@@ -286,7 +270,6 @@ where
             .or_insert(QueryCoverageRegistration {
                 coverage,
                 subscription,
-                owns_subscription,
                 ref_count: 1,
             });
     }
@@ -409,16 +392,6 @@ where
 
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
-        if let Some(receipts) = self
-            .node
-            .active_authority_view_receipts
-            .borrow_mut()
-            .as_mut()
-        {
-            for subscription in &attachment.registrations {
-                receipts.subscriptions.remove(subscription);
-            }
-        }
         let mut removed_subscriptions = Vec::new();
         let mut registrations = self.node.query_coverage_registrations.borrow_mut();
         for subscription in attachment.registrations {
@@ -426,7 +399,6 @@ where
                 continue;
             };
             let coverage = registration.coverage.clone();
-            let owns_subscription = registration.owns_subscription;
             registration.ref_count = registration.ref_count.saturating_sub(1);
             let last_registration = registration.ref_count == 0;
             if last_registration {
@@ -445,35 +417,28 @@ where
                     .borrow_mut()
                     .remove(&coverage);
             }
-            let has_live_stream_owner = self
-                .node
-                .upstream_subscription_owners
-                .borrow()
-                .get(&subscription)
-                .is_some_and(|owners| owners.iter().any(|owner| owner.strong_count() > 0));
-            if (owns_subscription && last_registration && !has_live_stream_owner)
-                || last_coverage_pin
-            {
+            if last_coverage_pin {
                 removed_subscriptions.push((subscription, coverage));
             }
         }
         drop(registrations);
         for (subscription, coverage) in removed_subscriptions {
-            self.node.node.borrow_mut().apply_unsubscribe(subscription);
-            let replacement = self
+            if let Some(receipts) = self
                 .node
-                .query_coverage_registrations
-                .borrow()
-                .values()
-                .find(|registration| registration.coverage == coverage)
-                .map(|registration| registration.subscription.subscription);
+                .active_authority_view_receipts
+                .borrow_mut()
+                .as_mut()
+            {
+                receipts.subscriptions.remove(&subscription);
+            }
+            self.node
+                .coverage_refresh_generations
+                .borrow_mut()
+                .remove(&coverage);
+            self.node.node.borrow_mut().apply_unsubscribe(subscription);
             let mut latest = self.node.latest_coverage_subscriptions.borrow_mut();
             if latest.get(&coverage) == Some(&subscription) {
-                if let Some(replacement) = replacement {
-                    latest.insert(coverage.clone(), replacement);
-                } else {
-                    latest.remove(&coverage);
-                }
+                latest.remove(&coverage);
             }
             drop(latest);
             self.node

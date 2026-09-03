@@ -168,6 +168,10 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     let second_attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
+    assert_eq!(
+        first_attachment.subscription(),
+        second_attachment.subscription()
+    );
     assert!(client.query_attachment_is_covered(&first_attachment));
     assert!(!client.query_attachment_is_covered(&second_attachment));
     client.tick().unwrap();
@@ -177,6 +181,10 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     assert!(client.query_attachment_is_covered(&second_attachment));
     assert_eq!(prepared_read(&client, &query).len(), 2);
     client.detach_query(first_attachment);
+    assert!(
+        client.query_attachment_is_covered(&second_attachment),
+        "dropping a sibling pin must not invalidate the shared receipt"
+    );
     client.detach_query(second_attachment);
 }
 
@@ -351,7 +359,7 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
 }
 
 #[test]
-fn reconnect_replays_each_distinct_usage_subscription_key() {
+fn reconnect_replays_one_shared_stream_for_identical_usages() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -385,7 +393,10 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
         ConnectionLink::Subscriber(SubscriberConnectionState { served, .. }) => served.len(),
         _ => panic!("expected subscriber connection"),
     };
-    assert_eq!(served_len, 2, "reconnect must replay S/q1 and distinct q2");
+    assert_eq!(
+        served_len, 1,
+        "reconnect must replay one stream for all three pins"
+    );
 
     client.detach_query(owned);
     client.tick().unwrap();
@@ -475,13 +486,13 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     else {
         panic!("expected subscriber connection");
     };
-    assert_eq!(served.len(), 2);
+    assert_eq!(served.len(), 1);
     assert_eq!(coverage_groups.len(), 1);
     let group = coverage_groups
         .values()
         .next()
         .expect("duplicate usage subscriptions should share one coverage group");
-    assert_eq!(group.subscribers.len(), 2);
+    assert_eq!(group.subscribers.len(), 1);
     let maintained_metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(maintained_metrics.hits_out, 2);
     assert_eq!(maintained_metrics.footprint.result_rows, 1);
