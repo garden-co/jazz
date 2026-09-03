@@ -54,6 +54,13 @@ export interface TodoServerOptions {
   /** URL of the external issuer's JWKS endpoint for HTTP request authentication. */
   jwksUrl?: string;
 }
+interface ServerLifecycle {
+  draining: boolean;
+  beginDrain: () => void;
+}
+
+const serverLifecycles = new WeakMap<Application, ServerLifecycle>();
+const stopPromises = new WeakMap<Server, Promise<void>>();
 
 // ============================================================================
 // Helpers
@@ -88,11 +95,36 @@ export async function createServer(
   const app = express();
 
   const sseConnections = new Map<Response, Db>();
+  const lifecycle: ServerLifecycle = {
+    draining: false,
+    beginDrain: () => {
+      lifecycle.draining = true;
+      const connections = Array.from(sseConnections.keys());
+      sseConnections.clear();
+      for (const res of connections) {
+        if (!res.destroyed && !res.writableEnded) {
+          res.end();
+        }
+      }
+    },
+  };
+  const isActiveSseConnection = (res: Response) =>
+    !lifecycle.draining && sseConnections.has(res) && !res.destroyed && !res.writableEnded;
 
   async function broadcastTodos() {
+    if (lifecycle.draining) {
+      return;
+    }
+
     await Promise.all(
       Array.from(sseConnections, async ([res, requestDb]) => {
+        if (!isActiveSseConnection(res)) {
+          return;
+        }
         const todos = await requestDb.all(schemaApp.todos);
+        if (!isActiveSseConnection(res)) {
+          return;
+        }
         res.write(`data: ${JSON.stringify(todos)}\n\n`);
       }),
     );
@@ -113,6 +145,14 @@ export async function createServer(
   // Health check
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "healthy" });
+  });
+
+  app.use("/todos", (_req: Request, res: Response, next: NextFunction) => {
+    if (!lifecycle.draining) {
+      next();
+      return;
+    }
+    res.status(503).json({ error: "Server is shutting down" });
   });
 
   // Authenticate every todo request before selecting a session-scoped database.
@@ -170,7 +210,17 @@ export async function createServer(
 
   // Live SSE stream of the authenticated caller's todos (must be before /todos/:id)
   app.get("/todos/live", async (_req: Request, res: Response, next: NextFunction) => {
+    const cleanup = () => {
+      sseConnections.delete(res);
+    };
+    res.once("close", cleanup);
+
     try {
+      if (lifecycle.draining) {
+        res.status(503).json({ error: "Server is shutting down" });
+        return;
+      }
+
       const db = requestDb(res);
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
@@ -180,12 +230,14 @@ export async function createServer(
       sseConnections.set(res, db);
 
       const todos = await db.all(schemaApp.todos);
+      if (!isActiveSseConnection(res)) {
+        return;
+      }
       res.write(`data: ${JSON.stringify(todos)}\n\n`);
-
-      res.on("close", () => {
-        sseConnections.delete(res);
-      });
     } catch (e) {
+      if (res.destroyed || res.writableEnded) {
+        return;
+      }
       next(e);
     }
   });
@@ -265,12 +317,18 @@ export async function createServer(
     res.status(500).json({ error: err.message });
   });
 
+  serverLifecycles.set(app, lifecycle);
+
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = async () => {
+    shutdownPromise ??= context.shutdown();
+    await shutdownPromise;
+  };
+
   return {
     app,
     db,
-    shutdown: async () => {
-      await context.shutdown();
-    },
+    shutdown,
     flush: () => {
       context.flush();
     },
@@ -303,13 +361,46 @@ export function startServer(todoServer: TodoServer, port: number = 0): Promise<R
  * Stop a running server.
  */
 export async function stopServer(server: RunningServer): Promise<void> {
-  await server.shutdown();
-  await new Promise<void>((resolve, reject) => {
-    server.server.close((err) => {
-      if (err) reject(err);
-      else resolve();
+  const existingStop = stopPromises.get(server.server);
+  if (existingStop) {
+    return existingStop;
+  }
+
+  const lifecycle = serverLifecycles.get(server.app);
+  const stopPromise = (async () => {
+    const httpClose = new Promise<void>((resolve, reject) => {
+      try {
+        server.server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      } catch (error) {
+        reject(error);
+      }
     });
-  });
+    lifecycle?.beginDrain();
+
+    let httpError: unknown;
+    try {
+      await httpClose;
+    } catch (error) {
+      httpError = error;
+    }
+
+    let shutdownError: unknown;
+    try {
+      await server.shutdown();
+    } catch (error) {
+      shutdownError = error;
+    }
+    if (httpError && shutdownError) {
+      throw new AggregateError([httpError, shutdownError], "HTTP and Jazz shutdown both failed");
+    }
+    if (httpError) throw httpError;
+    if (shutdownError) throw shutdownError;
+  })();
+  stopPromises.set(server.server, stopPromise);
+  return stopPromise;
 }
 
 // ============================================================================

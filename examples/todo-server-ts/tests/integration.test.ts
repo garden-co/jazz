@@ -5,7 +5,7 @@
  * exercise the full HTTP API, and clean up afterwards.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { userIdentity } from "jazz-tools";
 import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import { tmpdir } from "node:os";
@@ -47,26 +47,21 @@ function authenticatedFetch(
   return fetch(input, { ...init, headers });
 }
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  const { promise: result, resolve, reject } = Promise.withResolvers<T>();
-  // This integration test deliberately bounds platform shutdown with a real timer.
-  const timer = setTimeout(
-    () => reject(new Error(`Timed out after ${timeoutMs}ms`)),
-    timeoutMs,
-  );
-  promise.then(
-    (value) => {
-      clearTimeout(timer);
-      resolve(value);
-    },
-    (error: unknown) => {
-      clearTimeout(timer);
-      reject(error);
-    },
-  );
-  return result;
+  return new Promise<T>((resolve, reject) => {
+    // This integration test deliberately bounds platform shutdown with a real timer.
+    const timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
-
-
 
 describe("Todo Server Integration", () => {
   let server: RunningServer;
@@ -412,6 +407,44 @@ describe("Todo Server Integration", () => {
         await stopServer(sseServer);
       }
     });
+    it("rejects todo requests admitted after draining begins", async () => {
+      const drainingServer = await startServer(
+        await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
+      const originalClose = drainingServer.server.close.bind(drainingServer.server);
+      let closeCallback: ((error?: Error) => void) | undefined;
+      drainingServer.server.close = vi.fn((callback?: (error?: Error) => void) => {
+        closeCallback = callback;
+        return drainingServer.server;
+      }) as typeof drainingServer.server.close;
+      const shutdown = stopServer(drainingServer);
+      try {
+        const createResponse = await fetch(`${drainingServer.baseUrl}/todos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Too late" }),
+        });
+        expect(createResponse.status).toBe(503);
+
+        const streamResponse = await fetch(`${drainingServer.baseUrl}/todos/live`);
+        expect(streamResponse.status).toBe(503);
+        await expect(
+          drainingServer.db.all(app.todos.where({ title: "Too late" })),
+        ).resolves.toEqual([]);
+      } finally {
+        drainingServer.server.close = originalClose as typeof drainingServer.server.close;
+        await new Promise<void>((resolve, reject) => {
+          originalClose((error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+        closeCallback?.();
+        await shutdown;
+      }
+    });
+
     it("gracefully closes active SSE connections during shutdown", async () => {
       const sseServer = await startServer(
         await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
@@ -444,11 +477,9 @@ describe("Todo Server Integration", () => {
 
         const stop = stopServer(sseServer);
         shutdown = stop;
-        const [, eof] = await withTimeout(
-          Promise.all([stop, sseReader.read()]),
-          1_000,
-        );
+        const eof = await withTimeout(sseReader.read(), 1_000);
         expect(eof.done).toBe(true);
+        await stop;
         succeeded = true;
       } finally {
         if (!succeeded) {
