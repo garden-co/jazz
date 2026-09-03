@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
@@ -37,6 +37,25 @@ const PUBLIC_SERVER_URL_ENV = "NEXT_PUBLIC_JAZZ_SERVER_URL";
 const PUBLIC_TELEMETRY_COLLECTOR_URL_ENV = "NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL";
 const SCHEMA_HASH_STUB_SUBPATH = join("node_modules", ".cache", "jazz", "schema-hash.js");
 const SCHEMA_HASH_ALIAS = "jazz-tools/_dev/schema-hash";
+const WASM_PACKAGE_ALIAS = "jazz-wasm";
+
+function sealedWasmAliases() {
+  const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+  if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+    throw new Error("sealed correctness consumer is missing its admitted WASM package");
+  if (!sealedWasmPackage) return undefined;
+
+  const entry = resolve(sealedWasmPackage, "jazz_wasm.js");
+  // Turbopack interprets absolute alias targets as server-relative paths. Its
+  // project-relative spelling and Webpack's absolute spelling name the same
+  // immutable snapshot for every Next runtime import.
+  const fromProject = relative(process.cwd(), entry);
+  return {
+    webpack: entry,
+    turbopack:
+      fromProject === "" ? "." : fromProject.startsWith(".") ? fromProject : `./${fromProject}`,
+  };
+}
 
 async function writeSchemaHashStub(appRoot: string, hash: string): Promise<void> {
   const stubPath = join(appRoot, SCHEMA_HASH_STUB_SUBPATH);
@@ -74,15 +93,50 @@ export function withJazz(
 
   return async (phase, context) => {
     const resolved = await resolveConfig(nextConfig, phase, context);
+    const sealedWasm = sealedWasmAliases();
     const merged: NextConfigLike = {
       ...resolved,
       serverExternalPackages: mergeServerExternalPackages(resolved.serverExternalPackages),
     };
 
+    const previousWebpack = merged.webpack as
+      | ((config: WebpackConfig, ctx: unknown) => WebpackConfig)
+      | undefined;
+    const previousTurbopack = (merged.turbopack as TurbopackConfig | undefined) ?? {};
+
+    const withSealedWasm = (config: NextConfigLike): NextConfigLike => {
+      if (!sealedWasm) return config;
+      const configuredWebpack = config.webpack as
+        | ((config: WebpackConfig, ctx: unknown) => WebpackConfig)
+        | undefined;
+      const configuredTurbopack = config.turbopack as TurbopackConfig | undefined;
+      return {
+        ...config,
+        turbopack: {
+          ...previousTurbopack,
+          ...configuredTurbopack,
+          resolveAlias: {
+            ...previousTurbopack.resolveAlias,
+            ...configuredTurbopack?.resolveAlias,
+            [WASM_PACKAGE_ALIAS]: sealedWasm.turbopack,
+          },
+        },
+        webpack: (config: WebpackConfig, ctx: unknown) => {
+          const next = configuredWebpack ? configuredWebpack(config, ctx) : config;
+          next.resolve = next.resolve ?? {};
+          next.resolve.alias = {
+            ...next.resolve.alias,
+            [WASM_PACKAGE_ALIAS]: sealedWasm.webpack,
+          };
+          return next;
+        },
+      };
+    };
+
     // Everything below is dev-only: managed server, APP_ID/SERVER_URL
     // injection. In production the host app supplies those via its own env.
     if (phase !== DEVELOPMENT_PHASE || options.server === false) {
-      return merged;
+      return withSealedWasm(merged);
     }
 
     const serverOpt = options.server;
@@ -114,12 +168,7 @@ export function withJazz(
     // refuses to resolve them. Use the project-root-relative form there. Webpack
     // is happy with either, so feed it the absolute path for clarity.
     const turbopackStubPath = `./${SCHEMA_HASH_STUB_SUBPATH}`;
-    const previousWebpack = merged.webpack as
-      | ((config: WebpackConfig, ctx: unknown) => WebpackConfig)
-      | undefined;
-    const previousTurbopack = (merged.turbopack as TurbopackConfig | undefined) ?? {};
-
-    return {
+    return withSealedWasm({
       ...merged,
       env: {
         ...merged.env,
@@ -146,7 +195,7 @@ export function withJazz(
         };
         return next;
       },
-    };
+    });
   };
 }
 
