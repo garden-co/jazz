@@ -517,15 +517,34 @@ is deliberately about terminal values, not relations:
 Groove owns the selected ordered keys and scalar payload for every collection
 slot. It emits the smallest affected path operations without re-encoding an
 unmodified ancestor. One-shot reads and initial hydration still render complete
-terminal rows from that state. The transport carries this generic terminal
-operation vocabulary unchanged; a client applies it to its hydrated terminal
-tree and performs no joins, relation-edge interpretation, or query assembly.
+terminal rows from that state. The local subscription carrier delivers this
+generic terminal vocabulary to its binding's hydrated terminal tree. This is
+not authority-to-client result transport: the receiver evaluates the covered
+inputs locally, as specified above.
 
 This split is required by `INV-INC-1`: replacing a parent containing 20,000
 children after one child insert is observably correct but still performs work
 proportional to accumulated state. Root-addressing alone is insufficient unless
 the changed descendant path is preserved through Groove evaluation and the
 subscription carrier.
+
+The receiver-local decoder obeys the same rule. It retains decoded collection
+state keyed by the compiler's child identities and applies the addressed edit
+without decoding or encoding every sibling. Both the maintained receiver and
+the facade use this reducer. Opening, an explicit full snapshot, and a reset
+may encode complete roots; ordinary child-delta delivery may not. Opening also
+prepares the facade's decoder from the already-decoded terminal state, so the
+first subsequent edit cannot hide a full-collection initialization cost. This
+is process-local derived state, not a storage format or another query evaluator.
+
+A scalar update of an existing occurrence preserves its independently maintained
+child collections. Empty collection placeholders in that scalar payload do not
+mean child removal; explicit child edits own those changes. A remove/reinsert of
+the same occurrence within one atomic terminal batch is likewise a replacement,
+not a child-lifetime boundary. An occurrence absent at the end of the batch loses
+its retained child state. Only compiler-addressed
+collection slots receive this treatment; ordinary array-valued application
+columns remain scalar payload and are replaced normally.
 
 - Subscription opening: direct `array_subqueries` are accepted at the `Db` facade
   and sync registration surfaces, covered by

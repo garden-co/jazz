@@ -712,8 +712,10 @@ where
             .into_iter()
             .map(|(_, occurrence)| occurrence)
             .collect::<Vec<_>>();
-        let initial_outputs =
-            subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
+        let initial_outputs = {
+            materialize_subscription_terminal_records(&mut snapshot, &snapshot_index)?;
+            subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?
+        };
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
         snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
         snapshot_index.roots = root_occurrence_ids
@@ -722,6 +724,7 @@ where
             .enumerate()
             .map(|(index, occurrence)| (occurrence, index))
             .collect();
+        snapshot_index.terminal_records = subscription.decoded_terminal_records()?;
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(SubscriptionState {

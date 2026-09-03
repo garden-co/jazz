@@ -72,6 +72,22 @@ impl CoveredInputReceiver {
 }
 
 impl LocalMaintainedViewSubscription {
+    /// Seed a facade's retained decoder at its opening boundary. Copy the
+    /// compiler-addressed collections already decoded by the local terminal;
+    /// do not infer collection semantics from arbitrary array-valued columns.
+    pub(crate) fn decoded_terminal_records(
+        &self,
+    ) -> Result<
+        BTreeMap<OutputOccurrenceId, crate::db::terminal_record::TerminalRecordState>,
+        crate::db::Error,
+    > {
+        self.maintained
+            .decoded_terminal_records()
+            .iter()
+            .map(|(key, record)| Ok((crate::db::terminal_root_occurrence_id(key)?, record.clone())))
+            .collect()
+    }
+
     pub(crate) fn terminal_root_layout(&self) -> Option<&crate::db::TerminalRootLayout> {
         self.terminal_schemas.terminal_root_layout()
     }

@@ -2529,6 +2529,7 @@ mod reads;
 #[doc(hidden)]
 pub use reads::BindingHydrationError;
 mod subscriptions;
+pub(crate) mod terminal_record;
 mod transactions;
 
 /// Counts produced while servicing non-blocking database connection work.
@@ -4169,6 +4170,9 @@ struct RelationSnapshotIndex {
     roots: BTreeMap<OutputOccurrenceId, usize>,
     related: BTreeMap<(String, RowUuid), usize>,
     edges: BTreeSet<RelationEdge>,
+    /// Decoded descendants supersede the encoded root seed until a complete
+    /// snapshot is requested. Ordinary delta delivery must not re-encode it.
+    terminal_records: BTreeMap<OutputOccurrenceId, terminal_record::TerminalRecordState>,
 }
 
 impl RelationSnapshotIndex {
@@ -4475,7 +4479,7 @@ impl SubscriptionStream {
                 "remote one-shot attempted to materialize a non-local maintained snapshot",
             ));
         }
-        Ok(state.snapshot.clone())
+        materialized_subscription_snapshot(&state.snapshot, &state.snapshot_index)
     }
 
     /// Return the next queued materialized subscription event without waiting.
@@ -5157,6 +5161,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
         .iter()
         .map(|(occurrence_id, _)| occurrence_id.clone())
         .collect::<BTreeSet<_>>();
+    for occurrence in &affected {
+        materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
+    }
     let before = affected
         .iter()
         .filter_map(|occurrence_id| {
@@ -5166,6 +5173,46 @@ fn apply_terminal_operations_to_subscription_snapshot(
             Some((occurrence_id.clone(), (index, snapshot.rows[index].clone())))
         })
         .collect::<BTreeMap<_, _>>();
+
+    let inserted = root_operations
+        .iter()
+        .filter_map(|(occurrence, operation)| match operation.edit {
+            groove::ivm::TerminalEdit::Insert { .. } => Some((occurrence.clone(), true)),
+            groove::ivm::TerminalEdit::Remove { .. } => Some((occurrence.clone(), false)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .filter_map(|(key, present)| present.then_some(key))
+        .collect::<BTreeSet<_>>();
+    let replaced = root_operations
+        .iter()
+        .filter_map(|(occurrence, operation)| {
+            (matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
+                && inserted.contains(occurrence))
+            .then_some(occurrence.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    for (occurrence, operation) in &root_operations {
+        if replaced.contains(occurrence) {
+            if let groove::ivm::TerminalEdit::Insert { value, .. } = &operation.edit {
+                if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
+                    state.update_record(OwnedRecord::new(
+                        value.clone(),
+                        operation.root_descriptor,
+                    ))?;
+                }
+            }
+            continue;
+        }
+        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
+            if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
+                state.update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
+            }
+        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
+            snapshot_index.terminal_records.remove(occurrence);
+        }
+    }
 
     for (occurrence_id, operation) in root_operations {
         match operation.edit {
@@ -5253,13 +5300,20 @@ fn apply_terminal_operations_to_subscription_snapshot(
     // reconstruct nested children from result membership or authority facts.
     apply_descendant_terminal_operations_to_snapshot(
         snapshot,
+        snapshot_index,
         &occurrences,
         &affected,
         &descendant_operations,
     )?;
 
+    let terminal_records = std::mem::take(&mut snapshot_index.terminal_records);
     *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+    snapshot_index.terminal_records = terminal_records;
     snapshot_index.roots = root_occurrence_positions(&occurrences);
+
+    for occurrence in &affected {
+        materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
+    }
 
     let mut added = Vec::new();
     let mut updated = Vec::new();
@@ -5316,6 +5370,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
 /// than a reason to search a table/result relation for a plausible match.
 fn apply_descendant_terminal_operations_to_snapshot(
     snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
     occurrences: &[OutputOccurrenceId],
     roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
     operations: &[groove::ivm::TerminalOperation],
@@ -5348,217 +5403,67 @@ fn apply_descendant_terminal_operations_to_snapshot(
                 "terminal root position is outside the receiver snapshot",
             )
         })?;
-        apply_descendant_terminal_operation(root, operation)?;
+        if !snapshot_index.terminal_records.contains_key(&occurrence) {
+            let (descriptor, raw) = root.encoded_record();
+            snapshot_index.terminal_records.insert(
+                occurrence.clone(),
+                terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                    raw.to_vec(),
+                    *descriptor,
+                ))?,
+            );
+        }
+        snapshot_index
+            .terminal_records
+            .get_mut(&occurrence)
+            .expect("initialized above")
+            .apply(operation)?;
     }
     Ok(())
 }
 
-fn apply_descendant_terminal_operation(
-    root: &mut CurrentRow,
-    operation: &groove::ivm::TerminalOperation,
+/// Materialize the retained terminal state only at a full-snapshot boundary.
+/// Delta consumers receive the original child operations, not a rebuilt root.
+fn materialized_subscription_snapshot(
+    snapshot: &RelationSnapshot,
+    index: &RelationSnapshotIndex,
+) -> Result<RelationSnapshot, Error> {
+    let mut snapshot = snapshot.clone();
+    materialize_subscription_terminal_records(&mut snapshot, index)?;
+    Ok(snapshot)
+}
+
+fn materialize_subscription_terminal_records(
+    snapshot: &mut RelationSnapshot,
+    index: &RelationSnapshotIndex,
 ) -> Result<(), Error> {
-    let (descriptor, raw) = root.encoded_record();
-    let updated = apply_terminal_descendant_record(
-        OwnedRecord::new(raw.to_vec(), descriptor.clone()),
-        operation,
-    )?;
-    *root = CurrentRow::new(root.table().to_owned(), updated);
+    for occurrence in index.terminal_records.keys() {
+        materialize_subscription_terminal_record(snapshot, index, occurrence)?;
+    }
     Ok(())
 }
 
-/// Fold one compiler-owned descendant terminal edit into a retained root
-/// record. Both the public facade snapshot and the local maintained receiver
-/// use this reducer, so an opening/reset and later updates cannot disagree
-/// about nested arrays.
-pub(crate) fn apply_terminal_descendant_record(
-    root: OwnedRecord,
-    operation: &groove::ivm::TerminalOperation,
-) -> Result<OwnedRecord, Error> {
-    let descriptor = root.descriptor();
-    if descriptor != &operation.root_descriptor {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant descriptor disagrees with its retained root",
-        ));
-    }
-    let mut values = root.borrowed().to_values().map_err(|error| {
-        Error::new(
-            ErrorCode::Protocol,
-            format!("invalid retained terminal root payload: {error}"),
-        )
-    })?;
-    apply_terminal_path_edit(
-        &mut values,
-        descriptor,
-        operation.path.as_slice(),
-        &operation.edit,
-    )?;
-    let raw = descriptor.create(&values).map_err(|error| {
-        Error::new(
-            ErrorCode::Protocol,
-            format!("cannot encode retained terminal root after descendant edit: {error}"),
-        )
-    })?;
-    Ok(OwnedRecord::new(raw, descriptor.clone()))
-}
-
-fn apply_terminal_path_edit(
-    owner_values: &mut [Value],
-    owner_descriptor: &RecordDescriptor,
-    path: &[groove::ivm::TerminalPathSegment],
-    edit: &groove::ivm::TerminalEdit,
+fn materialize_subscription_terminal_record(
+    snapshot: &mut RelationSnapshot,
+    index: &RelationSnapshotIndex,
+    occurrence: &OutputOccurrenceId,
 ) -> Result<(), Error> {
-    use groove::ivm::TerminalPathSegment;
-    use groove::records::ValueType;
-
-    let Some((head, rest)) = path.split_first() else {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant operation has no collection path",
-        ));
-    };
-    let TerminalPathSegment::Collection(name) = head else {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant path must begin with a collection",
-        ));
-    };
-    let field_index = owner_descriptor.field_index(name).ok_or_else(|| {
-        Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant path names an unknown collection",
-        )
-    })?;
-    let child_descriptor = match owner_descriptor
-        .fields()
-        .get(field_index)
-        .map(|field| &field.value_type)
-    {
-        Some(ValueType::Array(element)) => match element.as_ref() {
-            ValueType::Record(descriptor) => (**descriptor).clone(),
-            _ => {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "terminal descendant collection does not contain records",
-                ));
-            }
-        },
-        _ => {
-            return Err(Error::new(
+    if let Some(record) = index.terminal_records.get(occurrence) {
+        let position = index.roots.get(occurrence).ok_or_else(|| {
+            Error::new(
                 ErrorCode::Protocol,
-                "terminal descendant path names a non-array field",
-            ));
-        }
-    };
-    let Some(Value::Array(children)) = owner_values.get_mut(field_index) else {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant collection payload is not an array",
-        ));
-    };
-    match rest {
-        [] => apply_terminal_collection_edit(children, &child_descriptor, edit),
-        [TerminalPathSegment::Key(key), tail @ ..] => {
-            let child_index = terminal_child_index(children, key, "path")?;
-            let Value::Record(child) = &children[child_index] else {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "terminal descendant collection contains a non-record child",
-                ));
-            };
-            let mut child_values = child.to_values().map_err(|error| {
-                Error::new(
-                    ErrorCode::Protocol,
-                    format!("invalid retained terminal child payload: {error}"),
-                )
-            })?;
-            apply_terminal_path_edit(&mut child_values, &child_descriptor, tail, edit)?;
-            let raw = child_descriptor.create(&child_values).map_err(|error| {
-                Error::new(
-                    ErrorCode::Protocol,
-                    format!("cannot encode retained terminal child after edit: {error}"),
-                )
-            })?;
-            children[child_index] = Value::Record(OwnedRecord::new(raw, child_descriptor));
-            Ok(())
-        }
-        _ => Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant path does not alternate collection and key",
-        )),
+                "retained terminal record has no root occurrence",
+            )
+        })?;
+        let root = snapshot.rows.get_mut(*position).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "retained terminal root position is outside snapshot",
+            )
+        })?;
+        *root = CurrentRow::new(root.table().to_owned(), record.record()?);
     }
-}
-
-fn apply_terminal_collection_edit(
-    children: &mut Vec<Value>,
-    descriptor: &RecordDescriptor,
-    edit: &groove::ivm::TerminalEdit,
-) -> Result<(), Error> {
-    use groove::ivm::TerminalEdit;
-
-    let key = match edit {
-        TerminalEdit::Insert { key, .. }
-        | TerminalEdit::Update { key, .. }
-        | TerminalEdit::Remove { key }
-        | TerminalEdit::Move { key, .. } => key,
-    };
-    match edit {
-        TerminalEdit::Insert { index, value, .. } => {
-            let record = OwnedRecord::new(value.clone(), descriptor.clone());
-            if terminal_child_key(&Value::Record(record.clone()))? != *key {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "terminal child insertion payload key disagrees with edit key",
-                ));
-            }
-            if let Some(existing) = terminal_child_index_if_present(children, key)? {
-                children.remove(existing);
-            }
-            children.insert((*index).min(children.len()), Value::Record(record));
-            Ok(())
-        }
-        TerminalEdit::Update { value, .. } => {
-            let index = terminal_child_index(children, key, "update")?;
-            let record = OwnedRecord::new(value.clone(), descriptor.clone());
-            if terminal_child_key(&Value::Record(record.clone()))? != *key {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "terminal child update payload key disagrees with edit key",
-                ));
-            }
-            children[index] = Value::Record(record);
-            Ok(())
-        }
-        TerminalEdit::Remove { .. } => {
-            let index = terminal_child_index(children, key, "removal")?;
-            children.remove(index);
-            Ok(())
-        }
-        TerminalEdit::Move { index, .. } => {
-            let previous = terminal_child_index(children, key, "move")?;
-            let value = children.remove(previous);
-            children.insert((*index).min(children.len()), value);
-            Ok(())
-        }
-    }
-}
-
-fn terminal_child_index_if_present(children: &[Value], key: &[u8]) -> Result<Option<usize>, Error> {
-    for (index, value) in children.iter().enumerate() {
-        if terminal_child_key(value)? == key {
-            return Ok(Some(index));
-        }
-    }
-    Ok(None)
-}
-
-fn terminal_child_index(children: &[Value], key: &[u8], operation: &str) -> Result<usize, Error> {
-    terminal_child_index_if_present(children, key)?.ok_or_else(|| {
-        Error::new(
-            ErrorCode::Protocol,
-            format!("terminal child {operation} addressed a missing key"),
-        )
-    })
+    Ok(())
 }
 
 fn terminal_child_key(value: &Value) -> Result<Vec<u8>, Error> {

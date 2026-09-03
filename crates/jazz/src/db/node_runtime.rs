@@ -2908,7 +2908,13 @@ where
                 .await?;
             let (previous_snapshot, previous_snapshot_index) = {
                 let state_ref = state.borrow();
-                (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
+                (
+                    materialized_subscription_snapshot(
+                        &state_ref.snapshot,
+                        &state_ref.snapshot_index,
+                    )?,
+                    state_ref.snapshot_index.clone(),
+                )
             };
             let (maintained, mut snapshot) = node
                 .lock()
@@ -3043,6 +3049,7 @@ where
                         previous_settled,
                         terminal_layout,
                     )?;
+                    materialize_subscription_terminal_records(&mut snapshot, &snapshot_index)?;
                     consumed_authoritative_resets.insert(authority_result_key);
                 }
             }
@@ -3120,6 +3127,15 @@ where
                 .enumerate()
                 .map(|(index, occurrence)| (occurrence, index))
                 .collect();
+            let SubscriptionKind::Prepared {
+                maintained_subscription,
+                ..
+            } = &state_ref.kind;
+            state_ref.snapshot_index.terminal_records = maintained_subscription
+                .as_ref()
+                .map(LocalMaintainedViewSubscription::decoded_terminal_records)
+                .transpose()?
+                .unwrap_or_default();
             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
             state_ref.settled = settled;
             // A strict remote opening is intentionally absent until its
@@ -3407,7 +3423,14 @@ where
                                         "JAZZ_COVERED_INPUT_TRACE stage=terminal_ops count={terminal_operation_count} reset={authoritative_reset}"
                                     );
                                 }
-                                let previous_snapshot = refresh.snapshot.clone();
+                                let previous_snapshot = authoritative_reset
+                                    .then(|| {
+                                        materialized_subscription_snapshot(
+                                            &refresh.snapshot,
+                                            &refresh.snapshot_index,
+                                        )
+                                    })
+                                    .transpose()?;
                                 let event = apply_terminal_operations_to_subscription_snapshot(
                                     &mut refresh.snapshot,
                                     &mut refresh.snapshot_index,
@@ -3426,10 +3449,16 @@ where
                                 // query.  Later local/covered updates remain
                                 // incremental terminal operations.
                                 let event = if authoritative_reset {
+                                    materialize_subscription_terminal_records(
+                                        &mut refresh.snapshot,
+                                        &refresh.snapshot_index,
+                                    )?;
                                     subscription_delta_event_with_reset(
                                         snapshot_tier,
                                         settled,
-                                        &previous_snapshot,
+                                        previous_snapshot
+                                            .as_ref()
+                                            .expect("reset snapshot captured above"),
                                         &refresh.snapshot,
                                         true,
                                         terminal_rows,
@@ -3464,7 +3493,10 @@ where
                             removed,
                         } => {
                             let state_ref = &mut refresh;
-                            let previous_snapshot = state_ref.snapshot.clone();
+                            let previous_snapshot = materialized_subscription_snapshot(
+                                &state_ref.snapshot,
+                                &state_ref.snapshot_index,
+                            )?;
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
@@ -3587,7 +3619,10 @@ where
                     // exact authority boundary for this receiver and must
                     // publish a reset from the collector state, not from a
                     // result cache or a re-run query.
-                    let snapshot = refresh.snapshot.clone();
+                    let snapshot = materialized_subscription_snapshot(
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                    )?;
                     let event = subscription_delta_event_with_reset(
                         snapshot_tier,
                         settled,
@@ -3619,21 +3654,36 @@ where
                 let preserve_local_overlay = suppressed_authoritative_change;
                 let (snapshot, snapshot_source) = if terminal_rows {
                     (
-                        refresh.snapshot.clone(),
+                        materialized_subscription_snapshot(
+                            &refresh.snapshot,
+                            &refresh.snapshot_index,
+                        )?,
                         SubscriptionSnapshotSource::LocalMaintained,
                     )
                 } else if preserve_local_overlay {
-                    (refresh.snapshot.clone(), previous_source)
+                    (
+                        materialized_subscription_snapshot(
+                            &refresh.snapshot,
+                            &refresh.snapshot_index,
+                        )?,
+                        previous_source,
+                    )
                 } else if remote_settled_tier.is_some() {
                     // A remote receipt has already been staged through the
                     // local collector above. Never rebuild a relation facade
                     // from authority output or a second storage read here.
                     (
-                        refresh.snapshot.clone(),
+                        materialized_subscription_snapshot(
+                            &refresh.snapshot,
+                            &refresh.snapshot_index,
+                        )?,
                         SubscriptionSnapshotSource::LocalMaintained,
                     )
                 } else if has_maintained_subscription {
-                    let previous = refresh.snapshot.clone();
+                    let previous = materialized_subscription_snapshot(
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                    )?;
                     (previous.clone(), previous_source)
                 } else {
                     (
@@ -3674,7 +3724,7 @@ where
         let (previous, previous_source, has_maintained_flat_tuple_subscription) = {
             let state = state.borrow();
             (
-                state.snapshot.clone(),
+                materialized_subscription_snapshot(&state.snapshot, &state.snapshot_index)?,
                 state.snapshot_source,
                 matches!(
                     &state.kind,
@@ -3748,6 +3798,15 @@ where
                 &state.kind,
                 &state.snapshot,
             )?;
+            let SubscriptionKind::Prepared {
+                maintained_subscription,
+                ..
+            } = &state.kind;
+            state.snapshot_index.terminal_records = maintained_subscription
+                .as_ref()
+                .map(LocalMaintainedViewSubscription::decoded_terminal_records)
+                .transpose()?
+                .unwrap_or_default();
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {

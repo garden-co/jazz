@@ -2,6 +2,130 @@
 
 use super::*;
 
+// Internal regression: a new public one-shot query would open another receiver
+// and hide stale decoded state in the existing stream's snapshot cache.
+#[test]
+fn structured_live_snapshot_keeps_child_edits_across_parent_reordering() {
+    fn retained_snapshot(subscription: &SubscriptionStream) -> RelationSnapshot {
+        let state = subscription._state.borrow();
+        super::super::super::materialized_subscription_snapshot(
+            &state.snapshot,
+            &state.snapshot_index,
+        )
+        .unwrap()
+    }
+    let schema = relation_schema();
+    let db = open_db(0xcf, AuthorSubject::for_test_bytes([0xcf; 16]), &schema);
+    for (id, name) in [(0xa1, "alice"), (0xb1, "bob")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (id, owner, title) in [(0x11, 0xa1, "first"), (0x21, 0xb1, "untouched")] {
+        db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(owner).0)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = Query::from("users")
+        .order_by("name", OrderDirection::Asc)
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(
+        &prepared_query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("title".to_owned(), Value::String("edited".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["edited"]
+    );
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xb1), "todosViaOwner", "title"),
+        vec!["untouched"]
+    );
+
+    db.update(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xb1), row(0xa1)]);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["edited"]
+    );
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("title".to_owned(), Value::String("after move".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["after move"]
+    );
+
+    db.delete("todos", row(0x11), Default::default()).unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert!(terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title").is_empty());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xb1), "todosViaOwner", "title"),
+        vec!["untouched"]
+    );
+
+    db.delete("users", row(0xa1), Default::default()).unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let snapshot = retained_snapshot(&subscription);
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xb1)]);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xb1), "todosViaOwner", "title"),
+        vec!["untouched"]
+    );
+}
+
 #[test]
 fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let schema = relation_schema();
