@@ -2,6 +2,141 @@
 
 use super::*;
 
+// Internal for the same reason as the parent-reordering regression below:
+// inspect this receiver's retained tree, not a freshly opened one-shot graph.
+#[test]
+fn structured_live_snapshot_keeps_grandchildren_across_child_replacement() {
+    fn comments(subscription: &SubscriptionStream, expected_title: &str) -> Vec<String> {
+        let state = subscription._state.borrow();
+        let snapshot = super::super::super::materialized_subscription_snapshot(
+            &state.snapshot,
+            &state.snapshot_index,
+        )
+        .unwrap();
+        let (descriptor, raw) = snapshot.rows[0].encoded_record();
+        let Value::Array(todos) = descriptor.bind(raw).get("todos").unwrap() else {
+            panic!("expected todos collection");
+        };
+        assert_eq!(todos.len(), 1);
+        let Value::Record(todo) = &todos[0] else {
+            panic!("expected todo record");
+        };
+        assert_eq!(
+            todo.get("title").unwrap(),
+            Value::String(expected_title.to_owned())
+        );
+        let Value::Array(comments) = todo.get("comments").unwrap() else {
+            panic!("expected comments collection");
+        };
+        comments
+            .into_iter()
+            .map(|comment| {
+                let Value::Record(comment) = comment else {
+                    panic!("expected comment record");
+                };
+                let Value::String(body) = comment.get("body").unwrap() else {
+                    panic!("expected comment body");
+                };
+                body
+            })
+            .collect()
+    }
+    let schema = relation_schema();
+    let db = open_db(0xce, AuthorSubject::for_test_bytes([0xce; 16]), &schema);
+    for (table, id, fields) in [
+        (
+            "users",
+            0xa1,
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        ),
+        (
+            "todos",
+            0x11,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("task".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+            ]),
+        ),
+        (
+            "comments",
+            0x21,
+            BTreeMap::from([
+                ("body".to_owned(), Value::String("keep me".to_owned())),
+                ("todo_id".to_owned(), Value::Uuid(row(0x11).0)),
+            ]),
+        ),
+    ] {
+        db.insert(
+            table,
+            fields,
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = Query::from("users").array_subquery(
+        ArraySubquery::new("todos", "todos", "owner_id", "id")
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+    );
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert_eq!(comments(&subscription, "task"), vec!["keep me"]);
+
+    db.update(
+        "todos",
+        row(0x11),
+        BTreeMap::from([("title".to_owned(), Value::String("renamed task".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert_eq!(
+        comments(&subscription, "renamed task"),
+        vec!["keep me"],
+        "a child scalar replacement preserves its independently maintained comments"
+    );
+
+    db.update(
+        "comments",
+        row(0x21),
+        BTreeMap::from([(
+            "body".to_owned(),
+            Value::String("edited comment".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert_eq!(
+        comments(&subscription, "renamed task"),
+        vec!["edited comment"]
+    );
+
+    db.update(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("renamed owner".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert_eq!(
+        comments(&subscription, "renamed task"),
+        vec!["edited comment"]
+    );
+
+    db.delete("comments", row(0x21), Default::default())
+        .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    assert!(
+        comments(&subscription, "renamed task").is_empty(),
+        "a real grandchild deletion still retracts it"
+    );
+}
+
 // Internal regression: a new public one-shot query would open another receiver
 // and hide stale decoded state in the existing stream's snapshot cache.
 #[test]

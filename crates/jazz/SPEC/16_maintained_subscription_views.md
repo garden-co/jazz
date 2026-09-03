@@ -546,6 +546,11 @@ its retained child state. Only compiler-addressed
 collection slots receive this treatment; ordinary array-valued application
 columns remain scalar payload and are replaced normally.
 
+Collection membership edits address the collection path and carry the affected
+child key in the edit. Recursive scalar updates may instead end their path at
+that child key; the decoder verifies it matches the update's key and updates
+that occurrence without dropping its independently maintained descendants.
+
 - Subscription opening: direct `array_subqueries` are accepted at the `Db` facade
   and sync registration surfaces, covered by
   `array_subquery_live_subscription_tracks_child_edges` and

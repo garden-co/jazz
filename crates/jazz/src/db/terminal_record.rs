@@ -120,6 +120,15 @@ impl TerminalRecordState {
         let collection = self.collections.get_mut(&index).expect("initialized above");
         match rest {
             [] => collection.apply(edit),
+            // Recursive record differencing addresses the selected child
+            // itself for a scalar update. Collection membership edits instead
+            // end at the collection and carry their key only in the edit.
+            [TerminalPathSegment::Key(path_key)] => match edit {
+                TerminalEdit::Update { key, .. } if key == path_key => collection.apply(edit),
+                _ => Err(invalid(
+                    "terminal keyed path must match its scalar update key",
+                )),
+            },
             [TerminalPathSegment::Key(key), tail @ ..] if !tail.is_empty() => collection
                 .rows
                 .get_mut(key)
