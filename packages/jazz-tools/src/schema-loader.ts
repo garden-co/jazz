@@ -172,7 +172,9 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
             name: field.name,
             sqlType: columnTypeToSqlType(field.column_type),
             nullable: field.nullable,
-            ...(field.default === undefined ? {} : { default: field.default }),
+            ...(field.default === undefined
+              ? {}
+              : { default: wasmValueToDefault(field.default, field.column_type, field.nullable) }),
           })),
         })),
       };
@@ -183,29 +185,95 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
   }
 }
 
-function wasmValueToDefault(value: Value, columnType: ColumnType): unknown {
-  switch (value.type) {
-    case "Null":
-      return null;
+function wasmValueToDefault(value: Value, columnType: ColumnType, nullable = true): unknown {
+  if (value.type === "Null") {
+    if (!nullable) {
+      throw new Error("Null default does not match non-nullable column.");
+    }
+    return null;
+  }
+
+  switch (columnType.type) {
     case "Integer":
+      if (value.type !== "Integer") {
+        throw new Error("Integer default does not match column type.");
+      }
+      return value.value;
     case "BigInt":
+      if (value.type !== "BigInt") {
+        throw new Error("BigInt default does not match column type.");
+      }
+      return value.value;
     case "Double":
+      if (value.type !== "Double") {
+        throw new Error("Double default does not match column type.");
+      }
+      return value.value;
     case "Boolean":
+      if (value.type !== "Boolean") {
+        throw new Error("Boolean default does not match column type.");
+      }
+      return value.value;
     case "Text":
+      if (value.type !== "Text") {
+        throw new Error("Text default does not match column type.");
+      }
+      return value.value;
     case "Timestamp":
+      if (value.type !== "Timestamp") {
+        throw new Error("Timestamp default does not match column type.");
+      }
+      return value.value;
     case "Uuid":
-      if (columnType.type === "Json") {
-        return JSON.parse(String(value.value));
+      if (value.type !== "Uuid") {
+        throw new Error("Uuid default does not match column type.");
       }
       return value.value;
     case "Bytea":
+      if (value.type !== "Bytea") {
+        throw new Error("Bytea default does not match column type.");
+      }
       return new Uint8Array(value.value);
-    case "Array": {
-      if (columnType.type !== "Array") {
+    case "Json":
+      if (value.type !== "Text") {
+        throw new Error("Json default does not match column type.");
+      }
+      return JSON.parse(value.value);
+    case "Enum":
+      if (value.type !== "Text") {
+        throw new Error("Enum default does not match column type.");
+      }
+      return value.value;
+    case "EnumPayload":
+      if (value.type !== "Enum") {
+        throw new Error("Payload enum default does not match column type.");
+      }
+      if (!Array.isArray(value.value.values)) {
+        throw new Error("Payload enum default values must be an array.");
+      }
+      const entry = columnType.cases.find((candidate) => candidate.name === value.value.case);
+      if (!entry) {
+        throw new Error(`Unknown payload enum case "${value.value.case}".`);
+      }
+      if (value.value.values.length !== entry.fields.length) {
+        throw new Error(
+          `Payload enum case "${value.value.case}" default has ${value.value.values.length} values; expected ${entry.fields.length}.`,
+        );
+      }
+      return {
+        type: value.value.case,
+        ...Object.fromEntries(
+          entry.fields.map((field, index) => [
+            field.name,
+            wasmValueToDefault(value.value.values[index]!, field.column_type, field.nullable),
+          ]),
+        ),
+      };
+    case "Array":
+      if (value.type !== "Array") {
         throw new Error("Array default does not match column type.");
       }
       return value.value.map((inner) => wasmValueToDefault(inner, columnType.element));
-    }
     case "Row":
       throw new Error("Root schema loading does not yet support row-valued defaults.");
   }
@@ -232,7 +300,7 @@ function wasmColumnToAst(column: ColumnDescriptor): Column {
     default:
       column.default === undefined
         ? undefined
-        : wasmValueToDefault(column.default, column.column_type),
+        : wasmValueToDefault(column.default, column.column_type, column.nullable),
     references: column.references,
     mergeStrategy: columnMergeStrategyToAst(column.merge_strategy),
   };

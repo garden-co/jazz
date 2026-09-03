@@ -11,6 +11,12 @@ const WITH_BIGINT_DIR = fileURLToPath(new URL("./testing/fixtures/with-bigint", 
 const WITH_ENUM_PAYLOAD_DEFAULTS_DIR = fileURLToPath(
   new URL("./testing/fixtures/with-enum-payload-defaults", import.meta.url),
 );
+const WITH_ENUM_PAYLOAD_WRONG_TAG_DIR = fileURLToPath(
+  new URL("./testing/fixtures/with-enum-payload-wrong-tag", import.meta.url),
+);
+const WITH_ENUM_PAYLOAD_REQUIRED_NULL_DIR = fileURLToPath(
+  new URL("./testing/fixtures/with-enum-payload-required-null", import.meta.url),
+);
 
 const defaultRemoveTempDirectory = schemaLoaderTestHooks.removeTempDirectory;
 afterEach(() => {
@@ -67,6 +73,18 @@ describe("loadCompiledSchema", () => {
       note: null,
     });
     expect(schemaToWasm(loaded.schema)).toEqual(app.wasmSchema);
+  });
+
+  it("rejects payload enum defaults with a nested value tag mismatch", async () => {
+    await expect(loadCompiledSchema(WITH_ENUM_PAYLOAD_WRONG_TAG_DIR)).rejects.toThrow(
+      "Text default does not match column type.",
+    );
+  });
+
+  it("rejects null defaults for required payload enum fields", async () => {
+    await expect(loadCompiledSchema(WITH_ENUM_PAYLOAD_REQUIRED_NULL_DIR)).rejects.toThrow(
+      "Null default does not match non-nullable column.",
+    );
   });
 
   it("loads typed-app BIGINT columns from wasm schema exports", async () => {
