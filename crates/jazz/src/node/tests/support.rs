@@ -1558,6 +1558,7 @@ struct M3MessageCounts {
     fate_delivered: u64,
     view_enqueued: u64,
     view_delivered: u64,
+    view_dropped_on_disconnect: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct M3RunSummary {
@@ -1605,6 +1606,8 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     let (core_dir, mut core) = open_node_with_schema(node(9), harness_schema.clone());
     let (reader_a_dir, mut reader_a) = open_node_with_schema(node(3), harness_schema.clone());
     let (reader_b_dir, mut reader_b) = open_node_with_schema(node(4), harness_schema.clone());
+    register_whole_table_receiver(&mut reader_a, "todos");
+    register_whole_table_receiver(&mut reader_b, "todos");
     let mut link_a = PeerState::client_link(author_a);
     let mut link_b = PeerState::client_link(author_b);
     let owner_shape = crate::query::Query::from("todos")
@@ -1991,21 +1994,11 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 midstream_view_emissions += 1;
                 views_a.push_back(link_a.current_rows_update(&mut core, "todos").unwrap());
                 message_counts.view_enqueued += 1;
-                if rng.chance(1, 4) {
-                    let duplicate = views_a.back().unwrap().clone();
-                    views_a.push_back(duplicate);
-                    message_counts.view_enqueued += 1;
-                }
             }
             4 if midstream_view_emissions < 12 => {
                 midstream_view_emissions += 1;
                 views_b.push_back(link_b.current_rows_update(&mut core, "todos").unwrap());
                 message_counts.view_enqueued += 1;
-                if rng.chance(1, 4) {
-                    let duplicate = views_b.back().unwrap().clone();
-                    views_b.push_back(duplicate);
-                    message_counts.view_enqueued += 1;
-                }
             }
             5 if !views_a.is_empty() || !views_b.is_empty() => {
                 // The protocol guarantees FIFO on each peer; we still
@@ -2031,9 +2024,24 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 if restart_a {
                     drop(reader_a);
                     reader_a = reopen_node_at(&reader_a_dir, node(3), harness_schema.clone());
+                    register_whole_table_receiver(&mut reader_a, "todos");
+                    // Restart loses the live stream, not cached history. Drop
+                    // its undelivered frames and open fresh coverage; the old
+                    // sender's payload inventory also cannot cross this loss.
+                    message_counts.view_dropped_on_disconnect += views_a.len() as u64;
+                    views_a.clear();
+                    link_a = PeerState::client_link(author_a);
+                    views_a.push_back(link_a.reset_current_rows(&mut core, "todos").unwrap());
+                    message_counts.view_enqueued += 1;
                 } else {
                     drop(reader_b);
                     reader_b = reopen_node_at(&reader_b_dir, node(4), harness_schema.clone());
+                    register_whole_table_receiver(&mut reader_b, "todos");
+                    message_counts.view_dropped_on_disconnect += views_b.len() as u64;
+                    views_b.clear();
+                    link_b = PeerState::client_link(author_b);
+                    views_b.push_back(link_b.reset_current_rows(&mut core, "todos").unwrap());
+                    message_counts.view_enqueued += 1;
                 }
             }
             7 if rehydrate_emissions < 4 => {
@@ -2160,6 +2168,11 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     );
     assert_eq!(reader_a.sync_metrics().parked_orphans, 0, "seed {seed}");
     assert_eq!(reader_b.sync_metrics().parked_orphans, 0, "seed {seed}");
+    assert_eq!(
+        message_counts.view_enqueued,
+        message_counts.view_delivered + message_counts.view_dropped_on_disconnect,
+        "every view frame is delivered in order or lost with its disconnected stream"
+    );
     M3RunSummary {
         writer_a: node_summary(&mut writer_a, &oracle_txs),
         writer_b: node_summary(&mut writer_b, &oracle_txs),

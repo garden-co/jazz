@@ -1284,7 +1284,14 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
     removal.reset_result_set = false;
     removal.version_carriers.clear();
     removal.program_fact_adds.clear();
-    removal.program_fact_removes = facts.iter().cloned().collect();
+    // A live transition removes covered inputs, never the compiler's manifest.
+    // Even an empty result retains complete coverage of its declared sources.
+    removal.program_fact_removes = facts.iter().filter(|fact| matches!(
+        fact, crate::protocol::ProgramFactEntry::CoveredInput(_)
+    )).cloned().collect();
+    let manifest = facts.iter().filter(|fact| matches!(
+        fact, crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
+    )).cloned().collect::<BTreeSet<_>>();
     reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(removal))
         .unwrap();
@@ -1292,7 +1299,7 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
         .query
         .authority_results
         .values()
-        .all(|state| state.settled_program_facts.is_empty()));
+        .any(|state| state.settled_program_facts == manifest));
     reader.apply_sync_message_settled(reset).unwrap();
     let settled_facts_store = reader
         .database

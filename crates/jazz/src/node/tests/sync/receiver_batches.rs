@@ -37,8 +37,12 @@ fn todos_covered_input(tx: TxId, version: &VersionRecord) -> crate::protocol::Pr
 }
 
 fn todos_source_closure(tx: TxId, versions: &[VersionRecord]) -> Vec<crate::protocol::ProgramFactEntry> {
+    // Payload tests may repeat immutable bodies; their closure still declares
+    // each source/version once. Malformed closure tests construct their own facts.
     std::iter::once(todos_source_coverage())
         .chain(versions.iter().map(|version| todos_covered_input(tx, version)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 
@@ -781,7 +785,7 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: vec![todos_source_coverage()],
             program_fact_removes: Vec::new(),
         };
         let result = reader.apply_view_updates_in_batch(vec![
@@ -861,7 +865,9 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         subscription,
         settled_through: global_time,
         defer_settlement: false,
-        reset_result_set: false,
+        // Repeated body delivery is valid across fresh complete snapshots,
+        // not as a duplicate live covered-input addition.
+        reset_result_set: true,
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: tx.clone(),
@@ -1120,7 +1126,7 @@ fn reset_scope_merge_is_order_independent_and_complete_dominates() {
         } else {
             vec![view, complete]
         };
-        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        let update = reset_scope_update(subscription, bundles);
         match path {
             ResetConflictPath::Batch => {
                 reader.apply_view_updates_in_batch(vec![update]).unwrap()
@@ -1155,7 +1161,7 @@ fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
             )
         })
         .collect();
-        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        let update = reset_scope_update(subscription, bundles);
         match path {
             ResetConflictPath::Batch => {
                 reader.apply_view_updates_in_batch(vec![update]).unwrap()
@@ -1210,9 +1216,7 @@ fn reset_rejects_divergent_complete_sets_and_bad_counts_atomically() {
         let result = reader
             .apply_view_updates_in_batch(vec![reset_scope_update(
             subscription,
-            tx_id,
             bundles,
-            true,
         )])
             .resolve();
         assert!(matches!(
@@ -1236,6 +1240,7 @@ fn reset_rejects_view_payload_outside_complete_set_in_both_orders() {
         .flat_map(|path| [false, true].into_iter().map(move |order| (path, order)))
     {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let complete = reset_scope_bundle(
@@ -1261,7 +1266,7 @@ fn reset_rejects_view_payload_outside_complete_set_in_both_orders() {
         } else {
             vec![view, complete]
         };
-        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        let update = reset_scope_update(subscription, bundles);
         let result = match path {
             ResetConflictPath::Batch => {
                 reader.apply_view_updates_in_batch(vec![update]).resolve()
@@ -1293,13 +1298,11 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
         reader
             .apply_view_update(reset_scope_update(
                 subscription,
-                tx_id,
                 vec![reset_scope_bundle(
                     reset_scope_tx(tx_id, 1),
                     stored_scope,
                     vec![first.clone()],
                 )],
-                false,
             ))
             .unwrap();
         drop(reader);
@@ -1316,7 +1319,6 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
         // masked the persisted-transaction scope conflict under test.
         let conflicting_update = reset_scope_update(
                 subscription,
-                tx_id,
                 vec![reset_scope_bundle(
                     reset_scope_tx(tx_id, 1),
                     conflicting_scope,
@@ -1327,7 +1329,6 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
                         None,
                     )],
                 )],
-                false,
             );
         let result = reader
             .apply_view_update(conflicting_update)
@@ -1377,9 +1378,7 @@ fn reset_scope_bundle(
 
 fn reset_scope_update(
     subscription: SubscriptionKey,
-    _tx_id: TxId,
     bundles: Vec<VersionBundle>,
-    with_removal: bool,
 ) -> ViewUpdateParts {
     let program_fact_adds = std::iter::once(todos_source_coverage())
         .chain(bundles.iter().flat_map(|bundle| {
@@ -1388,6 +1387,8 @@ fn reset_scope_update(
                 .iter()
                 .map(|version| todos_covered_input(bundle.tx.tx_id, version))
         }))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
     ViewUpdateParts {
         subscription,
@@ -1401,7 +1402,9 @@ fn reset_scope_update(
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
         program_fact_adds,
-        program_fact_removes: with_removal.then_some(removed_todos_input(_tx_id)).into_iter().collect(),
+        // Reset supplies the entire closure; impossible-removal rejection has
+        // a separate control in reset_conflicts_with_member_removals_are_atomic.
+        program_fact_removes: Vec::new(),
     }
 }
 
