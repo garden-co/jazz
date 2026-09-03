@@ -12,8 +12,6 @@ import type {
   BrowserInspectorControlRequest,
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
-  BrowserInspectorControlEvent,
-  BrowserInspectorControlRequest,
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
