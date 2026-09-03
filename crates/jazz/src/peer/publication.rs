@@ -1160,8 +1160,15 @@ impl PeerState {
             ))?
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let (program_fact_adds, program_fact_removes) =
-            canonical_set_delta(&previous_program_fact_set, &current_program_fact_set);
+        let (program_fact_adds, program_fact_removes) = if initial_snapshot_completed {
+            // A reopened evaluator can finish hydration after the opening
+            // call returned, with the previous publication closure retained.
+            // Its first drain is a reset, not a delta against that closure:
+            // unchanged inputs still belong in the complete reset manifest.
+            (current_program_fact_set.into_iter().collect(), Vec::new())
+        } else {
+            canonical_set_delta(&previous_program_fact_set, &current_program_fact_set)
+        };
         let fact_add_count = program_fact_adds.len();
         let fact_remove_count = program_fact_removes.len();
         if maintained_view_update_is_empty(

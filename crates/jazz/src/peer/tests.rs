@@ -42,6 +42,45 @@ fn row_from_u64(value: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
+#[test]
+fn late_initial_drain_resets_the_complete_retained_source_closure() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x74));
+    let first = row(0x75);
+    let first_tx = core.commit_mergeable_settled(
+        MergeableCommit::new("todos", first, 1_000).cells(title_cells("first")),
+    ).unwrap();
+    accept_global(&mut core, first_tx, 1);
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::new();
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+    // Pin the publication boundary independently of backend timing: a cold
+    // reopened evaluator retains the prior publication closure but its next
+    // completed drain is initial. That flag is internal; public row equality
+    // alone cannot distinguish an invalid reset from a valid incremental frame.
+    peer.publication_states.get_mut(&subscription).unwrap()
+        .maintained_subscription_view.as_mut().unwrap().initial_received = false;
+    let second = row(0x76);
+    let second_tx = core.commit_mergeable_settled(
+        MergeableCommit::new("todos", second, 1_001).cells(title_cells("second")),
+    ).unwrap();
+    accept_global(&mut core, second_tx, 2);
+    let SyncMessage::ViewUpdate(update) = peer.query_update(&mut core, &shape, &binding).unwrap()
+    else { panic!("expected completed source reset") };
+    assert!(update.reset_result_set);
+    assert!(update.program_fact_removes.is_empty());
+    assert!(update.program_fact_adds.iter().any(|fact| matches!(
+        fact, ProgramFactEntry::ProgramSourceCoverage(coverage) if coverage.complete
+    )));
+    let rows = update.program_fact_adds.iter().filter_map(|fact| match fact {
+        ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+        _ => None,
+    }).collect::<BTreeSet<_>>();
+    assert_eq!(rows, BTreeSet::from([first, second]));
+}
+
 /// A self-join can observe the same physical version through two normalized
 /// source roles. Covered-input facts must retain those roles so a receiver can
 /// route each delta to the same local program frontier without borrowing a
