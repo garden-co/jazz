@@ -3,6 +3,49 @@
 use super::*;
 use crate::node::query_eval::normalization::source_column_value;
 
+// Public row equality cannot detect native/WASM source-name disagreement on
+// one host. Pin the compiler-owned protocol identities to literal names.
+#[test]
+fn implicit_reference_source_identities_are_pointer_width_independent() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .nullable_fk_column("parent", "todos")
+                    .nullable_fk_column("project", "projects"),
+            ),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x73; 16]), schema.clone());
+    let shape = Query::from("todos").validate_runtime(&schema).unwrap();
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+    assert_eq!(
+        normalized.auxiliary_sources,
+        BTreeSet::from([
+            SourceId {
+                table: "todos".to_owned(),
+                path: SourcePath {
+                    components: vec![
+                        SourceRole::Root,
+                        SourceRole::Alias("reference:parent".to_owned())
+                    ]
+                },
+            },
+            SourceId {
+                table: "projects".to_owned(),
+                path: SourcePath {
+                    components: vec![
+                        SourceRole::Root,
+                        SourceRole::Alias("reference:project".to_owned())
+                    ]
+                },
+            },
+        ]),
+    );
+}
+
 #[test]
 fn payload_enum_normalization_uses_case_local_field_types() {
     let descriptor = RecordDescriptor::new([
@@ -148,6 +191,80 @@ fn declared_id_join_types_and_flat_join_physical_alias_validate() {
 
     let flat = Query::from("parents").flat_join("children", "parents._id", "children.parent");
     assert!(flat.validate_runtime(&schema).is_ok());
+}
+
+/// A caller's top-level inherited parent remains a receiver source through
+/// policy-branch normalization, while a branch's inherited proof stays
+/// authority-local.
+#[test]
+fn policy_branch_query_keeps_explicit_inherited_parent_contribution() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("parents").column("state", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("children").fk_column("parent", "parents")),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x24; 16]), schema.clone());
+    let mut query = Query::from("children").inherits("parent");
+    let branch_inherits = Query::from("children").inherits("parent").inherits;
+    query.policy_branches = vec![crate::query::PolicyBranch {
+        filters: vec![eq(col("parent"), lit(uuid::Uuid::nil()))],
+        joins: Vec::new(),
+        reachable: Vec::new(),
+        inherits: branch_inherits,
+    }];
+    let shape = query.validate_runtime(&schema).unwrap();
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+
+    assert_eq!(normalized.inherited_contributions.len(), 1);
+    let contribution = &normalized.inherited_contributions[0];
+    assert_eq!(contribution.id, "policy_branch:base:inherits:0");
+    assert_eq!(contribution.source.table, "parents");
+    assert!(matches!(
+        contribution.source.path.components.as_slice(),
+        [SourceRole::Alias(path)] if path == "policy_branch:base:inherits:0"
+    ));
+    assert!(
+        normalized
+            .inherited_contributions
+            .iter()
+            .all(|contribution| !contribution.id.starts_with("policy_branch:0:")),
+        "policy-branch inheritance is an authority proof, not a receiver input"
+    );
+}
+
+/// Every flat join-side occurrence is an exact receiver source.  A chained
+/// flat join used to exist only in the authority tuple plan, leaving the
+/// second source absent from the CoveredInput closure despite a claimed reset.
+#[test]
+fn chained_flat_joins_register_every_receiver_contributor() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("parents"))
+            .table(PublicTableSchemaBuilder::new("children").fk_column("parent", "parents"))
+            .table(PublicTableSchemaBuilder::new("grandchildren").fk_column("child", "children")),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x23; 16]), schema.clone());
+    let shape = Query::from("parents")
+        .flat_join("children", "parents._id", "children.parent")
+        .flat_join("grandchildren", "children._id", "grandchildren.child")
+        .validate_runtime(&schema)
+        .expect("chained flat join validates");
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .expect("chained flat join normalizes");
+
+    assert_eq!(normalized.join_contributions.len(), 2);
+    assert_eq!(
+        normalized
+            .join_contributions
+            .iter()
+            .map(|contribution| contribution.source.table.as_str())
+            .collect::<Vec<_>>(),
+        vec!["children", "grandchildren"],
+        "each flat join-side scan must be available to terminal lowering as a distinct exact source"
+    );
 }
 
 /// Flat-join filters must route a declared string `id` to authored fields on

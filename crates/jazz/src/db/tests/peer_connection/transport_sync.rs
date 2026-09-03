@@ -20,6 +20,145 @@ fn branch_sync_schema() -> JazzSchema {
     )
 }
 
+/// A malformed authority source-closure frame rejects only its exact public
+/// subscription before any receiver state or output is published.
+///
+/// alice owns the client stream; the authority supplies a real opening, whose
+/// duplicated covered-input witness is injected at the transport boundary.
+/// bob's later, distinct query proves that the peer remains usable.
+///
+/// alice ──subscribe──► authority ──forged duplicate──► alice (error)
+/// bob   ──subscribe──────────────────────────────────► bob   (valid reset)
+#[test]
+fn malformed_authority_closure_reaches_only_its_public_subscription() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0x41; 16]);
+    let bob = AuthorSubject::for_test_bytes([0x42; 16]);
+    let server = open_core(0x43, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x44, alice, &schema);
+    let row_id = row(0x45);
+    server
+        .insert_with_id("todos", row_id, cells("persisted upstream", false, bob))
+        .unwrap();
+
+    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let alice_query = Query::from("todos");
+    let mut alice_subscription =
+        prepared_subscribe(&client, &alice_query, global_subscribe_opts()).unwrap();
+    let local_opening = block_on(alice_subscription.next_raw()).expect("local opening");
+    assert!(!event_settled(&local_opening));
+    assert!(opened_rows(local_opening).is_empty());
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    let subscription = {
+        let mut frames = server_sent.borrow_mut();
+        let update = frames
+            .iter_mut()
+            .find_map(|message| match message {
+                SyncMessage::ViewUpdate(update) => Some(update),
+                _ => None,
+            })
+            .expect("authority must send alice's opening");
+        let subscription = update.subscription;
+        let duplicate = update
+            .program_fact_adds
+            .iter()
+            .find_map(|fact| match fact {
+                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+                _ => None,
+            })
+            .expect("nonempty authority opening has a covered-input witness");
+        update
+            .program_fact_adds
+            .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+        subscription
+    };
+    let authority_result = client
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let receipt_before = client
+        .node
+        .node
+        .borrow()
+        .applied_authority_result_generation(&authority_result);
+
+    client
+        .tick()
+        .expect("malformed closure becomes a subscription error, not a peer-tick failure");
+    assert_eq!(
+        block_on(alice_subscription.next_raw()),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                transition: "duplicate source-closure addition".to_owned(),
+            },
+        }),
+        "the client receives the exact safe closure-transition error without waiting"
+    );
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .applied_authority_result_generation(&authority_result),
+        receipt_before,
+        "the rejected frame cannot advance the authority receipt"
+    );
+    assert!(
+        prepared_read(&client, &alice_query).is_empty(),
+        "the rejected frame cannot publish a partial local result"
+    );
+
+    let bob_query = Query::from("todos").filter(eq(col("title"), lit("persisted upstream")));
+    let mut bob_subscription =
+        prepared_subscribe(&client, &bob_query, global_subscribe_opts()).unwrap();
+    let _ = block_on(bob_subscription.next_raw()).expect("bob local opening");
+    client.tick().unwrap();
+    let mut bob_rows = Vec::new();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = bob_subscription.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta { added, .. } => bob_rows.extend(added),
+                SubscriptionEvent::Rejected { reason } => {
+                    panic!("unrelated subscription was rejected: {reason:?}")
+                }
+                SubscriptionEvent::Closed => panic!("unrelated subscription closed"),
+            }
+        }
+        if bob_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>()
+            == vec![row_id]
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        bob_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![row_id]
+    );
+}
+
 fn branch_sync_selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
@@ -74,6 +213,181 @@ fn write_deletion_register(server: &CoreDb, table: &str, row: RowUuid, branch: B
     server.server.mark_subscriber_connections_dirty();
 }
 
+/// Public branch-view mutations use the normal client outbox and subscriber
+/// relay. This intentionally exercises both update and existing-target upsert
+/// rather than injecting a handcrafted commit unit at authority.
+#[test]
+fn public_branch_view_update_and_upsert_relay_to_authority() {
+    let schema = branch_sync_schema();
+    let author = AuthorSubject::for_test_bytes([0x61; 16]);
+    let server = open_core(0x62, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x63, author, &schema);
+    let base = branch_sync_selector(0x64);
+    let head = branch_sync_selector(0x65);
+    let first = row(0x66);
+    let second = row(0x67);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber_with_claims(
+        server_transport,
+        author,
+        test_provider_claims(author),
+    );
+
+    for (id, title) in [(first, "first base"), (second, "second base")] {
+        let write = client
+            .insert(
+                "todos",
+                BTreeMap::from([
+                    (
+                        "branch_id".to_owned(),
+                        Value::Uuid(uuid::Uuid::from_bytes([0x64; 16])),
+                    ),
+                    ("title".to_owned(), Value::String(title.to_owned())),
+                ]),
+                InsertOptions {
+                    row_id: Some(id),
+                    target: ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(write.wait(DurabilityTier::Global)).unwrap();
+    }
+
+    let (_, tx_id) = block_on(client.transaction_for_identity(author, async |tx| {
+        tx.update(
+            "todos",
+            first,
+            BTreeMap::from([("title".to_owned(), Value::String("first head".to_owned()))]),
+            UpdateOptions {
+                target: WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
+            },
+        )
+        .await?;
+        tx.upsert(
+            "todos",
+            second,
+            BTreeMap::from([("title".to_owned(), Value::String("second head".to_owned()))]),
+            UpsertOptions {
+                target: WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
+            },
+        )
+        .await
+    }))
+    .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(matches!(
+        client.write_state(tx_id).unwrap().fate,
+        Fate::Accepted
+    ));
+
+    let rows = serving_rows_in_read_view(
+        &server,
+        &schema,
+        &Query::from("todos"),
+        author,
+        &ReadViewSpec::branch_view(head, Some(BranchViewBase::Current(base))),
+    );
+    let titles = rows
+        .iter()
+        .map(|row| match row.cell(&schema.tables[0], "title").unwrap() {
+            Value::String(title) => title,
+            value => panic!("expected text title, got {value:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        titles,
+        BTreeSet::from(["first head".to_owned(), "second head".to_owned()])
+    );
+}
+
+#[test]
+fn branch_view_copy_evidence_storage_is_independent_of_public_write_order() {
+    let schema = branch_sync_schema();
+    let author = AuthorSubject::for_test_bytes([0x68; 16]);
+    let base = branch_sync_selector(0x69);
+    let head = branch_sync_selector(0x6a);
+    let first = row(0x6b);
+    let second = row(0x6c);
+    let build = |reverse: bool| {
+        let db = open_db(0x6d, author, &schema);
+        for (id, title) in [(first, "first base"), (second, "second base")] {
+            db.insert(
+                "todos",
+                BTreeMap::from([
+                    (
+                        "branch_id".to_owned(),
+                        Value::Uuid(uuid::Uuid::from_bytes([0x69; 16])),
+                    ),
+                    ("title".to_owned(), Value::String(title.to_owned())),
+                ]),
+                InsertOptions {
+                    row_id: Some(id),
+                    target: ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let order = if reverse {
+            [second, first]
+        } else {
+            [first, second]
+        };
+        let (_, tx_id) = block_on(db.transaction_for_identity(author, async |tx| {
+            for row in order {
+                tx.update(
+                    "todos",
+                    row,
+                    BTreeMap::from([(
+                        "title".to_owned(),
+                        Value::String(if row == first {
+                            "first head".to_owned()
+                        } else {
+                            "second head".to_owned()
+                        }),
+                    )]),
+                    UpdateOptions {
+                        target: WriteTarget::BranchView {
+                            head: head.clone(),
+                            base: Some(BranchViewBase::Current(base.clone())),
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }))
+        .unwrap();
+        let mut node = db.node.node.borrow_mut();
+        let provenance = node
+            .transaction_record(tx_id)
+            .unwrap()
+            .contribution_merge
+            .expect("branch-view transaction stores operation evidence");
+        provenance
+    };
+
+    let forward_provenance = build(false);
+    let reverse_provenance = build(true);
+    assert_eq!(forward_provenance, reverse_provenance);
+}
+
 #[test]
 fn db_sync_surface_round_trips_subscription_to_client() {
     let schema = schema();
@@ -112,6 +426,76 @@ fn db_sync_surface_round_trips_subscription_to_client() {
     server.tick().unwrap();
     client.tick().unwrap();
     assert_eq!(prepared_read(&client, &query).len(), 2);
+}
+
+/// Refresh is a post-durability publication effect for an inbound authority
+/// batch. This stays internal because the fault boundary and per-peer progress
+/// receipt are not exposed through the public client API.
+#[test]
+fn persisted_upstream_batch_survives_subscription_refresh_failure_without_redelivery() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc2, client_author, &schema);
+    seed(&server, "todos", cells("persisted upstream", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let opened = block_on(subscription.next_raw()).unwrap();
+    assert!(!event_settled(&opened));
+    assert!(opened_rows(opened).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    upstream
+        .borrow_mut()
+        .fail_next_subscription_refresh
+        .set(true);
+
+    let applied = block_on(upstream.borrow_mut().tick())
+        .expect("a post-persistence refresh failure must not fail the peer tick");
+    assert_eq!(
+        applied.remote_sync_applied, 1,
+        "the durably applied inbound batch must be acknowledged once"
+    );
+    assert_eq!(
+        applied.subscription_events, 1,
+        "the routed subscription error must remain visible in tick progress"
+    );
+    assert_eq!(
+        block_on(subscription.next_raw()).expect("refresh failure event"),
+        SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        },
+        "refresh failure belongs to the affected subscription"
+    );
+    assert_eq!(
+        prepared_read(&client, &query).len(),
+        1,
+        "refresh failure must not roll back the settled inbound batch"
+    );
+
+    let idle = block_on(upstream.borrow_mut().tick())
+        .expect("the same peer connection must remain usable");
+    assert_eq!(
+        idle.remote_sync_applied, 0,
+        "the consumed inbound batch must not be reported or applied again"
+    );
+    assert!(
+        client
+            .node
+            .connections
+            .borrow()
+            .iter()
+            .any(|connection| Rc::ptr_eq(connection, &upstream)),
+        "refresh failure must not force reconnect of the peer that applied the batch"
+    );
 }
 
 /// A globally accepted client write belongs to the authority's durable current
@@ -288,6 +672,11 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
         snapshot.rows[0].cell(&schema.tables[0], "branch_id"),
         Some(head.values["branch_id"].decode().unwrap()),
         "an inherited base row must project the requested head coordinate"
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, opts.clone())),
+        vec![selected_row],
+        "a strict receiver-local relation snapshot must retain the requested head projection"
     );
 
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();

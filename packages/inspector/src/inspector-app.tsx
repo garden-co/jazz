@@ -5,6 +5,7 @@ import { JazzProvider } from "jazz-tools/react";
 import { DevtoolsProvider } from "./contexts/devtools-context";
 import { defaultRuntimeContextKey } from "./contexts/default-runtime-context";
 import {
+  closeInspectorRuntimePort,
   openInspectorRuntimeSession,
   readInspectorHostConfig,
   type InspectorRuntimeContext,
@@ -176,7 +177,7 @@ export function InspectorApp() {
       .attach(selectedKey)
       .then((browserWorkerPort) => {
         if (!active) {
-          browserWorkerPort.close();
+          closeInspectorRuntimePort(browserWorkerPort);
           return;
         }
         setConnection({

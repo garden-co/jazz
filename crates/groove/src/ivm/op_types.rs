@@ -101,7 +101,34 @@ pub struct FrontierSourceOp {
 /// Source node for a runtime-maintained subscription-shape parameter set.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BindingSourceOp {
-    pub shape: String,
+    /// This is an internal identity, not the public prepared-shape name.
+    /// Runtime-owned mutable inputs must be disjoint from user-chosen prepared
+    /// binding names: a prefix is not an isolation boundary.
+    pub key: BindingSourceKey,
+}
+
+/// Internal identity for a source feeding the common binding delta engine.
+///
+/// Prepared bindings retain their user-visible string name. Mutable runtime
+/// inputs instead use their opaque allocation identity, so no caller-provided
+/// string can alias or overwrite their descriptor or records.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BindingSourceKey {
+    Prepared(String),
+    RuntimeInput { runtime_namespace: u64, local: u64 },
+}
+
+impl BindingSourceKey {
+    pub(crate) fn prepared(shape: impl Into<String>) -> Self {
+        Self::Prepared(shape.into())
+    }
+
+    pub(crate) fn prepared_name(&self) -> Option<&str> {
+        match self {
+            Self::Prepared(shape) => Some(shape),
+            Self::RuntimeInput { .. } => None,
+        }
+    }
 }
 
 /// Name of a value bound in an evaluation context.
@@ -263,36 +290,49 @@ pub struct RecursiveOp {
     /// Hard stop for non-settling recursive queries, especially cyclic bag
     /// semantics where multiplicities can grow forever.
     pub max_iters: usize,
+    /// Whether exhausting `max_iters` is a successful semantic cutoff rather
+    /// than a non-convergence error.
+    pub truncate_at_max_iters: bool,
     /// Tables read by the seed and step graphs, cached when the graph is compiled.
     pub read_tables: Vec<String>,
+    /// Descriptor of the optional recursion-owned step witness side stream.
+    /// The witness is intentionally generic record data; consumers decide what
+    /// its rows mean.
+    pub step_witness_output: Option<RecordDescriptor>,
 }
+
+/// Exposes the retained generic step witness stream of one recursive input.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RecursiveStepWitnessOp;
 
 // Aggregate.
 
 /// Per-group maximum operator descriptor.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ArgMaxByOp {
-    /// Grouping fields, in primary-key prefix order.
+    /// Grouping fields that define independent winner partitions.
     pub group_fields: Vec<String>,
-    /// Ordering fields, immediately after `group_fields` in the primary key.
+    /// Declared ordering fields compared after `group_fields`.
     pub order_fields: Vec<String>,
     /// Resolved logical field indices for `group_fields`.
     pub group_field_indices: Vec<usize>,
-    /// Resolved logical field indices for the full primary key.
-    pub primary_key_field_indices: Vec<usize>,
+    /// Resolved indices for the declared `group_fields + order_fields`
+    /// comparison key. Full record bytes independently identify multiplicity.
+    pub comparison_field_indices: Vec<usize>,
 }
 
 /// Per-group minimum operator descriptor.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ArgMinByOp {
-    /// Grouping fields, in primary-key prefix order.
+    /// Grouping fields that define independent winner partitions.
     pub group_fields: Vec<String>,
-    /// Ordering fields, immediately after `group_fields` in the primary key.
+    /// Declared ordering fields compared after `group_fields`.
     pub order_fields: Vec<String>,
     /// Resolved logical field indices for `group_fields`.
     pub group_field_indices: Vec<usize>,
-    /// Resolved logical field indices for the full primary key.
-    pub primary_key_field_indices: Vec<usize>,
+    /// Resolved indices for the declared `group_fields + order_fields`
+    /// comparison key. Full record bytes independently identify multiplicity.
+    pub comparison_field_indices: Vec<usize>,
 }
 
 /// Per-group ordered top-N window descriptor.

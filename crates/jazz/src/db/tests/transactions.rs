@@ -352,6 +352,119 @@ fn mergeable_branch_view_tx_retains_only_exact_inherited_large_values() {
     ));
 }
 
+/// Standalone and mergeable-transaction branch-view upserts may copy an
+/// inherited row whose untouched large value is represented by a descriptor.
+/// The descriptor remains trusted only because it came from that exact base
+/// preimage.
+#[test]
+fn branch_view_upserts_preserve_verified_inherited_large_values() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("branch", PublicColumnType::Text)
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .branch_by("branch"),
+        ),
+    );
+    let db = open_db(0x51, AuthorSubject::SYSTEM, &schema);
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .set_chunk_storage(std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new()));
+    });
+    let base = BranchSelector::new([("branch", Value::String("base".to_owned()))]);
+    let standalone_head = BranchSelector::new([("branch", Value::String("standalone".to_owned()))]);
+    let transaction_head =
+        BranchSelector::new([("branch", Value::String("transaction".to_owned()))]);
+    let standalone_row = row(0x51);
+    let transaction_row = row(0x52);
+    let standalone_body = "s".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 1);
+    let transaction_body = "t".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 2);
+
+    for (row_id, body) in [
+        (standalone_row, standalone_body.clone()),
+        (transaction_row, transaction_body.clone()),
+    ] {
+        let seeded = db
+            .insert(
+                "documents",
+                BTreeMap::from([
+                    ("branch".to_owned(), Value::String("base".to_owned())),
+                    ("title".to_owned(), Value::String("base".to_owned())),
+                    ("body".to_owned(), Value::String(body)),
+                ]),
+                InsertOptions {
+                    row_id: Some(row_id),
+                    target: ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        block_on(seeded.wait(DurabilityTier::Local)).unwrap();
+    }
+
+    let standalone = db
+        .upsert(
+            "documents",
+            standalone_row,
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("standalone overlay".to_owned()),
+            )]),
+            UpsertOptions {
+                target: WriteTarget::BranchView {
+                    head: standalone_head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    block_on(standalone.wait(DurabilityTier::Local)).unwrap();
+
+    let tx = db.mergeable_tx().unwrap();
+    tx.upsert(
+        "documents",
+        transaction_row,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("transaction overlay".to_owned()),
+        )]),
+        UpsertOptions {
+            target: WriteTarget::BranchView {
+                head: transaction_head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let query = db.table("documents");
+    for (head, row_id, expected_body) in [
+        (standalone_head, standalone_row, standalone_body),
+        (transaction_head, transaction_row, transaction_body),
+    ] {
+        let rows = prepared_all(
+            &db,
+            &query,
+            ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base.clone()))),
+        );
+        let visible = rows
+            .iter()
+            .find(|candidate| candidate.row_uuid() == row_id)
+            .expect("upserted inherited row remains visible");
+        assert_eq!(
+            visible.cell(&schema.tables[0], "body"),
+            Some(Value::String(expected_body))
+        );
+    }
+}
+
 #[test]
 fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
@@ -495,6 +608,668 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         rows[0].cell_at(0),
         Some(Value::String("attached".to_owned()))
     );
+}
+
+/// Internal because prompt, nonblocking RAII cleanup is observable only in the
+/// node's open-transaction owner, before any later database operation runs.
+#[test]
+fn dropping_owned_transactions_abandons_both_kinds_immediately_when_uncontended() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let mergeable = db.mergeable_tx().unwrap();
+    let mergeable_id = mergeable.tx_id;
+    let exclusive = db.exclusive_tx().unwrap();
+    let exclusive_id = exclusive.tx_id;
+
+    drop(mergeable);
+    drop(exclusive);
+
+    assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
+    for tx_id in [mergeable_id, exclusive_id] {
+        let error = db.abandon_transaction_handle(tx_id).unwrap_err();
+        assert!(error.message.contains("missing open transaction"));
+    }
+}
+
+/// Internal because contention and queue ownership are below the public
+/// transaction API; both RAII handle kinds must take the same nonblocking path.
+#[test]
+fn dropping_owned_transactions_while_node_is_locked_queues_both_abandonments() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let mergeable = db.mergeable_tx().unwrap();
+    let mergeable_id = mergeable.tx_id;
+    let exclusive = db.exclusive_tx().unwrap();
+    let exclusive_id = exclusive.tx_id;
+
+    block_on(async {
+        let guard = db.node.node.lock().await;
+        drop(mergeable);
+        drop(exclusive);
+        assert_eq!(db.node.pending_transaction_abandonments.borrow().len(), 2);
+        drop(guard);
+
+        db.tick().await.unwrap();
+    });
+
+    assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
+    for tx_id in [mergeable_id, exclusive_id] {
+        let error = db.abandon_transaction_handle(tx_id).unwrap_err();
+        assert!(error.message.contains("missing open transaction"));
+    }
+}
+
+/// A waiter already queued on the node mutex must observe a handle's synchronous
+/// tombstone before it can commit; the maintenance tick is deliberately never
+/// driven in this receipt.
+#[test]
+fn dropped_handles_beat_commit_waiters_already_ahead_of_tick() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let mergeable = db.mergeable_tx().await.unwrap();
+        let mergeable_id = mergeable.tx_id;
+        mergeable
+            .insert(
+                "todos",
+                doctest_support::todo_cells("mergeable abandoned", false),
+                InsertOptions {
+                    row_id: Some(row(0xd1)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let guard = db.node.node.lock().await;
+        let mut mergeable_commit = Box::pin(db.commit_mergeable_handle(mergeable_id));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            mergeable_commit.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(mergeable);
+        drop(guard);
+
+        let mergeable_error = mergeable_commit.await.unwrap_err();
+        assert_eq!(mergeable_error.code, ErrorCode::Protocol);
+        assert!(mergeable_error.message.contains("was abandoned"));
+        assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
+
+        let exclusive = db.exclusive_tx().await.unwrap();
+        let exclusive_id = exclusive.tx_id;
+        exclusive
+            .insert(
+                "todos",
+                doctest_support::todo_cells("exclusive abandoned", false),
+                InsertOptions {
+                    row_id: Some(row(0xd2)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let guard = db.node.node.lock().await;
+        let mut exclusive_commit = Box::pin(db.commit_exclusive_handle(exclusive_id));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            exclusive_commit.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(exclusive);
+        drop(guard);
+
+        let exclusive_error = exclusive_commit.await.unwrap_err();
+        assert_eq!(exclusive_error.code, ErrorCode::Protocol);
+        assert!(exclusive_error.message.contains("was abandoned"));
+        assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
+    });
+}
+
+/// Internal because queued binding commits and RAII drops meet below the
+/// public facade. The public receipt is the queued write handle's terminal
+/// error after one owner tick.
+#[test]
+fn queued_commits_reject_handles_abandoned_while_the_node_is_locked() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let mergeable = db.mergeable_tx().await.unwrap();
+        let mergeable_id = mergeable.tx_id;
+        mergeable
+            .insert(
+                "todos",
+                doctest_support::todo_cells("queued mergeable abandoned", false),
+                InsertOptions {
+                    row_id: Some(row(0xd3)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let node_owner = db.node.node.lock().await;
+        let mergeable_commit = db.enqueue_commit_mergeable_handle(mergeable_id).unwrap();
+        drop(mergeable);
+        drop(node_owner);
+        db.tick().await.unwrap();
+        let mergeable_error = mergeable_commit
+            .wait(DurabilityTier::Local)
+            .await
+            .unwrap_err();
+        assert_eq!(mergeable_error.code, ErrorCode::Protocol);
+        assert!(mergeable_error.message.contains("was abandoned"));
+        // Settle the failed mergeable commit's idempotent cleanup before
+        // placing the independent exclusive receipt on the FIFO owner.
+        db.tick().await.unwrap();
+
+        let exclusive = db.exclusive_tx().await.unwrap();
+        let exclusive_id = exclusive.tx_id;
+        exclusive
+            .insert(
+                "todos",
+                doctest_support::todo_cells("queued exclusive abandoned", false),
+                InsertOptions {
+                    row_id: Some(row(0xd4)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let node_owner = db.node.node.lock().await;
+        let exclusive_commit = db.enqueue_commit_exclusive_handle(exclusive_id).unwrap();
+        drop(exclusive);
+        drop(node_owner);
+        db.tick().await.unwrap();
+        let exclusive_error = exclusive_commit
+            .wait(DurabilityTier::Local)
+            .await
+            .unwrap_err();
+        assert_eq!(exclusive_error.code, ErrorCode::Protocol);
+        assert!(exclusive_error.message.contains("was abandoned"));
+    });
+}
+
+/// Internal because stale maintenance ids are deliberately absent from the
+/// public API. A stale id at the head must not fail the tick or strand a later
+/// live transaction.
+#[test]
+fn stale_transaction_abandonments_do_not_discard_later_queue_entries() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let already_terminal = db.mergeable_tx().unwrap();
+    let already_terminal_id = already_terminal.tx_id;
+    drop(already_terminal);
+    let never_opened_id = OpenTransactionId::new();
+    let live = db.exclusive_tx().unwrap();
+    let live_id = live.tx_id;
+
+    db.node
+        .pending_transaction_abandonments
+        .borrow_mut()
+        .extend([already_terminal_id, never_opened_id, live_id]);
+
+    block_on(db.tick()).unwrap();
+
+    assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
+    let error = db.abandon_transaction_handle(live_id).unwrap_err();
+    assert!(error.message.contains("missing open transaction"));
+    drop(live);
+}
+
+/// Internal because this drives `close` to its first lock wait to make the
+/// admission boundary deterministic. Queued drops before the boundary and
+/// live handles dropped after it must all be terminal when close completes.
+#[test]
+fn close_gates_transaction_admission_and_terminalizes_close_races() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let queued_mergeable = db.mergeable_tx().unwrap();
+    let queued_mergeable_id = queued_mergeable.tx_id;
+    let queued_exclusive = db.exclusive_tx().unwrap();
+    let queued_exclusive_id = queued_exclusive.tx_id;
+    let late_mergeable = db.mergeable_tx().unwrap();
+    let late_mergeable_id = late_mergeable.tx_id;
+    let late_exclusive = db.exclusive_tx().unwrap();
+    let late_exclusive_id = late_exclusive.tx_id;
+
+    block_on(async {
+        let guard = db.node.node.lock().await;
+        drop(queued_mergeable);
+        drop(queued_exclusive);
+        assert_eq!(db.node.pending_transaction_abandonments.borrow().len(), 2);
+
+        let mut closing = pin!(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Pending));
+
+        let mergeable_error = match db.mergeable_tx().await {
+            Ok(_) => panic!("close must reject mergeable transaction admission"),
+            Err(error) => error,
+        };
+        assert_eq!(mergeable_error.code, ErrorCode::WriteRejected);
+        let exclusive_error = match db.exclusive_tx().await {
+            Ok(_) => panic!("close must reject exclusive transaction admission"),
+            Err(error) => error,
+        };
+        assert_eq!(exclusive_error.code, ErrorCode::Protocol);
+
+        drop(late_mergeable);
+        drop(late_exclusive);
+        assert_eq!(
+            db.node.pending_transaction_abandonments.borrow().len(),
+            2,
+            "late drops belong to close's terminal sweep, not the closed queue"
+        );
+
+        drop(guard);
+        closing.await.unwrap();
+    });
+
+    assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
+    for tx_id in [
+        queued_mergeable_id,
+        queued_exclusive_id,
+        late_mergeable_id,
+        late_exclusive_id,
+    ] {
+        let error = db.abandon_transaction_handle(tx_id).unwrap_err();
+        assert!(error.message.contains("missing open transaction"));
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CloseCancellationWait {
+    CloseOwner,
+    QueuedMutationDrain,
+    TransactionWaitObserverDrain,
+    DeferredRejectionDiscard,
+    TransactionSweep,
+}
+
+fn assert_cancelled_close_sweeps_transactions_at(wait: CloseCancellationWait) {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let mergeable = db.mergeable_tx().await.unwrap();
+        let mergeable_id = mergeable.tx_id;
+        let exclusive = db.exclusive_tx().await.unwrap();
+        let exclusive_id = exclusive.tx_id;
+
+        let mut observer_release = None;
+        let mut queued_mutation_release = None;
+        let mut node_guard = None;
+        let mut close_owner_guard = None;
+        match wait {
+            CloseCancellationWait::CloseOwner => {
+                close_owner_guard = Some(db.node.lock_close_owner().await);
+            }
+            CloseCancellationWait::QueuedMutationDrain => {
+                let (release, blocked) = futures::channel::oneshot::channel();
+                db.node
+                    .enqueue_transaction_operation(
+                        mergeable_id,
+                        Box::pin(async {
+                            blocked
+                                .await
+                                .expect("the cancelled close retains the queued mutation");
+                            Ok(())
+                        }),
+                    )
+                    .unwrap();
+                queued_mutation_release = Some(release);
+            }
+            CloseCancellationWait::TransactionWaitObserverDrain => {
+                let (release, blocked) = futures::channel::oneshot::channel();
+                db.node
+                    .enqueue_transaction_wait_observer_for_test(Box::pin(async move {
+                        let _ = blocked.await;
+                    }));
+                observer_release = Some(release);
+            }
+            CloseCancellationWait::DeferredRejectionDiscard => {
+                db.node.defer_rejection_discard_for_test(TxId::new(
+                    TxTime::new(7_001, 9),
+                    NodeUuid::from_bytes([0xd7; 16]),
+                ));
+                node_guard = Some(db.node.node.lock().await);
+            }
+            CloseCancellationWait::TransactionSweep => {
+                node_guard = Some(db.node.node.lock().await);
+            }
+        }
+
+        let mut closing = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(
+            matches!(closing.as_mut().poll(&mut context), Poll::Pending),
+            "close must suspend at {wait:?}",
+        );
+
+        let error = match db.mergeable_tx().await {
+            Ok(_) => panic!("close must reject transaction admission at {wait:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+
+        drop(closing);
+        if let Some(release) = observer_release {
+            release
+                .send(())
+                .expect("the pending observer remains owned by node maintenance");
+        }
+        if let Some(release) = queued_mutation_release {
+            // Cancelling while close owns this FIFO lease intentionally leaves
+            // the final sweep pending. Release the retained operation, then
+            // let an ordinary maintenance turn drain it before asserting the
+            // sweep. This preserves the pre-sweep cancellation coverage
+            // without treating an active lease as quiescence.
+            release
+                .send(())
+                .expect("the pending mutation remains owned by node maintenance");
+        }
+        drop(node_guard);
+        drop(close_owner_guard);
+
+        db.tick().await.unwrap();
+        assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
+        for tx_id in [mergeable_id, exclusive_id] {
+            let error = db.abandon_transaction_handle(tx_id).unwrap_err();
+            assert!(
+                error.message.contains("missing open transaction"),
+                "{wait:?} cancellation left transaction {tx_id} open: {error}",
+            );
+        }
+
+        drop(mergeable);
+        drop(exclusive);
+    });
+}
+
+/// Internal because deterministic suspension at each node-owner wait and the
+/// resulting open-transaction owner state are not exposed by the public API.
+/// Admission closes and node maintenance owns the sweep before any of these
+/// boundaries can suspend.
+#[test]
+fn cancelled_close_sweeps_transactions_from_every_pre_sweep_wait() {
+    for wait in [
+        CloseCancellationWait::CloseOwner,
+        CloseCancellationWait::QueuedMutationDrain,
+        CloseCancellationWait::TransactionWaitObserverDrain,
+        CloseCancellationWait::DeferredRejectionDiscard,
+        CloseCancellationWait::TransactionSweep,
+    ] {
+        assert_cancelled_close_sweeps_transactions_at(wait);
+    }
+}
+
+/// Internal because only the owner queue exposes the exact cancellation point
+/// between dequeue and a cold operation's completion. Accepted FIFO work must
+/// remain retained when an in-progress close future is dropped.
+#[test]
+fn cancelled_close_retains_the_cold_queued_owner_operation() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let (release, blocked) = futures::channel::oneshot::channel();
+        let completed = Rc::new(Cell::new(false));
+        let operation_completed = Rc::clone(&completed);
+        db.node
+            .enqueue_transaction_operation(
+                OpenTransactionId::new(),
+                Box::pin(async move {
+                    blocked
+                        .await
+                        .expect("cancelled close must retain the queued operation");
+                    operation_completed.set(true);
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        let mut closing = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Pending));
+        drop(closing);
+
+        release
+            .send(())
+            .expect("close cancellation must not drop the queued operation");
+        db.drive_queued_mutation_once();
+        assert!(completed.get());
+    });
+}
+
+/// Internal because cancellation must strand retained FIFO work between close
+/// owners; the public API does not expose that handoff boundary.
+#[test]
+fn cancelled_close_handoff_is_coherent_with_concurrent_and_repeated_close() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let transaction = db.mergeable_tx().await.unwrap();
+        let transaction_id = transaction.tx_id;
+        let (release_retained_operation, retained_operation) = futures::channel::oneshot::channel();
+        db.node
+            .enqueue_transaction_operation(
+                transaction_id,
+                Box::pin(async move {
+                    retained_operation
+                        .await
+                        .expect("the cancelled close retains accepted FIFO work");
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        let queued_transaction_id = OpenTransactionId::new();
+        db.enqueue_begin_mergeable(queued_transaction_id, None, None)
+            .unwrap();
+        db.enqueue_transaction_insert(
+            queued_transaction_id,
+            false,
+            "todos".to_owned(),
+            doctest_support::todo_cells("accepted before close", false),
+            InsertOptions {
+                row_id: Some(row(0xd8)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let queued_commit = db
+            .enqueue_commit_mergeable_handle(queued_transaction_id)
+            .unwrap();
+
+        let mut cancelled = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(cancelled);
+
+        // Cancellation retains the cold head; release it before asking a new
+        // close owner to finish the same FIFO sequence.
+        release_retained_operation
+            .send(())
+            .expect("retained owner operation remains live after cancellation");
+
+        let (first, second) = futures::future::join(db.close(), db.close()).await;
+        first.unwrap();
+        second.unwrap();
+        db.close().await.unwrap();
+        assert_eq!(
+            queued_commit.wait(DurabilityTier::Local).await.unwrap(),
+            queued_commit.mergeable_tx_id(),
+            "concurrent close owners must drain FIFO work accepted before shutdown",
+        );
+
+        let error = db.abandon_transaction_handle(transaction_id).unwrap_err();
+        assert!(error.message.contains("missing open transaction"));
+        drop(transaction);
+    });
+}
+
+/// Internal because this fixes the exact owner-queue interleaving that public
+/// bindings cannot hold deterministically: close is cancelled while a cold
+/// predecessor is retained, then an ordinary tick runs before the accepted
+/// stage/commit sequence has acquired the node lock.
+#[test]
+fn cancelled_close_tick_does_not_tombstone_a_later_admitted_mergeable_commit() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let (release_head, cold_head) = futures::channel::oneshot::channel();
+        db.node
+            .enqueue_transaction_operation(
+                OpenTransactionId::new(),
+                Box::pin(async move {
+                    cold_head
+                        .await
+                        .expect("cancelled close retains its cold FIFO predecessor");
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        let transaction = db.mergeable_tx().await.unwrap();
+        let tx_id = transaction.tx_id;
+        db.enqueue_transaction_insert(
+            tx_id,
+            false,
+            "todos".to_owned(),
+            doctest_support::todo_cells("accepted before cancelled close", false),
+            InsertOptions {
+                row_id: Some(row(0xd9)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let commit = db.enqueue_commit_mergeable_handle(tx_id).unwrap();
+
+        let mut cancelled = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(cancelled);
+
+        // An ordinary tick while the cold predecessor is still retained must
+        // not consume shutdown's final transaction sweep.
+        db.tick().await.unwrap();
+        release_head
+            .send(())
+            .expect("the cold predecessor remains retained after cancellation");
+
+        // Complete the predecessor, then run the queued insert. The remaining
+        // commit proves that the already-open transaction was not swept between
+        // those FIFO entries.
+        db.tick().await.unwrap();
+        db.tick().await.unwrap();
+        db.close().await.unwrap();
+        assert_eq!(
+            commit.wait(DurabilityTier::Local).await.unwrap(),
+            commit.mergeable_tx_id(),
+            "shutdown must drain the accepted mergeable sequence rather than tombstoning it"
+        );
+        drop(transaction);
+    });
+}
+
+/// Internal because the accepted begin is intentionally queued behind a cold
+/// predecessor. If an intervening tick consumes the shutdown sweep early, a
+/// later close has no way to retire the transaction that this begin opens.
+#[test]
+fn completed_close_sweeps_begin_admitted_before_cancelled_close() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let (release_head, cold_head) = futures::channel::oneshot::channel();
+        db.node
+            .enqueue_transaction_operation(
+                OpenTransactionId::new(),
+                Box::pin(async move {
+                    cold_head
+                        .await
+                        .expect("cancelled close retains its cold FIFO predecessor");
+                    Ok(())
+                }),
+            )
+            .unwrap();
+        let queued_tx = OpenTransactionId::new();
+        db.enqueue_begin_mergeable(queued_tx, None, None).unwrap();
+
+        let mut cancelled = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(cancelled);
+
+        db.tick().await.unwrap();
+        release_head.send(()).unwrap();
+        db.tick().await.unwrap();
+        db.tick().await.unwrap();
+
+        db.close().await.unwrap();
+        let error = db
+            .abandon_transaction_handle(queued_tx)
+            .expect_err("completed close must retire the queued begin it admitted");
+        assert!(error.message.contains("missing open transaction"));
+    });
+}
+
+/// A live close owns the cold queue head in a [`QueuedMutationLease`], so the
+/// queue itself is temporarily empty. A concurrent maintenance turn must not
+/// mistake that gap for shutdown quiescence: the admitted begin still has to
+/// run before the final open-transaction sweep.
+#[test]
+fn live_close_does_not_sweep_a_cold_admitted_begin_before_its_lease_drops() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let queued_tx = OpenTransactionId::new();
+        let queued_db = db.clone_for_owner_operation();
+        let (release_begin, cold_begin) = futures::channel::oneshot::channel();
+        db.node
+            .enqueue_transaction_operation(
+                queued_tx,
+                Box::pin(async move {
+                    cold_begin
+                        .await
+                        .expect("live close retains the cold admitted begin");
+                    queued_db.begin_mergeable(queued_tx).await
+                }),
+            )
+            .unwrap();
+
+        let mut closing = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Pending));
+
+        // This is the concurrent tick/maintenance interleaving. Before the
+        // active-lease guard, queue emptiness alone consumed shutdown here.
+        db.node
+            .finish_transaction_abandonment_shutdown()
+            .await
+            .unwrap();
+        assert!(db.node.transaction_abandonment_shutdown_is_pending());
+
+        release_begin.send(()).unwrap();
+        closing.await.unwrap();
+
+        let error = db
+            .abandon_transaction_handle(queued_tx)
+            .expect_err("the resumed close must sweep the begin it admitted");
+        assert!(error.message.contains("missing open transaction"));
+    });
 }
 
 #[test]
@@ -1536,6 +2311,170 @@ fn exclusive_read_for_write_schema() -> JazzSchema {
     )
 }
 
+fn private_grant_read_for_write_schema() -> JazzSchema {
+    let grant = PublicPolicyExpr::Exists {
+        table: "grants".to_owned(),
+        condition: Box::new(PublicPolicyExpr::and(vec![
+            public_outer_eq("doc_id", "id"),
+            public_session_eq("subject", &["claims", "sub"]),
+        ])),
+    };
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(grant)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("grants")
+                    .fk_column("doc_id", "docs")
+                    .column("subject", PublicColumnType::Uuid),
+            ),
+    )
+}
+
+/// A replica may have a complete document preimage but not the private grant
+/// that proves its reader identity. It must still stage a mergeable UPDATE;
+/// only the connected fate authority decides the read-for-write rule. This is
+/// deliberately an end-to-end transport test rather than a local policy unit:
+/// the observable contract is pending locally, then Accepted or
+/// AuthorizationDenied without exposing the grant.
+///
+/// ```text
+/// client (doc, no grants) ──stage UPDATE──► authority (doc, private grant)
+///                                           ├── alice grant: Accepted
+///                                           └── bob no grant: AuthorizationDenied
+/// ```
+#[test]
+fn mergeable_read_for_write_is_decided_only_by_the_authority() {
+    let schema = private_grant_read_for_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xd9; 16]);
+    let target = row(0xca);
+    let server = open_core(0xda, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "docs",
+            target,
+            BTreeMap::from([("title".to_owned(), Value::String("original".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "grants",
+            row(0xcb),
+            BTreeMap::from([
+                ("doc_id".to_owned(), Value::Uuid(target.0)),
+                ("subject".to_owned(), Value::Uuid(alice.test_uuid())),
+            ]),
+        )
+        .unwrap();
+
+    let alice_client = open_db(0xdb, alice, &schema);
+    let bob_client = open_db(0xdc, bob, &schema);
+    alice_client.set_test_provider_claims(alice, test_provider_claims(alice));
+    bob_client.set_test_provider_claims(bob, test_provider_claims(bob));
+
+    // Seed only the complete target preimage on each client. Neither client
+    // receives or creates the authority's private `grants` support row.
+    for client in [&alice_client, &bob_client] {
+        client
+            .insert(
+                "docs",
+                BTreeMap::from([("title".to_owned(), Value::String("original".to_owned()))]),
+                InsertOptions {
+                    row_id: Some(target),
+                    identity: WriteIdentity::Session(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    let (alice_transport, alice_server_transport) = duplex();
+    let _alice_upstream = block_on(alice_client.connect_upstream(alice_transport));
+    let _alice_subscriber = server.accept_subscriber_with_claims(
+        alice_server_transport,
+        alice,
+        test_provider_claims(alice),
+    );
+    let (bob_transport, bob_server_transport) = duplex();
+    let _bob_upstream = block_on(bob_client.connect_upstream(bob_transport));
+    let _bob_subscriber =
+        server.accept_subscriber_with_claims(bob_server_transport, bob, test_provider_claims(bob));
+
+    // Settle the SYSTEM setup writes before the session cases. The grants
+    // remain authority-only because docs policy narrows ordinary delivery.
+    for client in [&alice_client, &bob_client] {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    }
+
+    let stage_update = |client: &Db<RocksDbStorage>, author, use_upsert| {
+        block_on(client.transaction_for_identity(author, async |tx| {
+            let cells = BTreeMap::from([("title".to_owned(), Value::String("edited".to_owned()))]);
+            if use_upsert {
+                tx.upsert("docs", target, cells, Default::default()).await
+            } else {
+                tx.update("docs", target, cells, Default::default()).await
+            }
+        }))
+        .expect("client staging uses the retained preimage, not local policy support")
+        .1
+    };
+
+    let alice_tx = stage_update(&alice_client, alice, false);
+    assert!(matches!(
+        alice_client.write_state(alice_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            ..
+        }
+    ));
+    alice_client.tick().unwrap();
+    server.tick().unwrap();
+    alice_client.tick().unwrap();
+    assert!(matches!(
+        alice_client.write_state(alice_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    let bob_tx = stage_update(&bob_client, bob, true);
+    assert!(matches!(
+        bob_client.write_state(bob_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            ..
+        }
+    ));
+    bob_client.tick().unwrap();
+    server.tick().unwrap();
+    bob_client.tick().unwrap();
+    assert!(matches!(
+        bob_client.write_state(bob_tx).unwrap(),
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        }
+    ));
+    let docs = server.read(&Query::from("docs")).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(
+        docs[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("edited".to_owned())),
+        "the denied update must not overwrite the authority's accepted result"
+    );
+}
+
 /// Alice's exclusive transaction cannot update or upsert Bob's read-hidden
 /// snapshot row. Full and partial updates return the same non-disclosing error.
 ///
@@ -1709,8 +2648,9 @@ fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change(
     assert_eq!(error.code, ErrorCode::TransactionConflict);
 }
 
-/// A session-authored mergeable transaction authorizes later mutations from
-/// its fixed overlay, not only from the pre-transaction current state.
+/// A session-authored mergeable transaction stages later mutations from its
+/// fixed overlay, not only from the pre-transaction current state. Policy
+/// authorization is deferred to the fate authority.
 ///
 /// alice tx: INSERT visible row ──UPDATE/UPSERT──► same staged row
 #[test]
@@ -1756,57 +2696,6 @@ fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
         committed.cell(table, "title"),
         Some(Value::String("ready".to_owned()))
     );
-
-    // A different visible row must not satisfy the targeted policy proof for
-    // a staged row that Alice cannot read.
-    let hidden = row(0xc9);
-    let hidden_open = OpenTransactionId::new();
-    db.begin_mergeable_for_identity(hidden_open, alice).unwrap();
-    let hidden_tx = db.mergeable_tx_ref(hidden_open);
-    hidden_tx
-        .insert(
-            "todos",
-            cells("hidden", false, AuthorSubject::for_test_bytes([0xb7; 16])),
-            InsertOptions {
-                row_id: Some(hidden),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    for (label, error) in [
-        (
-            "update",
-            hidden_tx
-                .update(
-                    "todos",
-                    hidden,
-                    BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
-                    Default::default(),
-                )
-                .expect_err("hidden overlay UPDATE must require visibility"),
-        ),
-        (
-            "upsert",
-            hidden_tx
-                .upsert(
-                    "todos",
-                    hidden,
-                    BTreeMap::from([("title".to_owned(), Value::String("nope".to_owned()))]),
-                    Default::default(),
-                )
-                .expect_err("hidden overlay UPSERT must require visibility"),
-        ),
-    ] {
-        assert_eq!(error.code, ErrorCode::WriteRejected, "{label}");
-        assert_eq!(
-            error.message,
-            format!(
-                "read policy denied {} on table todos: the operation requires read permission on the target row",
-                label.to_ascii_uppercase()
-            )
-        );
-    }
-    db.commit_mergeable_handle(hidden_open).unwrap();
 }
 
 /// A mergeable transaction opened for alice is an identity capability: its

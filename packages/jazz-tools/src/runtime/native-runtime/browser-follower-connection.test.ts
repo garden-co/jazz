@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
-import type {
-  BrowserFollowerPortEvent,
-  BrowserFollowerPortRequest,
+import {
+  serializeBrowserRelayError,
+  type BrowserFollowerPortEvent,
+  type BrowserFollowerPortRequest,
 } from "./browser-worker-protocol.js";
 
 class TestPort {
@@ -112,15 +113,23 @@ describe("MessagePortBrowserFollowerConnection", () => {
     port.emit({ type: "result", id: init.id });
     await connection.ready();
 
-    const negotiationFailure = "websocket authentication failed";
+    const negotiationFailure = new Error("websocket authentication failed");
     port.onPostMessage = (request) => {
       if (request.type === "reconnect") port.emit({ type: "result", id: request.id });
       if (request.type === "wait-server") {
-        port.emit({ type: "result", id: request.id, error: negotiationFailure });
+        port.emit({
+          type: "result",
+          id: request.id,
+          error: serializeBrowserRelayError(negotiationFailure),
+        });
       }
     };
 
-    await expect(connection.reconnect("{}", {})).rejects.toThrow(negotiationFailure);
+    await expect(connection.reconnect("{}", {})).rejects.toMatchObject({
+      name: negotiationFailure.name,
+      message: negotiationFailure.message,
+      stack: negotiationFailure.stack,
+    });
     expect(runtime.clearRemoteServerTransportError).not.toHaveBeenCalled();
     connection.detachForReconnect();
   });
@@ -205,15 +214,137 @@ describe("MessagePortBrowserFollowerConnection", () => {
     port.emit({ type: "result", id: init.id });
     await connection.ready();
 
-    port.emit({ type: "transport-error", message: "Protocol: terminal upstream failure" });
+    const cause = Object.assign(new Error("maintained reader failed"), {
+      name: "MaintainedReaderError",
+      stack: "MaintainedReaderError: maintained reader failed\n    at worker-reader.wasm:42:7",
+    });
+    const failure = Object.assign(new Error("Protocol: terminal upstream failure", { cause }), {
+      name: "WorkerTransportError",
+      stack:
+        "WorkerTransportError: Protocol: terminal upstream failure\n    at worker-core.ts:700:9",
+    });
+    port.emit({ type: "transport-error", error: serializeBrowserRelayError(failure) });
 
     expect(runtime.reportRemoteServerTransportError).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "Protocol: terminal upstream failure" }),
+      expect.objectContaining({
+        name: "WorkerTransportError",
+        message: "Protocol: terminal upstream failure",
+        stack: failure.stack,
+        cause: expect.objectContaining({
+          name: "MaintainedReaderError",
+          message: "maintained reader failed",
+          stack: cause.stack,
+        }),
+      }),
     );
     expect(runtime.reportRemoteMutationError).not.toHaveBeenCalled();
     expect(onFailure).not.toHaveBeenCalled();
     expect(port.close).not.toHaveBeenCalled();
 
     connection.detachForReconnect();
+  });
+  it("cancels a silent inspector control opening and protocol-closes its channel", async () => {
+    const port = new TestPort();
+    const transport = {
+      recvWireFrames: () => [],
+      sendWireFrame: () => undefined,
+      tick: () => 0,
+    };
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      clearRemoteServerTransportError: vi.fn(),
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+    };
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onFailure: vi.fn(),
+      },
+    );
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+    port.emit({ type: "result", id: init.id });
+    await connection.ready();
+
+    const controller = new AbortController();
+    const opening = connection.openInspectorControlPort(controller.signal);
+    await vi.waitFor(() =>
+      expect(port.sent.some((request) => request.type === "open-inspector-control")).toBe(true),
+    );
+    const request = port.sent.find((candidate) => candidate.type === "open-inspector-control");
+    if (!request || request.type !== "open-inspector-control") {
+      throw new Error("follower did not request an inspector control");
+    }
+    request.port.start();
+    const closed = new Promise<unknown>((resolve) => {
+      request.port.addEventListener("message", (event) => resolve(event.data), { once: true });
+    });
+
+    controller.abort();
+
+    await expect(opening).rejects.toThrow("cancelled");
+    await expect(closed).resolves.toEqual({ type: "close" });
+    request.port.close();
+    connection.detachForReconnect();
+  });
+  it("protocol-closes an inspector channel when follower disposal rejects its opening", async () => {
+    const port = new TestPort();
+    const transport = {
+      recvWireFrames: () => [],
+      sendWireFrame: () => undefined,
+      tick: () => 0,
+    };
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      clearRemoteServerTransportError: vi.fn(),
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+    };
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onFailure: vi.fn(),
+      },
+    );
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+    port.emit({ type: "result", id: init.id });
+    await connection.ready();
+
+    const opening = connection.openInspectorControlPort();
+    await vi.waitFor(() =>
+      expect(port.sent.some((request) => request.type === "open-inspector-control")).toBe(true),
+    );
+    const request = port.sent.find((candidate) => candidate.type === "open-inspector-control");
+    if (!request || request.type !== "open-inspector-control") {
+      throw new Error("follower did not request an inspector control");
+    }
+    request.port.start();
+    const closed = new Promise<unknown>((resolve) => {
+      request.port.addEventListener("message", (event) => resolve(event.data), { once: true });
+    });
+
+    connection.detachForReconnect();
+
+    await expect(opening).rejects.toThrow("reconnecting");
+    await expect(closed).resolves.toEqual({ type: "close" });
+    request.port.close();
   });
 });

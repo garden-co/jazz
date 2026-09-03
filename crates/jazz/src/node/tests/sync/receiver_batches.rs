@@ -1,5 +1,75 @@
 // Reset and incremental receiver batching, partial bundles, and winner selection.
 
+/// The peer protocol names the exact source closure, never an authority-side
+/// result member. These receiver-level cases all use the unaliased root scan
+/// of the `todos` whole-table subscription.
+fn todos_root_source() -> crate::protocol::ProgramSourceId {
+    crate::protocol::ProgramSourceId {
+        table: "todos".to_owned().into(),
+        path: vec![crate::protocol::ProgramSourceRole::Root],
+    }
+}
+
+fn todos_source_coverage() -> crate::protocol::ProgramFactEntry {
+    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+        crate::protocol::ProgramSourceCoverageEntry {
+            source: todos_root_source(),
+            complete: true,
+        },
+    )
+}
+
+fn todos_covered_input(tx: TxId, version: &VersionRecord) -> crate::protocol::ProgramFactEntry {
+    crate::protocol::ProgramFactEntry::CoveredInput(crate::protocol::CoveredInputEntry {
+        source: todos_root_source(),
+        version_table: "todos".to_owned().into(),
+        source_row: version.row_uuid(),
+        version: crate::protocol::RowVersionRefEntry {
+            tx,
+            schema_version: None,
+            layer: crate::protocol::ResultRowLayer::Content,
+            batch: Some(tx),
+            branch_or_prefix: (!version.branch_key().canonical_bytes().is_empty())
+                .then(|| version.branch_key().canonical_bytes()),
+            row_digest: None,
+        },
+    })
+}
+
+fn todos_source_closure(tx: TxId, versions: &[VersionRecord]) -> Vec<crate::protocol::ProgramFactEntry> {
+    // Payload tests may repeat immutable bodies; their closure still declares
+    // each source/version once. Malformed closure tests construct their own facts.
+    std::iter::once(todos_source_coverage())
+        .chain(versions.iter().map(|version| todos_covered_input(tx, version)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn removed_todos_input(tx: TxId) -> crate::protocol::ProgramFactEntry {
+    todos_covered_input(
+        tx,
+        &version_record(row(9), Vec::new(), title_cells("removed"), None),
+    )
+}
+
+fn todos_receiver_reset(subscription: SubscriptionKey) -> ViewUpdateParts {
+    ViewUpdateParts {
+        subscription,
+        settled_through: GlobalTime(0),
+        defer_settlement: false,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        opening_pending: false,
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: vec![todos_source_coverage()],
+        program_fact_removes: Vec::new(),
+    }
+}
+
 #[test]
 fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
@@ -27,14 +97,30 @@ fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     let update = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
     let mut incremental_update = update.clone();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set, ..
+        reset_result_set,
+        program_fact_adds,
+        ..
     }) = &mut incremental_update
     else {
         panic!("expected view update");
     };
     *reset_result_set = false;
+    // The explicit predecessor reset above already installed this source's
+    // coverage. A live transition carries only the row facts that follow it;
+    // source coverage is reset-only under the receiver contract.
+    program_fact_adds.retain(|fact| {
+        !matches!(fact, crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_))
+    });
 
+    register_whole_table_receiver(&mut bulk_reader, "todos");
     bulk_reader.apply_sync_message_settled(update).unwrap();
+    register_whole_table_receiver(&mut incremental_reader, "todos");
+    let subscription = incremental_reader
+        .whole_table_subscription_key("todos")
+        .unwrap();
+    incremental_reader
+        .apply_view_update(todos_receiver_reset(subscription))
+        .unwrap();
     incremental_reader
         .apply_sync_message_settled(incremental_update)
         .unwrap();
@@ -68,6 +154,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
 
     commit_mergeable_global(
         &mut writer,
@@ -97,9 +184,17 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
     };
     assert_eq!(version_bundles.len(), 2);
     version_bundles.reverse();
+    // The first batch member is the reset that admits the source coverage.
+    // Its following live transition must carry only row facts.
+    let program_fact_adds = program_fact_adds
+        .into_iter()
+        .filter(|fact| !matches!(fact, crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)))
+        .collect();
 
     reader
-        .apply_view_updates_in_batch(vec![ViewUpdateParts {
+        .apply_view_updates_in_batch(vec![
+            todos_receiver_reset(subscription),
+            ViewUpdateParts {
             subscription,
             settled_through,
             defer_settlement: false,
@@ -113,10 +208,10 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations: Vec::new(),
             program_fact_adds,
             program_fact_removes,
-        }])
+            },
+        ])
         .unwrap();
 
     let version_rows = reader.query_all_versions().unwrap();
@@ -143,7 +238,11 @@ fn complete_parent_receiver_update(
     reset_result_set: bool,
 ) -> ViewUpdateParts {
     let tx_id = tx.tx_id;
-    let row_uuid = version.row_uuid();
+    let program_fact_adds = if reset_result_set {
+        todos_source_closure(tx_id, std::slice::from_ref(&version))
+    } else {
+        vec![todos_covered_input(tx_id, &version)]
+    };
     ViewUpdateParts {
         subscription,
         settled_through: GlobalTime(1),
@@ -160,14 +259,9 @@ fn complete_parent_receiver_update(
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
         opening_pending: false,
-        result_member_adds: vec![ResultMemberEntry::row((
-            "todos".to_owned().into(),
-            row_uuid,
-            tx_id,
-        ))],
+        result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
+        program_fact_adds,
         program_fact_removes: Vec::new(),
     }
 }
@@ -213,6 +307,7 @@ fn initial_reset_preflights_accepted_partial_child_parent_constraints_atomically
         (0x92, row(0x93), false),
     ] {
         let (_dir, mut reader) = open_node_with_uuid(node(case));
+        register_whole_table_receiver(&mut reader, "todos");
         let parent = TxId::new(TxTime::from(70), node(case + 1));
         let child = TxId::new(TxTime::from(80), node(case + 2));
         let child_row = if succeeds { parent_row } else { row(0x94) };
@@ -281,6 +376,7 @@ fn receiver_batch_settles_pending_parent_constraints_and_survives_reopen() {
         let schema = schema();
         let dir = tempfile::tempdir().unwrap();
         let mut reader = open_node_at(&dir, schema.clone());
+        register_whole_table_receiver(&mut reader, "todos");
         let parent = TxId::new(TxTime::from(70), node(case + 1));
         let child_row = row(case + 2);
         let child = reader
@@ -296,6 +392,7 @@ fn receiver_batch_settles_pending_parent_constraints_and_survives_reopen() {
             row(case + 3)
         };
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
         let update = complete_parent_receiver_update(
             subscription,
             Transaction {
@@ -345,6 +442,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
 
     let row_uuid = row(1);
     let (tx_id, unit) = writer
@@ -369,6 +467,8 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
         panic!("expected accepted fate");
     };
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    // The preceding reset supplies the manifest; this live frame adds rows only.
+    let source_closure = versions.iter().map(|version| todos_covered_input(tx_id, version)).collect();
 
     reader
         .apply_view_updates_in_batch(vec![
@@ -381,14 +481,9 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 peer_complete_tx_payload_refs: Vec::new(),
                 authorization_progress: None,
                 opening_pending: false,
-                result_member_adds: vec![ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    row_uuid,
-                    tx_id,
-                ))],
+                result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
-                program_fact_adds: Vec::new(),
+                program_fact_adds: vec![todos_source_coverage()],
                 program_fact_removes: Vec::new(),
             },
             ViewUpdateParts {
@@ -409,8 +504,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
-                program_fact_adds: Vec::new(),
+                program_fact_adds: source_closure,
                 program_fact_removes: Vec::new(),
             },
         ])
@@ -437,6 +531,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
 #[test]
 fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -456,7 +551,6 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
     let mut redacted_tx = tx.clone();
     redacted_tx.n_total_writes = 1;
-
     reader
         .apply_view_updates_in_batch(vec![
             ViewUpdateParts {
@@ -467,7 +561,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                     scope: crate::protocol::VersionBundleScope::ViewScoped,
                     tx: redacted_tx.clone(),
-                    versions: vec![first],
+                    versions: vec![first.clone()],
                     fate: Fate::Accepted,
                     global_time: Some(GlobalTime(1)),
                     durability: DurabilityTier::Global,
@@ -475,14 +569,9 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 peer_complete_tx_payload_refs: Vec::new(),
                 authorization_progress: None,
                 opening_pending: false,
-                result_member_adds: vec![ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    row(1),
-                    tx_id,
-                ))],
+                result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
-                program_fact_adds: Vec::new(),
+                program_fact_adds: todos_source_closure(tx_id, std::slice::from_ref(&first)),
                 program_fact_removes: Vec::new(),
             },
             ViewUpdateParts {
@@ -493,7 +582,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                     scope: crate::protocol::VersionBundleScope::ViewScoped,
                     tx: redacted_tx,
-                    versions: vec![second],
+                    versions: vec![second.clone()],
                     fate: Fate::Accepted,
                     global_time: Some(GlobalTime(1)),
                     durability: DurabilityTier::Global,
@@ -501,14 +590,9 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 peer_complete_tx_payload_refs: Vec::new(),
                 authorization_progress: None,
                 opening_pending: false,
-                result_member_adds: vec![ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    row(2),
-                    tx_id,
-                ))],
+                result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
-                program_fact_adds: Vec::new(),
+                program_fact_adds: todos_source_closure(tx_id, std::slice::from_ref(&second)),
                 program_fact_removes: Vec::new(),
             },
         ])
@@ -575,6 +659,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
 #[test]
 fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -592,7 +677,9 @@ fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
-    let update = |version: VersionRecord, result_row| ViewUpdateParts {
+    let update = |version: VersionRecord, _result_row| {
+        let facts = todos_source_closure(tx_id, std::slice::from_ref(&version));
+        ViewUpdateParts {
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: false,
@@ -608,15 +695,11 @@ fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
         opening_pending: false,
-        result_member_adds: vec![ResultMemberEntry::row((
-            "todos".to_owned().into(),
-            result_row,
-            tx_id,
-        ))],
+        result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
+        program_fact_adds: facts,
         program_fact_removes: Vec::new(),
+        }
     };
 
     reader
@@ -672,6 +755,7 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
     };
     let run = |identity_conflict: bool| {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let mut conflicting_tx = base_tx.clone();
         if identity_conflict {
@@ -701,8 +785,7 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: vec![todos_source_coverage()],
             program_fact_removes: Vec::new(),
         };
         let result = reader.apply_view_updates_in_batch(vec![
@@ -730,6 +813,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), projection_schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(2), projection_schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(3), projection_schema.clone());
+    register_whole_table_receiver(&mut reader, "todos");
     let row_uuid = row(1);
     let (tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -774,11 +858,16 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
     .unwrap()
     .with_authored_columns(full.authored_columns().cloned());
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let update = |version, fate, update_global_time, update_durability, result_member_adds| ViewUpdateParts {
+    reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
+    let update = |version, fate, update_global_time, update_durability| {
+        let facts = todos_source_closure(tx_id, std::slice::from_ref(&version));
+        ViewUpdateParts {
         subscription,
         settled_through: global_time,
         defer_settlement: false,
-        reset_result_set: false,
+        // Repeated body delivery is valid across fresh complete snapshots,
+        // not as a duplicate live covered-input addition.
+        reset_result_set: true,
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: tx.clone(),
@@ -790,11 +879,11 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
         opening_pending: false,
-        result_member_adds,
+        result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
+        program_fact_adds: facts,
         program_fact_removes: Vec::new(),
+        }
     };
 
     assert!(matches!(
@@ -804,14 +893,12 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
                 Fate::Accepted,
                 Some(global_time),
                 durability,
-                Vec::new(),
             ),
             update(
                 conflicting.clone(),
                 Fate::Accepted,
                 Some(global_time),
                 durability,
-                Vec::new(),
             ),
         ])
         .resolve(),
@@ -825,22 +912,12 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
                 Fate::Accepted,
                 Some(global_time),
                 durability,
-                vec![ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    row_uuid,
-                    tx_id,
-                ))],
             ),
             update(
                 full.clone(),
                 Fate::Accepted,
                 Some(global_time),
                 durability,
-                vec![ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    row_uuid,
-                    tx_id,
-                ))],
             ),
         ])
         .unwrap();
@@ -872,7 +949,6 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             Fate::Pending,
             None,
             DurabilityTier::Edge,
-            Vec::new(),
         )])
         .unwrap();
     assert_eq!(
@@ -886,7 +962,6 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             Fate::Accepted,
             Some(global_time),
             durability,
-            Vec::new(),
         )])
         .resolve(),
         Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
@@ -921,6 +996,7 @@ fn reset_conflicts_with_member_removals_are_atomic() {
 fn reset_accepts_identical_annotated_duplicates() {
     for path in [ResetConflictPath::Batch, ResetConflictPath::Single] {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let tx = Transaction {
@@ -938,6 +1014,7 @@ fn reset_accepts_identical_annotated_duplicates() {
         };
         let version = version_record(row(1), Vec::new(), title_cells("one"), None)
             .with_authored_columns(Some(BTreeSet::from(["title".to_owned()])));
+        let closure = todos_source_closure(tx_id, std::slice::from_ref(&version));
         let bundles = [version.clone(), version]
             .into_iter()
             .map(|version| VersionBundle {
@@ -959,14 +1036,9 @@ fn reset_accepts_identical_annotated_duplicates() {
             peer_complete_tx_payload_refs: Vec::new(),
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds: vec![ResultMemberEntry::row((
-                "todos".to_owned().into(),
-                row(1),
-                tx_id,
-            ))],
+            result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: closure,
             program_fact_removes: Vec::new(),
         };
         match path {
@@ -985,7 +1057,7 @@ fn reset_accepts_identical_annotated_duplicates() {
             version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                 tx: tx.clone(),
-                versions: vec![conflicting],
+                versions: vec![conflicting.clone()],
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(1)),
                 durability: DurabilityTier::Global,
@@ -994,13 +1066,11 @@ fn reset_accepts_identical_annotated_duplicates() {
             authorization_progress: None,
             opening_pending: false,
             result_member_adds: Vec::new(),
-            result_member_removes: vec![ResultMemberEntry::row((
-                "todos".to_owned().into(),
-                row(1),
-                tx_id,
-            ))],
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: todos_source_closure(tx_id, std::slice::from_ref(&conflicting)),
+            // This case isolates conflicting transaction metadata.  An absent
+            // covered-input removal is independently rejected by
+            // `reset_conflicts_with_member_removals_are_atomic`.
             program_fact_removes: Vec::new(),
         };
         let result = match path {
@@ -1010,7 +1080,7 @@ fn reset_accepts_identical_annotated_duplicates() {
         assert!(matches!(
             result,
             Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
-        ));
+        ), "expected conflicting replay, got {result:?}");
         let stored = reader.query_versions_for_tx(tx_id).unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(
@@ -1033,6 +1103,7 @@ fn reset_scope_merge_is_order_independent_and_complete_dominates() {
         .flat_map(|path| [false, true].into_iter().map(move |order| (path, order)))
     {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let complete_tx = reset_scope_tx(tx_id, 2);
@@ -1055,7 +1126,7 @@ fn reset_scope_merge_is_order_independent_and_complete_dominates() {
         } else {
             vec![view, complete]
         };
-        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        let update = reset_scope_update(subscription, bundles);
         match path {
             ResetConflictPath::Batch => {
                 reader.apply_view_updates_in_batch(vec![update]).unwrap()
@@ -1073,6 +1144,7 @@ fn reset_scope_merge_is_order_independent_and_complete_dominates() {
 fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
     for path in [ResetConflictPath::Batch, ResetConflictPath::Single] {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let view_tx = reset_scope_tx(tx_id, 1);
@@ -1089,7 +1161,7 @@ fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
             )
         })
         .collect();
-        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        let update = reset_scope_update(subscription, bundles);
         match path {
             ResetConflictPath::Batch => {
                 reader.apply_view_updates_in_batch(vec![update]).unwrap()
@@ -1107,6 +1179,7 @@ fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
 fn reset_rejects_divergent_complete_sets_and_bad_counts_atomically() {
     for bad_count in [false, true] {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let tx = reset_scope_tx(tx_id, 2);
@@ -1144,9 +1217,7 @@ fn reset_rejects_divergent_complete_sets_and_bad_counts_atomically() {
         let result = reader
             .apply_view_updates_in_batch(vec![reset_scope_update(
             subscription,
-            tx_id,
             bundles,
-            true,
         )])
             .resolve();
         assert!(matches!(
@@ -1170,6 +1241,7 @@ fn reset_rejects_view_payload_outside_complete_set_in_both_orders() {
         .flat_map(|path| [false, true].into_iter().map(move |order| (path, order)))
     {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let complete = reset_scope_bundle(
@@ -1195,7 +1267,7 @@ fn reset_rejects_view_payload_outside_complete_set_in_both_orders() {
         } else {
             vec![view, complete]
         };
-        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        let update = reset_scope_update(subscription, bundles);
         let result = match path {
             ResetConflictPath::Batch => {
                 reader.apply_view_updates_in_batch(vec![update]).resolve()
@@ -1215,6 +1287,7 @@ fn reset_rejects_view_payload_outside_complete_set_in_both_orders() {
 fn reopened_scope_conflicts_preserve_persisted_transaction() {
     for stored_complete in [false, true] {
         let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let first = version_record(row(1), Vec::new(), title_cells("one"), None);
@@ -1226,27 +1299,27 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
         reader
             .apply_view_update(reset_scope_update(
                 subscription,
-                tx_id,
                 vec![reset_scope_bundle(
                     reset_scope_tx(tx_id, 1),
                     stored_scope,
                     vec![first.clone()],
                 )],
-                true,
             ))
             .unwrap();
         drop(reader);
 
         let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+        register_whole_table_receiver(&mut reader, "todos");
         let conflicting_scope = if stored_complete {
             crate::protocol::VersionBundleScope::ViewScoped
         } else {
             crate::protocol::VersionBundleScope::CompleteTransaction
         };
-        let result = reader
-            .apply_view_update(reset_scope_update(
+        // This reset conflict has no logical input removal. The old fixture's
+        // unrelated row-9 removal was deliberately absent after reopen and
+        // masked the persisted-transaction scope conflict under test.
+        let conflicting_update = reset_scope_update(
                 subscription,
-                tx_id,
                 vec![reset_scope_bundle(
                     reset_scope_tx(tx_id, 1),
                     conflicting_scope,
@@ -1257,8 +1330,9 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
                         None,
                     )],
                 )],
-                true,
-            ))
+            );
+        let result = reader
+            .apply_view_update(conflicting_update)
             .resolve();
         assert!(matches!(
             result,
@@ -1305,10 +1379,18 @@ fn reset_scope_bundle(
 
 fn reset_scope_update(
     subscription: SubscriptionKey,
-    tx_id: TxId,
     bundles: Vec<VersionBundle>,
-    with_removal: bool,
 ) -> ViewUpdateParts {
+    let program_fact_adds = std::iter::once(todos_source_coverage())
+        .chain(bundles.iter().flat_map(|bundle| {
+            bundle
+                .versions
+                .iter()
+                .map(|version| todos_covered_input(bundle.tx.tx_id, version))
+        }))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     ViewUpdateParts {
         subscription,
         settled_through: GlobalTime(1),
@@ -1319,12 +1401,10 @@ fn reset_scope_update(
         authorization_progress: None,
         opening_pending: false,
         result_member_adds: Vec::new(),
-        result_member_removes: with_removal
-            .then(|| ResultMemberEntry::row(("todos".to_owned().into(), row(9), tx_id)))
-            .into_iter()
-            .collect(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds,
+        // Reset supplies the entire closure; impossible-removal rejection has
+        // a separate control in reset_conflicts_with_member_removals_are_atomic.
         program_fact_removes: Vec::new(),
     }
 }
@@ -1335,10 +1415,8 @@ fn assert_reset_authored_columns_conflict(
     with_member_removal: bool,
 ) {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let binding_view_key = reader
-        .binding_view_key_for_subscription(subscription)
-        .unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
         tx_id,
@@ -1364,8 +1442,18 @@ fn assert_reset_authored_columns_conflict(
     if reversed {
         versions.reverse();
     }
+    // Keep the impossible-removal control independent from duplicate metadata:
+    // it needs one otherwise-valid source member so admission reaches the
+    // predecessor-removal check first.
+    let source_versions = if with_member_removal {
+        &versions[..1]
+    } else {
+        &versions[..]
+    };
+    let source_closure = todos_source_closure(tx_id, source_versions);
     let version_bundles = versions
         .into_iter()
+        .take(if with_member_removal { 1 } else { 2 })
         .map(|version| VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: tx.clone(),
@@ -1379,22 +1467,11 @@ fn assert_reset_authored_columns_conflict(
         .expect("two valid bundles form a packed carrier");
 
     reader.set_initial_sync_flush_cadence(2).unwrap();
-    reader
-        .query
-        .pending_terminal_operations_by_binding_view
-        .insert(
-            binding_view_key,
-            vec![reset_conflict_terminal_operation(1)],
-        );
     let cadence_before = (
         reader.initial_sync_flush_active,
         reader.initial_sync_flush_completed,
     );
     let hydration_before = reader.query.initial_hydration_binding_views.clone();
-    let pending_terminal_before = reader
-        .query
-        .pending_terminal_operations_by_binding_view
-        .clone();
     let deferred_before = reader.query.deferred_publication_binding_views.clone();
 
     let update = ViewUpdateParts {
@@ -1406,33 +1483,37 @@ fn assert_reset_authored_columns_conflict(
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
         opening_pending: false,
-        result_member_adds: vec![ResultMemberEntry::row((
-            "todos".to_owned().into(),
-            row(1),
-            tx_id,
-        ))],
-        result_member_removes: with_member_removal
-            .then(|| {
-                ResultMemberEntry::row(("todos".to_owned().into(), row(9), tx_id))
-            })
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: source_closure,
+        program_fact_removes: with_member_removal
+            .then_some(removed_todos_input(tx_id))
             .into_iter()
             .collect(),
-        terminal_operations: vec![reset_conflict_terminal_operation(2)],
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
     };
     let result = match path {
         ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![update]).resolve(),
         ResetConflictPath::Single => reader.apply_view_update(update).resolve(),
     };
 
-    assert!(
-        matches!(
-            result,
-            Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
-        ),
-        "{path:?} reset must reject conflicting authored columns (reversed: {reversed})"
-    );
+    if with_member_removal {
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidAuthoritySourceClosure { ref transition, .. })
+                    if transition.contains("covered input removal is absent from predecessor closure")
+            ),
+            "{path:?} reset must reject an absent covered-input removal (reversed: {reversed}): {result:?}"
+        );
+    } else {
+        assert!(
+            matches!(
+                result,
+                Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
+            ),
+            "{path:?} reset must reject conflicting authored columns (reversed: {reversed})"
+        );
+    }
     assert!(reader.query_transaction(tx_id).unwrap().is_none());
     assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
     assert!(reader.query_all_versions().unwrap().is_empty());
@@ -1454,24 +1535,9 @@ fn assert_reset_authored_columns_conflict(
         hydration_before
     );
     assert_eq!(
-        reader.query.pending_terminal_operations_by_binding_view,
-        pending_terminal_before
-    );
-    assert_eq!(
         reader.query.deferred_publication_binding_views,
         deferred_before
     );
-}
-
-fn reset_conflict_terminal_operation(marker: u8) -> groove::ivm::TerminalOperation {
-    groove::ivm::TerminalOperation {
-        root_descriptor: groove::records::RecordDescriptor::default(),
-        root_key: vec![marker],
-        path: Vec::new(),
-        edit: groove::ivm::TerminalEdit::Remove {
-            key: vec![marker],
-        },
-    }
 }
 
 // This stays internal because it directly exercises the protocol receiver's
@@ -1479,6 +1545,7 @@ fn reset_conflict_terminal_operation(marker: u8) -> groove::ivm::TerminalOperati
 #[test]
 fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -1498,6 +1565,8 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         (row(1), version_record(row(1), Vec::new(), title_cells("one"), None)),
         (row(2), version_record(row(2), Vec::new(), title_cells("two"), None)),
     ];
+
+    reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
 
     for (row_uuid, version) in updates {
         reader
@@ -1524,6 +1593,7 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
 #[test]
 fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -1539,6 +1609,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         user_metadata_json: None,
         contribution_merge: None,
     };
+    reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
     reader
         .apply_view_update(partial_exclusive_view_update(
             subscription,
@@ -1575,10 +1646,14 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
 fn partial_exclusive_view_update(
     subscription: SubscriptionKey,
     tx: Transaction,
-    row_uuid: RowUuid,
+    _row_uuid: RowUuid,
     version: VersionRecord,
 ) -> ViewUpdateParts {
     let tx_id = tx.tx_id;
+    // Callers install the whole-table source coverage in their reset. These
+    // subsequent partial fragments are live transitions and carry only their
+    // exact row fact.
+    let source_closure = vec![todos_covered_input(tx_id, &version)];
     let mut tx = tx;
     tx.n_total_writes = 1;
     ViewUpdateParts {
@@ -1597,14 +1672,9 @@ fn partial_exclusive_view_update(
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
         opening_pending: false,
-        result_member_adds: vec![ResultMemberEntry::row((
-            "todos".to_owned().into(),
-            row_uuid,
-            tx_id,
-        ))],
+        result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
+        program_fact_adds: source_closure,
         program_fact_removes: Vec::new(),
     }
 }
@@ -1614,6 +1684,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let row_uuid = row(1);
 
     let (_old_tx, old_unit) = writer
@@ -1642,7 +1713,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
         panic!("expected accepted old fate");
     };
 
-    let (new_tx, new_unit) = writer
+    let (_new_tx, new_unit) = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("new")),
         )
@@ -1668,6 +1739,13 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
         panic!("expected accepted new fate");
     };
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
+    // Both history bodies arrive below, but current-state coverage names only
+    // the winner. The predecessor reset already supplied the source manifest.
+    let source_closure = new_versions
+        .iter()
+        .map(|version| todos_covered_input(new.tx_id, version))
+        .collect();
 
     reader
         .apply_view_updates_in_batch(vec![ViewUpdateParts {
@@ -1697,14 +1775,9 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
             peer_complete_tx_payload_refs: Vec::new(),
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds: vec![ResultMemberEntry::row((
-                "todos".to_owned().into(),
-                row_uuid,
-                new_tx,
-            ))],
+            result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: source_closure,
             program_fact_removes: Vec::new(),
         }])
         .unwrap();
@@ -1723,6 +1796,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
 #[test]
 fn receiver_tracks_partial_mergeable_payload_coverage() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -1742,6 +1816,9 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
     let mut redacted_tx = tx.clone();
     redacted_tx.n_total_writes = 1;
+    let first_closure = vec![todos_covered_input(tx_id, &first)];
+    let second_closure = vec![todos_covered_input(tx_id, &second)];
+    reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
 
     reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -1757,10 +1834,9 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
+            result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: first_closure,
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
@@ -1792,10 +1868,9 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
+            result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: second_closure,
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
@@ -1810,6 +1885,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
 #[test]
 fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
@@ -1829,6 +1905,9 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
     let mut redacted_tx = tx.clone();
     redacted_tx.n_total_writes = 1;
+    let first_closure = vec![todos_covered_input(tx_id, &first)];
+    let complete_closure = vec![todos_covered_input(tx_id, &first), todos_covered_input(tx_id, &second)];
+    reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
     reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
@@ -1843,10 +1922,9 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
+            result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: first_closure,
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
@@ -1855,6 +1933,8 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     drop(reader);
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
     assert!(reader.query_transaction(tx_id).unwrap().unwrap().view_scoped_cardinality);
+    register_whole_table_receiver(&mut reader, "todos");
+    reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
     reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
@@ -1869,10 +1949,9 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
+            result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: complete_closure,
             program_fact_removes: Vec::new(),
         }))
         .unwrap();

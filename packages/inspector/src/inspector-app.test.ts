@@ -6,12 +6,14 @@ import { defaultRuntimeContextKey } from "./contexts/default-runtime-context";
 import type { InspectorRuntimeContext } from "./contexts/host-link";
 import { InspectorApp } from "./inspector-app";
 
-const { openSessionMock, readHostConfigMock } = vi.hoisted(() => ({
+const { closePortMock, openSessionMock, readHostConfigMock } = vi.hoisted(() => ({
+  closePortMock: vi.fn(),
   openSessionMock: vi.fn(),
   readHostConfigMock: vi.fn(),
 }));
 
 vi.mock("./contexts/host-link", () => ({
+  closeInspectorRuntimePort: closePortMock,
   openInspectorRuntimeSession: openSessionMock,
   readInspectorHostConfig: readHostConfigMock,
 }));
@@ -91,5 +93,42 @@ describe("InspectorApp", () => {
       cleanup();
       vi.useRealTimers();
     }
+  });
+
+  it("protocol-closes an attachment acknowledged after unmount", async () => {
+    openSessionMock.mockReset();
+    readHostConfigMock.mockReset();
+    closePortMock.mockReset();
+    let resolveAttach: (port: MessagePort) => void = () => {};
+    const attach = vi.fn(
+      () =>
+        new Promise<MessagePort>((resolve) => {
+          resolveAttach = resolve;
+        }),
+    );
+    const close = vi.fn();
+    const runtimeContext = context("context", localFirstPhysicalDbName);
+    openSessionMock.mockResolvedValue({
+      contexts: [runtimeContext],
+      listContexts: vi.fn(async () => [runtimeContext]),
+      attach,
+      close,
+    });
+    readHostConfigMock.mockReturnValue({
+      appId,
+      runtimeSources: { inspectorHostPhysicalDbName: localFirstPhysicalDbName },
+    });
+    const view = render(createElement(InspectorApp));
+    await vi.waitFor(() => expect(attach).toHaveBeenCalledWith("context"));
+
+    view.unmount();
+    const port = {} as MessagePort;
+    await act(async () => {
+      resolveAttach(port);
+      await Promise.resolve();
+    });
+
+    expect(closePortMock).toHaveBeenCalledWith(port);
+    expect(close).toHaveBeenCalledOnce();
   });
 });

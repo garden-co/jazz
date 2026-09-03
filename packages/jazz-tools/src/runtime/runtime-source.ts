@@ -45,8 +45,10 @@ export interface BrowserWorkerConnection {
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   deleteStorage(): Promise<void>;
   flushLocal(): Promise<void>;
-  openInspectorControlPort(): Promise<MessagePort>;
+  openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort>;
   shutdown(): Promise<void>;
+  /** Present only after an authenticated Inspector control-port attachment. */
+  getAuthenticatedInspectorAttachmentPhysicalDbName?(): string | null;
 }
 
 export interface BrowserFollowerConnection {

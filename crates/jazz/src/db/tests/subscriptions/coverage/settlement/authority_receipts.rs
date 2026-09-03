@@ -1,6 +1,36 @@
 //! Authority selection, receipt freshness, fallback cuts, and reconnect continuity.
 
 use super::*;
+use crate::protocol::ProgramFactEntry;
+
+/// These receipt-ordering controls emulate the authority only for the exact
+/// one-source `todos` program used below. A reset that claims settlement must
+/// carry the same complete source closure a real authority would publish;
+/// result snapshots without it are intentionally rejected by INV-SYNC-36.
+fn settled_todos_source_closure(
+    subscription: SubscriptionKey,
+    settled_through: GlobalTime,
+) -> SyncMessage {
+    SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: vec![ProgramFactEntry::ProgramSourceCoverage(
+            crate::protocol::ProgramSourceCoverageEntry {
+                source: crate::protocol::ProgramSourceId {
+                    table: "todos".to_owned().into(),
+                    path: vec![crate::protocol::ProgramSourceRole::Root],
+                },
+                complete: true,
+            },
+        )],
+        program_fact_removes: Vec::new(),
+    })
+}
 
 #[test]
 fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
@@ -134,20 +164,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     let client = open_db(0xc1, client_author, &schema);
     let all_query = Query::from("todos");
     let filtered_query = Query::from("todos").filter(eq(col("title"), lit("matching")));
-    let view_update = |subscription, settled_through| {
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through,
-            reset_result_set: true,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        })
-    };
+    let view_update = settled_todos_source_closure;
 
     let (old_client_transport, mut old_authority) = duplex();
     let _old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
@@ -172,6 +189,7 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     client.tick().unwrap();
     assert!(all_subscription._state.borrow().settled);
     assert!(filtered_subscription._state.borrow().settled);
+    let filtered_terminal_before = filtered_subscription._state.borrow().snapshot.clone();
 
     let (new_client_transport, mut new_authority) = duplex();
     let _new_upstream = crate::db::block_on(client.connect_upstream(new_client_transport));
@@ -201,7 +219,12 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     assert!(!all_subscription._state.borrow().settled);
     assert!(
         !filtered_subscription._state.borrow().settled,
-        "an X update may recompute filtered Y, so no selected receipt survives"
+        "a nonselected authority update invalidates every selected receipt"
+    );
+    assert_eq!(
+        filtered_subscription._state.borrow().snapshot,
+        filtered_terminal_before,
+        "receipt demotion must retain the receiver-local terminal until B supplies its own closure"
     );
 
     for subscription in new_keys.values().copied() {
@@ -314,20 +337,7 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let query = Query::from("todos");
-    let update = |subscription, settled_through| {
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through,
-            reset_result_set: true,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        })
-    };
+    let update = settled_todos_source_closure;
 
     let (old_client_transport, mut old_authority) = duplex();
     let _old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
@@ -389,20 +399,7 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
             _ => continue,
         }
     };
-    let view_update = |subscription, settled_through| {
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through,
-            reset_result_set: true,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        })
-    };
+    let view_update = settled_todos_source_closure;
     old_authority_transport
         .send(view_update(old_subscription, GlobalTime(1)))
         .unwrap();

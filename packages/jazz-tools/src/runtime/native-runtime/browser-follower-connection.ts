@@ -4,12 +4,18 @@ import type {
   BrowserFollowerConnectionContext,
 } from "../runtime-source.js";
 import { BrowserWorkerTransportPump, transferableFrames } from "./browser-worker-transport.js";
-import type {
-  BrowserFollowerPortEvent,
-  BrowserFollowerPortRequest,
+import {
+  deserializeBrowserRelayError,
+  type BrowserFollowerPortEvent,
+  type BrowserFollowerPortRequest,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { IndexedDbPageStore } from "../indexeddb-page-store.js";
+import {
+  closeInspectorControlPort,
+  inspectorControlAbortError,
+  waitForInspectorOpening,
+} from "./inspector-control-lifecycle.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
@@ -32,10 +38,12 @@ type BrowserFollowerPortRpcRequest =
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
   private readonly pump: BrowserWorkerTransportPump;
   private readonly readyPromise: Promise<void>;
+  private inspectorAttachmentPhysicalDbName: string | null = null;
   private readonly pending = new Map<number, PendingRequest>();
   private nextRequestId = 1;
   private closed = false;
   private failed: Error | null = null;
+  private readonly disposeQueryCoverageTrace: (() => void) | null;
 
   constructor(
     private readonly runtime: NativeRuntimeAdapter,
@@ -56,6 +64,15 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     port.addEventListener("message", this.onMessage);
     port.addEventListener("messageerror", this.onMessageError);
     port.start();
+    this.disposeQueryCoverageTrace = traceRelay
+      ? runtime.onQueryCoverageTrace((entry) => {
+          if (this.closed) return;
+          this.port.postMessage({
+            type: "diagnostic-query-coverage",
+            ...entry,
+          } satisfies BrowserFollowerPortRequest);
+        })
+      : null;
 
     // Establish the accepted peer with this tab's claims before any runtime
     // frames can be delivered. MessagePort ordering keeps the handshake ahead
@@ -110,6 +127,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     if (this.closed) throw new Error("Browser follower connection is closed");
   }
 
+  /** A worker-issued receipt, not caller-supplied authority. */
+  getAuthenticatedInspectorAttachmentPhysicalDbName(): string | null {
+    return this.inspectorAttachmentPhysicalDbName;
+  }
+
   async waitForServerConnection(): Promise<void> {
     await this.ready();
     await this.request({ type: "wait-server" });
@@ -133,23 +155,51 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.request({ type: "finish-storage-reset" });
   }
 
-  async openInspectorControlPort(): Promise<MessagePort> {
-    await this.ready();
+  async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
+    await waitForInspectorOpening(this.ready(), signal);
+    if (signal?.aborted) throw inspectorControlAbortError();
+
     const channel = new MessageChannel();
     const id = this.nextRequestId++;
+    let rejectPending: (error: Error) => void = () => {};
     const promise = new Promise<void>((resolve, reject) => {
+      rejectPending = reject;
       this.pending.set(id, { type: "open-inspector-control", resolve, reject });
     });
-    this.port.postMessage(
-      {
-        type: "open-inspector-control",
-        id,
-        port: channel.port2,
-      } satisfies BrowserFollowerPortRequest,
-      [channel.port2],
-    );
-    await promise;
-    return channel.port1;
+    let controlClosed = false;
+    const closeControl = () => {
+      if (controlClosed) return;
+      controlClosed = true;
+      closeInspectorControlPort(channel.port1);
+    };
+    const onAbort = () => {
+      if (!this.pending.delete(id)) return;
+      closeControl();
+      rejectPending(inspectorControlAbortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      this.port.postMessage(
+        {
+          type: "open-inspector-control",
+          id,
+          port: channel.port2,
+        } satisfies BrowserFollowerPortRequest,
+        [channel.port2],
+      );
+      await promise;
+      if (signal?.aborted) {
+        closeControl();
+        throw inspectorControlAbortError();
+      }
+      return channel.port1;
+    } catch (error) {
+      this.pending.delete(id);
+      closeControl();
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
@@ -232,7 +282,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       // Keep this distinct from a fate rejection. The runtime records the
       // error before any later port teardown so active Edge/Global waits and
       // remote subscriptions wake, while Local durability stays valid.
-      this.runtime.reportRemoteServerTransportError(new Error(message.message));
+      this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
       return;
     }
     if (message.type === "storage-reset") {
@@ -258,15 +308,18 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       return;
     }
     if (message.type === "error") {
-      this.fail(new Error(message.message));
+      this.fail(deserializeBrowserRelayError(message.error));
       return;
     }
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
     if (message.error) {
-      pending.reject(new Error(`Browser worker ${pending.type} failed: ${message.error}`));
-    } else pending.resolve();
+      pending.reject(deserializeBrowserRelayError(message.error));
+    } else {
+      this.inspectorAttachmentPhysicalDbName ??= message.inspectorAttachmentPhysicalDbName ?? null;
+      pending.resolve();
+    }
   };
 
   private readonly onMessageError = (): void => {
@@ -292,6 +345,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.closed = true;
     this.port.removeEventListener("message", this.onMessage);
     this.port.removeEventListener("messageerror", this.onMessageError);
+    this.disposeQueryCoverageTrace?.();
     this.pump.close();
     this.port.close();
     for (const pending of this.pending.values()) pending.reject(error);

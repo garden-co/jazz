@@ -387,8 +387,11 @@ rollback exposure. The legacy logical `(table, schema-version)` registry
 `jazz_partitions` no longer exists; durable `jazz_schema_versions` mappings are
 the complete reopen input.
 
-`jazz_schema_versions.physical_mapping` is a typed, versioned, exact-consumed
-binary payload, not JSON or a Rust-layout serialization. It canonically orders
+`jazz_schema_versions.physical_mapping` is one typed, exact-consumed **v1**
+binary payload, not JSON or a Rust-layout serialization. Its v1 payload-enum
+introduction ordinal is always a little-endian `u32`, including values below
+256; no alternate physical-mapping version or narrow-ordinal compatibility
+decoder exists. It canonically orders
 logical table names, column names, registry column ids, nested occurrence paths,
 and variant fields; malformed UTF-8, duplicate/out-of-order keys, unknown format
 versions, truncation, and trailing bytes fail closed at catalogue recovery.

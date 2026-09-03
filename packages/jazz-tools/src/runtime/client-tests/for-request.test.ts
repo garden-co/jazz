@@ -73,7 +73,7 @@ describe("JazzClient runtime helpers", () => {
 
   it("passes query propagation options to runtime query", async () => {
     const { client, queryCalls } = makeClient();
-    await client.query('{"table":"todos"}', { propagation: "local-only" });
+    await client.queryInternal('{"table":"todos"}', { propagation: "local-only" });
     expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
@@ -140,7 +140,7 @@ describe("JazzClient runtime helpers", () => {
       undefined,
       transactionId,
     );
-    await client.query(
+    await client.queryInternal(
       '{"table":"todos"}',
       {
         localUpdates: "deferred",
@@ -158,10 +158,10 @@ describe("JazzClient runtime helpers", () => {
     );
   });
 
-  it("passes query propagation options to runtime createSubscription", () => {
+  it("lowers the internal local-only tier to local-only propagation", () => {
     const { client, createSubscriptionCalls } = makeClient();
-    client.subscribe('{"table":"todos"}', () => {}, {
-      propagation: "local-only",
+    client.subscribeInternal('{"table":"todos"}', () => {}, {
+      tier: "local-only",
     });
     expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });

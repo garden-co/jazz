@@ -98,6 +98,13 @@ jobs:
             packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
             packages/jazz-tools/bin/native/jazz-tools-linux-x64
 
+      - name: Bind create-jazz preview to this immutable commit
+        env:
+          PREVIEW_COMMIT: ${{ github.event.pull_request.head.sha }}
+        run: |
+          CREATE_JAZZ_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          CREATE_JAZZ_VERSION="${CREATE_JAZZ_VERSION}" node -e 'const fs=require("fs");const commit=process.env.PREVIEW_COMMIT;const version=process.env.CREATE_JAZZ_VERSION;if(!/^[a-f0-9]{40}$/.test(commit))throw new Error(`invalid preview commit: ${commit}`);fs.writeFileSync("packages/create-jazz/jazz-source-snapshot.json",`${JSON.stringify({schema:1,packageVersion:version,commit},null,2)}\n`);'
+
       - name: Publish to pkg.pr.new
         run: |
           pnpm exec pkg-pr-new publish \

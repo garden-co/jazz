@@ -16,16 +16,17 @@ Invariant digest:
 - `INV-REC-4`: Accepted recursive facts MUST be emitted with weight `1`; positive recursive deltas with weight greater than one MUST collapse to one accepted fact.
 - `INV-REC-5`: Positive-only recursive evaluation MUST reject any non-positive frontier delta with `IvmRuntimeError::UnsupportedNonMonotoneRecursion`.
 - `INV-REC-6`: A recursive fixpoint MUST stop when the accepted frontier is empty and MUST converge on cyclic inputs by deduplicating against accumulated facts.
-- `INV-REC-7`: Recursive evaluation MUST fail with `IvmRuntimeError::RecursiveIterationLimit { node, max_iters }` when the number of step iterations exceeds `RecursiveOp::max_iters`.
+- `INV-REC-7`: Fixpoint recursion MUST fail with `IvmRuntimeError::RecursiveIterationLimit { node, max_iters }` when the number of step iterations exceeds its independent safety limit.
 - `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the resulting net recursive delta.
 - `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental use.
 - `INV-REC-10`: Context-dependent recursive arrangements MUST be keyed by `ScopePath` and recursive `sub_tick`; root-scope arrangements MUST use `sub_tick = 0` and MUST absorb a public tick's table delta exactly once even when recursive and non-recursive consumers share them.
 - `INV-REC-11`: Hydrating a new subscriber to an already-shared recursive node MUST return the full current recursive result and MUST NOT consume or suppress future tick deltas for existing subscribers.
 - `INV-REC-12`: Recursive recompute MUST NOT persist per-context child operator state in the runtime state maps after recompute completes.
-- `INV-REC-13`: `arg_max_by` MUST NOT be accepted inside recursive graph seed or step graphs.
+- `INV-REC-13`: Jazz MUST reject user-authored logical operations that would lower to `arg_max_by` or `arg_min_by` inside a recursive seed or step before resolving physical current-row sources. Physical ArgBy introduced by that source expansion MAY occur inside recursion and MUST use the same declared-key direction and ascending full-record tie-breaker as non-recursive evaluation before its winners enter recursive set accumulation.
 - `INV-REC-14`: SQL lowering MUST either preserve a query's semantics exactly or reject it explicitly.
 - `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
 - `INV-REC-16`: A terminal collector's touched-rendered-group bound MUST NOT be applied to recursive fixed-point state, iterations, or nested logical time.
+- `INV-REC-17`: Semantically depth-bounded recursion MUST include the depth-zero seed and facts produced by at most `max_iters` step evaluations, including no step frontier when `max_iters = 0`, and discard the next frontier without reporting non-convergence; maintained base or binding changes MUST preserve that seed-relative depth.
 
 ## Details
 
@@ -34,8 +35,11 @@ Invariant digest:
 Recursive queries are expressed as an explicit graph construct. A recursive
 node pairs an initial derivation with an iterative derivation, and the iterative
 derivation receives the facts accepted in the previous iteration through a
-scoped frontier source. In the reference API this is built with
-`GraphBuilder::recursive(seed, step, frontier, max_iters)` and
+scoped frontier source. In the reference API,
+`GraphBuilder::recursive(seed, step, frontier, max_iters)` uses `max_iters` as
+a non-convergence guard, while
+`GraphBuilder::recursive_bounded(seed, step, frontier, max_iters)` uses it as a
+semantic step-depth cutoff. Both use
 `GraphBuilder::frontier_source(frontier, output)` inside the step graph.
 
 **Implementation-status note.** SQL `WITH RECURSIVE` is currently rejected as
@@ -53,10 +57,18 @@ its recursive node: it names the channel by which the evaluator hands that
 iteration's accepted facts to the step graph, and it is meaningful only inside
 that step evaluation, not as a globally named weighted record set. A frontier
 source with no bound deltas in the current context yields an empty weighted
-record set with its declared descriptor (`INV-REC-2`). `arg_max_by` is not
-permitted inside a recursive seed or step graph (`INV-REC-13`). Nested recursive
-graphs are rejected at graph validation/compilation time rather than accepted
-under ambiguous recursive scope (`INV-REC-15`).
+record set with its declared descriptor (`INV-REC-2`).
+
+Jazz validates recursive seed and step plans before resolving current-row
+sources. A user-authored logical unordered `limit(1)`, which would lower to
+ArgBy, is rejected at that logical boundary. Current-row source resolution may
+then introduce internal `arg_max_by` operators inside the already-validated
+recursive graph. Those physical `arg_max_by` and `arg_min_by` operators use the
+same declared-key and ascending full-record ordering used outside recursion
+before their winners enter the accumulated set (`INV-REC-13`,
+`INV-QUERY-20`). Nested recursive graphs are rejected at graph
+validation/compilation time rather than accepted under ambiguous recursive
+scope (`INV-REC-15`).
 
 ### 6.2 Monotone set semantics and the fixpoint
 
@@ -80,9 +92,18 @@ frontier is empty (`INV-REC-6`). In a from-scratch recompute (§6.3), the
 fixpoint runs over the _full_ seed output. In positive-incremental maintenance,
 it runs over the seed's delta for that tick and again accepts only facts not
 already in `accumulated`. Cyclic input converges because each iteration is
-deduplicated against the accumulated set. As a safety bound, evaluation stops
-with `RecursiveIterationLimit { node, max_iters }` when the frontier is still
-non-empty after `max_iters` iterations (`INV-REC-7`).
+deduplicated against the accumulated set. Fixpoint recursion has an independent
+safety bound and stops with `RecursiveIterationLimit { node, max_iters }` when
+the frontier remains non-empty beyond it (`INV-REC-7`).
+
+A semantic depth bound is different: the seed is depth zero, exactly
+`max_iters` step frontiers are accepted, and the next frontier is discarded as
+out of range rather than interpreted as non-convergence. In particular, a zero
+bound returns the seed only and MUST NOT evaluate or admit a one-hop frontier.
+Because positive incremental recursion normally resumes from the accumulated
+closure, which no longer records seed-relative depth, a semantically bounded
+node recomputes from its seed on relevant table or binding changes
+(`INV-REC-17`).
 
 _Further invariants._ `INV-REC-5` — positive-only recursive evaluation rejects a
 non-positive frontier delta (`UnsupportedNonMonotoneRecursion`); non-monotone

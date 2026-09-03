@@ -139,7 +139,7 @@ runs:
       if: inputs.sccache == 'true' && runner.os == 'Linux' && steps.provisioned-tools.outputs.active != 'true'
       uses: ./.github/actions/install-rust-tool
       with:
-        tool: sccache
+        tool: sccache@0.15.0
 
     - name: Mount sccache sticky disk
       if: inputs.sccache == 'true' && inputs.sccache-sticky-disk == 'true' && runner.os == 'Linux' && steps.provisioned-tools.outputs.active != 'true'

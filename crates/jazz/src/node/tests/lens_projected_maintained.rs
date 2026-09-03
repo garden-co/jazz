@@ -80,19 +80,22 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
         result_member_adds,
         result_member_removes,
         reset_result_set,
+        program_fact_adds,
         ..
     }) = update
     else {
         panic!("current-row subscription should produce a view update");
     };
-    assert!(!reset_result_set);
+    assert!(reset_result_set);
+    assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
-    assert_eq!(result_member_adds.len(), 1);
-    let member = result_member_adds[0]
-        .as_real_row()
-        .expect("current-row result should be real row");
-    assert_eq!(member.row_uuid, shared_row);
-    assert_eq!(member.content_tx, Some(new_tx));
+    let inputs = program_fact_adds.iter().filter_map(|fact| match fact {
+        crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].source_row, shared_row);
+    assert_eq!(inputs[0].version.tx, new_tx);
     assert_eq!(bundles.len(), 1);
     assert_eq!(bundles[0].versions.len(), 1);
     let shipped = &bundles[0].versions[0];

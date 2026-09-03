@@ -234,6 +234,60 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
     ), "the predecessor remains independently pending");
 }
 
+/// INV-RLS-24 moves read-for-write authorization only for mergeable staging.
+/// Exclusive transactions retain their existing snapshot/read-set contract;
+/// the shared write-policy admission helper must not silently add the new
+/// mergeable prior-row read check to them.
+///
+/// This stays internal because the regression is the transaction-kind gate on
+/// the common authority helper, before exclusive conflict validation runs.
+#[test]
+fn authority_read_for_write_check_is_mergeable_only() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_select(PublicPolicyExpr::False)
+                    .with_insert(PublicPolicyExpr::True)
+                    .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x95);
+    let base = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", target, 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("before".to_owned()),
+        )])),
+    );
+    let (_, unit) = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 11)
+                .made_by(user(0xa5))
+                .parents(vec![base])
+                .cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("after".to_owned()),
+                )])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        versions,
+    } = unit
+    else {
+        panic!("commit helper must emit one commit unit");
+    };
+    tx.kind = TxKind::Exclusive;
+    assert!(
+        crate::db::block_on(core.commit_unit_satisfies_write_policies(&tx, &versions, None))
+            .unwrap(),
+        "exclusive admission keeps its pre-existing write-policy-only helper semantics"
+    );
+}
+
 /// This stays at the node boundary because admission evaluates policy-pinned
 /// inline rows before a public client receives a write outcome. It proves the
 /// provenance visible to that inline program matches the public milliseconds
@@ -617,9 +671,11 @@ fn owner_only_read_narrows_view_updates_per_peer_identity() {
 
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_a, BTreeSet::from([row(1)]));
+    register_whole_table_receiver(&mut reader_a, "todos");
     reader_a.apply_sync_message_settled(update_a).unwrap();
     let update_b = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_b, BTreeSet::from([row(2)]));
+    register_whole_table_receiver(&mut reader_b, "todos");
     reader_b.apply_sync_message_settled(update_b).unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
 
@@ -693,17 +749,19 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads, ..
             },
-        result_member_adds,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    assert_eq!(result_member_adds, &vec![(
-        groove::Intern::new("announcements".to_owned()),
-        announcement_row,
-        tx_id
-    )]);
+    assert_eq!(
+        canonical_view_update_rows(&update).0,
+        vec![(
+            groove::Intern::new("announcements".to_owned()),
+            announcement_row,
+            tx_id
+        )]
+    );
     assert!(complete_tx_payloads.is_empty());
     assert!(!bob_peer.shipped_complete_tx_payloads().contains(&tx_id));
     let shipped_rows = version_bundles
@@ -712,6 +770,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         .collect::<BTreeSet<_>>();
     assert_eq!(shipped_rows, BTreeSet::from([announcement_row]));
 
+    register_shape_binding(&mut bob_node, &shape, &binding);
     bob_node.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         bob_node
@@ -747,6 +806,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
 
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
+    register_whole_table_receiver(&mut reader_a, "todos");
     reader_a.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader_a
@@ -763,8 +823,6 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs, ..
             },
-        result_member_adds,
-        result_member_removes,
         ..
     }) = &update
     else {
@@ -772,10 +830,9 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     };
     assert!(version_carriers.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(result_member_adds.is_empty());
     assert_eq!(
-        result_member_removes,
-        &vec![("todos".to_owned().into(), row_uuid, tx_a)]
+        canonical_view_update_rows(&update),
+        (vec![], vec![("todos".to_owned().into(), row_uuid, tx_a)])
     );
     reader_a.apply_sync_message_settled(update).unwrap();
     assert!(
@@ -794,6 +851,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let mut link_b = PeerState::client_link(author_b);
     let update = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
+    register_whole_table_receiver(&mut reader_b, "todos");
     reader_b.apply_sync_message_settled(update).unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     assert_eq!(
@@ -914,7 +972,10 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let invited_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    invited_reader.apply_sync_message_settled(invited_update).unwrap();
+    register_whole_table_receiver(&mut invited_reader, "canvases");
+    invited_reader
+        .apply_sync_message_settled(invited_update)
+        .unwrap();
     assert_eq!(
         invited_reader
             .subscription_current_rows("canvases", DurabilityTier::Global)
@@ -947,6 +1008,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let uninvited_update = uninvited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
+    register_whole_table_receiver(&mut uninvited_reader, "canvases");
     uninvited_reader
         .apply_sync_message_settled(uninvited_update)
         .unwrap();
@@ -972,15 +1034,9 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let revoked_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_removes, ..
-    }) = &revoked_update
-    else {
-        panic!("expected view update");
-    };
     assert_eq!(
-        result_member_removes,
-        &vec![("canvases".to_owned().into(), canvas_row, accepted_id)]
+        canonical_view_update_rows(&revoked_update),
+        (vec![], vec![("canvases".to_owned().into(), canvas_row, accepted_id)])
     );
     invited_reader.apply_sync_message_settled(revoked_update).unwrap();
     assert!(

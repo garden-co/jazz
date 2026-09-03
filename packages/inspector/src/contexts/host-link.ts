@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   INSPECTOR_HOST_GLOBAL,
   INSPECTOR_SUBSCRIPTIONS_MESSAGE,
+  deserializeInspectorControlError,
   type DbConfig,
   type InspectorSubscription,
   type InspectorSubscriptionsMessage,
@@ -98,6 +99,10 @@ function closeRemotePort(port: MessagePort): void {
   }
 }
 
+export function closeInspectorRuntimePort(port: MessagePort): void {
+  closeRemotePort(port);
+}
+
 export async function openInspectorRuntimeSession(
   options: InspectorRuntimeSessionOptions = {},
 ): Promise<InspectorRuntimeSession | null> {
@@ -109,7 +114,10 @@ export async function openInspectorRuntimeSession(
     throw abortError();
   }
 
-  const opening = Promise.resolve().then(() => host.handle.openControlPort());
+  const openingController = new AbortController();
+  const opening = Promise.resolve().then(() =>
+    host.handle.openControlPort(openingController.signal),
+  );
   let openingSettled = false;
   let openingTimer: ReturnType<typeof setTimeout> | undefined;
   let removeAbortListener: (() => void) | undefined;
@@ -120,6 +128,7 @@ export async function openInspectorRuntimeSession(
         return;
       }
 
+      if (error !== undefined) openingController.abort();
       openingSettled = true;
       clearTimeout(openingTimer);
       openingTimer = undefined;
@@ -161,7 +170,7 @@ export async function openInspectorRuntimeSession(
     if (!entry) return;
     pending.delete(message.id);
     clearTimeout(entry.timer);
-    if (message.error) entry.reject(new Error(String(message.error)));
+    if (message.error) entry.reject(deserializeInspectorControlError(message.error));
     else entry.resolve(message);
   };
 

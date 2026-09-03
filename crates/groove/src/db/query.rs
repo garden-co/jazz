@@ -1,6 +1,138 @@
 use super::*;
 
 impl Database {
+    /// Allocate an opaque mutable input source for graphs maintained by this
+    /// database. The identity is runtime-local and cannot be reused after the
+    /// database closes.
+    pub fn allocate_input_source(&mut self, descriptor: RecordDescriptor) -> InputSourceId {
+        self.ivm_runtime.allocate_input_source(descriptor)
+    }
+
+    /// Atomically replace multiple runtime-owned source record sets and drive
+    /// them through the same IVM graph used by ordinary table changes.
+    pub async fn replace_input_sources(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+    ) -> Result<TickMetrics, Error> {
+        self.ensure_not_poisoned()?;
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
+        let metrics = match self
+            .ivm_runtime
+            .replace_input_sources(replacements, &storage)
+            .await
+        {
+            Ok(metrics) => metrics,
+            // These are all preflight failures: record decoding, runtime
+            // ownership, and descriptor compatibility are checked before the
+            // first source refcount changes. They are ordinary recoverable
+            // caller errors, so a following valid replacement may proceed.
+            Err(
+                error @ (IvmRuntimeError::RecordEncoding(_)
+                | IvmRuntimeError::ForeignInputSource
+                | IvmRuntimeError::InputSourceRetired
+                | IvmRuntimeError::BindingSourceDescriptorMismatch(_)),
+            ) => {
+                return Err(Error::IvmRuntime(error));
+            }
+            // A tick can have touched graph/operator state after inputs were
+            // installed. Database commits use the same fail-closed rule: do
+            // not expose a possibly half-evaluated runtime to later calls.
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        self.last_tick_metrics = Some(metrics.clone());
+        if let Err(error) = self.drive_resident_progress_now() {
+            self.poisoned = true;
+            return Err(error);
+        }
+        Ok(metrics)
+    }
+
+    /// Atomically apply set-like record additions and removals to
+    /// runtime-owned inputs, then drive one ordinary IVM tick.
+    pub async fn apply_input_source_deltas(
+        &mut self,
+        deltas: impl IntoIterator<Item = InputSourceDelta>,
+    ) -> Result<TickMetrics, Error> {
+        self.ensure_not_poisoned()?;
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
+        let metrics = match self
+            .ivm_runtime
+            .apply_input_source_deltas(deltas, &storage)
+            .await
+        {
+            Ok(metrics) => metrics,
+            Err(
+                error @ (IvmRuntimeError::RecordEncoding(_)
+                | IvmRuntimeError::ForeignInputSource
+                | IvmRuntimeError::InputSourceRetired
+                | IvmRuntimeError::BindingSourceDescriptorMismatch(_)),
+            ) => return Err(Error::IvmRuntime(error)),
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        self.last_tick_metrics = Some(metrics.clone());
+        if let Err(error) = self.drive_resident_progress_now() {
+            self.poisoned = true;
+            return Err(error);
+        }
+        Ok(metrics)
+    }
+
+    /// Retract and permanently retire runtime-local input identities. A
+    /// retired source stays empty in already-compiled graphs and cannot be
+    /// replaced again.
+    pub async fn retire_input_sources(
+        &mut self,
+        ids: impl IntoIterator<Item = InputSourceId>,
+    ) -> Result<TickMetrics, Error> {
+        self.ensure_not_poisoned()?;
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
+        let metrics = match self.ivm_runtime.retire_input_sources(ids, &storage).await {
+            Ok(metrics) => metrics,
+            Err(
+                error @ (IvmRuntimeError::ForeignInputSource | IvmRuntimeError::InputSourceRetired),
+            ) => {
+                return Err(Error::IvmRuntime(error));
+            }
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        self.last_tick_metrics = Some(metrics.clone());
+        if let Err(error) = self.drive_resident_progress_now() {
+            self.poisoned = true;
+            return Err(error);
+        }
+        Ok(metrics)
+    }
+
     /// Drain continuation turns which the IVM itself has explicitly scheduled
     /// for already-resident work. Stop as soon as a storage/chunk request is
     /// genuinely pending: this direct API has no durable owner waker to retain
