@@ -15,7 +15,7 @@ import {
   type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
-import type { ColumnTransformMap, QueryBuilder } from "./runtime/db.js";
+import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
@@ -1019,15 +1019,19 @@ export class TypedTableQueryBuilder<
   private _gatherVal?: BuiltGather;
   private _unionVal?: BuiltRelation;
   _columnTransforms?: ColumnTransformMap;
+  readonly _columnTransformsByTable?: ColumnTransformRegistry;
 
   constructor(
     table: TableNameFromMeta<TMeta>,
     schema: WasmSchema,
     columnTransforms?: ColumnTransformMap,
+    columnTransformsByTable?: ColumnTransformRegistry,
   ) {
     this._table = table;
     this._schema = schema;
     this._columnTransforms = columnTransforms;
+    this._columnTransformsByTable =
+      columnTransformsByTable ?? (columnTransforms ? { [table]: columnTransforms } : undefined);
   }
 
   where(
@@ -1245,6 +1249,7 @@ export class TypedTableQueryBuilder<
       this._table,
       this._schema,
       this._columnTransforms,
+      this._columnTransformsByTable,
     );
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes } as Partial<BuilderInclude<TMeta>>;
@@ -1519,6 +1524,14 @@ function columnTransformsForTable(
   return Object.keys(transforms).length > 0 ? transforms : undefined;
 }
 
+function columnTransformsForSchema(definition: SchemaDefinition): ColumnTransformRegistry {
+  const registry: ColumnTransformRegistry = {};
+  for (const [tableName, tableDefinition] of Object.entries(definition)) {
+    registry[tableName] = columnTransformsForTable(tableDefinition);
+  }
+  return registry;
+}
+
 function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchema): SchemaAst {
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
@@ -1636,13 +1649,15 @@ function createAppForTables(
   schemaAst?: SchemaAst,
 ): App<Schema<SchemaDefinition>> {
   registeredWasmSchema = wasmSchema;
+  const columnTransformsByTable = definition ? columnTransformsForSchema(definition) : undefined;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
   for (const tableName of tableNames) {
     tables[tableName] = new TypedTableQueryBuilder(
       tableName,
       wasmSchema,
-      definition ? columnTransformsForTable(definition[tableName]) : undefined,
+      columnTransformsByTable?.[tableName],
+      columnTransformsByTable,
     );
   }
 
@@ -1654,7 +1669,12 @@ function createAppForTables(
       }
 
       const first = relations[0]!;
-      const builder = new TypedTableQueryBuilder(first._table, wasmSchema);
+      const builder = new TypedTableQueryBuilder(
+        first._table,
+        wasmSchema,
+        first._columnTransforms,
+        first._columnTransformsByTable,
+      );
       (builder as any)._unionVal = {
         union: {
           inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
