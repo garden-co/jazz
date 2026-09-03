@@ -1853,7 +1853,7 @@ fn non_global_peer_query_subscriptions_use_maintained_path() {
     };
     let mut peer = PeerState::new();
 
-    peer.rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
+    peer.rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
     assert!(
         peer.publication_states
@@ -1861,7 +1861,7 @@ fn non_global_peer_query_subscriptions_use_maintained_path() {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .is_some()
     );
-    peer.query_update_for_subscription(&mut core, subscription, &shape, &binding)
+    peer.query_update_for_subscription_with_opts(&mut core, subscription, &shape, &binding, opts)
         .unwrap();
 }
 

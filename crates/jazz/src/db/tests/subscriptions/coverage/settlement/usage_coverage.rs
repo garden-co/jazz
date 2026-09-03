@@ -678,7 +678,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             tx: crate::tx::Transaction {
                 tx_id: TxId::new(TxTime::from(44), NodeUuid::from_bytes([0x44; 16])),
                 kind: crate::tx::TxKind::Mergeable,
-                n_total_writes: 0,
+                n_total_writes: 1,
                 made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
@@ -694,9 +694,15 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             durability: DurabilityTier::Edge,
         }]))
         .unwrap();
+    client.tick().unwrap();
     assert!(
-        client.tick().is_err(),
-        "missing payload must reject the update"
+        matches!(
+            first.try_next_event(),
+            Some(SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. },
+            })
+        ),
+        "missing payload must be reported to its public subscription"
     );
     let mut duplicate = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(
@@ -706,8 +712,8 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
 
     authority_transport.send(update(Vec::new())).unwrap();
     client.tick().unwrap();
-    assert!(opened_rows(block_on(first.next_raw()).unwrap()).is_empty());
-    assert!(opened_rows(block_on(duplicate.next_raw()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(first.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(duplicate.next_event()).unwrap()).is_empty());
     let mut after_success = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(
         opened_rows(

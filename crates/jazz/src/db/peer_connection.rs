@@ -77,10 +77,9 @@ fn route_invalid_authority_source_closure(
 
 /// Namespace for relay-owned usage-site subscription handles.
 ///
-/// A relay may normalize multiple downstream coverage requests to the same
-/// upstream read view. The resulting subscriptions still need distinct wire
-/// handles: the upstream node deduplicates their work by [`CoverageKey`], while
-/// retaining the independent ownership needed for correct unsubscribe behavior.
+/// A new coverage lifetime mints a fresh handle. Identical live scope-relay
+/// requests reuse that handle and retain independent connection pins; after
+/// final release, a later lifetime cannot inherit the retired stream's replies.
 const RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("ae3eb9f7-65cc-528d-8f3e-a772fb6f68fe");
 

@@ -673,7 +673,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     };
     let mut bob_peer = PeerState::edge_client(bob);
     let initial = bob_peer
-        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
     assert_view_update_only_references_rows(&initial, BTreeSet::new());
 
@@ -703,8 +703,9 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     );
 
     let update = bob_peer
-        .query_update_for_subscription(&mut core, subscription, &shape, &binding)
-        .unwrap();
+        .query_update_for_subscription_with_opts(&mut core, subscription, &shape, &binding, opts)
+        .unwrap()
+        .expect("membership insertion must publish newly covered message input");
     assert!(
         canonical_view_update_rows(&update)
             .0

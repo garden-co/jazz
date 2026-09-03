@@ -383,8 +383,8 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
     relay
         .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
         .unwrap();
-    let update = |subscription, reset_result_set: bool, opening_pending, defer_settlement| {
-        let program_fact_adds = reset_result_set
+    let update = |subscription, reset_result_set: bool, opening_pending: bool, defer_settlement| {
+        let program_fact_adds = (reset_result_set && !opening_pending)
             .then(|| {
                 vec![
                     crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
@@ -456,7 +456,8 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
     let pending = relay.take_pending_authoritative_resets();
     assert_eq!(
         pending,
-        BTreeSet::from([alice_key.clone(), bob_key.clone()])
+        BTreeSet::from([bob_key.clone()]),
+        "Alice's progress marker has not installed a complete reset"
     );
     // Bob can defer a later publication while Alice's opening continues. That
     // deferred marker is also exact-policy state, not binding-view state.
@@ -472,12 +473,12 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
     }
     assert_eq!(
         relay.take_pending_authoritative_resets(),
-        BTreeSet::from([alice_key.clone(), bob_key.clone()]),
-        "each exact reset can be deferred and retried without ambiguity"
+        BTreeSet::from([bob_key.clone()]),
+        "Bob's exact reset can be deferred without manufacturing Alice's receipt"
     );
 
     relay
-        .apply_view_update(update(alice_subscribe.subscription, false, false, false))
+        .apply_view_update(update(alice_subscribe.subscription, true, false, false))
         .resolve()
         .unwrap();
     relay
@@ -486,6 +487,11 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
         .unwrap();
     assert!(!relay.opening_pending_for_authority_result(&alice_key));
     assert!(!relay.publication_deferred_for_authority_result(&bob_key));
+    assert_eq!(
+        relay.take_pending_authoritative_resets(),
+        BTreeSet::from([alice_key.clone()]),
+        "Alice's completed closure now owns its independent reset"
+    );
     assert!(
         relay.applied_authority_result_generation(&alice_key) > 1,
         "Alice's lifecycle keeps progressing after her opening reset"

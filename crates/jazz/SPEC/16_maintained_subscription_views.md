@@ -251,6 +251,11 @@ Installing carriers, publishing membership, and evaluating the graph are one
 ordered semantic boundary even when storage commits and runtime scheduling use
 several internal steps.
 
+An opening-pending message is only progress: it carries no source changes or
+content witnesses, does not replace the prior closure, and cannot establish
+settlement or a reusable coverage receipt. Even an empty result needs the
+subsequent complete compiler-owned source coverage manifest before it can open.
+
 ### 16.1.2 Application subscription delta contract
 
 The application-facing subscription stream is a stream of result deltas. A

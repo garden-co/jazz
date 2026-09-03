@@ -886,7 +886,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     let (edge_transport, mut authority_transport) = duplex();
     let _upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
     let query = Query::from("todos");
-    let _stream = prepared_subscribe(&edge, &query, global_subscribe_opts()).unwrap();
+    let mut stream = prepared_subscribe(&edge, &query, global_subscribe_opts()).unwrap();
     edge.tick().unwrap();
     let subscription = loop {
         match authority_transport
@@ -909,12 +909,28 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             },
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: if opening_pending {
+                Vec::new()
+            } else {
+                vec![crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                    crate::protocol::ProgramSourceCoverageEntry {
+                        source: crate::protocol::ProgramSourceId {
+                            table: "todos".to_owned().into(),
+                            path: vec![crate::protocol::ProgramSourceRole::Root],
+                        },
+                        complete: true,
+                    },
+                )]
+            },
             program_fact_removes: Vec::new(),
         })
     };
     authority_transport.send(view_update(true, 1)).unwrap();
     edge.tick().unwrap();
+    assert!(
+        stream.try_next_event().is_none(),
+        "pending is neither a result nor a rejection"
+    );
     let authority_result_key = edge
         .node
         .node
@@ -966,6 +982,27 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     );
     drop(node);
 
+    let mut malformed_pending = view_update(false, 2);
+    if let SyncMessage::ViewUpdate(payload) = &mut malformed_pending {
+        payload.peer_payload_inventory.opening_pending = true;
+    }
+    authority_transport.send(malformed_pending).unwrap();
+    edge.tick().unwrap();
+    assert!(matches!(
+        stream.try_next_event(),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. },
+        })
+    ));
+    assert_eq!(
+        edge.node
+            .node
+            .borrow()
+            .applied_authority_result_generation(&authority_result_key),
+        before_generation,
+        "a pending marker carrying source data must fail before mutating the receipt"
+    );
+
     authority_transport.send(view_update(false, 2)).unwrap();
     edge.tick().unwrap();
     let node = Rc::clone(&edge.node.node);
@@ -976,6 +1013,8 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         "the same message class must remain admitted from an authority link"
     );
     assert!(!node.opening_pending_for_authority_result(&authority_result_key));
+    drop(node);
+    assert!(opened_rows(block_on(stream.next_event()).unwrap()).is_empty());
 }
 
 // This stays internal because the admission ordering and retained peer registration

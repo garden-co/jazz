@@ -1710,6 +1710,7 @@ fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
         ])),
     );
     let mut peer = PeerState::new();
+    register_whole_table_receiver(&mut client, "counters");
     client
         .apply_sync_message_settled(peer.current_rows_update(&mut core, "counters").unwrap())
         .unwrap();

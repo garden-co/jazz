@@ -1408,6 +1408,19 @@ where
     /// storage or in-memory receiver state.
     fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
         for update in updates {
+            // An opening-pending marker makes no source or body claim. It
+            // must not mutate a prior closure while withholding settlement.
+            if update.opening_pending
+                && (!update.program_fact_adds.is_empty()
+                    || !update.program_fact_removes.is_empty()
+                    || !update.version_carriers.is_empty()
+                    || !update.peer_complete_tx_payload_refs.is_empty())
+            {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "opening-pending marker carries source data".to_owned(),
+                });
+            }
             // INV-SYNC-36 has one peer result model: the authority sends an
             // exact covered source closure and the receiver derives its own
             // terminal. Result-member deltas and payload rows are authority
@@ -1473,9 +1486,11 @@ where
     fn reset_replaces_authority_source_closure(
         reset_result_set: bool,
         has_source_facts: bool,
+        opening_pending: bool,
         state: Option<&AuthorityResultState>,
     ) -> bool {
         reset_result_set
+            && !opening_pending
             && (has_source_facts
                 || !matches!(
                     state.map(|state| state.source_closure),
@@ -1540,6 +1555,7 @@ where
             let reset_replaces = Self::reset_replaces_authority_source_closure(
                 update.reset_result_set,
                 !update.program_fact_adds.is_empty() || !update.program_fact_removes.is_empty(),
+                update.opening_pending,
                 state,
             );
             if reset_replaces {
@@ -1953,6 +1969,7 @@ where
         let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
             reset_result_set,
             !program_fact_adds.is_empty() || !program_fact_removes.is_empty(),
+            opening_pending,
             self.query.authority_results.get(&authority_result_key),
         );
         if reset_cleared_shared_state {
@@ -2043,7 +2060,7 @@ where
                 .or_default()
                 .pending_authoritative_reset = true;
         }
-        if !defer_settlement {
+        if !defer_settlement && !opening_pending {
             let state = self
                 .query
                 .authority_results
@@ -2084,7 +2101,7 @@ where
                 );
             }
         }
-        if !defer_settlement {
+        if !defer_settlement && !opening_pending {
             self.persist_settled_result_state_delta_for_authority_result(
                 authority_result_key.clone(),
                 reset_cleared_shared_state,
@@ -2105,6 +2122,7 @@ where
             && version_bundles_is_empty
             && (!reset_result_set || peer_complete_tx_payload_refs.is_empty())
             && !defer_settlement
+            && !opening_pending
         {
             self.query
                 .authority_results
@@ -2137,12 +2155,12 @@ where
         // The receiver validates the exact compiler-owned coverage set before
         // it installs the replacement, so this marker never makes a partial
         // closure publishable.
-        if reset_result_set && !defer_settlement {
+        if reset_result_set && !defer_settlement && !opening_pending {
             state.source_closure = crate::node::AuthoritySourceClosure::Claimed {
                 generation: state.applied_view_update_generation,
             };
             state.source_incrementals.clear();
-        } else if !defer_settlement {
+        } else if !defer_settlement && !opening_pending {
             // Normal source updates retain their predecessor closure and are
             // applied as descriptor-bound runtime input deltas. They must not
             // be re-labelled as a complete reset merely because an authority
@@ -2191,7 +2209,7 @@ where
         // whether it is an exact reset or a successor delta. Persisting
         // earlier would leave a reopened receiver with facts but no claimed
         // generation, forcing it to treat a durable exact closure as pending.
-        if !defer_settlement {
+        if !defer_settlement && !opening_pending {
             self.persist_known_state_fact_for_authority_result(
                 authority_result_key,
                 settled_through,

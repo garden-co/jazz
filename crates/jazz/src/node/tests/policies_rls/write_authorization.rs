@@ -671,9 +671,11 @@ fn owner_only_read_narrows_view_updates_per_peer_identity() {
 
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_a, BTreeSet::from([row(1)]));
+    register_whole_table_receiver(&mut reader_a, "todos");
     reader_a.apply_sync_message_settled(update_a).unwrap();
     let update_b = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_b, BTreeSet::from([row(2)]));
+    register_whole_table_receiver(&mut reader_b, "todos");
     reader_b.apply_sync_message_settled(update_b).unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
 
@@ -768,6 +770,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         .collect::<BTreeSet<_>>();
     assert_eq!(shipped_rows, BTreeSet::from([announcement_row]));
 
+    register_shape_binding(&mut bob_node, &shape, &binding);
     bob_node.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         bob_node
@@ -803,6 +806,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
 
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
+    register_whole_table_receiver(&mut reader_a, "todos");
     reader_a.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader_a
@@ -847,6 +851,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let mut link_b = PeerState::client_link(author_b);
     let update = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
+    register_whole_table_receiver(&mut reader_b, "todos");
     reader_b.apply_sync_message_settled(update).unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     assert_eq!(
@@ -967,7 +972,10 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let invited_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    invited_reader.apply_sync_message_settled(invited_update).unwrap();
+    register_whole_table_receiver(&mut invited_reader, "canvases");
+    invited_reader
+        .apply_sync_message_settled(invited_update)
+        .unwrap();
     assert_eq!(
         invited_reader
             .subscription_current_rows("canvases", DurabilityTier::Global)
@@ -1000,6 +1008,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let uninvited_update = uninvited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
+    register_whole_table_receiver(&mut uninvited_reader, "canvases");
     uninvited_reader
         .apply_sync_message_settled(uninvited_update)
         .unwrap();
