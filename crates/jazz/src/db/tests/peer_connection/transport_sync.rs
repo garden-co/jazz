@@ -159,6 +159,164 @@ fn malformed_authority_closure_reaches_only_its_public_subscription() {
     );
 }
 
+/// Alice's one-shot read must report a malformed closure, not wait forever
+/// because it has no public subscription sender to receive the rejection.
+/// The real authority supplies an opening; only its duplicate input witness
+/// is planted at the transport boundary to exercise protocol validation.
+///
+/// alice ──attach read──► authority ──duplicate witness──► alice (typed error)
+#[test]
+fn malformed_authority_closure_fails_one_shot_owner_tick_loudly() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0x46; 16]);
+    let server = open_core(0x47, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x48, alice, &schema);
+    server
+        .insert_with_id(
+            "todos",
+            row(0x49),
+            cells("persisted upstream", false, alice),
+        )
+        .unwrap();
+    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let query = client.prepare_query(&Query::from("todos")).unwrap();
+    let attachment = client
+        .attach_query_with_opts(
+            &query,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    {
+        let mut frames = server_sent.borrow_mut();
+        let update = frames
+            .iter_mut()
+            .find_map(|message| match message {
+                SyncMessage::ViewUpdate(update) => Some(update),
+                _ => None,
+            })
+            .expect("authority must send the opening");
+        let duplicate = update
+            .program_fact_adds
+            .iter()
+            .find_map(|fact| match fact {
+                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+                _ => None,
+            })
+            .expect("opening must contain an input witness");
+        update
+            .program_fact_adds
+            .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+    }
+    let error = client
+        .tick()
+        .expect_err("one-shot closure errors must not be swallowed");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate source-closure addition"),
+        "{error}"
+    );
+    assert!(!client.query_attachment_is_covered(&attachment));
+}
+
+/// Alice's trusted Inspector reads a local maintained page while propagating
+/// to core. Receiving authority coverage must not repeatedly replace her
+/// storage-backed graph; after hydration it stays live and becomes quiescent.
+///
+/// core ──covered rows──► alice admin Local page ──idle ticks──► same page
+#[test]
+fn local_admin_page_keeps_its_graph_after_propagation_coverage() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0x51; 16]);
+    let core = open_core(0x52, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x53, AuthorSubject::SYSTEM, &schema);
+    for index in 0..40 {
+        core.insert_with_id(
+            "todos",
+            row(index + 1),
+            cells(&format!("todo {index:03}"), false, alice),
+        )
+        .unwrap();
+    }
+    let (client_transport, server_transport) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = core.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let query = client
+        .table("todos")
+        .select([
+            "title",
+            "done",
+            "$createdAt",
+            "$createdBy",
+            "$updatedAt",
+            "$updatedBy",
+        ])
+        .order_by("title", OrderDirection::Asc)
+        .limit(26);
+    let prepared = client.prepare_query(&query).unwrap();
+    let mut stream = block_on(client.subscribe_for_identity(
+        &prepared,
+        ReadOpts::default(),
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..32 {
+        client.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(
+        snapshot.root_count, 26,
+        "the local page must hydrate from synced storage"
+    );
+    let mut idle_events = 0;
+    for index in 0..8 {
+        // Force ordinary runtime progress without changing this title window.
+        // Browser async-storage wakeups also revisit the same retained stream.
+        client
+            .insert(
+                "todos",
+                cells("zzz outside page", false, alice),
+                crate::db::InsertOptions {
+                    row_id: Some(row(100 + index)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            idle_events += 1;
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.root_count, 26);
+    assert_eq!(
+        idle_events, 0,
+        "one authority reset must not repeatedly reopen the local graph"
+    );
+}
+
 fn branch_sync_selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }

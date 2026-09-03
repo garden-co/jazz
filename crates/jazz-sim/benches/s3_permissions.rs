@@ -33,7 +33,7 @@ use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::TransportError;
 use jazz_sim::fixture::{
     apply_sync_message_settled, commit_mergeable_unit_settled, ingest_commit_unit_settled,
-    settle_outcome,
+    register_query_receiver, register_query_receiver_for_subscription, settle_outcome,
 };
 use jazz_sim::public_schema_fixture::{
     all_operation_policies, compile_public_schema, seeded_recursive_access_policy,
@@ -435,6 +435,7 @@ struct Client {
     _dir: tempfile::TempDir,
     peer: PeerState,
     registered_subscriptions: BTreeSet<SubscriptionKey>,
+    covered_inputs: BTreeSet<jazz::protocol::CoveredInputEntry>,
     visible_rows: BTreeSet<RowUuid>,
 }
 
@@ -997,7 +998,13 @@ fn revoke_phase(
     oracle.memberships.remove(&membership);
     let query_start = Instant::now();
     hydrate_edge_policy(ctx, core, edge);
-    let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
+    let core_update = block_on(edge.core_peer.query_update_for_subscription(
+        core,
+        edge_query_subscription(&edge.name, shape, binding),
+        shape,
+        binding,
+    ))
+    .unwrap();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
     apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
@@ -1005,9 +1012,20 @@ fn revoke_phase(
     let query_update_us = query_start.elapsed().as_micros() as u64;
     let removed = match &update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            result_member_removes,
+            program_fact_removes,
             ..
-        }) => result_member_removes.len(),
+        }) => program_fact_removes
+            .iter()
+            .filter_map(|fact| match fact {
+                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
+                {
+                    Some(input.source_row)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .len(),
         _ => 0,
     };
     assert!(
@@ -1061,7 +1079,13 @@ fn forbidden_write_phase(
         resource_cells(9_000),
         900_000,
     );
-    let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
+    let core_update = block_on(edge.core_peer.query_update_for_subscription(
+        core,
+        edge_query_subscription(&edge.name, shape, binding),
+        shape,
+        binding,
+    ))
+    .unwrap();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
     apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
@@ -1083,7 +1107,13 @@ fn forbidden_write_phase(
             resource_cells(config.resources() + tick),
             900_010 + tick as u64,
         );
-        let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
+        let core_update = block_on(edge.core_peer.query_update_for_subscription(
+            core,
+            edge_query_subscription(&edge.name, shape, binding),
+            shape,
+            binding,
+        ))
+        .unwrap();
         ctx.send("core", &edge.name, core_update);
         let delivered_to_edge = ctx.recv(&edge.name);
         apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
@@ -1886,6 +1916,24 @@ fn apply_db_subscription_event(visible_rows: &mut BTreeSet<RowUuid>, event: Subs
     }
 }
 
+fn edge_query_subscription(
+    edge_name: &str,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) -> SubscriptionKey {
+    // The same semantic query is received from core and served downstream.
+    // Those are independent usages: downstream reset/close must not retire
+    // the edge's upstream receipt. Keep fixture IDs deterministic but distinct.
+    SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: jazz::query::BindingId(uuid::Uuid::new_v5(
+            &binding.binding_id().0,
+            format!("s3/core-to-edge/{edge_name}").as_bytes(),
+        )),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    }
+}
+
 fn hydrate(
     ctx: &mut dyn DriverContext,
     core: &mut NodeState<RocksDbStorage>,
@@ -1898,7 +1946,28 @@ fn hydrate(
     install_claims(core, edge.core_peer.identity());
     install_claims(&mut edge.node, client.peer.identity());
     core.reset_storage_read_metrics();
-    let core_update = block_on(edge.core_peer.rehydrate_query(core, shape, binding)).unwrap();
+    let subscription = edge_query_subscription(&edge.name, shape, binding);
+    register_query_receiver_for_subscription(
+        &mut edge.node,
+        subscription,
+        shape,
+        binding,
+        RegisterShapeOptions::default(),
+        jazz::protocol::DelegatedSessionBinding {
+            identity: edge.core_peer.identity(),
+            claims: raw_claims(edge.core_peer.identity()),
+        },
+    )
+    .unwrap();
+    let core_update = block_on(edge.core_peer.rehydrate_query_for_subscription_with_opts(
+        core,
+        subscription,
+        shape,
+        binding,
+        RegisterShapeOptions::default(),
+    ))
+    .unwrap()
+    .expect("core query opens");
     let core_read_metrics = core.take_storage_read_metrics();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
@@ -1964,7 +2033,13 @@ fn deliver_update(
     install_claims(core, edge.core_peer.identity());
     install_claims(&mut edge.node, client.peer.identity());
     hydrate_edge_policy(ctx, core, edge);
-    let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
+    let core_update = block_on(edge.core_peer.query_update_for_subscription(
+        core,
+        edge_query_subscription(&edge.name, shape, binding),
+        shape,
+        binding,
+    ))
+    .unwrap();
     ctx.send("core", &edge.name, core_update);
     let delivered_to_edge = ctx.recv(&edge.name);
     apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
@@ -1978,24 +2053,32 @@ fn deliver_update(
 fn apply_client_update(client: &mut Client, message: SyncMessage) {
     if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
         reset_result_set,
-        result_member_adds,
-        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = &message
     {
         if *reset_result_set {
-            client.visible_rows.clear();
+            client.covered_inputs.clear();
         }
-        for row in result_member_adds {
-            if let Some((_, row_uuid, _)) = row.as_row() {
-                client.visible_rows.insert(row_uuid);
+        for fact in program_fact_removes {
+            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = fact {
+                client.covered_inputs.remove(input);
             }
         }
-        for row in result_member_removes {
-            if let Some((_, row_uuid, _)) = row.as_row() {
-                client.visible_rows.remove(&row_uuid);
+        for fact in program_fact_adds {
+            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = fact {
+                client.covered_inputs.insert(input.clone());
             }
         }
+        // Direct-peer receipts inspect authorized root coverage, not a second
+        // result evaluator. The Db scenario below asserts application output.
+        client.visible_rows = client
+            .covered_inputs
+            .iter()
+            .filter(|input| input.source.path == [jazz::protocol::ProgramSourceRole::Root])
+            .map(|input| input.source_row)
+            .collect();
     }
     apply_sync_message_settled(&mut client.node, message).unwrap();
 }
@@ -2035,7 +2118,10 @@ fn ensure_client_subscription_registered(
             subscription,
             values,
             known_state: None,
-            delegated_session: None,
+            delegated_session: Some(jazz::protocol::DelegatedSessionBinding {
+                identity: client.peer.identity(),
+                claims: raw_claims(client.peer.identity()),
+            }),
         }),
     )
     .expect("client registers query binding before view updates");
@@ -2583,6 +2669,7 @@ fn open_client(
         _dir: dir,
         peer: PeerState::edge_client(author),
         registered_subscriptions: BTreeSet::new(),
+        covered_inputs: BTreeSet::new(),
         visible_rows: BTreeSet::new(),
     }
 }
@@ -2612,7 +2699,20 @@ fn hydrate_edge_policy(
     edge: &mut EdgeRoute,
 ) {
     for table in [ACCESS, MEMBERSHIPS] {
-        let update = block_on(edge.policy_peer.rehydrate_current_rows(core, table)).unwrap();
+        let shape = Query::from(table).validate(&schema()).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        register_query_receiver(
+            &mut edge.node,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+            jazz::protocol::DelegatedSessionBinding {
+                identity: AuthorSubject::SYSTEM,
+                claims: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let update = block_on(edge.policy_peer.rehydrate_query(core, &shape, &binding)).unwrap();
         ctx.send("core", &edge.name, update);
         let delivered = ctx.recv(&edge.name);
         apply_sync_message_settled(&mut edge.node, delivered.message).unwrap();
@@ -2871,13 +2971,26 @@ fn visible_rows_db_client(client: &DbClient) -> BTreeSet<RowUuid> {
 fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            result_member_adds,
-            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
             ..
-        }) => result_member_adds
+        }) => program_fact_adds
             .iter()
-            .chain(result_member_removes.iter())
-            .filter_map(|entry| entry.as_row())
+            .chain(program_fact_removes.iter())
+            .filter_map(|entry| match entry {
+                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
+                {
+                    Some((
+                        input.version_table.clone(),
+                        input.source_row,
+                        input.version.tx,
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect(),
         _ => Vec::new(),
     }

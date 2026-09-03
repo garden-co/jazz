@@ -699,6 +699,8 @@ pub struct PeerIoPump {
     local_chunks: groove::chunks::LocalChunkReader,
     connection: u64,
     role: PeerIoPumpRole,
+    wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
+    wire_outbound_frame: Option<Rc<RefCell<crate::wire::WireFrame>>>,
 }
 
 /// One encoded auxiliary frame whose source obligation remains owned by this
@@ -740,14 +742,34 @@ impl PeerIoPump {
         local_chunks: groove::chunks::LocalChunkReader,
         connection: u64,
         role: PeerIoPumpRole,
+        wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
     ) -> Self {
         resolver.register_connection(connection, matches!(role, PeerIoPumpRole::Upstream));
+        let wire_outbound_frame = wire_inbound_context.as_ref().map(|context| {
+            let mut envelope = crate::wire::WireEnvelope::new(
+                context.expected_protocol_version(),
+                crate::wire::FEATURE_NONE,
+                Vec::new(),
+            );
+            if let Some(session) = context.expected_session().cloned() {
+                envelope = envelope.with_session(session);
+            }
+            Rc::new(RefCell::new(crate::wire::WireFrame::Message(envelope)))
+        });
         Self {
             resolver,
             local_chunks,
             connection,
             role,
+            wire_inbound_context,
+            wire_outbound_frame,
         }
+    }
+
+    fn wire_inbound_context(&self) -> Result<&crate::wire::WireInboundContext, String> {
+        self.wire_inbound_context.as_deref().ok_or_else(|| {
+            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
+        })
     }
 
     /// Route an auxiliary message received by the binding. Returns `false` for
@@ -891,17 +913,17 @@ impl PeerIoPump {
     pub async fn route_incoming_wire_frame(
         &self,
         frame: Vec<u8>,
-        negotiated_features: crate::wire::WireFeatures,
     ) -> Result<Option<Vec<u8>>, String> {
         let decoded = crate::wire::decode_frame(&frame)
             .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
         let crate::wire::WireFrame::Message(envelope) = decoded else {
             return Ok(Some(frame));
         };
-        let payload = crate::wire::decompress_sync_payload(&envelope.payload, envelope.features)
-            .map_err(|error| format!("malformed auxiliary wire payload: {error}"))?;
-        let message = crate::wire::decode_sync_message_for_features(&payload, negotiated_features)
-            .map_err(|error| format!("malformed auxiliary sync payload: {error:?}"))?;
+        let context = self.wire_inbound_context()?;
+        let mut decoder = crate::wire::WireStreamDecoder::new(context.negotiated_features())
+            .map_err(|error| format!("invalid auxiliary wire context: {error}"))?;
+        let message = crate::wire::admit_complete_envelope(context, &mut decoder, envelope)
+            .map_err(|error| format!("malformed auxiliary wire envelope: {error:?}"))?;
         match self.route_incoming(message).await {
             Ok(()) => Ok(None),
             Err(_) => Ok(Some(frame)),
@@ -911,15 +933,8 @@ impl PeerIoPump {
     /// Encode one bounded auxiliary batch as an ordinary complete wire frame.
     /// Bindings request one chunk per frame, keeping the maximum 256 KiB node
     /// response below the non-fragmented wire-frame bound.
-    pub fn take_outbound_wire_frame(
-        &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let Some(mut reservation) =
-            self.reserve_outbound_wire_frame(protocol_version, negotiated_features, session)?
-        else {
+    pub fn take_outbound_wire_frame(&self) -> Result<Option<Vec<u8>>, String> {
+        let Some(mut reservation) = self.reserve_outbound_wire_frame()? else {
             return Ok(None);
         };
         let frame = reservation.take_frame();
@@ -932,19 +947,12 @@ impl PeerIoPump {
     /// it after a rejected send; dropping it also restores the original batch.
     pub(crate) fn reserve_outbound_wire_frame(
         &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
     ) -> Result<Option<ReservedOutboundWireFrame>, String> {
+        let context = self.wire_inbound_context()?;
         let Some(message) = self.take_outbound(1) else {
             return Ok(None);
         };
-        let frame = match Self::encode_outbound_wire_frame(
-            message.clone(),
-            protocol_version,
-            negotiated_features,
-            session,
-        ) {
+        let frame = match self.encode_outbound_wire_frame(message.clone(), context) {
             Ok(frame) => frame,
             Err(error) => {
                 self.restore_outbound(message);
@@ -964,27 +972,20 @@ impl PeerIoPump {
     /// transport chooses a smaller batch boundary.
     pub fn take_outbound_wire_frames(
         &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
         max_frames: usize,
         max_bytes: usize,
     ) -> Result<Vec<Vec<u8>>, String> {
         if max_frames == 0 || max_bytes == 0 {
             return Ok(Vec::new());
         }
+        let context = self.wire_inbound_context()?;
         let mut frames = Vec::new();
         let mut total_bytes: usize = 0;
         while frames.len() < max_frames {
             let Some(message) = self.take_outbound(1) else {
                 break;
             };
-            let frame = Self::encode_outbound_wire_frame(
-                message.clone(),
-                protocol_version,
-                negotiated_features,
-                session.clone(),
-            );
+            let frame = self.encode_outbound_wire_frame(message.clone(), context);
             let frame = match frame {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -1014,22 +1015,34 @@ impl PeerIoPump {
     }
 
     fn encode_outbound_wire_frame(
+        &self,
         message: SyncMessage,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
+        context: &crate::wire::WireInboundContext,
     ) -> Result<Vec<u8>, String> {
+        let negotiated_features = context.negotiated_features();
         let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
             .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
         let active_features = negotiated_features
             & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD);
-        let mut envelope =
-            crate::wire::WireEnvelope::new(protocol_version, active_features, payload);
-        if let Some(session) = session {
-            envelope = envelope.with_session(session);
+        let wire_outbound_frame = self.wire_outbound_frame.as_ref().ok_or_else(|| {
+            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
+        })?;
+        let mut frame = wire_outbound_frame.borrow_mut();
+        {
+            let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
+                unreachable!("auxiliary outbound template is always a message frame");
+            };
+            envelope.protocol_version = context.expected_protocol_version();
+            envelope.features = active_features;
+            envelope.payload = payload;
         }
-        crate::wire::encode_frame(&crate::wire::WireFrame::Message(envelope))
-            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"))
+        let encoded = crate::wire::encode_frame(&frame)
+            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"));
+        let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
+            unreachable!("auxiliary outbound template is always a message frame");
+        };
+        envelope.payload = Vec::new();
+        encoded
     }
 
     /// Drain one bounded auxiliary batch for immediate transmission.
@@ -1618,6 +1631,7 @@ type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
 struct PendingLocalPublication {
     published: Rc<PublishedTransaction>,
     upload_unit: Option<SyncMessage>,
+    settlement: Pin<Box<dyn Future<Output = Result<TxId, Error>> + 'static>>,
 }
 
 type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;
@@ -2432,6 +2446,9 @@ impl InitialSyncFlushCadence {
 pub struct QueryAttachment {
     subscriptions: Vec<SubscriptionKey>,
     required_after: Vec<(BindingViewKey, u64)>,
+    /// A memory-only foreground reads local state from its durable owner.
+    /// That delivery is required independently of any remote authority receipt.
+    requires_delivery_receipt: bool,
     /// Edge/Global coverage is live authority evidence, not merely a newer
     /// durable view generation.
     requires_current_authority_receipt: bool,
@@ -2526,6 +2543,7 @@ mod reads;
 #[doc(hidden)]
 pub use reads::BindingHydrationError;
 mod subscriptions;
+pub(crate) mod terminal_record;
 mod transactions;
 
 /// Counts produced while servicing non-blocking database connection work.
@@ -4166,6 +4184,9 @@ struct RelationSnapshotIndex {
     roots: BTreeMap<OutputOccurrenceId, usize>,
     related: BTreeMap<(String, RowUuid), usize>,
     edges: BTreeSet<RelationEdge>,
+    /// Decoded descendants supersede the encoded root seed until a complete
+    /// snapshot is requested. Ordinary delta delivery must not re-encode it.
+    terminal_records: BTreeMap<OutputOccurrenceId, terminal_record::TerminalRecordState>,
 }
 
 impl RelationSnapshotIndex {
@@ -4472,7 +4493,7 @@ impl SubscriptionStream {
                 "remote one-shot attempted to materialize a non-local maintained snapshot",
             ));
         }
-        Ok(state.snapshot.clone())
+        materialized_subscription_snapshot(&state.snapshot, &state.snapshot_index)
     }
 
     /// Return the next queued materialized subscription event without waiting.
@@ -5154,6 +5175,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
         .iter()
         .map(|(occurrence_id, _)| occurrence_id.clone())
         .collect::<BTreeSet<_>>();
+    for occurrence in &affected {
+        materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
+    }
     let before = affected
         .iter()
         .filter_map(|occurrence_id| {
@@ -5163,6 +5187,46 @@ fn apply_terminal_operations_to_subscription_snapshot(
             Some((occurrence_id.clone(), (index, snapshot.rows[index].clone())))
         })
         .collect::<BTreeMap<_, _>>();
+
+    let inserted = root_operations
+        .iter()
+        .filter_map(|(occurrence, operation)| match operation.edit {
+            groove::ivm::TerminalEdit::Insert { .. } => Some((occurrence.clone(), true)),
+            groove::ivm::TerminalEdit::Remove { .. } => Some((occurrence.clone(), false)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .filter_map(|(key, present)| present.then_some(key))
+        .collect::<BTreeSet<_>>();
+    let replaced = root_operations
+        .iter()
+        .filter_map(|(occurrence, operation)| {
+            (matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
+                && inserted.contains(occurrence))
+            .then_some(occurrence.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    for (occurrence, operation) in &root_operations {
+        if replaced.contains(occurrence) {
+            if let groove::ivm::TerminalEdit::Insert { value, .. } = &operation.edit {
+                if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
+                    state.update_record(OwnedRecord::new(
+                        value.clone(),
+                        operation.root_descriptor,
+                    ))?;
+                }
+            }
+            continue;
+        }
+        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
+            if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
+                state.update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
+            }
+        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
+            snapshot_index.terminal_records.remove(occurrence);
+        }
+    }
 
     for (occurrence_id, operation) in root_operations {
         match operation.edit {
@@ -5250,13 +5314,20 @@ fn apply_terminal_operations_to_subscription_snapshot(
     // reconstruct nested children from result membership or authority facts.
     apply_descendant_terminal_operations_to_snapshot(
         snapshot,
+        snapshot_index,
         &occurrences,
         &affected,
         &descendant_operations,
     )?;
 
+    let terminal_records = std::mem::take(&mut snapshot_index.terminal_records);
     *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+    snapshot_index.terminal_records = terminal_records;
     snapshot_index.roots = root_occurrence_positions(&occurrences);
+
+    for occurrence in &affected {
+        materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
+    }
 
     let mut added = Vec::new();
     let mut updated = Vec::new();
@@ -5313,6 +5384,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
 /// than a reason to search a table/result relation for a plausible match.
 fn apply_descendant_terminal_operations_to_snapshot(
     snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
     occurrences: &[OutputOccurrenceId],
     roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
     operations: &[groove::ivm::TerminalOperation],
@@ -5345,217 +5417,67 @@ fn apply_descendant_terminal_operations_to_snapshot(
                 "terminal root position is outside the receiver snapshot",
             )
         })?;
-        apply_descendant_terminal_operation(root, operation)?;
+        if !snapshot_index.terminal_records.contains_key(&occurrence) {
+            let (descriptor, raw) = root.encoded_record();
+            snapshot_index.terminal_records.insert(
+                occurrence.clone(),
+                terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                    raw.to_vec(),
+                    *descriptor,
+                ))?,
+            );
+        }
+        snapshot_index
+            .terminal_records
+            .get_mut(&occurrence)
+            .expect("initialized above")
+            .apply(operation)?;
     }
     Ok(())
 }
 
-fn apply_descendant_terminal_operation(
-    root: &mut CurrentRow,
-    operation: &groove::ivm::TerminalOperation,
+/// Materialize the retained terminal state only at a full-snapshot boundary.
+/// Delta consumers receive the original child operations, not a rebuilt root.
+fn materialized_subscription_snapshot(
+    snapshot: &RelationSnapshot,
+    index: &RelationSnapshotIndex,
+) -> Result<RelationSnapshot, Error> {
+    let mut snapshot = snapshot.clone();
+    materialize_subscription_terminal_records(&mut snapshot, index)?;
+    Ok(snapshot)
+}
+
+fn materialize_subscription_terminal_records(
+    snapshot: &mut RelationSnapshot,
+    index: &RelationSnapshotIndex,
 ) -> Result<(), Error> {
-    let (descriptor, raw) = root.encoded_record();
-    let updated = apply_terminal_descendant_record(
-        OwnedRecord::new(raw.to_vec(), descriptor.clone()),
-        operation,
-    )?;
-    *root = CurrentRow::new(root.table().to_owned(), updated);
+    for occurrence in index.terminal_records.keys() {
+        materialize_subscription_terminal_record(snapshot, index, occurrence)?;
+    }
     Ok(())
 }
 
-/// Fold one compiler-owned descendant terminal edit into a retained root
-/// record. Both the public facade snapshot and the local maintained receiver
-/// use this reducer, so an opening/reset and later updates cannot disagree
-/// about nested arrays.
-pub(crate) fn apply_terminal_descendant_record(
-    root: OwnedRecord,
-    operation: &groove::ivm::TerminalOperation,
-) -> Result<OwnedRecord, Error> {
-    let descriptor = root.descriptor();
-    if descriptor != &operation.root_descriptor {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant descriptor disagrees with its retained root",
-        ));
-    }
-    let mut values = root.borrowed().to_values().map_err(|error| {
-        Error::new(
-            ErrorCode::Protocol,
-            format!("invalid retained terminal root payload: {error}"),
-        )
-    })?;
-    apply_terminal_path_edit(
-        &mut values,
-        descriptor,
-        operation.path.as_slice(),
-        &operation.edit,
-    )?;
-    let raw = descriptor.create(&values).map_err(|error| {
-        Error::new(
-            ErrorCode::Protocol,
-            format!("cannot encode retained terminal root after descendant edit: {error}"),
-        )
-    })?;
-    Ok(OwnedRecord::new(raw, descriptor.clone()))
-}
-
-fn apply_terminal_path_edit(
-    owner_values: &mut [Value],
-    owner_descriptor: &RecordDescriptor,
-    path: &[groove::ivm::TerminalPathSegment],
-    edit: &groove::ivm::TerminalEdit,
+fn materialize_subscription_terminal_record(
+    snapshot: &mut RelationSnapshot,
+    index: &RelationSnapshotIndex,
+    occurrence: &OutputOccurrenceId,
 ) -> Result<(), Error> {
-    use groove::ivm::TerminalPathSegment;
-    use groove::records::ValueType;
-
-    let Some((head, rest)) = path.split_first() else {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant operation has no collection path",
-        ));
-    };
-    let TerminalPathSegment::Collection(name) = head else {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant path must begin with a collection",
-        ));
-    };
-    let field_index = owner_descriptor.field_index(name).ok_or_else(|| {
-        Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant path names an unknown collection",
-        )
-    })?;
-    let child_descriptor = match owner_descriptor
-        .fields()
-        .get(field_index)
-        .map(|field| &field.value_type)
-    {
-        Some(ValueType::Array(element)) => match element.as_ref() {
-            ValueType::Record(descriptor) => (**descriptor).clone(),
-            _ => {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "terminal descendant collection does not contain records",
-                ));
-            }
-        },
-        _ => {
-            return Err(Error::new(
+    if let Some(record) = index.terminal_records.get(occurrence) {
+        let position = index.roots.get(occurrence).ok_or_else(|| {
+            Error::new(
                 ErrorCode::Protocol,
-                "terminal descendant path names a non-array field",
-            ));
-        }
-    };
-    let Some(Value::Array(children)) = owner_values.get_mut(field_index) else {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant collection payload is not an array",
-        ));
-    };
-    match rest {
-        [] => apply_terminal_collection_edit(children, &child_descriptor, edit),
-        [TerminalPathSegment::Key(key), tail @ ..] => {
-            let child_index = terminal_child_index(children, key, "path")?;
-            let Value::Record(child) = &children[child_index] else {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "terminal descendant collection contains a non-record child",
-                ));
-            };
-            let mut child_values = child.to_values().map_err(|error| {
-                Error::new(
-                    ErrorCode::Protocol,
-                    format!("invalid retained terminal child payload: {error}"),
-                )
-            })?;
-            apply_terminal_path_edit(&mut child_values, &child_descriptor, tail, edit)?;
-            let raw = child_descriptor.create(&child_values).map_err(|error| {
-                Error::new(
-                    ErrorCode::Protocol,
-                    format!("cannot encode retained terminal child after edit: {error}"),
-                )
-            })?;
-            children[child_index] = Value::Record(OwnedRecord::new(raw, child_descriptor));
-            Ok(())
-        }
-        _ => Err(Error::new(
-            ErrorCode::Protocol,
-            "terminal descendant path does not alternate collection and key",
-        )),
+                "retained terminal record has no root occurrence",
+            )
+        })?;
+        let root = snapshot.rows.get_mut(*position).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "retained terminal root position is outside snapshot",
+            )
+        })?;
+        *root = CurrentRow::new(root.table().to_owned(), record.record()?);
     }
-}
-
-fn apply_terminal_collection_edit(
-    children: &mut Vec<Value>,
-    descriptor: &RecordDescriptor,
-    edit: &groove::ivm::TerminalEdit,
-) -> Result<(), Error> {
-    use groove::ivm::TerminalEdit;
-
-    let key = match edit {
-        TerminalEdit::Insert { key, .. }
-        | TerminalEdit::Update { key, .. }
-        | TerminalEdit::Remove { key }
-        | TerminalEdit::Move { key, .. } => key,
-    };
-    match edit {
-        TerminalEdit::Insert { index, value, .. } => {
-            let record = OwnedRecord::new(value.clone(), descriptor.clone());
-            if terminal_child_key(&Value::Record(record.clone()))? != *key {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "terminal child insertion payload key disagrees with edit key",
-                ));
-            }
-            if let Some(existing) = terminal_child_index_if_present(children, key)? {
-                children.remove(existing);
-            }
-            children.insert((*index).min(children.len()), Value::Record(record));
-            Ok(())
-        }
-        TerminalEdit::Update { value, .. } => {
-            let index = terminal_child_index(children, key, "update")?;
-            let record = OwnedRecord::new(value.clone(), descriptor.clone());
-            if terminal_child_key(&Value::Record(record.clone()))? != *key {
-                return Err(Error::new(
-                    ErrorCode::Protocol,
-                    "terminal child update payload key disagrees with edit key",
-                ));
-            }
-            children[index] = Value::Record(record);
-            Ok(())
-        }
-        TerminalEdit::Remove { .. } => {
-            let index = terminal_child_index(children, key, "removal")?;
-            children.remove(index);
-            Ok(())
-        }
-        TerminalEdit::Move { index, .. } => {
-            let previous = terminal_child_index(children, key, "move")?;
-            let value = children.remove(previous);
-            children.insert((*index).min(children.len()), value);
-            Ok(())
-        }
-    }
-}
-
-fn terminal_child_index_if_present(children: &[Value], key: &[u8]) -> Result<Option<usize>, Error> {
-    for (index, value) in children.iter().enumerate() {
-        if terminal_child_key(value)? == key {
-            return Ok(Some(index));
-        }
-    }
-    Ok(None)
-}
-
-fn terminal_child_index(children: &[Value], key: &[u8], operation: &str) -> Result<usize, Error> {
-    terminal_child_index_if_present(children, key)?.ok_or_else(|| {
-        Error::new(
-            ErrorCode::Protocol,
-            format!("terminal child {operation} addressed a missing key"),
-        )
-    })
+    Ok(())
 }
 
 fn terminal_child_key(value: &Value) -> Result<Vec<u8>, Error> {

@@ -41,7 +41,7 @@ Invariant digest:
 - `INV-EDGE-22`: Authoritative result state retained by a relay MUST be identified by the complete canonical query identity and exact immutable policy binding; result members, generations, receipts, repair state, and persistence from different policy bindings MUST never share a mutable result identity.
 - `INV-EDGE-23`: A scope-isolated client relay MAY answer same-scope row-version repair without re-evaluating policy only for a version in that scope's previously delivered authorized payload closure or a same-scope authored pending version. Other relays MUST prove that exact closure membership or forward repair to an authority.
 - `INV-EDGE-24`: Application and wire callers MUST NOT choose internal authority-result source identities or policy bindings. The receiving topology assigns and validates them from the authenticated connection and admitted session.
-- `INV-EDGE-25`: A fate authority receiving a mergeable commit through a scope-isolated client relay MUST authorize it only under that relay attachment's immutable server-admitted foreground binding, then pass an internal non-wire proof into terminal admission. Transaction authorship, relay transport, `SYSTEM`, persisted state, stale epochs, and mutable session-claim refresh MUST NOT substitute for or widen that binding.
+- `INV-EDGE-25`: A fate authority receiving a commit (mergeable or exclusive) through a scope-isolated client relay MUST authorize it only under that relay attachment's immutable server-admitted foreground binding, then pass an internal non-wire proof into terminal admission. Transaction authorship, relay transport, `SYSTEM`, persisted state, stale epochs, and mutable session-claim refresh MUST NOT substitute for or widen that binding.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
@@ -280,7 +280,7 @@ the last hop to the client.
 
 A commit relayed from a scope-isolated client is different from both cases. The
 relay transport has no permission subject, so the receiving fate authority
-proves the mergeable commit under the immutable foreground binding in the live,
+proves the commit under the immutable foreground binding in the live,
 server-issued relay capability. Only that proof may enable terminal admission;
 it is internal state and is never accepted from the wire. `Transaction.made_by`
 remains authorship rather than permission evidence, and neither `SYSTEM`, a
@@ -288,6 +288,13 @@ persisted result, a stale admission epoch, nor a mutable subscriber-claims field
 may substitute for or widen the capability. Disconnect or transport replacement
 invalidates the proof and requires authorization under the freshly admitted
 epoch (`INV-EDGE-25`).
+
+This applies to both mergeable and exclusive transactions. Exclusive read-set
+validation is an additional core admission requirement, not an alternative to
+write authorization. For example, a foreground may submit an exclusive
+todo/check/note insertion through its worker: all three write policies must
+pass under its admitted session before core validates and accepts the bundle.
+If the note is forbidden, none of the otherwise permitted siblings is admitted.
 
 ### 9.5 Mergeable fate authority
 

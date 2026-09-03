@@ -49,6 +49,114 @@ fn user_values_v3(
     row_input!("id" => id, "name" => name, "email" => email, "role" => role)
 }
 
+/// A cold old-schema reader can request one new-schema row by physical ID
+/// without first hydrating the table. Alice stays on v1; Bob writes a v2 array
+/// field which the backward lens must omit from Alice's result.
+///
+/// alice(v1) connects --> bob(v2) inserts --> edge --> alice's ID-filtered read
+#[tokio::test]
+async fn cold_old_schema_id_query_reads_new_array_column_row() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let old = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("todos")
+                        .column("title", ColumnType::Text)
+                        .column("done", ColumnType::Boolean),
+                )
+                .build();
+            let new = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("todos")
+                        .column("title", ColumnType::Text)
+                        .column("done", ColumnType::Boolean)
+                        .column(
+                            "tags",
+                            ColumnType::Array {
+                                element: Box::new(ColumnType::Text),
+                            },
+                        ),
+                )
+                .build();
+            let lens = Lens::new(
+                SchemaHash::compute(&old),
+                SchemaHash::compute(&new),
+                LensTransform::with_ops(vec![LensOp::AddColumn {
+                    table: "todos".to_owned(),
+                    column: "tags".to_owned(),
+                    column_type: ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                    default: Value::Array(Vec::new()),
+                }]),
+            );
+            let server = JazzServer::start().await;
+            push_catalogue_in_memory(
+                server.server_state(),
+                server.app_id(),
+                "dev",
+                &[old.clone(), new.clone()],
+                &[lens],
+            )
+            .await
+            .expect("publish array migration");
+            publish_allow_all_permissions(
+                &server.base_url(),
+                server.app_id(),
+                server.admin_secret(),
+                &new,
+            )
+            .await;
+            let alice = jazz_testkit::connect(
+                server.make_client_context_for_user(old, test_user_id("cold-array-alice")),
+            )
+            .await
+            .expect("connect old-schema Alice");
+            let bob = jazz_testkit::connect(
+                server.make_client_context_for_user(new, test_user_id("cold-array-bob")),
+            )
+            .await
+            .expect("connect new-schema Bob");
+            let (row_id, _, tx) = bob
+                .insert(
+                    "todos",
+                    row_input!(
+                        "title" => "written through new schema", "done" => true,
+                        "tags" => Value::Array(vec![Value::Text("migration".to_owned())])
+                    ),
+                )
+                .expect("insert new-schema row");
+            support::wait_for_edge_txs(&bob, &[tx.expect("insert transaction")]).await;
+            let rows = tokio::time::timeout(
+                Duration::from_secs(10),
+                alice.query_with_read_tier(
+                    Query::from("todos").filter(jazz::query::eq(
+                        jazz::query::col("id"),
+                        jazz::query::lit(*row_id.uuid()),
+                    )),
+                    jazz::tools::ReadTier::Remote,
+                ),
+            )
+            .await
+            .expect("old-schema ID query settles")
+            .expect("old-schema ID query succeeds");
+            assert_eq!(
+                rows,
+                vec![(
+                    row_id,
+                    vec![
+                        Value::Text("written through new schema".to_owned()),
+                        Value::Boolean(true)
+                    ]
+                )]
+            );
+            alice.shutdown().await.expect("shutdown Alice");
+            bob.shutdown().await.expect("shutdown Bob");
+            server.shutdown().await;
+        })
+        .await;
+}
+
 fn schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
@@ -1840,6 +1948,8 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
 /// Alice writes under schema v1, Bob opens a v2 draft, and only the public
 /// migration publication makes Bob's schema readable. The draft must not expose
 /// Alice's v1 row before the lineage lens atomically activates it.
+/// An already-waiting query must resume without application-level retries;
+/// separately cancelled attempts must not prevent that activation.
 ///
 /// ```text
 /// admin ──publish v1──► server ◄── Alice writes v1 row
@@ -1896,6 +2006,14 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         .await
         .expect("connect bob with unpublished draft schema");
     let query = jazz::query::Query::from("users");
+    let mut pending_query =
+        Box::pin(bob.query_with_read_tier(query.clone(), jazz::tools::ReadTier::Remote));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), pending_query.as_mut())
+            .await
+            .is_err(),
+        "a valid draft query stays pending rather than rejecting or exposing rows"
+    );
     let pre_lens_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut pre_lens_attempts = 0;
     while tokio::time::Instant::now() < pre_lens_deadline {
@@ -1916,6 +2034,13 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     );
 
     publish_v1_to_v2_catalogue_migration(&server).await;
+    let resumed_rows = tokio::time::timeout(Duration::from_secs(10), pending_query.as_mut())
+        .await
+        .expect("catalogue activation wakes the existing query")
+        .expect("the pending query was not permanently rejected");
+    assert_eq!(resumed_rows.len(), 1);
+    assert_eq!(resumed_rows[0].0, row_id);
+    drop(pending_query);
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(

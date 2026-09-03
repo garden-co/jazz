@@ -93,9 +93,11 @@ describe("RecordPlayer scenario receipt", () => {
 
   test("lowers playlist browsing to the requested bounded window", async () => {
     let capturedQuery: { _build(): string } | undefined;
+    let capturedOptions: unknown;
     const db = {
-      all: async (query: { _build(): string }) => {
+      all: async (query: { _build(): string }, options: unknown) => {
         capturedQuery = query;
+        capturedOptions = options;
         return [];
       },
     };
@@ -108,6 +110,7 @@ describe("RecordPlayer scenario receipt", () => {
       ),
     ).resolves.toEqual([]);
 
+    expect(capturedOptions).toEqual({ tier: "remote-if-possible" });
     const runtimeQuery = JSON.parse(translateQuery(capturedQuery!._build(), app.wasmSchema));
     expect(runtimeQuery.table).toBe("playlist_entries");
     expect(runtimeQuery.conditions).toEqual([

@@ -5,6 +5,69 @@ use crate::legacy_test_future::FutureResolveExt as _;
 use crate::peer::PeerState;
 use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey};
 
+/// Cold and registered receivers must compile the same page-relative window.
+/// Real-server pagination tests cover returned rows; this compiler-level test
+/// additionally pins the retained limit and exact shape identity before a
+/// registration or authority receipt exists, including parameter inlining.
+#[test]
+fn cold_receiver_window_is_exact_shape_bound_and_retains_limit() {
+    let (_dir, mut node) = open_node();
+    let shape = Query::from("users")
+        .filter(eq(col("name"), param("name")))
+        .order_by("name", OrderDirection::Asc)
+        .offset(2)
+        .limit(1)
+        .validate(&schema())
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "name".to_owned(),
+            Value::String("alice".to_owned()),
+        )]))
+        .unwrap();
+    let view = BindingViewKey::new(shape.shape_id(), binding.binding_id(), Default::default());
+    let window = |node: &NodeState<RocksDbStorage>, selected| {
+        let request = node
+            .current_query_program_request(
+                &shape,
+                &binding,
+                DurabilityTier::Edge,
+                AuthorSubject::SYSTEM,
+                CurrentQueryProgramOutput::MaintainedView,
+                &ReadViewSpec::default(),
+                selected,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .unwrap();
+        match request.input.shape.nodes.get(&request.input.shape.root) {
+            Some(RowSetExpr::Slice { offset, limit, .. }) => (*offset, *limit),
+            other => panic!("receiver must retain the bounded window operator: {other:?}"),
+        }
+    };
+    assert_eq!(window(&node, Some(view)), (0, Some(1)));
+    assert_eq!(window(&node, None), (2, Some(1)));
+    register_query_shape(&mut node, &shape, RegisterShapeOptions::default());
+    assert_eq!(window(&node, Some(view)), (0, Some(1)));
+
+    let different_shape = Query::from("users")
+        .order_by("name", OrderDirection::Desc)
+        .offset(2)
+        .limit(1)
+        .validate(&schema())
+        .unwrap();
+    register_query_shape(&mut node, &different_shape, RegisterShapeOptions::default());
+    let different_view = BindingViewKey::new(
+        different_shape.shape_id(),
+        binding.binding_id(),
+        Default::default(),
+    );
+    assert_eq!(
+        window(&node, Some(different_view)),
+        (2, Some(1)),
+        "equal numeric bounds do not authorize reusing a differently ordered source"
+    );
+}
+
 /// A receiver has only the exact policy-scoped source closure delivered by its
 /// authority.  Test reads from that node must therefore use the client-local
 /// execution path, never the trusted-serving path that expects complete

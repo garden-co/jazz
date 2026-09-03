@@ -478,14 +478,45 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
         panic!("expected view update");
     };
     assert_eq!(*settled_through, GlobalTime::new(10, 0).unwrap());
-    assert!(!reset_result_set);
+    // A cursor deduplicates bodies, not the new usage's input manifest.
+    assert!(*reset_result_set);
     assert!(result_member_adds.is_empty());
     assert!(version_bundles.is_empty());
 
     let missing = reader
         .missing_known_state_row_version_refs(&update)
         .unwrap();
-    assert!(missing.is_empty());
+    assert_eq!(
+        missing,
+        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, _tx_id)]
+    );
+    // Alice's claimed cursor was ahead of her retained payloads. Repair the
+    // actual missing body, then verify the same rows as the undeduplicated
+    // control opening rather than accepting an empty apparent success.
+    let mut repair_peer = PeerState::client_link(AuthorSubject::SYSTEM);
+    let messages = repair_peer
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: missing.clone(),
+                delegated_session: None,
+            },
+        )
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
+        panic!("expected row-version payloads");
+    };
+    reader
+        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
+        .unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
+    assert_eq!(
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("known"))])
+    );
 }
 
 #[test]
@@ -713,7 +744,9 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set);
+    // Reattaching restores the full input manifest without retransmitting
+    // known bodies, even when Alice still holds the previous live closure.
+    assert!(*reset_result_set);
     assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
     assert!(version_bundles.is_empty());
@@ -804,7 +837,9 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set);
+    // Durable payload knowledge survives reopen; it does not replace the
+    // fresh attachment's complete authority input manifest.
+    assert!(*reset_result_set);
     assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
     assert!(version_bundles.is_empty());
@@ -1217,7 +1252,6 @@ fn fast_known_state_requires_a_live_receipt_after_reopen_and_eviction() {
             .unwrap(),
         Some(crate::protocol::KnownStateDeclaration::Fast { .. })
     ));
-
     let mut reopened = reader.reopen_in_place().unwrap();
     let declaration = reopened
         .known_state_declaration_for_subscription(
@@ -1247,6 +1281,293 @@ fn fast_known_state_requires_a_live_receipt_after_reopen_and_eviction() {
         )
         .unwrap();
     assert_eq!(declaration, None);
+}
+
+#[derive(Clone, Copy)]
+enum EvictionFailurePath {
+    ManualBatch,
+    BudgetedPerCandidate,
+}
+
+#[derive(Clone, Copy)]
+enum EvictionPersistenceOutcome {
+    FailBeforeDelegation,
+    WriteThroughThenError,
+}
+
+fn assert_eviction_failure_contract(
+    path: EvictionFailurePath,
+    outcome: EvictionPersistenceOutcome,
+    row_uuid: RowUuid,
+    global_time: u64,
+    title: &'static str,
+) {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row_uuid, global_time).cells(title_cells(title)),
+    );
+    let column_families = schema().column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailWriteManyMemoryStorage::new(&refs);
+    let mut reader = NodeState::new(node(3), schema(), storage.clone()).unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let update = relay_with_system_binding(subscription)
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap()
+        .expect("expected view update");
+    reader.apply_sync_message_settled(update).unwrap();
+    let persisted_history = reader.row_history("todos", row_uuid).unwrap();
+    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    assert_eq!(persisted_versions.len(), 1);
+    let persisted_version = persisted_versions
+        .first()
+        .expect("persisted version count was checked above");
+    let logical_history_table = reader
+        .version_storage_table_for_row(persisted_version)
+        .unwrap()
+        .to_string();
+    let logical_history_key = history_primary_key(persisted_version).into_bytes();
+    let (history_table, history_key) = jazz_class_v1_history_physical_target(
+        &logical_history_table,
+        &logical_history_key,
+    );
+    assert!(reader.cached_tx_version_tables(tx_id).is_some());
+    reader.cache_tx_versions(tx_id, persisted_versions.clone());
+    assert!(reader.cached_tx_versions(tx_id).is_some());
+    // Internal durable-boundary receipt: a reopened node intentionally lacks
+    // the live authority handoff needed to declare Fast, so that public API
+    // result alone cannot distinguish an evicted durable fact from a stale
+    // one. This isolated store has exactly this subscription's fact.
+    let known_state_facts = reader
+        .database
+        .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
+        .unwrap();
+    assert_eq!(
+        futures::executor::block_on(known_state_facts.prefix_entries(&[]))
+            .unwrap()
+            .len(),
+        1,
+        "the settled update must persist its fast known-state fact before eviction"
+    );
+    assert!(matches!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &[],
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
+
+    match outcome {
+        EvictionPersistenceOutcome::FailBeforeDelegation => {
+            storage.fail_write_many_on_delete(history_table, history_key);
+        }
+        EvictionPersistenceOutcome::WriteThroughThenError => {
+            storage
+                .fail_write_many_on_delete_after_write_through(history_table, history_key);
+        }
+    }
+    match path {
+        EvictionFailurePath::ManualBatch => {
+            reader
+                .evict_cold(&PeerEvictionPins::default())
+                .resolve()
+                .expect_err("manual eviction must reach the injected persistence failure");
+        }
+        EvictionFailurePath::BudgetedPerCandidate => {
+            reader
+                .enforce_edge_cache_budget(
+                    &PeerEvictionPins::default(),
+                    EdgeCacheBudget::new(0),
+                )
+                .resolve()
+                .expect_err("budgeted eviction must reach the injected persistence failure");
+        }
+    }
+    // Public recovery proves durable body and known-state behaviour, but only
+    // this private receipt can observe cache removal without querying a
+    // persistence-poisoned live node.
+    assert!(reader.cached_tx_versions(tx_id).is_none());
+    assert!(reader.cached_tx_version_tables(tx_id).is_none());
+    drop(reader);
+
+    let mut reopened = NodeState::new(node(3), schema(), storage).unwrap();
+    let known_state_facts = reopened
+        .database
+        .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
+        .unwrap();
+    assert!(
+        futures::executor::block_on(known_state_facts.prefix_entries(&[]))
+            .unwrap()
+            .is_empty(),
+        "eviction must durably remove every fast known-state fact even when body persistence fails"
+    );
+    let reopened_history = reopened.row_history("todos", row_uuid).unwrap();
+    match outcome {
+        EvictionPersistenceOutcome::FailBeforeDelegation => {
+            assert_eq!(reopened_history, persisted_history);
+        }
+        EvictionPersistenceOutcome::WriteThroughThenError => {
+            assert!(reopened_history.is_empty());
+        }
+    }
+    let declaration = reopened
+        .known_state_declaration_for_subscription(
+            &shape,
+            &binding,
+            subscription,
+            &[],
+            AuthorSubject::SYSTEM,
+            None,
+        )
+        .unwrap();
+    assert!(!matches!(
+        declaration,
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
+}
+
+#[test]
+fn manual_eviction_fail_before_error_preserves_body_and_clears_fast_known_state_and_transaction_cache()
+{
+    assert_eviction_failure_contract(
+        EvictionFailurePath::ManualBatch,
+        EvictionPersistenceOutcome::FailBeforeDelegation,
+        row(0x78),
+        14,
+        "fail before",
+    );
+}
+
+#[test]
+fn manual_eviction_write_through_error_clears_fast_known_state_and_transaction_cache() {
+    assert_eviction_failure_contract(
+        EvictionFailurePath::ManualBatch,
+        EvictionPersistenceOutcome::WriteThroughThenError,
+        row(0x79),
+        15,
+        "write-through",
+    );
+}
+
+#[test]
+fn budgeted_eviction_fail_before_error_preserves_body_and_clears_fast_known_state_and_transaction_cache()
+{
+    assert_eviction_failure_contract(
+        EvictionFailurePath::BudgetedPerCandidate,
+        EvictionPersistenceOutcome::FailBeforeDelegation,
+        row(0x7a),
+        16,
+        "budget fail before",
+    );
+}
+
+#[test]
+fn budgeted_eviction_write_through_error_removes_body_and_clears_fast_known_state_and_transaction_cache()
+{
+    assert_eviction_failure_contract(
+        EvictionFailurePath::BudgetedPerCandidate,
+        EvictionPersistenceOutcome::WriteThroughThenError,
+        row(0x7b),
+        17,
+        "budget write-through",
+    );
+}
+
+#[test]
+fn failed_known_state_clear_leaves_eviction_bodies_and_transaction_caches_intact() {
+    // Internal persistence-boundary coverage: public recovery only observes
+    // the eventual refetch. This direct failpoint proves clearing the fast
+    // declaration is the barrier before eviction can publish any body delete.
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    let row_uuid = row(0x7c);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row_uuid, 18).cells(title_cells("clear failure")),
+    );
+    let column_families = schema().column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailWriteManyMemoryStorage::new(&refs);
+    let mut reader = NodeState::new(node(3), schema(), storage.clone()).unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let update = relay_with_system_binding(subscription)
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap()
+        .expect("expected view update");
+    reader.apply_sync_message_settled(update).unwrap();
+    let persisted_history = reader.row_history("todos", row_uuid).unwrap();
+    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    reader.cache_tx_versions(tx_id, persisted_versions);
+    assert!(matches!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &[],
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
+    assert!(reader.cached_tx_versions(tx_id).is_some());
+    assert!(reader.cached_tx_version_tables(tx_id).is_some());
+
+    storage.fail_nth_following_write_many(1);
+    reader
+        .evict_cold(&PeerEvictionPins::default())
+        .resolve()
+        .expect_err("known-state clearing failure must stop eviction before body removal");
+
+    assert_eq!(reader.row_history("todos", row_uuid).unwrap(), persisted_history);
+    assert!(matches!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &[],
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
+    assert!(reader.cached_tx_versions(tx_id).is_some());
+    assert!(reader.cached_tx_version_tables(tx_id).is_some());
 }
 
 #[test]

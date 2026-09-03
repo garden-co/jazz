@@ -893,6 +893,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         fact,
         crate::protocol::ProgramFactEntry::CoveredInput(input)
             if input.source.table.as_str() == "tasks"
+                && input.version_table.as_str() == "todos"
                 && input.source_row == row_uuid
                 && input.version.tx == tx_id
     )), "the exact closure names the receiver's projected source row");
@@ -903,8 +904,8 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         .unwrap();
     assert_eq!(
         requests,
-        vec![crate::protocol::RowVersionRef::new("tasks", row_uuid, tx_id)],
-        "with no carrier, the update must issue FetchRowVersions"
+        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)],
+        "with no carrier, fetch the authored coordinate, not the projected source name"
     );
     let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let messages = peer

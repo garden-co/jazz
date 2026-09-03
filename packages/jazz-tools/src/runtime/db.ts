@@ -2572,13 +2572,10 @@ export class Db {
       );
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
-    let startLocalSeed: (() => void) | null = null;
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const remoteIfPossibleOffline =
       options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
-    const strictRemoteReadTier =
-      options?.tier === ReadTier.Remote || options?.tier === ReadTier.RemoteIfPossible;
     if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const context = this.getRuntimeOperationContext();
     type NativeSubscription = {
@@ -2623,7 +2620,6 @@ export class Db {
       terminalized = true;
       deliveryReady = false;
       bufferedDeltas.length = 0;
-      startLocalSeed = null;
       if (activeSubscription === subscription) {
         activeSubscription = null;
       }
@@ -2762,7 +2758,6 @@ export class Db {
       unsubscribed = true;
       deliveryReady = false;
       bufferedDeltas.length = 0;
-      startLocalSeed = null;
       readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       if (activeSubscription !== null) {
@@ -2785,9 +2780,6 @@ export class Db {
           if (unsubscribed || terminalized || activeSubscription === null) return;
           deliver(delta);
         }
-        const seed = startLocalSeed;
-        startLocalSeed = null;
-        seed?.();
       })
       .catch((error: unknown) => {
         if (unsubscribed || terminalized || activeSubscription === null || this.isShuttingDown) {
@@ -2804,13 +2796,9 @@ export class Db {
     // and public Db.subscribe callers are not required to consume it.
     if (ready) void ready.catch(() => undefined);
     const initialSubscription = createSubscriptionGeneration();
-    if (queryOptions.tier == null || queryOptions.tier === "local") {
-      try {
-        deliver(manager.seed([]));
-      } catch (error) {
-        terminalizeSubscription(initialSubscription, error);
-      }
-    }
+    // The native maintained stream owns both the opening snapshot and later
+    // changes. Do not fabricate an empty opening or race it with a one-shot
+    // cache read: that snapshot may be older than deltas already delivered.
     if (
       this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
     ) {
@@ -2857,61 +2845,6 @@ export class Db {
             .catch((error: unknown) => terminalizeSubscription(replacement, error));
         }
       }, readyAbort.signal);
-    }
-    if (
-      this.config.serverUrl &&
-      !remoteIfPossibleOffline &&
-      !strictRemoteReadTier &&
-      // `edge` and `global` promise that their first callback is the worker's
-      // authority-tier snapshot.  A browser worker cannot establish that
-      // snapshot until its server transport is ready, so never race it with a
-      // main-thread local-storage seed (including after Db.disconnect()).
-      !this.connection.shouldDeferSubscriptionStart(
-        resolveReadTier(queryOptions.tier ?? "local"),
-      ) &&
-      queryOptions.propagation !== "local-only" &&
-      resolveReadTier(queryOptions.tier ?? "local") !== "global" &&
-      !queryUsesRelationTraversal(builtQuery)
-    ) {
-      const seedQuery = () =>
-        this.allInternal(query, {
-          ...options,
-          tier: "local",
-          propagation: "local-only",
-        });
-      const seedLocal = () => {
-        const subscription = activeSubscription;
-        if (subscription === null || unsubscribed || terminalized) return;
-        const seedRows =
-          session == null
-            ? seedQuery()
-            : this.withRuntimeOperationContext({ session }, () => seedQuery());
-        void seedRows
-          .then((rows) => {
-            if (
-              unsubscribed ||
-              terminalized ||
-              activeSubscription !== subscription ||
-              subscription.terminalError !== null
-            ) {
-              return;
-            }
-            deliver(manager.seed(rows));
-          })
-          .catch((error: unknown) => {
-            if (
-              unsubscribed ||
-              terminalized ||
-              activeSubscription !== subscription ||
-              subscription.terminalError !== null
-            ) {
-              return;
-            }
-            terminalizeSubscription(subscription, error);
-          });
-      };
-      if (initialReadiness) startLocalSeed = seedLocal;
-      else seedLocal();
     }
 
     const handle = unsubscribe as SubscriptionHandle;

@@ -6227,3 +6227,100 @@ fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
     );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
 }
+
+/// Alice's second usage must recover the canonical query after its runtime
+/// handle is invalidated, and both usages must receive the new complete input
+/// closure. This internal test deliberately invalidates the runtime token:
+/// that exact cache transition is not controllable through an app API.
+///
+/// Alice opens -> runtime invalidation -> Bob adds a row -> Alice opens again.
+#[test]
+fn duplicate_usage_reopens_stale_canonical_query_before_cloning() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x94));
+    let first = row(0x49);
+    let first_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", first, 1_000).cells(title_cells("first")),
+        )
+        .unwrap();
+    accept_global(&mut core, first_tx, 1);
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let canonical = subscription_key(&shape, &binding);
+    let mut peer = PeerState::new();
+    peer.rehydrate_query_for_subscription_with_opts(
+        &mut core,
+        canonical,
+        &shape,
+        &binding,
+        RegisterShapeOptions::default(),
+    )
+    .unwrap();
+    peer.publication_states
+        .get_mut(&canonical)
+        .unwrap()
+        .groove_runtime_token = Some(core.groove_runtime_token().checked_add(1).unwrap());
+    let second = row(0x4a);
+    let second_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", second, 2_000).cells(title_cells("second")),
+        )
+        .unwrap();
+    accept_global(&mut core, second_tx, 2);
+
+    let reconciled = peer
+        .reconcile_maintained_subscription_for_clone(
+            &mut core,
+            canonical,
+            &shape,
+            &binding,
+            &RegisterShapeOptions::default(),
+            None,
+        )
+        .unwrap()
+        .expect("a stale canonical query must reopen instead of remaining pending forever");
+    let canonical_update = reconciled
+        .canonical_update
+        .as_ref()
+        .expect("existing usages must receive the reopened source closure");
+    let SyncMessage::ViewUpdate(payload) = canonical_update else {
+        panic!("expected view update")
+    };
+    assert!(payload.reset_result_set);
+    assert_eq!(
+        payload
+            .program_fact_adds
+            .iter()
+            .filter_map(covered_input_result_row)
+            .map(|(_, row, _)| row)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first, second])
+    );
+    let target = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x49)),
+        ..canonical
+    };
+    peer.set_subscription_policy_binding(
+        target,
+        peer.subscription_policy_binding(canonical).unwrap(),
+    );
+    let cloned = peer
+        .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
+            &mut core, canonical, target, &shape, reconciled,
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate(payload) = cloned else {
+        panic!("expected clone reset")
+    };
+    assert_eq!(payload.subscription, target);
+    assert!(payload.reset_result_set);
+    assert_eq!(
+        payload
+            .program_fact_adds
+            .iter()
+            .filter_map(covered_input_result_row)
+            .map(|(_, row, _)| row)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first, second])
+    );
+}

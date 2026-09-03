@@ -15,10 +15,10 @@ use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::CurrentRow;
 use jazz::protocol::{
-    CoveredInputEntry, ProgramFactEntry, ProgramSourceCoverageEntry, ProgramSourceId,
-    ProgramSourceRole, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionBundleScope, VersionCarrier, VersionRecord, ViewUpdatePayload,
+    BranchSelector, CoveredInputEntry, ProgramFactEntry, ProgramSourceCoverageEntry,
+    ProgramSourceId, ProgramSourceRole, RegisterShapeOptions, ResultRowLayer, RowVersionRef,
+    RowVersionRefEntry, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
+    VersionBundle, VersionBundleScope, VersionCarrier, VersionRecord, ViewUpdatePayload,
 };
 use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -2164,6 +2164,186 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     );
 }
 
+/// Alice reads one explicit branch through her persistent worker. The worker
+/// must preserve each input's physical branch witness, including on a later
+/// attachment to the same maintained query; neither branch may become root.
+///
+/// ```text
+/// core (main + draft rows) ──main closure──► worker ──same witnesses──► alice
+/// ```
+#[test]
+fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("branch", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch"),
+            )
+            .build(),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xd2; 16]);
+    let foreground = open_db(0x51, alice, &schema);
+    let worker = open_db(0x52, alice, &schema);
+    let core = open_core(0x53, &schema);
+    foreground.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
+    let (upstream, downstream) = duplex();
+    let _foreground_link = block_on(foreground.connect_upstream(upstream));
+    let (downstream, forwarded) = recording_transport(downstream, false);
+    let _worker_link = worker.accept_subscriber(downstream, alice);
+    let (upstream, downstream) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(upstream));
+    let (downstream, authoritative) = recording_transport(downstream, false);
+    let _core_link =
+        core.accept_scope_isolated_relay_subscriber_for_test(downstream, alice, BTreeMap::new(), 1);
+    let main = BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([1; 16])))]);
+    let draft = BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([2; 16])))]);
+    let mut main_id = None;
+    let mut seed_settlements = Vec::new();
+    for (branch, title) in [(main.clone(), "main document"), (draft, "draft document")] {
+        let write = foreground
+            .insert(
+                "documents",
+                BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                jazz::db::InsertOptions {
+                    target: jazz::db::ExactWriteTarget::Branch(branch),
+                    ..Default::default()
+                },
+            )
+            .expect("seed branch document");
+        let settled = Rc::new(Cell::new(None));
+        let observed = Rc::clone(&settled);
+        foreground.wait_for_transaction_with(
+            write.mergeable_tx_id(),
+            DurabilityTier::Global,
+            move |result| {
+                observed.set(Some(result.is_ok()));
+            },
+        );
+        seed_settlements.push(settled);
+        if title == "main document" {
+            main_id = Some(write.row_uuid());
+        }
+    }
+    for _ in 0..16 {
+        foreground.tick().expect("upload branch seeds");
+        worker.tick().expect("relay branch seeds and fates");
+        core.tick().expect("admit branch seeds");
+    }
+    for settled in seed_settlements {
+        assert_eq!(
+            settled.get(),
+            Some(true),
+            "branch seed must settle globally"
+        );
+    }
+    let query = foreground
+        .prepare_query(&Query::from("documents"))
+        .expect("prepare documents");
+    let opts = ReadOpts {
+        tier: DurabilityTier::Edge,
+        ..Default::default()
+    }
+    .branch_view(main.clone(), None);
+    let mut attachments = Vec::new();
+    for _ in 0..2 {
+        let attachment = foreground
+            .attach_query_with_opts(&query, opts.clone())
+            .expect("attach branch query");
+        for _ in 0..16 {
+            foreground.tick().expect("send branch query");
+            worker.tick().expect("relay branch query");
+            core.tick().expect("serve branch query");
+            worker.tick().expect("relay branch closure");
+            foreground.tick().expect("apply branch closure");
+            if foreground.query_attachment_is_covered(&attachment) {
+                break;
+            }
+        }
+        assert!(
+            foreground.query_attachment_is_covered(&attachment),
+            "branch closure must settle"
+        );
+        let rows = block_on(foreground.all(&query, opts.clone())).expect("read branch closure");
+        assert_eq!(
+            rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+            vec![main_id.unwrap()]
+        );
+        attachments.push(attachment);
+    }
+    // Settlement is part of the public wire contract. Observe the real
+    // transport, because row equality alone would miss a relay replacing
+    // core's cut with its own unrelated local clock (often zero).
+    let authority_cut = authoritative
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update.settled_through),
+            _ => None,
+        })
+        .last()
+        .expect("authority supplied a view");
+    assert!(authority_cut.0 > 0);
+    let forwarded_cuts = forwarded
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::ViewUpdate(update) if !update.peer_payload_inventory.opening_pending => {
+                Some(update.settled_through)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!forwarded_cuts.is_empty());
+    assert!(
+        forwarded_cuts.iter().all(|cut| *cut == authority_cut),
+        "relay must retain the exact source cut: {forwarded_cuts:?}"
+    );
+
+    let update = foreground
+        .update(
+            "documents",
+            main_id.unwrap(),
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("revised main document".to_owned()),
+            )]),
+            jazz::db::UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: main,
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .expect("edit the selected branch");
+    let settled = Rc::new(Cell::new(None));
+    let observed = Rc::clone(&settled);
+    foreground.wait_for_transaction_with(
+        update.mergeable_tx_id(),
+        DurabilityTier::Global,
+        move |result| {
+            observed.set(Some(result.is_ok()));
+        },
+    );
+    for _ in 0..16 {
+        foreground.tick().expect("send branch edit");
+        worker
+            .tick()
+            .expect("relay branch edit and updated closure");
+        core.tick().expect("admit branch edit");
+    }
+    assert_eq!(settled.get(), Some(true));
+    let rows = block_on(foreground.all(&query, opts)).expect("read incrementally updated branch");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("revised main document".to_owned()))
+    );
+}
+
 #[test]
 /// Alice seeds one exclusive transaction containing sibling rows; her browser
 /// main thread asks its durable worker relay for each sibling as an Edge read.
@@ -2180,6 +2360,37 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 /// ordinary `Db::tick` boundary must therefore remain stack-safe when this
 /// receipt runs on libtest's default 2 MiB worker stack.
 fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
+    exclusive_sibling_edge_reads_extend_relay_projection(false, false);
+}
+
+/// Alice's exclusive multi-row write traverses the same scope-isolated worker
+/// as her reads. Core must prove the delegated writer's policies for exclusive
+/// transactions too, before validating their exclusive read sets.
+///
+/// ```text
+/// alice foreground ──exclusive rows──► worker ──delegated upload──► core
+/// alice foreground ◄────────────── authoritative settlement ──────────┘
+/// ```
+#[test]
+fn worker_relay_admits_exclusive_sibling_write_before_edge_reads() {
+    exclusive_sibling_edge_reads_extend_relay_projection(true, false);
+}
+
+/// Alice can insert todos and checks but not notes. Relaying the exclusive
+/// bundle must not bypass the note policy or admit its allowed siblings.
+///
+/// ```text
+/// alice ──exclusive todo/check/note──► worker ──► core ──whole bundle rejected
+/// ```
+#[test]
+fn worker_relay_rejects_exclusive_bundle_when_one_sibling_is_forbidden() {
+    exclusive_sibling_edge_reads_extend_relay_projection(true, true);
+}
+
+fn exclusive_sibling_edge_reads_extend_relay_projection(
+    write_through_worker: bool,
+    deny_note: bool,
+) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("orgs").column("name", ColumnType::Text))
@@ -2192,7 +2403,16 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
             .table(
                 TableSchemaBuilder::new("notes")
                     .fk_column("org_id", "orgs")
-                    .fk_column("check_id", "checks"),
+                    .fk_column("check_id", "checks")
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(if deny_note {
+                                PolicyExpr::False
+                            } else {
+                                PolicyExpr::True
+                            }),
+                    ),
             )
             .build(),
     );
@@ -2213,7 +2433,12 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
     let _core_seed = core.accept_subscriber(core_seed_transport, alice);
 
-    let tx = seeder
+    let writer = if write_through_worker {
+        &main_thread
+    } else {
+        &seeder
+    };
+    let tx = writer
         .exclusive_tx()
         .expect("open exclusive seed transaction");
     let org = tx
@@ -2250,11 +2475,35 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
             Default::default(),
         )
         .expect("seed note");
-    tx.commit().expect("commit exclusive sibling rows");
-    for _ in 0..4 {
+    let tx_id = tx.commit().expect("commit exclusive sibling rows");
+    let settled = Rc::new(Cell::new(None));
+    let observed = Rc::clone(&settled);
+    writer.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
+        observed.set(Some(result.is_ok()));
+    });
+    for _ in 0..12 {
         seeder.tick().expect("upload sibling rows");
+        main_thread.tick().expect("upload foreground sibling rows");
+        worker.tick().expect("forward sibling upload or fate");
         core.tick().expect("accept sibling rows");
         seeder.tick().expect("apply sibling fates");
+    }
+    assert_eq!(
+        settled.get(),
+        Some(!deny_note),
+        "exclusive settlement must honor every sibling's policy"
+    );
+    if deny_note {
+        for table in ["orgs", "todos", "checks", "notes"] {
+            let query = core
+                .prepare_query(&Query::from(table))
+                .expect("prepare authority rows");
+            assert!(
+                core.read(&query).expect("read authority rows").is_empty(),
+                "rejected exclusive bundle must not expose {table} siblings"
+            );
+        }
+        return;
     }
 
     let opts = ReadOpts {
@@ -2648,6 +2897,9 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
         &query,
         ReadOpts {
             tier: DurabilityTier::Edge,
+            // Public `remote` lowers to Deferred. Immediate deliberately
+            // includes local pending writes (the remote-if-possible overlay).
+            local_updates: jazz::db::LocalUpdates::Deferred,
             ..ReadOpts::default()
         },
     ))
@@ -3533,17 +3785,16 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
     );
 }
 
-/// A browser worker must rebase a narrower one-shot page against a received
-/// authority window instead of applying that page's absolute offset twice.
-/// Alice first subscribes to positions 8..24, then asks for positions 8..10;
-/// the latter must remain the first two members of the received window.
+/// Alice's authority-relative receiver applies the remote page offset once.
+/// A later local-first query instead counts over her locally cached rows: a
+/// cached remote page must not silently change the local coordinate system.
 ///
 /// ```text
 /// core Global page 8..24 ──► worker ──► main Edge page 8..24
-/// main later Local page 8..10 ──► materialized page 8..24
+/// main later Local offset 8/limit 2 over cached 8..24 ──► positions 16..18
 /// ```
 #[test]
-fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
+fn browser_relay_distinguishes_authority_windows_from_literal_local_pagination() {
     // This receipt seeds and propagates several independently maintained
     // browser/worker/core views. Give only its test thread the normal 2 MiB
     // stack plus a 4 MiB margin, rather than changing the process-wide test
@@ -3551,13 +3802,13 @@ fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
     std::thread::Builder::new()
         .name("browser-relay-window-receipt".to_owned())
         .stack_size(6 * 1024 * 1024)
-        .spawn(browser_relay_keeps_offset_window_membership_on_large_stack)
+        .spawn(browser_relay_distinguishes_authority_and_local_windows_on_large_stack)
         .expect("spawn browser relay window receipt")
         .join()
         .expect("browser relay window receipt panicked");
 }
 
-fn browser_relay_keeps_offset_window_membership_on_large_stack() {
+fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xc2; 16]);
     let main_thread = open_db(0x1c, alice, &schema);
@@ -3644,8 +3895,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     );
     assert_eq!(
         row_ids(&local_rows),
-        row_ids(&edge_rows),
-        "the browser cache must materialize the authoritative result membership without applying the offset again",
+        todo_ids[16..24].to_vec(),
+        "Local offset 8 is evaluated over the cached positions 8..24, independently of remote page coordinates",
     );
 
     let contained_local = main_thread
@@ -3667,8 +3918,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
             ))
             .expect("read a contained local window without its own edge subscription"),
         ),
-        todo_ids[8..10].to_vec(),
-        "a narrower Local read derives its relative slice from the received authority window",
+        todo_ids[16..18].to_vec(),
+        "a narrower Local read still counts from the beginning of local knowledge",
     );
 
     let narrower = main_thread
@@ -3765,8 +4016,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
             ))
             .expect("read shifted contained local window"),
         ),
-        todo_ids[7..9].to_vec(),
-        "a local subwindow is invalidated with the authority window it derives from",
+        todo_ids[15..17].to_vec(),
+        "Local counts over cached positions 7..24: the newly received position 7 shifts its local offset, while cached position 23 remains known",
     );
 
     // Mirror a browser `db.all({ tier: "edge" })`: it releases the broad
@@ -3781,9 +4032,8 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
         main_thread.tick().expect("apply broad window cleanup");
     }
 
-    // A later Local one-shot must recognize that the overlay is only the
-    // materialized 8..24 page. It starts at the same absolute offset, so it
-    // must slice relative to that page instead of returning positions 16/17.
+    // Detaching authority coverage does not give later Local queries remote
+    // coordinates. They still count over ordinary cached positions 7..24.
     let same_offset_one_shot = main_thread
         .prepare_query(
             &Query::from("todos")
@@ -3803,12 +4053,12 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
             ))
             .expect("read same-offset local one-shot after broad coverage release"),
         ),
-        todo_ids[7..9].to_vec(),
-        "same-offset Local page is relative to the materialized authority page",
+        todo_ids[15..17].to_vec(),
+        "detaching authority coverage leaves the literal Local coordinate system unchanged",
     );
 
     // The retained page is deliberately not an Edge receipt. A fresh Edge
-    // usage site must clear the local-only interpretation and wait for a new
+    // usage site must wait for a new
     // authority response instead of treating detached membership as current
     // authorization coverage.
     let fresh_edge_read = main_thread

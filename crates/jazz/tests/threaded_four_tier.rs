@@ -178,7 +178,7 @@ fn commit_unit(
 
 fn send_view(node: &mut NodeState<RocksDbStorage>, peer: &mut PeerState, tx: &Sender<Wire>) {
     install_session_claims(node, peer.identity());
-    let update = block_on(peer.current_rows_update(node, TABLE)).unwrap();
+    let update = block_on(common::direct_query_update(node, peer, &schema(), TABLE));
     send_sync(tx, update);
 }
 
@@ -291,7 +291,16 @@ fn relay_thread(
     downstream_tx: Sender<Wire>,
     mut downstream_peer: PeerState,
 ) -> ThreadResult {
-    let (_dir, mut node) = open_node(node(node_byte), schema);
+    let (_dir, mut node) = open_node(node(node_byte), schema.clone());
+    block_on(common::register_direct_receiver(
+        &mut node,
+        &schema,
+        TABLE,
+        jazz::protocol::DelegatedSessionBinding {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+        },
+    ));
     let mut forwarded = 0_usize;
     let mut tx_ids = Vec::new();
     let mut upstream_stopped = false;
@@ -352,7 +361,16 @@ fn ui_thread(
     ui_author: AuthorSubject,
     ui_owner: AuthorSubject,
 ) -> UiResult {
-    let (_dir, mut ui) = open_node(node(1), schema);
+    let (_dir, mut ui) = open_node(node(1), schema.clone());
+    block_on(common::register_direct_receiver(
+        &mut ui,
+        &schema,
+        TABLE,
+        jazz::protocol::DelegatedSessionBinding {
+            identity: ui_author,
+            claims: BTreeMap::new(),
+        },
+    ));
     let mut tx_ids = Vec::new();
     let mut parents = BTreeMap::<RowUuid, TxId>::new();
 

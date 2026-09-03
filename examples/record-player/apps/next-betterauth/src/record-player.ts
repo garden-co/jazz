@@ -62,7 +62,7 @@ export class JazzRecordPlayerStore {
     }));
   }
 
-  /** Bounded, indexed playlist-window query used by the playlist screen. */
+  /** Authority-relative while online; offsets use cached rows while offline. */
   async playlistWindow(
     playlistId: string,
     offset = PLAYLIST_WINDOW_OFFSET,
@@ -74,6 +74,7 @@ export class JazzRecordPlayerStore {
         .orderBy("position", "asc")
         .offset(offset)
         .limit(limit),
+      { tier: "remote-if-possible" },
     );
     return rows.map((row) => ({
       id: row.id,

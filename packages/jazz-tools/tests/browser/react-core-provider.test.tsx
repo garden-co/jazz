@@ -522,7 +522,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("error", "boom");
   });
 
-  it("RCB-B12B: stale empty-refresh snapshots do not publish across session resubscribe", async () => {
+  it("RCB-B12B: empty openings need no snapshot read and retired session deltas cannot publish", async () => {
     const internalSessionA: Session = {
       issuer: "https://issuer.example",
       user_id: "alice",
@@ -540,12 +540,7 @@ describe("react-core provider/hooks browser coverage", () => {
     const aliceUser = sessionA.user;
     const bobUser = sessionB.user;
     const listeners = new Set<(state: AuthState) => void>();
-    const refreshes = {
-      alice: makeDeferred<Todo[]>(),
-      bob: makeDeferred<Todo[]>(),
-    };
-    const aliceRefreshStarted = makeDeferred<void>();
-    let aliceRefreshStartedResolved = false;
+    const snapshotRead = vi.fn(async () => []);
     const subscribeCalls: Array<{
       session: string;
       callback: (delta: SubscriptionDelta<Todo>) => void;
@@ -575,20 +570,7 @@ describe("react-core provider/hooks browser coverage", () => {
         });
         return () => {};
       },
-      all(_query: QueryBuilder<Todo>, _options?: QueryOptions, session?: Session) {
-        const user = session
-          ? canonicalAuthorSubject(session.issuer, session.user_id)
-          : (liveSession?.user ?? "anon");
-        if (user === aliceUser) {
-          if (!aliceRefreshStartedResolved) {
-            aliceRefreshStartedResolved = true;
-            aliceRefreshStarted.resolve();
-          }
-          return refreshes.alice;
-        }
-        if (user === bobUser) return refreshes.bob;
-        return Promise.resolve([]);
-      },
+      all: snapshotRead,
     };
     const manager = new SubscriptionsOrchestrator({ appId: "rcb-b12b" }, db, internalSessionA);
     const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
@@ -623,7 +605,9 @@ describe("react-core provider/hooks browser coverage", () => {
       "expected initial session-A subscription",
     );
     subscribeCalls[0]!.callback({ reset: true, all: [], delta: [] });
-    await aliceRefreshStarted;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(snapshotRead).not.toHaveBeenCalled();
+    expect(subscribeCalls[0]!.session).toBe(aliceUser);
 
     liveSession = sessionB;
     const authState: AuthState = { authMode: "external", session: sessionB };
@@ -637,7 +621,12 @@ describe("react-core provider/hooks browser coverage", () => {
       "expected session-B resubscribe",
     );
 
-    refreshes.alice.resolve([{ id: "a", title: "Alice stale" }]);
+    expect(subscribeCalls[1]!.session).toBe(bobUser);
+    subscribeCalls[0]!.callback({
+      reset: true,
+      all: [{ id: "a", title: "Alice stale" }],
+      delta: [{ kind: 0, id: "a", index: 0, item: { id: "a", title: "Alice stale" } }],
+    });
     await new Promise((resolve) => setTimeout(resolve, 25));
     await expectText("rows", "loading");
 
@@ -647,6 +636,7 @@ describe("react-core provider/hooks browser coverage", () => {
     });
 
     await expectText("rows", "Bob fresh");
+    expect(snapshotRead).not.toHaveBeenCalled();
   });
 
   it("RCB-B13: hook usage outside provider throws expected invariant error", async () => {

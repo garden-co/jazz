@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
 
+use groove::ivm::SubscriptionEvent as GrooveSubscriptionEvent;
 use groove::ivm::{
     InputSourceId, InputSourceReplacement, LiteralValue, PreparedShapeId, RoutedMultisinkTerminal,
     StaticScanSpec,
@@ -833,6 +834,7 @@ where
         force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
         let policy = self.query_program_policy_context(identity);
+        let requested_shape_id = shape.shape_id();
         // Linked shapes carry read-policy alternatives so a trusted serving
         // authority can establish the authorized residual frontier.  Neither
         // System authority nor a client-local receiver may evaluate those
@@ -899,28 +901,22 @@ where
         };
         let mut input_shape = self.normalized_row_set_shape(shape, binding)?;
         let settled_view_matches_query_window = settled_binding_view.is_some_and(|binding_view| {
-            self.query
-                .registered_shapes
-                .get(&binding_view.shape_id)
-                .is_some_and(|source_shape| {
-                    source_shape.query().offset == shape.query().offset
-                        && source_shape.query().limit == shape.query().limit
-                })
+            // A cold receiver is compiled before RegisterShape is processed.
+            // Its exact requested shape already identifies the input window;
+            // registry timing must not decide whether to apply its offset twice.
+            binding_view.shape_id == requested_shape_id
         });
-        let settled_window_input = (settled_view_matches_query_window
-            && shape.query().aggregate.is_none())
-        .then(|| match input_shape.nodes.get(&input_shape.root) {
-            Some(RowSetExpr::Slice { input, .. }) => Some(input.clone()),
-            _ => None,
-        })
-        .flatten();
-        if let Some(input) = settled_window_input {
-            // The settled binding source is the authority-selected result
-            // membership, including LIMIT/OFFSET. Keep evaluating the public
-            // row shape over those members, but do not slice that window a
-            // second time on the client.
-            input_shape.nodes.remove(&input_shape.root);
-            input_shape.root = input;
+        if settled_view_matches_query_window
+            && shape.query().aggregate.is_none()
+            && let Some(RowSetExpr::Slice { offset, .. }) =
+                input_shape.nodes.get_mut(&input_shape.root)
+        {
+            // Covered inputs for this exact root occurrence are already the
+            // output of the authority window. Evaluate order and limit with
+            // the ordinary Groove operator, relative to that page. Keeping
+            // the limit also bounds newly inserted pending overlay rows.
+            // Local-first has no settled source and retains its absolute offset.
+            *offset = 0;
         }
         let policy_schema_version = self.read_policy_schema_for_table_name(
             &shape.query().table,
@@ -991,17 +987,14 @@ where
                 // settled authority view.  Dropping version witnesses here
                 // would leave it with no source registry and tempt the
                 // runtime to reopen local storage for an authority reset.
-                // The storage-backed optimization remains valid for a cold
-                // local-only maintained view, where there is no remote
-                // closure to claim.
-                // Client-local programs use the same mutable source slots
-                // for ordinary propagated Local reads and strict remote
-                // reads.  At opening time the latter has not yet learnt its
-                // settled binding view, so that view cannot safely decide
-                // whether source witnesses are needed.  Keep the registry
-                // for every client-local maintained program; only trusted
-                // serving may take the storage-backed shortcut.
-                && authorization_mode != QueryAuthorizationMode::ClientLocal
+                // Local-first keeps ordinary local storage as its source for
+                // its entire lifetime, including when propagation is enabled.
+                // It may load exact result payloads from that storage rather
+                // than retaining every source payload in every query. Cold
+                // remote receivers still retain witnesses even before their
+                // first authority receipt; they may not fall back to storage.
+                && (authorization_mode != QueryAuthorizationMode::ClientLocal
+                    || tier == DurabilityTier::Local)
                 && settled_binding_view.is_none()
                 && !root_has_read_policy
                 && self.storage_backed_maintained_root_has_identity_table_mapping(
@@ -1170,7 +1163,8 @@ where
                 &source_request.source.table,
                 request.reads.primary.read_schema,
             )?;
-            let metadata = read_sources::inline_source_metadata(&source_request.requirements, None);
+            let metadata =
+                read_sources::covered_input_source_metadata(&source_request.requirements, &table);
             let descriptor =
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
                     &table, &metadata,
@@ -3743,6 +3737,27 @@ where
         }
         let mut maintained = MaintainedSubscriptionView::default();
         maintained.set_read_view(read_view_key);
+        // Resolve names from permanent physical catalogue identities, never
+        // from equal row UUIDs or a search for the first matching table label.
+        // Keep logical source identity unchanged: only the immutable payload
+        // coordinate follows the row's authored schema across a table rename.
+        let mut witness_table_names = BTreeMap::new();
+        for logical_name in tables.keys() {
+            let table_id =
+                self.physical_table_id_for_schema(shape.schema_version(), logical_name)?;
+            for (schema_id, mapping) in &self.catalogue.physical_mappings {
+                let Some(alias) = self.catalogue.schema_version_aliases.get(schema_id) else {
+                    continue;
+                };
+                for (authored_name, table_mapping) in &mapping.tables {
+                    if table_mapping.table_id == table_id && authored_name != logical_name {
+                        witness_table_names
+                            .insert((logical_name.clone(), *alias), authored_name.clone());
+                    }
+                }
+            }
+        }
+        maintained.set_witness_table_names(witness_table_names);
         if storage_backed_result_materialization {
             maintained.enable_storage_backed_result_materialization();
         }
@@ -3754,8 +3769,11 @@ where
         // this call returns. Keep Stream A unpublished until the first
         // complete Stream B snapshot arrives; publication drains this same
         // subscription and gates ViewUpdate on `initial_received`.
-        let initial_received = match subscription.try_recv() {
-            Ok(snapshot) => {
+        let mut receiver_cx =
+            std::task::Context::from_waker(progress_waker.unwrap_or(std::task::Waker::noop()));
+        let initial_received = match subscription.poll_next_event(&mut receiver_cx) {
+            std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
+                let snapshot = update.deltas;
                 if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_snapshot");
                 }
@@ -3797,20 +3815,19 @@ where
                     .extend(snapshot_transitions.terminal_operations);
                 true
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            std::task::Poll::Pending => false,
+            std::task::Poll::Ready(GrooveSubscriptionEvent::Error(error)) => {
                 self.database.unsubscribe(subscription.id());
                 self.retire_covered_input_sources(&covered_input_sources)
                     .await?;
-                return Err(Error::InvalidStoredValue(
-                    "seeded maintained subscription disconnected",
-                ));
+                return Err(Error::Groove(error.into()));
             }
         };
         if initial_received {
             loop {
-                match subscription.try_recv() {
-                    Ok(deltas) => {
+                match subscription.poll_next_event(&mut receiver_cx) {
+                    std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
+                        let deltas = update.deltas;
                         let delta_transitions = match maintained.apply_multisink_deltas(
                             deltas,
                             &terminal_schemas,
@@ -3843,14 +3860,12 @@ where
                             .terminal_operations
                             .extend(delta_transitions.terminal_operations);
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    std::task::Poll::Pending => break,
+                    std::task::Poll::Ready(GrooveSubscriptionEvent::Error(error)) => {
                         self.database.unsubscribe(subscription.id());
                         self.retire_covered_input_sources(&covered_input_sources)
                             .await?;
-                        return Err(Error::InvalidStoredValue(
-                            "seeded maintained subscription disconnected",
-                        ));
+                        return Err(Error::Groove(error.into()));
                     }
                 }
             }
