@@ -37,13 +37,20 @@ function applyPermissions(permissions: CompiledPermissions): s.App<PriorityAppSc
       "priorities",
       wasmSchema,
       priorityApp.priorities._columnTransforms,
+      priorityApp.priorities._columnTransformsByTable,
     ),
     wasmSchema,
   } as s.App<PriorityAppSchema>;
 }
 const relatedSchema = {
   parents: s.table({
-    itemId: s.ref("items").optional(),
+    item: s
+      .ref("items")
+      .optional()
+      .transform<string | null>({
+        from: (value) => (value === null ? null : `item:${value}`),
+        to: (value) => (value === null ? null : value.replace(/^item:/, "")),
+      }),
     itemIds: s.array(s.ref("items")),
   }),
   items: s.table({
@@ -66,7 +73,8 @@ const relatedPermissions = s.definePermissions(relatedApp, ({ policy }) => {
   policy.items.allowRead.where({});
   policy.items.allowInsert.where({});
 });
-const relatedAppWithPermissions: s.App<RelatedAppSchema> = applyRelatedPermissions(relatedPermissions);
+const relatedAppWithPermissions: s.App<RelatedAppSchema> =
+  applyRelatedPermissions(relatedPermissions);
 
 function applyRelatedPermissions(permissions: CompiledPermissions): s.App<RelatedAppSchema> {
   const wasmSchema = schemaToWasm(
@@ -78,12 +86,17 @@ function applyRelatedPermissions(permissions: CompiledPermissions): s.App<Relate
       "parents",
       wasmSchema,
       relatedApp.parents._columnTransforms,
+      relatedApp.parents._columnTransformsByTable,
     ),
-    items: new TypedTableQueryBuilder("items", wasmSchema, relatedApp.items._columnTransforms),
+    items: new TypedTableQueryBuilder(
+      "items",
+      wasmSchema,
+      relatedApp.items._columnTransforms,
+      relatedApp.items._columnTransformsByTable,
+    ),
     wasmSchema,
   } as s.App<RelatedAppSchema>;
 }
-
 
 describe("TS transformed columns", () => {
   let db: Db | undefined;
@@ -149,19 +162,19 @@ describe("TS transformed columns", () => {
     const activeDb = db!;
 
     const { value: firstItem } = activeDb.insert(relatedAppWithPermissions.items, {
-      score: 3,
+      score: 30,
       label: "alpha",
     });
     const { value: secondItem } = activeDb.insert(relatedAppWithPermissions.items, {
-      score: 7,
+      score: 70,
       label: "beta",
     });
     const { value: emptyParent } = activeDb.insert(relatedAppWithPermissions.parents, {
-      itemId: null,
+      item: null,
       itemIds: [],
     });
     const { value: populatedParent } = activeDb.insert(relatedAppWithPermissions.parents, {
-      itemId: firstItem.id,
+      item: `item:${firstItem.id}`,
       itemIds: [firstItem.id, secondItem.id],
     });
 
@@ -193,10 +206,37 @@ describe("TS transformed columns", () => {
     expect(included?.items).toEqual(expect.arrayContaining([firstExpected, secondExpected]));
 
     const hopped = await activeDb.one(
-      relatedAppWithPermissions.parents
-        .where({ id: { eq: populatedParent.id } })
-        .hopTo("item"),
+      relatedAppWithPermissions.parents.where({ id: { eq: populatedParent.id } }).hopTo("item"),
     );
     expect(hopped).toEqual(firstExpected);
+  });
+
+  it("applies partial selection before root transforms and supports legacy transform metadata", async () => {
+    const activeDb = db!;
+    const { value: item } = activeDb.insert(relatedAppWithPermissions.items, {
+      score: 30,
+      label: "alpha",
+    });
+
+    const partial = await activeDb.one(
+      relatedAppWithPermissions.items
+        .where({ id: { eq: item.id } })
+        .select({ label: { fromUtf8: 0, toUtf8: 1 } }),
+    );
+    expect(partial?.label).toBe("label:a");
+
+    const built = relatedAppWithPermissions.items.where({ id: { eq: item.id } });
+    const legacyQuery = {
+      _table: built._table,
+      _schema: built._schema,
+      _columnTransforms: built._columnTransforms,
+      _build: () => built._build(),
+      _rowType: built._rowType,
+    };
+    await expect(activeDb.one(legacyQuery)).resolves.toMatchObject({
+      id: item.id,
+      score: 30,
+      label: "label:alpha",
+    });
   });
 });
