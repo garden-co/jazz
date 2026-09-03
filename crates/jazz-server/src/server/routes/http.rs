@@ -1408,6 +1408,12 @@ mod tests {
         (status, serde_json::from_slice(&body).expect("health json"))
     }
 
+    /// Confirms that Alice's monitor sees her blank dynamic edge as unready
+    /// until that edge has a client-usable runtime.
+    ///
+    /// ```text
+    /// edge bootstrap ──no catalogue/runtime──► monitor: 503 not_ready
+    /// ```
     #[tokio::test]
     async fn blank_dynamic_edge_reports_runtime_not_ready() {
         let state = blank_dynamic_edge().await;
@@ -1425,6 +1431,12 @@ mod tests {
         );
     }
 
+    /// Confirms that an operator's monitor sees Alice's edge connector's fatal
+    /// reason before the same edge's missing-runtime readiness state.
+    ///
+    /// ```text
+    /// edge connector ──fatal──► edge ──health──► monitor: unhealthy
+    /// ```
     #[tokio::test]
     async fn fatal_edge_upstream_failure_precedes_missing_runtime() {
         let state = blank_dynamic_edge().await;
@@ -1446,6 +1458,12 @@ mod tests {
         );
     }
 
+    /// Confirms that an operator's monitor sees Alice's dynamic edge become
+    /// ready only after the authority catalogue is published and marked ready.
+    ///
+    /// ```text
+    /// authority ──catalogue──► edge shell ──ready mark──► monitor: healthy
+    /// ```
     #[tokio::test]
     async fn dynamic_edge_becomes_healthy_after_runtime_publication() {
         let schema = readiness_schema();
@@ -1493,6 +1511,12 @@ mod tests {
         assert_eq!(json, serde_json::json!({ "status": "healthy" }));
     }
 
+    /// Confirms that an operator's monitor keeps Alice's fixed-schema edge
+    /// healthy while its upstream connector retries offline.
+    ///
+    /// ```text
+    /// upstream ──offline──► fixed edge ──health──► monitor: healthy
+    /// ```
     #[tokio::test]
     async fn fixed_schema_offline_edge_remains_healthy() {
         let state = fixed_offline_edge().await;
@@ -1507,6 +1531,12 @@ mod tests {
         assert_eq!(json, serde_json::json!({ "status": "healthy" }));
     }
 
+    /// Confirms that an operator's monitor still reports Alice's fixed-schema
+    /// edge unhealthy when its connector reaches a fatal terminal state.
+    ///
+    /// ```text
+    /// edge connector ──fatal──► fixed edge ──health──► monitor: unhealthy
+    /// ```
     #[tokio::test]
     async fn fatal_edge_upstream_failure_retains_unhealthy_health_response() {
         let state = fixed_offline_edge().await;
@@ -1528,6 +1558,12 @@ mod tests {
         );
     }
 
+    /// Confirms that an operator's shutdown request takes precedence for Alice's
+    /// edge over both fatal-upstream and missing-runtime health states.
+    ///
+    /// ```text
+    /// operator ──shutdown──► edge ──health──► monitor: shutting_down
+    /// ```
     #[tokio::test]
     async fn shutdown_keeps_shutting_down_precedence_over_edge_readiness() {
         let state = blank_dynamic_edge().await;
@@ -1559,6 +1595,12 @@ mod tests {
         );
     }
 
+    /// Confirms that an operator's monitor does not apply dynamic-edge runtime
+    /// readiness to Alice's core topology.
+    ///
+    /// ```text
+    /// core without edge shell ──health──► monitor: healthy
+    /// ```
     #[tokio::test]
     async fn core_topology_remains_healthy_without_a_runtime_shell() {
         let state = ServerBuilder::new(AppId::from_name("health-core"))
