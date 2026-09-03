@@ -86,9 +86,6 @@ pub(super) struct IncrementalEvaluation<'a> {
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
     pending_binding_retractions: usize,
     pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
-    /// A scoped resident failure invalidates the live slice and discards all
-    /// staged state. No continuation or publication may install it later.
-    discarded: bool,
 }
 
 #[derive(Clone)]
@@ -621,21 +618,33 @@ impl EvaluationWorkQueue {
 impl IncrementalEvaluation<'_> {
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
         self.work_queue.abandon(nodes);
+        // A scoped failure owns only its downstream slice. Keep evaluating
+        // disjoint roots in this tick; their prepared state and notifications
+        // remain publishable. The staged maps share immutable bases and this
+        // removes only entries produced by the failed owner.
+        self.operator_states
+            .retain(|key, _| !nodes.contains(&key.node));
+        self.arrangement_states
+            .retain(|key, _| !nodes.contains(&key.input));
+        self.arrangement_keys_by_input
+            .retain(|node, _| !nodes.contains(node));
+        self.eval_memo.retain(|key, _| !nodes.contains(&key.node));
+        self.eval_memo_bytes = self
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum();
+        self.node_meta.retain(|node, _| !nodes.contains(node));
+        self.relevant_nodes.retain(|node| !nodes.contains(node));
+        self.affected_nodes.retain(|node| !nodes.contains(node));
         self.terminal_deltas.retain(|node, _| !nodes.contains(node));
         self.root_ordering_windows
             .retain(|node, _| !nodes.contains(node));
-        self.discarded = true;
-        self.pending_subscription_outputs.clear();
-        self.terminal_deltas.clear();
-        self.root_ordering_windows.clear();
-        self.pending_notifications.clear();
-        self.published_subscriptions.clear();
+        self.pending_subscription_outputs
+            .retain(|node, _| !nodes.contains(node));
     }
 
     fn install(&mut self, runtime: &mut IvmRuntime) {
-        if self.discarded {
-            return;
-        }
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
@@ -710,9 +719,6 @@ impl IncrementalEvaluation<'_> {
         runtime: &mut IvmRuntime,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), EvaluationFailure>> {
-        if self.discarded {
-            return Poll::Ready(Ok(()));
-        }
         let ready = self.requests.poll(cx);
         if ready == 0 {
             self.requests.poll_eager_retry(cx);
@@ -2276,7 +2282,6 @@ impl IvmRuntime {
             node_meta,
             pending_binding_retractions,
             pending_notifications: Vec::new(),
-            discarded: false,
         })
     }
 

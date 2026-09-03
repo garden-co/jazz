@@ -1329,12 +1329,34 @@ async fn resident_recursive_limit_discards_staged_closure() {
         failed.recv().unwrap().to_values().unwrap(),
         [(vec![Value::U64(1), Value::U64(2)], 1)]
     );
+    let healthy = database
+        .subscribe_one_sink(GraphBuilder::table("edges").project(["src", "dst"]))
+        .await
+        .expect("an independent recursive subscription opens");
+    assert_eq!(
+        healthy.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
 
     let before_stats = database.runtime_stats();
     let mut update = database.open_batch();
     insert_edge(&mut update, 2, 2, 3);
     insert_edge(&mut update, 3, 3, 4);
     database.commit_batch(update).await.unwrap();
+    let mut healthy_delta = healthy
+        .try_recv()
+        .expect("the independent subscription receives its commit delta")
+        .to_values()
+        .unwrap();
+    healthy_delta.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        healthy_delta,
+        [
+            (vec![Value::U64(2), Value::U64(3)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ],
+        "a failed recursive owner must not suppress an independent owner's publication"
+    );
     let after_stats = database.runtime_stats();
     assert_eq!(
         after_stats.graph_nodes, before_stats.graph_nodes,
@@ -1356,17 +1378,11 @@ async fn resident_recursive_limit_discards_staged_closure() {
         after_stats.recursive_accumulated_encoded_bytes, 0,
         "failed recursion must not retain encoded partial closure state"
     );
-    assert_eq!(
-        after_stats.arrangement_count, before_stats.arrangement_count,
-        "failed recursion must not install or remove committed arrangements"
-    );
-    assert_eq!(
-        after_stats.arrangement_rows, before_stats.arrangement_rows,
-        "failed recursion must not advance committed arrangement rows"
-    );
-    assert_eq!(
-        after_stats.arrangement_encoded_bytes, before_stats.arrangement_encoded_bytes,
-        "failed recursion must not advance encoded arrangement state"
+    assert!(
+        after_stats.arrangement_count >= before_stats.arrangement_count
+            && after_stats.arrangement_rows >= before_stats.arrangement_rows
+            && after_stats.arrangement_encoded_bytes >= before_stats.arrangement_encoded_bytes,
+        "only the healthy owner's arrangement work may be published"
     );
     assert!(
         after_stats.eval_memo_entries <= before_stats.eval_memo_entries,
