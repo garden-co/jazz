@@ -2270,6 +2270,7 @@ where
                 coverage_groups: BTreeMap::new(),
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
+                pending_catalogue_subscriptions: BTreeMap::new(),
                 scope_purposes: BTreeMap::new(),
                 scope_aggregates: BTreeMap::new(),
                 authority_scope_hydrations: BTreeMap::new(),

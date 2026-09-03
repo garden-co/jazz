@@ -1948,6 +1948,8 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
 /// Alice writes under schema v1, Bob opens a v2 draft, and only the public
 /// migration publication makes Bob's schema readable. The draft must not expose
 /// Alice's v1 row before the lineage lens atomically activates it.
+/// An already-waiting query must resume without application-level retries;
+/// separately cancelled attempts must not prevent that activation.
 ///
 /// ```text
 /// admin ──publish v1──► server ◄── Alice writes v1 row
@@ -2004,6 +2006,14 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         .await
         .expect("connect bob with unpublished draft schema");
     let query = jazz::query::Query::from("users");
+    let mut pending_query =
+        Box::pin(bob.query_with_read_tier(query.clone(), jazz::tools::ReadTier::Remote));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), pending_query.as_mut())
+            .await
+            .is_err(),
+        "a valid draft query stays pending rather than rejecting or exposing rows"
+    );
     let pre_lens_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut pre_lens_attempts = 0;
     while tokio::time::Instant::now() < pre_lens_deadline {
@@ -2024,6 +2034,13 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     );
 
     publish_v1_to_v2_catalogue_migration(&server).await;
+    let resumed_rows = tokio::time::timeout(Duration::from_secs(10), pending_query.as_mut())
+        .await
+        .expect("catalogue activation wakes the existing query")
+        .expect("the pending query was not permanently rejected");
+    assert_eq!(resumed_rows.len(), 1);
+    assert_eq!(resumed_rows[0].0, row_id);
+    drop(pending_query);
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
