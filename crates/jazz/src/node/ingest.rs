@@ -36,6 +36,7 @@ impl Default for CommitUnitParkMode {
 
 include!("ingest/catalogue.rs");
 include!("ingest/commit_bundles.rs");
+include!("ingest/authority_publications.rs");
 include!("ingest/fates.rs");
 include!("ingest/view_updates.rs");
 include!("ingest/validation.rs");

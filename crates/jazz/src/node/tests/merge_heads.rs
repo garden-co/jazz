@@ -216,7 +216,8 @@ fn edge_creates_edge_durable_merge_for_concurrent_inserts_and_edits() {
         let schema = two_column_schema();
         let (_left_dir, mut left) = open_node_with_schema(node(0xc1), schema.clone());
         let (_right_dir, mut right) = open_node_with_schema(node(0xc2), schema.clone());
-        let (_edge_dir, mut edge) = open_node_with_schema(node(0xc9), schema);
+        let (edge_dir, mut edge) = open_node_with_schema(node(0xc9), schema.clone());
+        let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0xcf), schema.clone());
         let shared_row = row(0xca);
         let admit = |edge: &mut NodeState<RocksDbStorage>, unit| {
             let SyncMessage::CommitUnit { tx, versions } = unit else {
@@ -270,6 +271,105 @@ fn edge_creates_edge_durable_merge_for_concurrent_inserts_and_edits() {
         admit(&mut edge, right_unit);
         let replayed = edge.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
         assert_eq!(merge_heads_from_value(replayed[0].record().get_idx(3).unwrap()).unwrap(), heads);
+
+        let publication = edge.edge_authority_publication_for(right_tx).unwrap();
+        drop(edge);
+        let mut edge = reopen_node_at(&edge_dir, node(0xc9), schema);
+        assert_eq!(edge.edge_authority_publication_for(right_tx).unwrap(), publication,
+            "publication reconstruction must survive an edge restart");
+        for _ in 0..2 {
+            let outcome = core.ingest_edge_authority_publication(publication.clone(), 100).unwrap();
+            assert!(outcome.publications.is_empty(),
+                "a reconciled edge publication must not generate any new core merge publication");
+            settle_outcome(&mut core, outcome).unwrap();
+            let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+            assert_eq!(frontier.len(), 1);
+            assert_eq!(merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap(), heads,
+                "core must retain the edge's merge, not create a redundant same-frontier merge");
+            assert!(matches!(core.transaction_state_settled(merge_tx),
+                Some((Fate::Accepted, Some(_), DurabilityTier::Global))));
+        }
+    }
+}
+
+#[test]
+fn core_merges_only_residual_heads_from_distinct_edge_publications() {
+    // Internal admission APIs expose merge authorship and parent identities,
+    // which convergence alone cannot distinguish from redundant core merges.
+    for edit_existing in [false, true] {
+        let schema = two_column_schema();
+        let (_left_dir, mut left) = open_node_with_schema(node(0xd1), schema.clone());
+        let (_right_dir, mut right) = open_node_with_schema(node(0xd2), schema.clone());
+        let (_edge_a_dir, mut edge_a) = open_node_with_schema(node(0xd3), schema.clone());
+        let (_edge_b_dir, mut edge_b) = open_node_with_schema(node(0xd4), schema.clone());
+        let (core_dir, mut core) = open_history_complete_node_with_schema(node(0xdf), schema.clone());
+        let shared_row = row(0xda);
+        let admit = |edge: &mut NodeState<RocksDbStorage>, unit| {
+            let SyncMessage::CommitUnit { tx, versions } = unit else {
+                panic!("expected commit unit");
+            };
+            let tx_id = tx.tx_id;
+            let outcome = edge.ingest_edge_authority_mergeable_commit_unit(
+                tx, versions, u64::MAX - SKEW_TOLERANCE_MS,
+            ).unwrap();
+            let receipts = settle_outcome(edge, outcome).unwrap();
+            assert!(receipts.iter().any(|receipt| matches!(receipt,
+                SyncMessage::FateUpdate { tx_id: accepted, fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Edge), global_time: None }
+                    if *accepted == tx_id
+            )));
+        };
+        let parents = if edit_existing {
+            let (seed_tx, seed) = left.commit_mergeable_unit_settled(
+                MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
+                    ("title".to_owned(), v("seed")), ("body".to_owned(), v("seed")),
+                ])),
+            ).unwrap();
+            right.apply_sync_message_settled(seed.clone()).unwrap();
+            admit(&mut edge_a, seed.clone());
+            admit(&mut edge_b, seed);
+            vec![seed_tx]
+        } else { Vec::new() };
+        let (left_tx, left_unit) = left.commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", shared_row, 20).parents(parents.clone())
+                .cells(BTreeMap::from([("title".to_owned(), v("left"))])),
+        ).unwrap();
+        let (right_tx, right_unit) = right.commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", shared_row, 20).parents(parents)
+                .cells(BTreeMap::from([("body".to_owned(), v("right"))])),
+        ).unwrap();
+        admit(&mut edge_a, left_unit);
+        admit(&mut edge_b, right_unit);
+        let first = edge_a.edge_authority_publication_for(left_tx).unwrap();
+        let second = edge_b.edge_authority_publication_for(right_tx).unwrap();
+        let outcome = core.ingest_edge_authority_publication(first.clone(), 100).unwrap();
+        settle_outcome(&mut core, outcome).unwrap();
+        let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+        assert_eq!(frontier.len(), 1);
+        assert_eq!(merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap(),
+            BTreeSet::from([left_tx]));
+        drop(core);
+        let mut core = reopen_node_at(&core_dir, node(0xdf), schema);
+        let outcome = core.ingest_edge_authority_publication(second.clone(), 101).unwrap();
+        settle_outcome(&mut core, outcome).unwrap();
+        let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+        assert_eq!(frontier.len(), 1);
+        let heads = merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap();
+        assert_eq!(heads.len(), 1);
+        let merge_tx = *heads.iter().next().unwrap();
+        assert_eq!(merge_tx.node, node(0xdf), "only residual cross-edge concurrency requires a core merge");
+        let SyncMessage::CommitUnit { versions, .. } = core.commit_unit_for(merge_tx).unwrap() else {
+            panic!("expected merge unit");
+        };
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].parents(), &[left_tx, right_tx]);
+        for publication in [second, first] {
+            let outcome = core.ingest_edge_authority_publication(publication, 102).unwrap();
+            settle_outcome(&mut core, outcome).unwrap();
+            let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+            assert_eq!(frontier.len(), 1);
+            assert_eq!(merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap(), heads);
+        }
     }
 }
 

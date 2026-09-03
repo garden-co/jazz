@@ -324,6 +324,16 @@ where
         versions: Vec<VersionRecord>,
         now_ms: u64,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
+        self.finalize_edge_accepted_mergeable_commit_unit_with_reconciliation(tx, versions, now_ms, true).await
+    }
+
+    async fn finalize_edge_accepted_mergeable_commit_unit_with_reconciliation(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        now_ms: u64,
+        reconcile: bool,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let versions = canonical_versions(versions);
         let mut memo = IngestMemo::default();
         if tx.kind != TxKind::Mergeable {
@@ -473,7 +483,9 @@ where
             global_time: Some(global_time),
             durability: Some(durability),
         }]);
-        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Core).await?);
+        if reconcile {
+            outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Core).await?);
+        }
         Ok(outcome)
     }
 

@@ -26,6 +26,28 @@ use crate::time::TxTime;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
 
+/// One complete transaction inside an edge-authority publication.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorityCommitUnit {
+    /// Canonical transaction envelope, including generated branch intent.
+    pub tx: Transaction,
+    /// Every row version in the transaction, never a query-scoped subset.
+    pub versions: Vec<VersionRecord>,
+}
+
+/// A coherent edge-authorized frontier for one admitted write.
+///
+/// Core admits every member before reconciling remaining concurrent heads.
+/// The group may include pending-global history dependencies and edge merges;
+/// it is not an additional application transaction or a query result.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorityPublication {
+    /// Admitted write whose upload/acknowledgement owns this publication.
+    pub tx_id: TxId,
+    /// Complete accepted transactions in increasing transaction-id order.
+    pub commits: Vec<AuthorityCommitUnit>,
+}
+
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
