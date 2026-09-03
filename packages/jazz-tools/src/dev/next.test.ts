@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
@@ -15,6 +15,8 @@ const PRODUCTION_BUILD_PHASE = "phase-production-build";
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
+const originalCorrectnessRun = process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN;
+const originalCorrectnessWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
 
 async function resolveWrappedConfig(
   wrapped: ReturnType<typeof withJazz>,
@@ -39,6 +41,8 @@ beforeEach(async () => {
   delete process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
   delete process.env.BACKEND_SECRET;
+  delete process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN;
+  delete process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
 
   // Redirect cwd to a per-test directory for managed-runtime state.
   const fakeCwd = await tempRoots.create("jazz-next-test-cwd-");
@@ -61,6 +65,12 @@ afterEach(async () => {
   } else {
     process.env.NEXT_PUBLIC_JAZZ_APP_ID = originalJazzAppId;
   }
+
+  if (originalCorrectnessRun === undefined) delete process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN;
+  else process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN = originalCorrectnessRun;
+  if (originalCorrectnessWasmPackage === undefined)
+    delete process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+  else process.env.JAZZ_CORRECTNESS_WASM_PACKAGE = originalCorrectnessWasmPackage;
 });
 
 describe("withJazz", () => {
@@ -107,6 +117,36 @@ describe("withJazz", () => {
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
+  });
+
+  it("routes both Next bundlers to the admitted WASM snapshot", async () => {
+    process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN = "1";
+    process.env.JAZZ_CORRECTNESS_WASM_PACKAGE = "/sealed/wasm";
+    const resolved = (await resolveWrappedConfig(
+      withJazz({ turbopack: { resolveAlias: { existing: "./existing" } } }),
+      PRODUCTION_BUILD_PHASE,
+    )) as NextConfigLike & {
+      turbopack?: { resolveAlias?: Record<string, string> };
+      webpack?: (config: { resolve?: { alias?: Record<string, string> } }) => unknown;
+    };
+
+    expect(resolved.turbopack?.resolveAlias?.existing).toBe("./existing");
+    const wasmEntry = resolve("/sealed/wasm", "jazz_wasm.js");
+    const fromProject = relative(process.cwd(), wasmEntry);
+    expect(resolved.turbopack?.resolveAlias?.["jazz-wasm"]).toBe(
+      fromProject.startsWith(".") ? fromProject : `./${fromProject}`,
+    );
+    const finalConfig = resolved.webpack!({ resolve: { alias: {} } }) as {
+      resolve: { alias: Record<string, string> };
+    };
+    expect(finalConfig.resolve.alias["jazz-wasm"]).toBe(wasmEntry);
+  });
+
+  it("fails before Next can resolve a mutable WASM package in a sealed run", async () => {
+    process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN = "1";
+    await expect(resolveWrappedConfig(withJazz({}), PRODUCTION_BUILD_PHASE)).rejects.toThrow(
+      "sealed correctness consumer is missing its admitted WASM package",
+    );
   });
 
   it("starts a local server in development and injects NEXT_PUBLIC_JAZZ_* env vars", async () => {
