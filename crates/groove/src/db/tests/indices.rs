@@ -1066,6 +1066,44 @@ async fn unique_indices_reject_existing_conflicting_values() {
 }
 
 #[futures_test::test]
+async fn durable_unique_indices_allow_atomic_replacement_within_one_batch() {
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
+    let mut database = Database::new(unique_indexed_albums_schema(), storage)
+        .await
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    let mut batch = database.open_batch();
+    batch.delete("albums", PrimaryKeyValue::U64(7));
+    batch.insert(
+        "albums",
+        vec![Value::U64(8), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    assert_eq!(
+        record_values(
+            database
+                .index_scan(
+                    "albums",
+                    "unique_albums_by_title",
+                    &[Value::String("Blue Train".to_owned())],
+                )
+                .await
+                .unwrap()
+        ),
+        [vec![Value::U64(8), Value::String("Blue Train".to_owned())]]
+    );
+}
+
+#[futures_test::test]
 async fn durable_unique_indices_reject_positive_delta_for_existing_different_record() {
     let storage =
         MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
