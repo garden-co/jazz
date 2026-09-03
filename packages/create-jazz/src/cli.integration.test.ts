@@ -120,9 +120,9 @@ describe("create-jazz CLI end-to-end", () => {
       expect(fs.existsSync(appDir), "scaffolded directory should use the positional name").toBe(
         true,
       );
-      expect(
-        JSON.parse(fs.readFileSync(path.join(appDir, "package.json"), "utf-8")).name,
-      ).toBe("starter-before-name");
+      expect(JSON.parse(fs.readFileSync(path.join(appDir, "package.json"), "utf-8")).name).toBe(
+        "starter-before-name",
+      );
     },
   );
 
@@ -170,9 +170,9 @@ describe("create-jazz CLI end-to-end", () => {
       expect(fs.existsSync(appDir), "scaffolded directory should use the positional name").toBe(
         true,
       );
-      expect(
-        JSON.parse(fs.readFileSync(path.join(appDir, "package.json"), "utf-8")).name,
-      ).toBe("hosting-before-name");
+      expect(JSON.parse(fs.readFileSync(path.join(appDir, "package.json"), "utf-8")).name).toBe(
+        "hosting-before-name",
+      );
       expect(fs.existsSync(path.join(appDir, ".git")), "--no-git should be preserved").toBe(false);
     },
   );

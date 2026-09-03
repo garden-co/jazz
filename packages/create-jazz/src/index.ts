@@ -90,6 +90,18 @@ function readFlagValue(args: string[], name: string): string | undefined {
   return undefined;
 }
 
+function readAppName(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--starter" || arg === "--hosting") {
+      i++;
+      continue;
+    }
+    if (!arg.startsWith("-")) return arg;
+  }
+  return undefined;
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -102,8 +114,8 @@ async function main() {
 
   const gitOptOut = args.includes("--no-git");
 
-  // App name is the first non-flag argument
-  const argvName = args.find((a) => !a.startsWith("-"));
+  // App name is the first non-flag argument after recognized flag values.
+  const argvName = readAppName(args);
 
   // #146aff brand blue via 24-bit ANSI escape
   const blue = (s: string) => `\x1b[38;2;20;106;255m${s}\x1b[39m`;
