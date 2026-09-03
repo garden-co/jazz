@@ -1714,6 +1714,7 @@ where
         let confirmation_floor = node.committed_global_time();
         drop(node);
         let session_context = transport.connection_session_context();
+        let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
         let upstream_upload_destination =
             session_context.map(|context| UpstreamUploadDestination {
                 remote_node: *context.remote.node.as_bytes(),
@@ -1975,6 +1976,7 @@ where
                 self.local_chunk_reader.clone(),
                 connection_epoch,
                 PeerIoPumpRole::Upstream,
+                wire_inbound_context,
             ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
@@ -2230,6 +2232,7 @@ where
             .connection_session_context()
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+        let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
         let downstream_fates = Rc::new(RefCell::new(Vec::new()));
         let scope_mismatch = self
             .node
@@ -2313,6 +2316,7 @@ where
                 self.local_chunk_reader.clone(),
                 connection_epoch,
                 PeerIoPumpRole::Subscriber,
+                wire_inbound_context,
             ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
@@ -4039,6 +4043,12 @@ pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+
+    /// Return the immutable wire admission context paired with this transport.
+    #[doc(hidden)]
+    fn wire_inbound_context(&self) -> Option<crate::wire::WireInboundContext> {
+        None
+    }
 
     /// Immutable endpoint facts accepted by authenticated session admission.
     /// Semantic messages never self-assert this context.
