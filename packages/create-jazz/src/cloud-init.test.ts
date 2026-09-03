@@ -315,7 +315,7 @@ describe("runHostedInit", () => {
       expect(events[firstStepIdx]).toMatch(/provision/i);
     });
 
-    it("routes success output through onLog and does not call console.log", async () => {
+    it("routes redacted success output through onLog and does not call console.log", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
         appId: "app-frank",
         adminSecret: "admin-frank",
@@ -340,8 +340,10 @@ describe("runHostedInit", () => {
         .join("\n");
       expect(allInfo).toContain("app-frank");
       expect(allInfo).toContain("NEXT_PUBLIC_JAZZ_APP_ID=app-frank");
-      expect(allInfo).toContain("BACKEND_SECRET=backend-frank");
+      expect(allInfo).toContain(CLOUD_SYNC_URL);
       expect(allInfo).toContain("https://v2.dashboard.jazz.tools");
+      expect(allInfo).not.toContain("admin-frank");
+      expect(allInfo).not.toContain("backend-frank");
     });
 
     it("routes failure warnings through onLog and does not call console.warn", async () => {

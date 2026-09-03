@@ -53,15 +53,18 @@ export function writeHostedEnv({
     ? readFileSync(envPath, "utf8").replace(/\r\n/g, "\n").replace(/\r/g, "\n")
     : "";
   const parsed = parseEnv(existing);
-
   const vals = values as Record<string, string | undefined>;
 
-  // A key is missing only when it is entirely absent from the file
-  const missing = keys.filter((k) => !parsed.has(k));
-
-  const skippedWithDifferentValue = keys.filter((k) => {
-    const supplied = vals[k];
-    return parsed.has(k) && supplied && supplied !== parsed.get(k);
+  // Empty hosted values are placeholders, so a successful retry may replace them.
+  const replacements: Record<string, string> = {};
+  for (const key of keys) {
+    const supplied = vals[key];
+    if (parsed.get(key) === "" && supplied) replacements[key] = supplied;
+  }
+  const skippedWithDifferentValue = keys.filter((key) => {
+    const supplied = vals[key];
+    const existingValue = parsed.get(key);
+    return parsed.has(key) && existingValue !== "" && supplied && supplied !== existingValue;
   });
 
   if (skippedWithDifferentValue.length > 0) {
@@ -70,28 +73,39 @@ export function writeHostedEnv({
     );
   }
 
+  const missing = keys.filter((key) => !parsed.has(key));
+  const lines = existing.split("\n").map((line) => {
+    const eq = line.indexOf("=");
+    if (eq === -1) return line;
+    const key = line.slice(0, eq);
+    const replacement = replacements[key];
+    return replacement !== undefined && line.slice(eq + 1) === "" ? `${key}=${replacement}` : line;
+  });
+  let base = lines.join("\n");
+
+  // Remove the managed placeholder note once every hosted placeholder is filled.
+  const needsTodo = keys.some(
+    (key) => (replacements[key] ?? (parsed.has(key) ? parsed.get(key) : (vals[key] ?? ""))) === "",
+  );
+  if (Object.keys(replacements).length > 0 && !needsTodo) {
+    base = base
+      .split("\n")
+      .filter((line) => line !== TODO_COMMENT)
+      .join("\n");
+  }
+
   if (missing.length === 0) {
-    if (!existing.endsWith("\n")) {
-      writeFileSync(envPath, existing + "\n");
-    }
+    if (!base.endsWith("\n")) writeFileSync(envPath, base + "\n");
+    else if (base !== existing) writeFileSync(envPath, base);
     return;
   }
 
-  const additions: string[] = [];
-  for (const key of missing) {
-    additions.push(`${key}=${vals[key] ?? ""}`);
-  }
-
-  // TODO comment is needed when any final value (existing or newly added) is empty
-  const needsTodo =
-    additions.some((line) => line.endsWith("=")) ||
-    keys.some((k) => parsed.has(k) && parsed.get(k) === "");
-
-  let base = existing;
+  const additions = missing.map((key) => `${key}=${vals[key] ?? ""}`);
   if (base && !base.endsWith("\n")) base += "\n";
-
   const additionBlock = additions.join("\n") + "\n";
-  const content = needsTodo ? base + TODO_COMMENT + "\n" + additionBlock : base + additionBlock;
-
+  const content =
+    needsTodo && !base.includes(TODO_COMMENT)
+      ? base + TODO_COMMENT + "\n" + additionBlock
+      : base + additionBlock;
   writeFileSync(envPath, content);
 }
