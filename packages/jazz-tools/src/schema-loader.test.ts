@@ -8,6 +8,9 @@ const WITH_DEFAULTS_DIR = fileURLToPath(
   new URL("./testing/fixtures/with-defaults", import.meta.url),
 );
 const WITH_BIGINT_DIR = fileURLToPath(new URL("./testing/fixtures/with-bigint", import.meta.url));
+const WITH_ENUM_PAYLOAD_DEFAULTS_DIR = fileURLToPath(
+  new URL("./testing/fixtures/with-enum-payload-defaults", import.meta.url),
+);
 
 const defaultRemoveTempDirectory = schemaLoaderTestHooks.removeTempDirectory;
 afterEach(() => {
@@ -49,6 +52,21 @@ describe("loadCompiledSchema", () => {
         }),
       }),
     );
+  });
+
+  it("round-trips payload enum defaults from wasm schema exports", async () => {
+    const { app } = (await import("./testing/fixtures/with-enum-payload-defaults/schema.js")) as {
+      app: { wasmSchema: unknown };
+    };
+    const loaded = await loadCompiledSchema(WITH_ENUM_PAYLOAD_DEFAULTS_DIR);
+
+    expect(loaded.schema.tables[0]?.columns[0]?.default).toEqual({
+      type: "ready",
+      count: 7,
+      label: "live",
+      note: null,
+    });
+    expect(schemaToWasm(loaded.schema)).toEqual(app.wasmSchema);
   });
 
   it("loads typed-app BIGINT columns from wasm schema exports", async () => {
