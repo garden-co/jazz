@@ -1464,7 +1464,7 @@ impl OwnedWriteOperation {
     }
 }
 
-enum OverlayHandle<'a, T> {
+enum OverlayHandle<'a, T: ?Sized> {
     Borrowed(&'a T),
     Owned(Rc<T>),
 }
@@ -1478,7 +1478,7 @@ impl<T> Clone for OverlayHandle<'_, T> {
     }
 }
 
-impl<T> std::ops::Deref for OverlayHandle<'_, T> {
+impl<T: ?Sized> std::ops::Deref for OverlayHandle<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -1489,7 +1489,7 @@ impl<T> std::ops::Deref for OverlayHandle<'_, T> {
     }
 }
 
-pub struct StagedWriteOverlay<'a, S> {
+pub struct StagedWriteOverlay<'a, S: ?Sized> {
     base: OverlayHandle<'a, S>,
     staged_writes: OverlayHandle<'a, RefCell<StagedWriteState>>,
 }
@@ -1621,7 +1621,7 @@ where
     }
 }
 
-impl<'a, S> StagedWriteOverlay<'a, S> {
+impl<'a, S: ?Sized> StagedWriteOverlay<'a, S> {
     pub(crate) fn new(base: &'a S, staged_writes: &'a RefCell<StagedWriteState>) -> Self {
         Self {
             base: OverlayHandle::Borrowed(base),
@@ -1790,7 +1790,7 @@ fn overlay_scan<'a, S>(
     request: ScanRequest,
 ) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
 where
-    S: OrderedKvStorage,
+    S: OrderedKvStorage + ?Sized,
 {
     let cf = request.cf.clone();
     let bounds = request.bounds.clone();
@@ -1848,7 +1848,7 @@ where
     })
 }
 
-impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
+impl<S: ?Sized> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {

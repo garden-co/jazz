@@ -11,13 +11,15 @@ use super::evaluation_session::{
     EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
 };
 use super::*;
-use crate::storage::OwnedStorage;
+use crate::storage::{OwnedStorage, StagedWriteOverlay, StagedWriteState};
 
 /// Hydration can discover a large resident graph in one poll. Keep every
 /// owner turn bounded so a browser worker returns to transport ingress between
 /// CPU-only graph slices. Cold storage takes the separate request-pending path
 /// below; its waker is intentionally not used to classify the pending reason.
 const MAX_HYDRATION_RUNNABLE_NODES_PER_POLL: usize = 32;
+
+type PersistFlush<'a> = Pin<Box<dyn Future<Output = Result<(), IvmRuntimeError>> + 'a>>;
 
 /// Owned preparation state for one interruptible evaluation.
 ///
@@ -86,6 +88,10 @@ pub(super) struct IncrementalEvaluation<'a> {
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
     pending_binding_retractions: usize,
     pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
+    /// Derived writes use the same sparse overlay as their evaluation reads.
+    /// The owned flush future is retained across resident owner turns.
+    durable_writes: RefCell<StagedWriteState>,
+    persist_flush: Option<PersistFlush<'a>>,
     /// No independent root remains after a scoped failure, so this tick must
     /// not publish its staged globals.
     discarded: bool,
@@ -1031,6 +1037,21 @@ impl IncrementalEvaluation<'_> {
         }
 
         drop(evaluator);
+        if self.persist_flush.is_none() && !self.durable_writes.borrow().is_empty() {
+            let operations = std::mem::take(self.durable_writes.get_mut()).into_operations();
+            let storage = self.storage.clone();
+            self.persist_flush = Some(Box::pin(async move {
+                storage.as_ref().write_many(operations).await?;
+                Ok(())
+            }));
+        }
+        if let Some(flush) = &mut self.persist_flush {
+            match flush.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Ok(())) => self.persist_flush = None,
+            }
+        }
         self.install(runtime);
         runtime
             .operator_states
@@ -2207,6 +2228,7 @@ impl IvmRuntime {
             }
         }
         let current_tick = self.current_tick + 1;
+        let durable_writes = RefCell::new(StagedWriteState::default());
         let table_delta_records = table_deltas
             .iter()
             .map(|delta| delta.deltas.len())
@@ -2225,6 +2247,7 @@ impl IvmRuntime {
             &mut node_meta,
             &table_frontiers,
             &binding_frontiers,
+            &durable_writes,
         )
         .await?;
         bump_input_frontiers_staged(
@@ -2313,6 +2336,8 @@ impl IvmRuntime {
             node_meta,
             pending_binding_retractions,
             pending_notifications: Vec::new(),
+            durable_writes,
+            persist_flush: None,
             discarded: false,
         })
     }
@@ -2537,6 +2562,7 @@ impl IvmRuntime {
         node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
         table_frontiers: &HashMap<String, u64>,
         binding_frontiers: &HashMap<BindingSourceKey, u64>,
+        durable_writes: &RefCell<StagedWriteState>,
     ) -> Result<(), IvmRuntimeError> {
         let durable_nodes = affected_nodes
             .iter()
@@ -2548,6 +2574,7 @@ impl IvmRuntime {
             })
             .collect::<Vec<_>>();
         let binding_snapshots = self.binding_snapshot_deltas();
+        let durable_overlay = StagedWriteOverlay::new(storage, durable_writes);
         let mut metrics = TickMetrics::default();
         for node in durable_nodes {
             let graph_node = self
@@ -2578,7 +2605,7 @@ impl IvmRuntime {
                     binding_frontiers,
                     memo_use_clock,
                     node_meta,
-                    storage: Some(storage),
+                    storage: Some(&durable_overlay),
                     evaluation_inputs: None,
                     context: EvalContext::root(),
                     metrics: &mut metrics,
@@ -2588,7 +2615,7 @@ impl IvmRuntime {
                 evaluator.update_node(*input_node).await?.as_ref().clone()
             };
             apply_persist_delta(
-                storage,
+                &durable_overlay,
                 &persist.storage,
                 &persist.key_fields,
                 persist.unique,
