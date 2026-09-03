@@ -10,6 +10,7 @@ import {
   type RowOf,
 } from "../../src/index.js";
 import { createJazzClient } from "../../src/web/create-jazz-client.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
 import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import {
@@ -1099,8 +1100,8 @@ async function snapshotBobLocalExposure(
   privateMessageId: string,
 ): Promise<BobExposureSnapshot> {
   const [localChats, localMessages] = await Promise.all([
-    bob.all(app.chats, { tier: "local", propagation: "local-only" }),
-    bob.all(app.messages, { tier: "local", propagation: "local-only" }),
+    bob.all(app.chats, inspectorLocalQueryOptions()),
+    bob.all(app.messages, inspectorLocalQueryOptions()),
   ]);
 
   return {

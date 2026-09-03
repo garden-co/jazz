@@ -334,11 +334,14 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             };
             let edge_start = ctx.now_ms();
             let active = &mut participants[active_idx];
+            let policy_claims = raw_claims(active.peer.identity());
             let outcome = block_on(active.peer.ingest_edge_mergeable_commit_unit(
                 &mut active.edge.node,
                 tx,
                 versions,
                 u64::MAX,
+                u64::MAX,
+                policy_claims,
             ))
             .expect("edge ingest");
             let updates =
@@ -688,7 +691,9 @@ fn run_concurrent_live(
     install_participant_claims(&mut edge_node, config);
     apply_core_binding(&mut core, &shape, &binding);
     apply_binding(&mut edge_node, &shape, &binding);
-    let mut policy_peer = PeerState::relay();
+    // This direct benchmark helper represents one SYSTEM-scoped policy
+    // reader, not a multiplexing transport relay.
+    let mut policy_peer = PeerState::new();
     hydrate_edge_policy_direct(&mut core, &mut edge_node, &mut policy_peer);
 
     let mut writer_nodes = Vec::with_capacity(config.active);
@@ -1175,11 +1180,14 @@ fn run_edge_actor(
                 let start = Instant::now();
                 let writer_peer = writer_peers.get_mut(&writer_idx).expect("writer edge peer");
                 let now_ms = epoch.elapsed().as_millis() as u64;
+                let policy_claims = raw_claims(writer_peer.identity());
                 let outcome = block_on(writer_peer.ingest_edge_mergeable_commit_unit(
                     &mut edge_node,
                     tx,
                     versions,
                     now_ms,
+                    now_ms,
+                    policy_claims,
                 ))
                 .expect("edge ingest");
                 let mut updates =
@@ -1507,6 +1515,7 @@ fn apply_core_binding(
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .unwrap();
@@ -2319,6 +2328,7 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .unwrap();
@@ -2356,6 +2366,7 @@ fn register_binding(
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .unwrap();
@@ -2397,7 +2408,9 @@ fn open_participant(
             node: edge_node,
             _dir: edge_dir,
             core_peer: PeerState::client_link(identity),
-            policy_peer: PeerState::relay(),
+            // Policy hydration is invoked directly in this simulation. It
+            // never carries a downstream session through a relay transport.
+            policy_peer: PeerState::new(),
         },
     }
 }

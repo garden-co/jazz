@@ -225,6 +225,7 @@ pub(super) fn analyze_query_plan(
     };
     let plan = plan_with_default_result_order(plan, request);
     validate_output_capabilities(request, &plan, &mut gaps);
+    validate_recursive_arg_by_capabilities(&plan, &mut gaps);
 
     for plan_source in analyzed_plan_sources(&plan) {
         let read_source = request.reads.primary.sources.get(&plan_source);
@@ -345,6 +346,59 @@ pub(super) fn validate_output_capabilities(
     gaps.push(UnsupportedReason::Operator(
         "maintained subscription view window shape is not lowered yet".to_owned(),
     ));
+}
+
+fn validate_recursive_arg_by_capabilities(
+    plan: &AnalyzedQueryPlan,
+    gaps: &mut Vec<UnsupportedReason>,
+) {
+    if collect_plan_fragments(plan)
+        .recursives
+        .into_iter()
+        .any(logical_recursive_plan_contains_arg_by)
+    {
+        gaps.push(UnsupportedReason::Operator(
+            "arg_max_by and arg_min_by are not supported inside recursive seed or step graphs"
+                .to_owned(),
+        ));
+    }
+}
+
+fn logical_recursive_plan_contains_arg_by(relation: &RecursiveRelationPlan) -> bool {
+    let mut linear_plans = vec![&relation.seed, &relation.step];
+    let mut relation_inputs = Vec::new();
+    loop {
+        if let Some(plan) = linear_plans.pop() {
+            let mut pending_order_is_empty = true;
+            for step in &plan.steps {
+                match step {
+                    LinearStep::OrderBy(keys) => pending_order_is_empty = keys.is_empty(),
+                    LinearStep::Slice { limit, offset, .. } => {
+                        if pending_order_is_empty && *offset == 0 && *limit == Some(1) {
+                            return true;
+                        }
+                        pending_order_is_empty = true;
+                    }
+                    LinearStep::Aggregate { .. } => pending_order_is_empty = true,
+                    LinearStep::Join { right, .. } => relation_inputs.push(right.as_ref()),
+                    LinearStep::Filter(_) | LinearStep::Project(_) => {}
+                }
+            }
+            continue;
+        }
+        let Some(input) = relation_inputs.pop() else {
+            return false;
+        };
+        match input {
+            RelationInputPlan::Linear(plan) => linear_plans.push(plan),
+            RelationInputPlan::Union(union) => {
+                relation_inputs.extend(union.branches.iter().map(|branch| &branch.plan));
+            }
+            RelationInputPlan::Recursive(nested) => {
+                linear_plans.extend([&nested.seed, &nested.step]);
+            }
+        }
+    }
 }
 
 /// Row-valued root windows have a public default order when callers do not
@@ -999,14 +1053,15 @@ fn supported_current_storage_projection(
         | SourceExpr::SettledBindingView {
             projection,
             binding_view: _,
-            rows: _,
-            requires_result_payload: _,
+            authority_result_key: _,
         } => Some(projection),
         SourceExpr::WithOverlays { input, overlays } => {
-            if overlays
-                .entries
-                .iter()
-                .all(|overlay| matches!(overlay, OverlayRef::OpenTransaction(_)))
+            if (overlays.entries == [OverlayRef::PendingLocal]
+                && matches!(input.as_ref(), SourceExpr::SettledBindingView { .. }))
+                || overlays
+                    .entries
+                    .iter()
+                    .all(|overlay| matches!(overlay, OverlayRef::OpenTransaction(_)))
             {
                 supported_current_storage_projection(Some(input.as_ref()))
             } else {

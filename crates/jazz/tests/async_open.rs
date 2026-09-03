@@ -1,17 +1,23 @@
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, LocalUpdates, Propagation, ReadOpts};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ExclusiveTxOps, LocalUpdates, Propagation, ReadOpts, Transport,
+};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::protocol::SyncMessage;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
+use jazz::wire::TransportError;
 
 fn schema() -> JazzSchema {
     let source = SchemaBuilder::new()
@@ -21,14 +27,46 @@ fn schema() -> JazzSchema {
 }
 
 fn config(storage: TestStorage) -> DbConfig<TestStorage> {
-    DbConfig::new(
-        schema(),
+    config_for(
         storage,
-        DbIdentity {
-            node: NodeUuid::from_bytes([0x31; 16]),
-            author: AuthorSubject::for_test_bytes([0x41; 16]),
-        },
+        NodeUuid::from_bytes([0x31; 16]),
+        AuthorSubject::for_test_bytes([0x41; 16]),
     )
+}
+
+fn config_for(
+    storage: TestStorage,
+    node: NodeUuid,
+    author: AuthorSubject,
+) -> DbConfig<TestStorage> {
+    DbConfig::new(schema(), storage, DbIdentity { node, author })
+}
+
+#[derive(Default)]
+struct SubscriptionWireCounts {
+    subscribes: Cell<usize>,
+    unsubscribes: Cell<usize>,
+}
+
+struct CountingTransport {
+    counts: Rc<SubscriptionWireCounts>,
+}
+
+impl Transport for CountingTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        match message {
+            SyncMessage::Subscribe(_) => self.counts.subscribes.update(|count| count + 1),
+            SyncMessage::Unsubscribe { .. } => {
+                self.counts.unsubscribes.update(|count| count + 1);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        None
+    }
 }
 
 #[test]
@@ -189,11 +227,11 @@ fn exclusive_transaction_relation_snapshot_suspends_on_cold_storage() {
     assert_eq!(snapshot.root_count, 1);
 }
 
-/// Alice explicitly closes a subscription. Closing queues the same command as
-/// Drop, waits for its tick acknowledgement, and remains harmless when called
-/// again or after the database has begun shutdown.
+/// Alice explicitly closes a subscription without installing a scheduler or
+/// driving a separate database tick. Repeated and post-shutdown closes remain
+/// harmless, while plain Drop keeps its queued-cleanup behaviour.
 #[test]
-fn explicit_subscription_close_waits_for_tick_and_is_idempotent_through_shutdown() {
+fn explicit_subscription_close_drives_finalization_without_an_external_tick() {
     let schema = schema();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -210,49 +248,32 @@ fn explicit_subscription_close_waits_for_tick_and_is_idempotent_through_shutdown
     };
     let mut subscription =
         block_on(db.subscribe(&prepared, opts.clone())).expect("open subscription");
-    let mut close = Box::pin(subscription.close());
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    assert!(matches!(
-        Pin::new(&mut close).poll(&mut context),
-        Poll::Pending
-    ));
-    block_on(db.tick()).expect("drain explicit close command");
-    assert!(matches!(
-        Pin::new(&mut close).poll(&mut context),
-        Poll::Ready(Ok(()))
-    ));
-    drop(close);
-    assert_eq!(db.active_groove_subscriptions_for_test(), 0);
 
+    block_on(subscription.close()).expect("explicit close drives its own finalization");
+    assert_eq!(db.active_groove_subscriptions_for_test(), 0);
     assert!(
         block_on(subscription.next()).is_none(),
         "explicit close must make the public Stream terminal, not merely stop its producer"
     );
-
     block_on(subscription.close()).expect("repeated close is a no-op");
-    let mut cancelled_close =
-        block_on(db.subscribe(&prepared, opts.clone())).expect("open cancellation-safe close");
-    let mut close_future = Box::pin(cancelled_close.close());
-    assert!(matches!(
-        Pin::new(&mut close_future).poll(&mut context),
-        Poll::Pending
-    ));
-    drop(close_future);
-    // The initial reset is still buffered. Both inherent helpers must agree
-    // with `Stream::poll_next`: cancellation of close does not make a closed
-    // stream expose pre-close events.
     assert!(
-        block_on(cancelled_close.next_event()).is_none(),
-        "next_event must honor terminal close before inspecting buffered events"
+        block_on(subscription.next_event()).is_none(),
+        "explicit close must terminate next_event"
     );
     assert!(
-        cancelled_close.try_next_event().is_none(),
-        "try_next_event must honor terminal close before inspecting buffered events"
+        subscription.try_next_event().is_none(),
+        "explicit close must terminate try_next_event"
     );
-    block_on(db.tick()).expect("dropped close future leaves its command queued");
+
+    let dropped = block_on(db.subscribe(&prepared, opts.clone())).expect("open dropped stream");
+    drop(dropped);
+    assert_eq!(
+        db.active_groove_subscriptions_for_test(),
+        1,
+        "plain Drop must remain non-blocking until the next owner turn"
+    );
+    block_on(db.tick()).expect("tick drains the plain Drop command");
     assert_eq!(db.active_groove_subscriptions_for_test(), 0);
-    block_on(cancelled_close.close()).expect("queued close remains idempotent");
 
     let mut post_shutdown = block_on(db.subscribe(&prepared, opts)).expect("open shutdown stream");
     block_on(db.close()).expect("close db after finalization");
@@ -262,6 +283,119 @@ fn explicit_subscription_close_waits_for_tick_and_is_idempotent_through_shutdown
         "Db::close retires live maintained views before storage shutdown"
     );
     block_on(post_shutdown.close()).expect("post-shutdown close is safely invalidated");
+}
+
+/// A close suspended behind the node owner remains owned by the stream. If the
+/// caller cancels that future, a retry must rejoin the same completion rather
+/// than report success while the maintained subscription is still resident.
+#[test]
+fn cancelled_subscription_close_rejoins_blocked_finalization_without_a_tick() {
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db =
+        block_on(Db::open(config(TestStorage::new(&refs)))).expect("open subscription test db");
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare todos query");
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut subscription =
+        block_on(db.subscribe(&prepared, opts.clone())).expect("open subscription");
+
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut node_owner = Box::pin(db.hold_node_owner_for_test());
+    assert!(matches!(
+        node_owner.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+
+    let mut first_close = Box::pin(subscription.close());
+    assert!(matches!(
+        first_close.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(first_close);
+    assert!(subscription.try_next_event().is_none());
+    assert!(block_on(subscription.next_event()).is_none());
+    assert!(block_on(subscription.next()).is_none());
+
+    let mut retry = Box::pin(subscription.close());
+    assert!(
+        matches!(retry.as_mut().poll(&mut context), Poll::Pending),
+        "retry must await the retained completion while the node remains blocked"
+    );
+    drop(node_owner);
+
+    block_on(retry).expect("retry resumes and completes the original finalization");
+    assert_eq!(db.active_groove_subscriptions_for_test(), 0);
+    block_on(subscription.close()).expect("completed close remains idempotent");
+}
+
+/// Two propagated streams share one upstream coverage owner. Closing the first
+/// retires only its local ownership. Closing the last retires shared ownership
+/// immediately, while the wire Unsubscribe remains connection-tick delivery.
+#[test]
+fn propagated_close_retires_shared_ownership_before_wire_unsubscribe_delivery() {
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let client = block_on(Db::open(config_for(
+        TestStorage::new(&refs),
+        NodeUuid::from_bytes([0x51; 16]),
+        AuthorSubject::for_test_bytes([0x61; 16]),
+    )))
+    .expect("open client");
+    let wire_counts = Rc::new(SubscriptionWireCounts::default());
+    let _upstream = block_on(client.connect_upstream(Box::new(CountingTransport {
+        counts: Rc::clone(&wire_counts),
+    })));
+    let prepared = client
+        .prepare_query(&client.table("todos"))
+        .expect("prepare propagated query");
+    let mut first =
+        block_on(client.subscribe(&prepared, ReadOpts::default())).expect("open first stream");
+    let mut second =
+        block_on(client.subscribe(&prepared, ReadOpts::default())).expect("open second stream");
+
+    block_on(client.tick()).expect("send shared subscription");
+    assert_eq!(
+        wire_counts.subscribes.get(),
+        1,
+        "shared propagated coverage must send one Subscribe"
+    );
+    assert_eq!(client.query_coverage_attachment_counts_for_test().0, 1);
+
+    block_on(first.close()).expect("close first shared owner");
+    assert_eq!(client.active_groove_subscriptions_for_test(), 1);
+    assert_eq!(client.query_coverage_attachment_counts_for_test().0, 1);
+    block_on(client.tick()).expect("flush after first owner closes");
+    assert_eq!(
+        wire_counts.unsubscribes.get(),
+        0,
+        "the first close must preserve shared upstream coverage"
+    );
+
+    block_on(second.close()).expect("close final shared owner");
+    assert_eq!(client.active_groove_subscriptions_for_test(), 0);
+    assert_eq!(client.query_coverage_attachment_counts_for_test().0, 0);
+    assert_eq!(
+        wire_counts.unsubscribes.get(),
+        0,
+        "close acknowledges local ownership retirement before wire delivery"
+    );
+    block_on(second.close()).expect("repeat final close before wire delivery");
+    block_on(client.tick()).expect("deliver final Unsubscribe");
+    assert_eq!(
+        wire_counts.unsubscribes.get(),
+        1,
+        "the last shared owner must queue exactly one wire Unsubscribe"
+    );
 }
 
 /// Closing the database closes finalization admission before its storage close

@@ -288,6 +288,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("syncs a todo between two app instances through the server", async () => {
+    (globalThis as { __JAZZ_SUBSCRIPTION_TRACE__?: boolean }).__JAZZ_SUBSCRIPTION_TRACE__ = true;
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
 
     // Mount two independent app instances connected to the same server

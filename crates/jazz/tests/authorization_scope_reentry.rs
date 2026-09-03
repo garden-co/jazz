@@ -261,8 +261,9 @@ fn exact_mixed_reentry_delta(
     )
 }
 
-/// A write-only session cannot mutate a read-hidden row, even with a complete
-/// replacement, through an ordinary facade or a mergeable transaction.
+/// A write-only session cannot mutate a read-hidden row through the trusted
+/// identity facade. Ordinary and transaction writes instead stage locally for
+/// the authority to decide after upload.
 ///
 /// writer ──full/partial update or upsert──► hidden document ──► denied
 #[test]
@@ -338,7 +339,7 @@ fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
     );
     assert_eq!(ordered_page(&db, reader(), &prepared), vec![winner, second]);
 
-    let transaction_error = match block_on(db.transaction_for_identity(writer(), async |tx| {
+    block_on(db.transaction_for_identity(writer(), async |tx| {
         tx.update(
             DOCUMENTS,
             winner,
@@ -346,28 +347,19 @@ fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
             Default::default(),
         )
         .await
-    })) {
-        Ok(_) => panic!("write-only transaction update must be denied"),
-        Err(error) => error,
-    };
-    assert_eq!(transaction_error.code, ErrorCode::WriteRejected);
-    assert!(transaction_error.message.contains("UPDATE"));
+    }))
+    .expect("mergeable transaction stages its write for authority admission");
 
-    let transaction_upsert_error =
-        match block_on(db.transaction_for_identity(writer(), async |tx| {
-            tx.upsert(
-                DOCUMENTS,
-                winner,
-                BTreeMap::from([("rank".to_owned(), Value::U64(5))]),
-                Default::default(),
-            )
-            .await
-        })) {
-            Ok(_) => panic!("write-only transaction upsert must be denied"),
-            Err(error) => error,
-        };
-    assert_eq!(transaction_upsert_error.code, ErrorCode::WriteRejected);
-    assert!(transaction_upsert_error.message.contains("UPSERT"));
+    block_on(db.transaction_for_identity(writer(), async |tx| {
+        tx.upsert(
+            DOCUMENTS,
+            winner,
+            BTreeMap::from([("rank".to_owned(), Value::U64(5))]),
+            Default::default(),
+        )
+        .await
+    }))
+    .expect("mergeable transaction stages its upsert for authority admission");
 
     let upsert_error = match block_on(db.upsert(
         DOCUMENTS,

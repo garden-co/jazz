@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { loadEnvFileIntoProcessEnv } from "./env-file.js";
+import { loadEnvFileIntoProcessEnv, resolveViteEnvDir, type ViteEnvConfig } from "./env-file.js";
 import { ManagedDevRuntime, type ManagedRuntime } from "./managed-runtime.js";
 import { resolveJazzWasmEntry } from "./vite.js";
 import type {
@@ -31,6 +31,8 @@ interface ViteServerConfigLike {
 
 interface ViteUserConfigLike {
   root?: string;
+  envDir?: ViteEnvConfig["envDir"];
+  envFile?: ViteEnvConfig["envFile"];
   server?: ViteServerConfigLike;
   ssr?: { external?: true | string[] };
   optimizeDeps?: { exclude?: string[] };
@@ -127,9 +129,11 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   async function ensureInitialised(
     serverConfig: ViteServerConfigLike | undefined,
     root: string,
+    envDir: string | false,
+    mode: string,
   ): Promise<ManagedRuntime> {
     if (managed) return managed;
-    loadEnvFileIntoProcessEnv(root);
+    await loadEnvFileIntoProcessEnv(envDir, mode);
     managed = await runtime.initialize(buildInitOptions(serverConfig, root));
     return managed;
   }
@@ -152,7 +156,12 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         return merged;
       }
       const root = config.root ? resolve(config.root) : process.cwd();
-      return ensureInitialised(config.server, root).then(() => merged);
+      return ensureInitialised(
+        config.server,
+        root,
+        resolveViteEnvDir(root, config),
+        env.mode ?? "development",
+      ).then(() => merged);
     },
 
     async configureServer(viteServer: ViteDevServer): Promise<void> {
@@ -161,7 +170,12 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
 
       let resolvedRuntime: ManagedRuntime;
       try {
-        resolvedRuntime = await ensureInitialised(viteServer.config.server, viteServer.config.root);
+        resolvedRuntime = await ensureInitialised(
+          viteServer.config.server,
+          viteServer.config.root,
+          viteServer.config.envDir ?? viteServer.config.root,
+          viteServer.config.mode ?? "development",
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         viteServer.ws.send({

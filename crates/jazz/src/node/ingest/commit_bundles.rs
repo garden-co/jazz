@@ -169,6 +169,7 @@ where
             identity,
             trust: CommitUnitTrust::TrustedBackend,
             edge_authority: true,
+            admitted_write_authorization: false,
         });
         let mut updates = self.ingest_edge_authority_mergeable_commit_unit_once(
             tx,
@@ -472,7 +473,7 @@ where
             global_time: Some(global_time),
             durability: Some(durability),
         }]);
-        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows).await?);
+        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Core).await?);
         Ok(outcome)
     }
 
@@ -639,6 +640,18 @@ where
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        // Validate untrusted metadata before a missing ordinary history parent
+        // can park the unit. Otherwise malformed provenance would leave an
+        // inert parked receipt instead of producing its terminal fate.
+        if self
+            .validate_contribution_merge_operation_identities(&tx)
+            .is_err()
+        {
+            return self
+                .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
@@ -745,7 +758,7 @@ where
             global_time: Some(global_time),
             durability: Some(durability),
         }]);
-        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows).await?);
+        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Core).await?);
         Ok(outcome)
     }
 
@@ -828,6 +841,15 @@ where
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        if self
+            .validate_contribution_merge_operation_identities(&tx)
+            .is_err()
+        {
+            return self
+                .reject_malformed_commit(tx, "invalid contribution provenance".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
@@ -892,13 +914,16 @@ where
 
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Edge;
+        let merge_rows = self.merge_rows_for_versions(&versions)?;
         self.ingest_known_transaction(tx.clone(), versions, fate.clone(), None, durability).await?;
-        Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
+        let mut outcome = PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
             global_time: None,
             durability: Some(durability),
-        }]))
+        }]);
+        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Edge).await?);
+        Ok(outcome)
     }
 
     pub(super) async fn ingest_known_transaction(

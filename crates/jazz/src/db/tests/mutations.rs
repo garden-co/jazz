@@ -2,6 +2,33 @@
 
 use super::*;
 
+/// Test-only capability wrapper for a transport whose remote endpoint was
+/// authenticated and admitted as a trusted backend.  The transport capability
+/// is deliberately separate from `accept_subscriber_with_trust`: accepting a
+/// peer does not let an arbitrary client-side transport self-authorize
+/// delegated session bindings.
+struct TrustedBackendTransport {
+    inner: Box<dyn Transport>,
+}
+
+impl Transport for TrustedBackendTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), crate::wire::TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        true
+    }
+}
+
 /// JSON pointer writes use the RFC 6901 array-index grammar, so a caller
 /// cannot mutate `alice`'s first array member through a leading-zero path that
 /// an equivalent read treats as absent.
@@ -100,6 +127,24 @@ fn branch_update_read_policy_schema() -> JazzSchema {
     )
 }
 
+fn branch_upsert_rule_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch", PublicColumnType::Text)
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .branch_by("branch"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("root_todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean),
+            ),
+    )
+}
+
 #[test]
 fn admitted_server_authorizes_branch_write_through_referenced_application_row() {
     let schema = branch_column_reference_policy_schema();
@@ -163,7 +208,9 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
 }
 
 /// A session that can satisfy `UPDATE` policy but cannot select a branch row
-/// cannot update it through either the facade or a mergeable transaction.
+/// cannot update it through the immediate facade. A mergeable transaction may
+/// stage the same structural mutation, but the fate authority must reject it
+/// from its complete policy inputs.
 ///
 /// mallory ──update branch row──► read-hidden source ──► denied
 #[test]
@@ -246,7 +293,10 @@ fn session_branch_updates_require_read_visibility_before_staging() {
         BTreeMap::from([("published".to_owned(), Value::Bool(true))]),
         crate::db::UpsertOptions {
             identity: crate::db::WriteIdentity::Session(writer),
-            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            target: crate::db::WriteTarget::BranchView {
+                head: branch.clone(),
+                base: None,
+            },
             ..Default::default()
         },
     )) {
@@ -256,7 +306,7 @@ fn session_branch_updates_require_read_visibility_before_staging() {
     assert_eq!(upsert_error.code, crate::db::ErrorCode::WriteRejected);
     assert!(upsert_error.message.contains("UPSERT"));
 
-    let transaction_error = block_on(db.transaction_for_identity(writer, async |tx| {
+    let (_, tx_id) = block_on(db.transaction_for_identity(writer, async |tx| {
         tx.update(
             "todos",
             row_id,
@@ -271,9 +321,17 @@ fn session_branch_updates_require_read_visibility_before_staging() {
         )
         .await
     }))
-    .expect_err("transaction branch update must require read visibility");
-    assert_eq!(transaction_error.code, crate::db::ErrorCode::WriteRejected);
-    assert!(transaction_error.message.contains("UPDATE"));
+    .expect("mergeable client staging must not issue a policy verdict");
+    db.finalize_local_mergeable_commit_for_test(tx_id)
+        .expect("history-complete fate authority settles the staged write");
+    let transaction_state = db.write_state(tx_id).expect("staged transaction state");
+    assert!(matches!(
+        transaction_state,
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        }
+    ));
 
     assert!(
         block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))
@@ -426,6 +484,259 @@ fn point_update_preimage_fast_path_preserves_target_and_policy_dispatch() {
         1,
         "a table with a read policy must retain ClientLocal point-query dispatch"
     );
+}
+
+#[test]
+fn branch_view_upserts_reject_tombstones_and_preserve_other_insertability_cases() {
+    let schema = branch_upsert_rule_schema();
+    let db = open_db(0x7d, AuthorSubject::SYSTEM, &schema);
+    let query = db.table("todos");
+    let root_query = db.table("root_todos");
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .expect("todos table");
+    let base = BranchSelector::new([("branch", Value::String("base".to_owned()))]);
+    let head = BranchSelector::new([("branch", Value::String("head".to_owned()))]);
+    let standalone_tombstone = row(0x7e);
+    let standalone_inherited = row(0x7f);
+    let standalone_absent = row(0x80);
+    let transaction_tombstone = row(0x81);
+    let transaction_inherited = row(0x82);
+    let transaction_absent = row(0x83);
+    let standalone_root_tombstone = row(0x84);
+    let transaction_root_tombstone = row(0x85);
+
+    for (row_id, title) in [
+        (standalone_tombstone, "standalone tombstone"),
+        (standalone_inherited, "standalone inherited"),
+        (transaction_tombstone, "transaction tombstone"),
+        (transaction_inherited, "transaction inherited"),
+    ] {
+        block_on(db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                target: crate::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed base row");
+    }
+    for (row_id, title) in [
+        (standalone_root_tombstone, "standalone root tombstone"),
+        (transaction_root_tombstone, "transaction root tombstone"),
+    ] {
+        block_on(db.insert(
+            "root_todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        ))
+        .expect("seed root row");
+    }
+
+    for row_id in [standalone_tombstone, transaction_tombstone] {
+        block_on(db.delete(
+            "todos",
+            row_id,
+            crate::db::DeleteOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::current(base.clone())),
+                },
+                ..Default::default()
+            },
+        ))
+        .expect("create head-local tombstone");
+    }
+    for row_id in [standalone_root_tombstone, transaction_root_tombstone] {
+        block_on(db.delete("root_todos", row_id, Default::default()))
+            .expect("create root tombstone");
+    }
+
+    let standalone_tombstone_error = expect_error(block_on(db.upsert(
+        "todos",
+        standalone_tombstone,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        crate::db::UpsertOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::current(base.clone())),
+            },
+            ..Default::default()
+        },
+    )));
+    assert_eq!(
+        standalone_tombstone_error.code,
+        crate::db::ErrorCode::WriteRejected
+    );
+    assert!(
+        standalone_tombstone_error
+            .message
+            .contains("already deleted")
+    );
+
+    block_on(db.upsert(
+        "todos",
+        standalone_inherited,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        crate::db::UpsertOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("copy and patch inherited row");
+    block_on(db.upsert(
+        "todos",
+        standalone_absent,
+        BTreeMap::from([
+            (
+                "title".to_owned(),
+                Value::String("standalone absent".to_owned()),
+            ),
+            ("done".to_owned(), Value::Bool(true)),
+        ]),
+        crate::db::UpsertOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("insert absent row in head");
+    let standalone_root_error = expect_error(block_on(db.upsert(
+        "root_todos",
+        standalone_root_tombstone,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )));
+    assert_eq!(
+        standalone_root_error.code,
+        crate::db::ErrorCode::WriteRejected
+    );
+    assert!(standalone_root_error.message.contains("already deleted"));
+
+    block_on(db.transaction(async |tx| {
+        let branch_target = || crate::db::WriteTarget::BranchView {
+            head: head.clone(),
+            base: Some(BranchViewBase::current(base.clone())),
+        };
+        let tombstone_error = tx
+            .upsert(
+                "todos",
+                transaction_tombstone,
+                BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+                crate::db::UpsertOptions {
+                    target: branch_target(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("transaction branch upsert must reject a head tombstone");
+        assert_eq!(tombstone_error.code, crate::db::ErrorCode::WriteRejected);
+        assert!(tombstone_error.message.contains("already deleted"));
+
+        tx.upsert(
+            "todos",
+            transaction_inherited,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            crate::db::UpsertOptions {
+                target: branch_target(),
+                ..Default::default()
+            },
+        )
+        .await?;
+        tx.upsert(
+            "todos",
+            transaction_absent,
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("transaction absent".to_owned()),
+                ),
+                ("done".to_owned(), Value::Bool(true)),
+            ]),
+            crate::db::UpsertOptions {
+                target: branch_target(),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let root_error = tx
+            .upsert(
+                "root_todos",
+                transaction_root_tombstone,
+                BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+                Default::default(),
+            )
+            .await
+            .expect_err("transaction root upsert must match standalone tombstone rejection");
+        assert_eq!(root_error.code, crate::db::ErrorCode::WriteRejected);
+        assert!(root_error.message.contains("already deleted"));
+        Ok(())
+    }))
+    .expect("commit accepted branch upserts");
+
+    block_on(async {
+        let mut node = db.node.node.lock().await;
+        for row_id in [standalone_tombstone, transaction_tombstone] {
+            assert!(
+                node.local_content_winner_tx_id_in_branch("todos", &head, row_id)
+                    .await
+                    .expect("inspect rejected branch upsert")
+                    .is_none(),
+                "rejected branch upsert must not emit tombstone-hidden content"
+            );
+        }
+    });
+
+    let branch_rows = prepared_all(
+        &db,
+        &query,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        }
+        .branch_view(head.clone(), Some(BranchViewBase::current(base.clone()))),
+    );
+    assert!(!row_ids(&branch_rows).contains(&standalone_tombstone));
+    assert!(!row_ids(&branch_rows).contains(&transaction_tombstone));
+    for (row_id, title) in [
+        (standalone_inherited, "standalone inherited"),
+        (standalone_absent, "standalone absent"),
+        (transaction_inherited, "transaction inherited"),
+        (transaction_absent, "transaction absent"),
+    ] {
+        let visible = branch_rows
+            .iter()
+            .find(|current| current.row_uuid() == row_id)
+            .expect("successful branch upsert must be visible");
+        assert_eq!(
+            visible.cell(table, "title"),
+            Some(Value::String(title.to_owned()))
+        );
+        assert_eq!(visible.cell(table, "done"), Some(Value::Bool(true)));
+    }
+
+    let root_rows = prepared_read(&db, &root_query);
+    assert!(!row_ids(&root_rows).contains(&standalone_root_tombstone));
+    assert!(!row_ids(&root_rows).contains(&transaction_root_tombstone));
 }
 
 #[test]
@@ -2532,7 +2843,10 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _upstream =
+        crate::db::block_on(backend.connect_upstream(Box::new(TrustedBackendTransport {
+            inner: backend_transport,
+        })));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,
@@ -2613,7 +2927,10 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _upstream =
+        crate::db::block_on(backend.connect_upstream(Box::new(TrustedBackendTransport {
+            inner: backend_transport,
+        })));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,
@@ -3012,7 +3329,10 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
             BTreeMap::new(),
             crate::db::UpsertOptions {
                 identity: attributed,
-                target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch.clone(),
+                    base: None,
+                },
                 ..Default::default()
             },
         )),
@@ -3257,4 +3577,271 @@ fn default_insert_keeps_subject_and_made_by_equal() {
 
     assert_eq!(tx.made_by, owner);
     assert_eq!(prepared_read(&db, &db.table("todos")).len(), 1);
+}
+
+fn queued_local_publication(db: &Db<RocksDbStorage>, expects_upload_unit: bool) -> TxId {
+    let publications = db.node.pending_local_publications.borrow();
+    assert_eq!(
+        publications.len(),
+        1,
+        "publication must cross into node ownership before refresh returns"
+    );
+    let publication = publications.front().unwrap();
+    assert_eq!(publication.upload_unit.is_some(), expects_upload_unit);
+    publication.published.tx_id()
+}
+
+fn cancel_during_subscription_refresh<F, T>(
+    db: &Db<RocksDbStorage>,
+    future: F,
+    expects_upload_unit: bool,
+) -> TxId
+where
+    F: Future<Output = Result<T, Error>>,
+{
+    db.stall_next_subscription_refresh.set(true);
+    let mut future = Box::pin(future);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+
+    for _ in 0..128 {
+        match future.as_mut().poll(&mut context) {
+            Poll::Pending => {}
+            Poll::Ready(Ok(_)) => {
+                panic!("commit completed instead of stalling in subscription refresh")
+            }
+            Poll::Ready(Err(error)) => {
+                panic!("commit failed before stalled subscription refresh: {error}")
+            }
+        }
+        if !db.node.pending_local_publications.borrow().is_empty() {
+            let tx_id = queued_local_publication(db, expects_upload_unit);
+            drop(future);
+            return tx_id;
+        }
+    }
+    panic!("publication never transferred to the node-owned persistence queue")
+}
+
+fn settle_cancelled_local_publication(db: &Db<RocksDbStorage>, tx_id: TxId) {
+    block_on(db.tick()).unwrap();
+    assert!(db.node.pending_local_publications.borrow().is_empty());
+    assert_eq!(
+        db.write_state(tx_id).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            global_time: None,
+        },
+        "a cancelled caller must not abandon node-owned persistence"
+    );
+}
+fn assert_internal_subscription_refresh_failure(subscription: &mut SubscriptionStream) {
+    let event = block_on(subscription.next_raw()).expect("refresh failure event");
+    assert_eq!(
+        event,
+        SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        }
+    );
+}
+
+/// A deferred local writer transfers its publication to the node queue before
+/// its affected subscription refresh fails; a sibling stream still receives
+/// its delta, and the later runtime tick persists the queued write.
+#[test]
+fn deferred_write_refresh_error_returns_committed_handle_and_keeps_persistence_owned() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let db = open_db(0xa2, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let _opening = block_on(subscription.next_raw()).unwrap();
+
+    db.fail_next_subscription_refresh.set(true);
+    let write = block_on(db.insert(
+        "todos",
+        cells("persist me", false, owner),
+        Default::default(),
+    ))
+    .expect("publication-owned write must return its handle");
+
+    let published = queued_local_publication(&db, false);
+    assert_eq!(published, write.mergeable_tx_id());
+    assert_internal_subscription_refresh_failure(&mut subscription);
+    settle_cancelled_local_publication(&db, published);
+    assert_eq!(
+        block_on(write.wait(DurabilityTier::Local)).unwrap(),
+        published
+    );
+}
+
+/// A synchronous local writer persists before refreshing subscriptions: the
+/// affected stream becomes terminal with its original error, while its sibling
+/// keeps receiving later deltas without turning either write into a failure.
+#[test]
+fn persisted_write_refresh_error_returns_committed_handle() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let db = open_db(0xa6, owner, &schema);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let _opening = block_on(subscription.next_raw()).unwrap();
+
+    db.fail_next_subscription_refresh.set(true);
+    let write = block_on(db.insert(
+        "todos",
+        cells("already persisted", false, owner),
+        Default::default(),
+    ))
+    .expect("persisted write must not report observer refresh as commit failure");
+
+    assert!(db.node.pending_local_publications.borrow().is_empty());
+    assert_eq!(
+        db.write_state(write.mergeable_tx_id()).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            global_time: None,
+        }
+    );
+    assert_internal_subscription_refresh_failure(&mut subscription);
+}
+
+/// One deferred local writer publishes two transactions; the node runtime must
+/// persist and enqueue both exactly once, in authoring order, before a later
+/// idle tick can revisit the outbox.
+#[test]
+fn deferred_local_publications_persist_and_enqueue_in_publication_order_once() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let db = open_db(0xa7, owner, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let first = block_on(db.insert(
+        "todos",
+        cells("first ordered publication", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    let second = block_on(db.insert(
+        "todos",
+        cells("second ordered publication", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx_ids = [first.mergeable_tx_id(), second.mergeable_tx_id()];
+    assert_eq!(
+        db.node
+            .pending_local_publications
+            .borrow()
+            .iter()
+            .map(|publication| publication.published.tx_id())
+            .collect::<Vec<_>>(),
+        tx_ids
+    );
+
+    block_on(db.tick()).unwrap();
+    assert!(db.node.pending_local_publications.borrow().is_empty());
+    assert_eq!(
+        db.node
+            .outbox
+            .borrow()
+            .iter()
+            .map(|upload| upload.tx_id)
+            .collect::<Vec<_>>(),
+        tx_ids
+    );
+    for tx_id in tx_ids {
+        assert_eq!(
+            db.write_state(tx_id).unwrap(),
+            WriteState {
+                fate: Fate::Pending,
+                durability: DurabilityTier::Local,
+                global_time: None,
+            }
+        );
+    }
+
+    block_on(db.tick()).unwrap();
+    assert_eq!(db.node.outbox.borrow().len(), 2);
+}
+
+/// Causal flow: a mergeable transaction enters the node-owned deferred queue,
+/// its subscriber refresh stalls, and the caller future is cancelled. The next
+/// node tick must still persist the exact queued transaction.
+#[test]
+fn deferred_mergeable_handle_refresh_cancellation_keeps_persistence_owned() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let db = open_db(0xa3, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    block_on(db.mergeable_tx_ref(open).insert(
+        "todos",
+        cells("mergeable handle", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+
+    let published =
+        cancel_during_subscription_refresh(&db, db.commit_mergeable_handle(open), false);
+    settle_cancelled_local_publication(&db, published);
+}
+
+/// Causal flow: an exclusive transaction transfers its upload-bearing
+/// publication to the deferred queue, refresh stalls, then its caller is
+/// cancelled. The node tick must retain and persist that exact publication.
+#[test]
+fn deferred_exclusive_refresh_cancellation_keeps_persistence_owned() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let db = open_db(0xa4, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.exclusive_tx_ref(open).insert(
+        "todos",
+        cells("exclusive handle", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+
+    let published = cancel_during_subscription_refresh(&db, db.commit_exclusive_handle(open), true);
+    settle_cancelled_local_publication(&db, published);
+}
+
+/// A deferred local writer and its resident subscriber share one runtime: the
+/// write must queue durability work and still deliver the visible subscription
+/// delta before the write call returns.
+#[test]
+fn deferred_write_still_refreshes_resident_subscriptions_before_returning() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let db = open_db(0xa5, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let _opening = block_on(subscription.next_raw()).unwrap();
+
+    let write = block_on(db.insert(
+        "todos",
+        cells("resident refresh", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        queued_local_publication(&db, false),
+        write.mergeable_tx_id()
+    );
+    let event = block_on(subscription.next_raw()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = event else {
+        panic!("successful deferred write must publish a resident delta");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), write.row_uuid());
 }

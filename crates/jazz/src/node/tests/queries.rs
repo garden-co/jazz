@@ -1533,17 +1533,11 @@ fn view_update_result_set_matches_groove_current_rows_for_seeded_commits() {
 }
 
 #[test]
-fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
+fn binding_delta_validates_shape_arity_and_cleans_up_binding_usage() {
     let (_temp_dir, mut node) = open_node();
     let shape = Query::from("todos")
         .filter(eq(col("title"), param("wanted")))
         .validate(&schema())
-        .unwrap();
-    let binding = shape
-        .bind(BTreeMap::from([(
-            "wanted".to_owned(),
-            Value::String("match".to_owned()),
-        )]))
         .unwrap();
     let values = vec![Value::String("match".to_owned())];
     let usage_binding_id = BindingId(uuid::Uuid::from_bytes([0x77; 16]));
@@ -1564,6 +1558,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         subscription: usage_subscription,
         values: values.clone(),
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
     assert!(
@@ -1584,7 +1579,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(usage_binding_id, usage_subscription.read_view))
+            .contains_key(&(usage_binding_id, usage_subscription.read_view, None))
     );
     assert!(matches!(
         node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
@@ -1592,6 +1587,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             subscription: usage_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         })),
         Err(Error::InvalidStoredValue("binding arity mismatch"))
     ));
@@ -1601,6 +1597,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         subscription: usage_subscription,
         values: values.clone(),
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
     node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
@@ -1608,44 +1605,22 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         subscription: other_usage_subscription,
         values,
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(usage_binding_id, usage_subscription.read_view))
+            .contains_key(&(usage_binding_id, usage_subscription.read_view, None))
     );
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
     );
 
-    let canonical_subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: Default::default(),
-    };
-    let binding_view_key =
-        crate::protocol::BindingViewKey::from_canonical_subscription_key(canonical_subscription);
-    node.query.settled_result_sets.insert(
-        binding_view_key,
-        BTreeSet::new(),
-    );
-    node.query.settled_program_facts.insert(
-        binding_view_key,
-        BTreeSet::from([crate::protocol::ViewFactEntry::PathCorrelationCoverage(
-            crate::protocol::PathCorrelationCoverageEntry {
-                path: "owner".to_owned(),
-                source_table: "todos".to_owned().into(),
-                source_row: row(1),
-                correlation_key: vec![1],
-                complete: true,
-            },
-        )]),
-    );
     node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: usage_subscription,
     })
@@ -1654,16 +1629,14 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         !node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(usage_binding_id, usage_subscription.read_view))
+            .contains_key(&(usage_binding_id, usage_subscription.read_view, None))
     );
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
     );
-    assert!(node.query.settled_result_sets.contains_key(&binding_view_key));
-    assert!(node.query.settled_program_facts.contains_key(&binding_view_key));
 
     node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: other_usage_subscription,
@@ -1673,29 +1646,30 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         !node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
     );
-    assert!(!node.query.settled_result_sets.contains_key(&binding_view_key));
-    assert!(!node.query.settled_program_facts.contains_key(&binding_view_key));
 }
 
 #[test]
 fn binding_delta_cleanup_distinguishes_canonical_read_view() {
-    let (_temp_dir, mut node) = open_node();
+    let schema = branch_view_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x44), schema.clone());
     let shape = Query::from("todos")
         .filter(eq(col("title"), param("wanted")))
-        .validate(&schema())
-        .unwrap();
-    let binding = shape
-        .bind(BTreeMap::from([(
-            "wanted".to_owned(),
-            Value::String("match".to_owned()),
-        )]))
+        .validate(&schema)
         .unwrap();
     let values = vec![Value::String("match".to_owned())];
-    let branch_read_view = crate::protocol::ReadViewKey {
-        id: uuid::Uuid::from_bytes([0x44; 16]),
+    let branch_opts = crate::protocol::RegisterShapeOptions {
+        read_view: crate::protocol::ReadViewSpec {
+            source: crate::protocol::ReadViewSourceSpec::BranchView {
+                head: branch_selector(0x44),
+                base: None,
+            },
+        },
+        ..Default::default()
     };
+    let branch_read_view = branch_opts.read_view_key();
+    assert_ne!(branch_read_view, ReadViewKey::default());
     let default_usage_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: BindingId(uuid::Uuid::from_bytes([0x77; 16])),
@@ -1720,56 +1694,57 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
         subscription: default_usage_subscription,
         values: values.clone(),
         known_state: None,
+        delegated_session: None,
     }))
+    .unwrap();
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
+        shape_id: shape.shape_id(),
+        ast: crate::protocol::ShapeAst::from_validated(&shape),
+        opts: branch_opts,
+    })
     .unwrap();
     node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: branch_usage_subscription,
         values,
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
 
-    let default_binding_view_key =
-        crate::protocol::BindingViewKey::new(shape.shape_id(), binding.binding_id(), Default::default());
-    let branch_binding_view_key =
-        crate::protocol::BindingViewKey::new(shape.shape_id(), binding.binding_id(), branch_read_view);
-    node.query
-        .settled_result_sets
-        .insert(default_binding_view_key, BTreeSet::new());
-    node.query
-        .settled_result_sets
-        .insert(branch_binding_view_key, BTreeSet::new());
-
-    // Internal sync-state coverage: public non-default read views fail closed,
-    // so this future multi-view cleanup invariant is only observable below the
-    // public facade for now.
+    // The same usage handle may name distinct read views. Unsubscribing one
+    // must retain the other registered binding usage.
     node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: default_usage_subscription,
     })
     .unwrap();
     assert!(
-        !node
-            .query
-            .settled_result_sets
-            .contains_key(&default_binding_view_key)
-    );
-    assert!(
         node.query
-            .settled_result_sets
-            .contains_key(&branch_binding_view_key)
+            .registered_bindings
+            .get(&shape.shape_id())
+            .unwrap()
+            .contains_key(&(
+                branch_usage_subscription.binding_id,
+                branch_read_view,
+                None,
+            ))
     );
 
     node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: branch_usage_subscription,
     })
     .unwrap();
-    assert!(
-        !node
-            .query
-            .settled_result_sets
-            .contains_key(&branch_binding_view_key)
-    );
+    assert!(!node
+        .query
+        .registered_bindings
+        .get(&shape.shape_id())
+        .is_some_and(|bindings| {
+            bindings.contains_key(&(
+                branch_usage_subscription.binding_id,
+                branch_read_view,
+                None,
+            ))
+        }));
 }
 
 #[test]

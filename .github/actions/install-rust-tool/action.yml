@@ -1,10 +1,14 @@
 name: Install Rust tool
-description: Install a pinned Rust development tool in a job-local action home.
+description: Install an allowlisted, pinned Cargo tool in a job-local action home.
 
 inputs:
   tool:
-    description: Tool name and version accepted by taiki-e/install-action.
+    description: Pinned tool name accepted by dev/ci/install-rust-tool.sh.
     required: true
+  installer-revision:
+    description: Bump to invalidate a broken immutable hosted-tool cache.
+    required: false
+    default: "v1"
 
 runs:
   using: composite
@@ -16,7 +20,7 @@ runs:
         if [[ -f /opt/jazz-ci/toolchains/v1/manifest.json ]]; then
           node dev/ci/validate-tool-bundle.mjs >/dev/null
           case '${{ inputs.tool }}' in
-            sccache|cargo-nextest@0.9.143|wasm-pack@0.13.1)
+            sccache@0.15.0|cargo-nextest@0.9.143|wasm-pack@0.13.1)
               echo "active=true" >> "${GITHUB_OUTPUT}"
               ;;
             *)
@@ -27,14 +31,33 @@ runs:
           echo "active=false" >> "${GITHUB_OUTPUT}"
         fi
 
-    # install-action stages downloads under $HOME/.install-action and can use
-    # $CARGO_HOME/bin for Cargo-crate fallback. Self-hosted runner agents can
-    # share HOME/CARGO_HOME, so isolate both mutable roots to this job. These
-    # step-scoped variables do not change later Cargo registry/cache use.
-    - if: steps.provisioned-tool.outputs.active != 'true'
-      uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+    # Cargo's registry and install state must not leak between concurrent
+    # self-hosted jobs. These step-scoped paths leave later build caches alone.
+    # The key includes every compatibility dimension; do not add restore keys,
+    # because an older tool is not an acceptable fallback.
+    - name: Restore pinned Cargo tool
+      id: tool-cache
+      if: steps.provisioned-tool.outputs.active != 'true'
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
-        tool: ${{ inputs.tool }}
+        path: ${{ runner.temp }}/jazz-rust-tool
+        key: jazz-rust-tool-${{ inputs.installer-revision }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}
+
+    - name: Install pinned Cargo tool
+      if: steps.provisioned-tool.outputs.active != 'true'
+      shell: bash
+      run: dev/ci/install-rust-tool.sh
       env:
-        HOME: ${{ runner.temp }}/jazz-install-action
-        CARGO_HOME: ${{ runner.temp }}/jazz-install-action/cargo
+        JAZZ_RUST_TOOL: ${{ inputs.tool }}
+        JAZZ_RUST_TOOL_CACHE_HIT: ${{ steps.tool-cache.outputs.cache-hit }}
+        JAZZ_RUST_TOOL_CACHE_KEY: jazz-rust-tool-${{ inputs.installer-revision }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}
+        CARGO_HOME: ${{ runner.temp }}/jazz-rust-tool/cargo
+
+    # Only a miss can publish this immutable key. Concurrent cold jobs safely
+    # converge when one save observes the other has already created the key.
+    - name: Save pinned Cargo tool
+      if: steps.provisioned-tool.outputs.active != 'true' && steps.tool-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ runner.temp }}/jazz-rust-tool
+        key: jazz-rust-tool-${{ inputs.installer-revision }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}

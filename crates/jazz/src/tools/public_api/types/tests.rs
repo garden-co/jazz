@@ -320,47 +320,81 @@ fn schema_hash_enum_variant_order_sensitive() {
 }
 
 #[test]
-fn schema_hash_matches_ordered_enum_cross_runtime_fixture() {
+fn schema_hash_matches_portable_column_types_cross_runtime_fixture() {
     #[derive(serde::Deserialize)]
-    struct EnumHashCase {
-        variants: Vec<String>,
-        hash: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct EnumHashFixture {
+    struct ColumnTypeHashFixture {
         #[serde(rename = "schemaLayoutVersion")]
         schema_layout_version: u16,
-        cases: Vec<EnumHashCase>,
+        #[serde(rename = "columnTypeCases")]
+        column_type_cases: Vec<ColumnTypeHashCase>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ColumnTypeHashCase {
+        name: String,
+        #[serde(rename = "columnType")]
+        column_type: ColumnType,
+        nullable: bool,
+        hash: String,
     }
 
-    let fixture: EnumHashFixture = serde_json::from_str(include_str!(
-        "../../../../../../packages/jazz-tools/src/testing/fixtures/ordered-enum-schema-hashes.json"
+    let fixture: ColumnTypeHashFixture = serde_json::from_str(include_str!(
+        "../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
     ))
-    .expect("ordered enum hash fixture is valid JSON");
+    .expect("portable column-type hash fixture is valid JSON");
 
-    assert_eq!(fixture.schema_layout_version, 9);
+    assert_eq!(fixture.schema_layout_version, 11);
+    assert_eq!(
+        fixture
+            .column_type_cases
+            .iter()
+            .map(|case| case.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "integer",
+            "bigint",
+            "double",
+            "boolean",
+            "text",
+            "json",
+            "enum",
+            "enum-reordered",
+            "enum-payload",
+            "enum-payload-reordered",
+            "enum-payload-nullable-field",
+            "timestamp",
+            "uuid",
+            "bytea",
+            "array",
+            "row",
+            "nullable-text",
+            "nested-composite",
+        ],
+        "the shared corpus covers every portable scalar tag plus nullable and nested shapes"
+    );
 
     let hashes: Vec<_> = fixture
-        .cases
+        .column_type_cases
         .iter()
         .map(|case| {
-            let schema = SchemaBuilder::new()
-                .table(TableSchema::builder("todos").column(
-                    "status",
-                    ColumnType::Enum {
-                        variants: case.variants.clone(),
-                    },
-                ))
-                .build();
+            let table = if case.nullable {
+                TableSchema::builder("values").nullable_column("value", case.column_type.clone())
+            } else {
+                TableSchema::builder("values").column("value", case.column_type.clone())
+            };
+            let schema = SchemaBuilder::new().table(table).build();
             let hash = SchemaHash::compute(&schema).to_hex();
-            assert_eq!(hash, case.hash, "fixture hash for {:?}", case.variants);
+            assert_eq!(hash, case.hash, "fixture hash for {}", case.name);
             hash
         })
         .collect();
 
-    assert_ne!(
-        hashes[0], hashes[1],
-        "reordering variants changes durable tag meaning"
+    assert_eq!(
+        hashes.len(),
+        hashes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "each shared corpus case has a unique structural hash"
     );
 }
 

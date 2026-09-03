@@ -419,7 +419,10 @@ where
             )
             .await?;
         }
-        let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
+        // Staging owns the decoded records and derived-index working set. Keep
+        // it behind an async allocation boundary so admission does not retain
+        // that state on the caller's poll stack.
+        let staged_versions = Box::pin(self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
             tx,
             versions,
@@ -429,7 +432,7 @@ where
             update_current_indexes,
             view_scoped_cardinality,
             None,
-        )
+        ))
         .await?;
         let mut staged_global_times = Vec::new();
         self.finalize_staged_transaction_ingest(
@@ -904,7 +907,15 @@ where
         reason: String,
     ) -> Result<Vec<SyncMessage>, Error> {
         let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-        self.ingest_rejected_transaction(tx.clone(), fate.clone())
+        // Malformed provenance cannot be encoded safely. Retain the terminal
+        // outcome, but never make an invalid payload durable merely to report
+        // it; recovery continues to reject any independently corrupted stored
+        // record at decode time.
+        let storage_tx = Transaction {
+            contribution_merge: None,
+            ..tx.clone()
+        };
+        self.ingest_rejected_transaction(storage_tx, fate.clone())
             .await?;
         let mut updates = vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,

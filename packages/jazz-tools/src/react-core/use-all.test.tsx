@@ -3,7 +3,7 @@ import { Component, Suspense, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { QueryBuilder } from "../runtime/db.js";
+import type { DbDeltaSubscriptionCallbacks, QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
@@ -36,13 +36,13 @@ function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
     getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
-    subscribeDelta: (_query: any, callback: (d: SubscriptionDelta<any>) => void) => {
+    subscribeDelta: (_query: QueryBuilder<Todo>, callbacks: DbDeltaSubscriptionCallbacks<Todo>) => {
       if (options?.throwOnSubscribe) {
         throw options.throwOnSubscribe;
       }
       const unsubscribe = vi.fn();
       subscribeCalls.push({
-        callback: callback as (d: SubscriptionDelta<Todo>) => void,
+        callback: callbacks.onDelta,
         unsubscribe,
       });
       return unsubscribe;

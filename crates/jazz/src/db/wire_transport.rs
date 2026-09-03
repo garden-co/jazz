@@ -242,6 +242,7 @@ pub struct WireTransportAdapter<T> {
     features: WireFeatures,
     session: Option<WireSession>,
     session_context: Option<ConnectionSessionContext>,
+    permits_delegated_sessions: bool,
     outbound_stream: WireStreamEncoder,
     inbound_stream: WireStreamDecoder,
     pub(super) reassembler: LogicalMessageReassembler,
@@ -278,6 +279,26 @@ where
         session: Option<WireSession>,
         session_context: Option<ConnectionSessionContext>,
     ) -> Self {
+        Self::new_with_session_context_and_delegated_sessions(
+            inner,
+            protocol_version,
+            features,
+            session,
+            session_context,
+            false,
+        )
+    }
+
+    /// Wrap an already admitted trusted SYSTEM backend link. This is the only
+    /// transport form that may forward a downstream session binding upstream.
+    pub fn new_with_session_context_and_delegated_sessions(
+        inner: T,
+        protocol_version: u16,
+        features: WireFeatures,
+        session: Option<WireSession>,
+        session_context: Option<ConnectionSessionContext>,
+        permits_delegated_sessions: bool,
+    ) -> Self {
         let outbound_stream = WireStreamEncoder::new(features)
             .expect("negotiated wire compression must be compiled into this binary");
         let inbound_stream = WireStreamDecoder::new(features)
@@ -288,6 +309,7 @@ where
             features,
             session,
             session_context,
+            permits_delegated_sessions,
             outbound_stream,
             inbound_stream,
             reassembler: LogicalMessageReassembler::default(),
@@ -697,6 +719,10 @@ where
 
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
         self.session_context
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        self.permits_delegated_sessions
     }
 }
 
