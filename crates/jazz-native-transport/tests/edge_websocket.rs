@@ -14,6 +14,7 @@ use jazz::tools::{AppContext, ClientStorage, JazzClient};
 use jazz::wire::WireTransport as _;
 use jazz_native_transport::{NativeWebSocketConnector, WebSocketClientError, WebSocketTransport};
 use jazz_server::{AuthConfig, BuiltServer, ServerBuilder, ServerState, StorageBackend};
+use tokio::sync::oneshot;
 
 async fn serve(builder: ServerBuilder) -> (String, tokio::task::JoinHandle<()>) {
     let built = builder
@@ -59,6 +60,59 @@ fn transport_auth(secret: &str) -> jazz::tools::websocket_prelude_auth::AuthConf
 
 fn native_connector() -> Arc<NativeWebSocketConnector> {
     Arc::new(NativeWebSocketConnector)
+}
+
+/// Accept the TCP connection but never answer its HTTP upgrade request.
+async fn serve_stalled_http_upgrade() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    oneshot::Receiver<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalled upgrade listener");
+    let address = listener.local_addr().expect("stalled listener address");
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept stalled upgrade");
+        let _ = accepted_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    (format!("http://{address}"), task, accepted_rx)
+}
+
+#[tokio::test]
+async fn stalled_http_upgrade_reports_handshake_timeout() {
+    let app_id = AppId::from_name("adapter-stalled-http-upgrade");
+    let (url, task, accepted) = serve_stalled_http_upgrade().await;
+    let connection = tokio::spawn(async move {
+        WebSocketTransport::connect(
+            url,
+            app_id,
+            jazz::ids::AuthorSubject::SYSTEM,
+            transport_auth("secret"),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), accepted)
+        .await
+        .expect("client opens loopback TCP connection")
+        .expect("stalled upgrade server remains alive");
+    let result = match tokio::time::timeout(Duration::from_secs(6), &mut connection).await {
+        Ok(result) => result.expect("connector task"),
+        Err(_) => {
+            connection.abort();
+            task.abort();
+            panic!("establishment timeout remains bounded");
+        }
+    };
+    task.abort();
+
+    let error = result.expect_err("stalled upgrade must fail");
+    assert!(
+        matches!(&error, WebSocketClientError::HandshakeTimeout),
+        "stalled upgrade must report typed handshake timeout: {error}"
+    );
 }
 
 #[tokio::test]
