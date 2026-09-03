@@ -1413,6 +1413,85 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
 }
 
 #[test]
+fn scope_relay_local_read_delivers_cache_before_authority_opens() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let core = open_core(0x64, AuthorSubject::SYSTEM, &schema);
+    let relay = open_db(0x65, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let foreground = open_db(0x66, author, &schema);
+    foreground.set_non_durable_client();
+    let cached = row(0x67);
+    relay
+        .insert_with_id_attributed(author, "todos", cached, cells("cached", false, author))
+        .unwrap();
+    let (relay_transport, core_transport) = duplex();
+    let _relay_upstream = block_on(relay.connect_upstream(relay_transport));
+    let (foreground_transport, relay_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _relay_foreground =
+        relay.accept_subscriber_with_claims(relay_transport, author, BTreeMap::new());
+    let query = Query::from("todos");
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let mut stream = prepared_subscribe(&foreground, &query, opts.clone()).unwrap();
+    let mut strict = prepared_subscribe(&foreground, &query, global_subscribe_opts()).unwrap();
+    // The authority is connected but deliberately not driven. Local reads must
+    // still receive the relay's cached/pending row, without a terminal error.
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        relay.tick().unwrap();
+    }
+    foreground.tick().unwrap();
+    while let Some(event) = stream.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+    }
+    while let Some(event) = strict.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+        assert!(
+            !event_settled(&event),
+            "strict read settled without authority: {event:?}"
+        );
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&foreground, &query, opts.clone())),
+        vec![cached]
+    );
+    let _core_relay =
+        core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 1);
+    for _ in 0..16 {
+        core.tick().unwrap();
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&foreground, &query, opts)),
+        vec![cached]
+    );
+    let mut strict_settled = false;
+    while let Some(event) = strict.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+        strict_settled |= event_settled(&event);
+    }
+    assert!(
+        strict_settled,
+        "strict read must finish when its authority opens"
+    );
+}
+
+#[test]
 fn scope_relay_shares_upstream_across_foregrounds_until_final_detach() {
     // Public reads prove convergence; connection inspection pins the wire
     // ownership invariant that cannot be inferred from equal result values.

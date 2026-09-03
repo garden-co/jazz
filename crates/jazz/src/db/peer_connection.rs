@@ -4247,6 +4247,10 @@ where
                                     subscription,
                                     selected_authority_result_key,
                                 );
+                                peer.set_subscription_awaiting_selected_authority_source(
+                                    subscription,
+                                    waits_for_selected_authority,
+                                );
                             }
                             if local_subscriber
                                 && upstream_opts.binding_source
@@ -6534,8 +6538,11 @@ pub(super) fn send_subscriber_with_sync_context<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    // A selected upstream source does not itself make this a strict read.
+    // Local-first still publishes cached inputs while that source is pending.
     if let SyncMessage::ViewUpdate(payload) = &mut message
         && node.borrow().client_relay_scope().is_some()
+        && peer.subscription_awaits_selected_authority_source(payload.subscription)
     {
         let source = peer
             .subscription_authority_result_source(payload.subscription)

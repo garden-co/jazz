@@ -373,8 +373,9 @@ impl PeerState {
     }
 
     /// Mark a scope-relay served usage as pending the exact U source installed
-    /// above. This is set only by non-authoritative admission and survives
-    /// maintained-view replacement; definitive publication clears it.
+    /// above. This admission-time requirement survives maintained-view
+    /// replacement; whether that source is currently settled is checked
+    /// separately. Local-first usages may have a source without awaiting it.
     pub(crate) fn set_subscription_awaiting_selected_authority_source(
         &mut self,
         subscription: SubscriptionKey,
@@ -557,10 +558,16 @@ impl PeerState {
         purpose: RehydratePurpose,
     ) -> bool {
         purpose == RehydratePurpose::Query
-            && self
-                .publication_states
-                .get(&subscription)
-                .is_some_and(|state| state.awaiting_selected_authority_source)
+            && self.subscription_awaits_selected_authority_source(subscription)
+    }
+
+    pub(crate) fn subscription_awaits_selected_authority_source(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> bool {
+        self.publication_states
+            .get(&subscription)
+            .is_some_and(|state| state.awaiting_selected_authority_source)
     }
 
     fn selected_authority_source(
