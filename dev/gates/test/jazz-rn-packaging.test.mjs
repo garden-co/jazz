@@ -34,14 +34,13 @@ const relayJsExports = new Set([
   "decodeNativeForegroundResponse",
   "executeNativeRelayCommand",
 ]);
-const nativeSpecMethods = new Set(["getAbiVersion", "installForegroundRuntime", "execute"]);
-const androidRelayMethods = new Set(["getAbiVersion", "installForegroundRuntime", "execute"]);
+const nativeSpecMethods = new Set(["getAbiVersion", "execute"]);
+const androidRelayMethods = new Set(["getAbiVersion", "execute"]);
 // This includes lifecycle/generated hooks, which are not JavaScript methods.
 // Keeping them explicit catches accidental methods added beside the ABI.
 const iosRelaySelectors = new Set([
   "init",
   "getAbiVersion",
-  "installForegroundRuntime",
   "installJSIBindingsWithRuntime",
   "execute",
   "invalidate",
@@ -327,6 +326,11 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     "NativeJazzRelay TurboModule has exactly its fixed ABI methods",
   );
   assertExactNames("NativeJazzRelay TurboModule", new Set(membersByName.keys()), nativeSpecMethods);
+  assert.doesNotMatch(
+    commentFreeSpec,
+    /\binstallForegroundRuntime\b/,
+    "the obsolete JS-triggered foreground installer must not re-enter the TurboModule ABI",
+  );
   for (const name of nativeSpecMethods) {
     assertExactNativeSpecMethod(membersByName.get(name), name);
   }

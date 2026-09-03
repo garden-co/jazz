@@ -47,6 +47,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "public-client-read-failed",
     "public-client-publish-failed",
     "public-client-shutdown-failed",
+    "public-client-relay-readback-failed",
     "scope-isolation-failed",
     "scope-isolation-open-failed",
     "scope-isolation-write-failed",

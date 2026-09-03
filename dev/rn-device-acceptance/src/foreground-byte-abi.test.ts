@@ -238,6 +238,31 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     excludes: ["b"],
   });
 
+  // A hosted Android emulator can need far more than 96 zero-delay JS turns
+  // to publish a committed row when host scheduling is contended immediately
+  // after the release build. The receipt is bounded by elapsed time, not
+  // scheduler turn count, so that load does not manufacture a false failure.
+  const slowAndroidPublication = scopeFactory(false, false, 192);
+  let slowClock = 0;
+  await proveForegroundScopeIsolation(
+    slowAndroidPublication,
+    scopeA,
+    scopeCodec,
+    {
+      write: "a",
+      contains: ["a"],
+      excludes: ["b"],
+    },
+    undefined,
+    {
+      timeoutMs: 1_000,
+      now: () => slowClock,
+      yieldTurn: async () => {
+        slowClock += 1;
+      },
+    },
+  );
+
   aWasWritten = false;
   bWasWritten = false;
   const writerProgressRequired = scopeFactory(false, false, 0, true);
@@ -322,7 +347,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     );
   }
 
-  const pendingReceipt = (settles: boolean, emitsWake = true) => {
+  const pendingReceipt = (settles: boolean, emitsWake = true, settlesImmediately = false) => {
     const metrics = { all: 0, poll: 0, tick: 0, close: 0 };
     let scheduler: ((urgency: string) => void) | undefined;
     const scheduleWake = () => {
@@ -349,6 +374,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
                 metrics.all += 1;
                 if (metrics.all > 1)
                   throw new Error("scope receipt reissued all instead of polling");
+                if (settlesImmediately) return rows(true, false);
                 scheduleWake();
                 return Uint8Array.of(15, 42);
               case 8:
@@ -387,26 +413,98 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   assert.deepEqual(pendingThenVisible.metrics, { all: 1, poll: 2, tick: 3, close: 1 });
 
   const pendingForever = pendingReceipt(false);
+  let pendingClock = 0;
   await assert.rejects(
     async () =>
-      proveForegroundScopeIsolation(pendingForever.factory, scopeA, scopeCodec, {
-        contains: ["a"],
-        excludes: ["b"],
-      }),
-    /did not settle after bounded ticks/,
+      proveForegroundScopeIsolation(
+        pendingForever.factory,
+        scopeA,
+        scopeCodec,
+        {
+          contains: ["a"],
+          excludes: ["b"],
+        },
+        undefined,
+        {
+          timeoutMs: 96,
+          now: () => pendingClock,
+          yieldTurn: async () => {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            pendingClock += 1;
+          },
+        },
+      ),
+    /did not settle before its bounded deadline/,
   );
-  assert.deepEqual(pendingForever.metrics, { all: 1, poll: 95, tick: 96, close: 1 });
+  assert.deepEqual(pendingForever.metrics, { all: 1, poll: 94, tick: 96, close: 1 });
 
   const missingNativeWake = pendingReceipt(true, false);
+  let missingWakeClock = 0;
   await assert.rejects(
     async () =>
-      proveForegroundScopeIsolation(missingNativeWake.factory, scopeA, scopeCodec, {
-        contains: ["a"],
-        excludes: ["b"],
-      }),
-    /did not settle after bounded ticks/,
+      proveForegroundScopeIsolation(
+        missingNativeWake.factory,
+        scopeA,
+        scopeCodec,
+        {
+          contains: ["a"],
+          excludes: ["b"],
+        },
+        undefined,
+        {
+          timeoutMs: 96,
+          now: () => missingWakeClock,
+          yieldTurn: async () => {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            missingWakeClock += 1;
+          },
+        },
+      ),
+    /did not settle before its bounded deadline/,
   );
   assert.deepEqual(missingNativeWake.metrics, { all: 1, poll: 0, tick: 96, close: 1 });
+
+  const expiredDuringYield = pendingReceipt(false);
+  let yieldClock = 0;
+  await assert.rejects(
+    async () =>
+      proveForegroundScopeIsolation(
+        expiredDuringYield.factory,
+        scopeA,
+        scopeCodec,
+        { contains: ["a"], excludes: ["b"] },
+        undefined,
+        {
+          timeoutMs: 1,
+          now: () => yieldClock,
+          yieldTurn: async () => {
+            yieldClock = 1;
+          },
+        },
+      ),
+    /did not settle before its bounded deadline/,
+  );
+  assert.deepEqual(expiredDuringYield.metrics, { all: 0, poll: 0, tick: 1, close: 1 });
+
+  const expiredWhileExecuting = pendingReceipt(false, true, true);
+  let clockReads = 0;
+  await assert.rejects(
+    async () =>
+      proveForegroundScopeIsolation(
+        expiredWhileExecuting.factory,
+        scopeA,
+        scopeCodec,
+        { contains: ["a"], excludes: ["b"] },
+        undefined,
+        {
+          timeoutMs: 1,
+          now: () => (clockReads++ < 3 ? 0 : 1),
+          yieldTurn: async () => {},
+        },
+      ),
+    /did not settle before its bounded deadline/,
+  );
+  assert.deepEqual(expiredWhileExecuting.metrics, { all: 1, poll: 0, tick: 1, close: 1 });
 
   aWasWritten = false;
   bWasWritten = false;

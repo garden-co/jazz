@@ -2484,6 +2484,10 @@ impl TickScheduler for ForegroundWakeScheduler {
             match urgency {
                 TickUrgency::Immediate => FOREGROUND_WAKE_IMMEDIATE,
                 TickUrgency::Deferred => FOREGROUND_WAKE_DEFERRED,
+                // The fixed foreground wake ABI already represents a later
+                // owner turn as an `after:0` callback. Keep cold hydration
+                // out of the current JSI turn without expanding that ABI.
+                TickUrgency::AfterCurrentTurn => FOREGROUND_WAKE_AFTER,
             },
             0,
         )

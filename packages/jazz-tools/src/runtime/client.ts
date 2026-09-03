@@ -5,7 +5,7 @@
  * subscriptions, and sync.
  */
 
-import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
+import type { AppContext, Session } from "./context.js";
 import type {
   InsertValues,
   RuntimeSubscriptionDelta,
@@ -21,12 +21,7 @@ import {
 } from "./client-session.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
-import {
-  resolveRuntimeConfigSyncInitInput,
-  resolveRuntimeConfigWasmUrl,
-} from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
-import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
 
 type RuntimeSerializedSession = Pick<Session, "issuer" | "user_id" | "claims" | "authMode"> & {
   [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
@@ -1821,125 +1816,4 @@ export class JazzClient {
 
     await this.runtime.clearClientStorage();
   }
-}
-
-/**
- * WASM module type for sync client creation.
- * This is the type of the jazz-wasm module after dynamic import.
- */
-export type WasmModule = typeof import("jazz-wasm");
-
-async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
-  const moduleBuiltin = process.getBuiltinModule?.("module");
-  const fsBuiltin = process.getBuiltinModule?.("fs");
-  const pathBuiltin = process.getBuiltinModule?.("path");
-
-  if (!moduleBuiltin || !fsBuiltin || !pathBuiltin) {
-    return null;
-  }
-
-  const { createRequire } = moduleBuiltin;
-  const { existsSync, readFileSync } = fsBuiltin;
-  const { dirname, resolve } = pathBuiltin;
-
-  const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
-  if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
-    throw new Error("sealed correctness consumer is missing its admitted WASM package");
-  if (sealedWasmPackage) {
-    const wasmPath = pathBuiltin.resolve(sealedWasmPackage, "jazz_wasm_bg.wasm");
-    return existsSync(wasmPath) ? readFileSync(wasmPath) : null;
-  }
-
-  const require = createRequire(import.meta.url);
-  const packageJsonPath = require.resolve("jazz-wasm/package.json");
-  const packageDir = dirname(packageJsonPath);
-  const wasmPath = resolve(packageDir, "pkg/jazz_wasm_bg.wasm");
-
-  if (!existsSync(wasmPath)) {
-    return null;
-  }
-
-  return readFileSync(wasmPath);
-}
-
-/**
- * Load and initialize the WASM module.
- *
- * Exported so that `createDb()` can pre-load the module for sync mutations.
- */
-let wasmInitializationTail: Promise<void> = Promise.resolve();
-
-export function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
-  const initialization = wasmInitializationTail.then(() => initializeWasmModule(runtime));
-  wasmInitializationTail = initialization.then(
-    () => undefined,
-    () => undefined,
-  );
-  return initialization;
-}
-
-async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
-  // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
-  const wasmModule: any = await import("jazz-wasm");
-  const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
-
-  if (syncInitInput) {
-    wasmModule.initSync(syncInitInput);
-    assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
-    return wasmModule;
-  }
-
-  // In Node.js, we need to read the .wasm file and use initSync.
-  // In browsers/React Native, the default fetch-based init works (or default()).
-  // Use try/catch so we skip the Node path when node:* modules are unavailable (e.g. RN).
-  let nodeInitDone = false;
-  if (typeof process !== "undefined" && process.versions?.node) {
-    try {
-      const wasmBinary = await tryLoadNodePackagedWasmBinary();
-      if (wasmBinary) {
-        wasmModule.initSync({ module: wasmBinary });
-        nodeInitDone = true;
-      }
-    } catch {
-      // Node modules unavailable (e.g. React Native with process polyfill)
-    }
-  }
-  if (!nodeInitDone && typeof wasmModule.default === "function") {
-    const wasmUrl =
-      typeof location !== "undefined"
-        ? resolveRuntimeConfigWasmUrl(import.meta.url, location.href, runtime)
-        : null;
-
-    if (wasmUrl) {
-      await initializeWasmFromUrl(wasmModule, wasmUrl);
-    } else {
-      await wasmModule.default();
-    }
-  }
-
-  assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
-  return wasmModule;
-}
-
-async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<void> {
-  const response = await fetch(wasmUrl);
-  if (!response.ok) {
-    throw new Error(
-      `WASM asset request failed (${response.status} ${response.statusText}) for ${wasmUrl}`,
-    );
-  }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (
-    bytes.length < 4 ||
-    bytes[0] !== 0x00 ||
-    bytes[1] !== 0x61 ||
-    bytes[2] !== 0x73 ||
-    bytes[3] !== 0x6d
-  ) {
-    const contentType = response.headers.get("content-type") ?? "unknown content type";
-    throw new Error(
-      `WASM asset response is not a WebAssembly binary for ${wasmUrl} (${contentType})`,
-    );
-  }
-  await wasmModule.default({ module_or_path: bytes });
 }

@@ -707,9 +707,6 @@ where
         Ok(())
     }
 
-    pub(crate) fn tx_time_high_water(&self) -> TxTime {
-        self.clock.tx_time
-    }
 }
 
 #[cfg(test)]

@@ -11,8 +11,13 @@ const nativeForegroundTest = vi.hoisted(() => ({
   tick: vi.fn(),
   setTickScheduler: vi.fn(),
   close: vi.fn(() => true),
-  install: vi.fn(),
   openAttached: vi.fn(),
+  turboModule: {
+    getAbiVersion: () => 7,
+    execute: async () => {
+      throw new Error("the read-only foreground path must not use TurboModule execute");
+    },
+  },
 }));
 
 // This intentionally mocks only the platform-installed TurboModule. The
@@ -22,27 +27,7 @@ const nativeForegroundTest = vi.hoisted(() => ({
 // responsible for installing this same HostObject factory through JSI.
 vi.mock("react-native", () => ({
   TurboModuleRegistry: {
-    get: () => ({
-      getAbiVersion: () => 7,
-      execute: async () => {
-        throw new Error("the read-only foreground path must not use TurboModule execute");
-      },
-      installForegroundRuntime: () => {
-        nativeForegroundTest.install();
-        (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV1 = {
-          abiVersion: 7,
-          openAttached: (capability: Uint8Array) => {
-            nativeForegroundTest.openAttached(capability);
-            return {
-              execute: (command: Uint8Array) => nativeForegroundTest.execute!(command),
-              tick: nativeForegroundTest.tick,
-              setTickScheduler: nativeForegroundTest.setTickScheduler,
-              close: nativeForegroundTest.close,
-            };
-          },
-        };
-      },
-    }),
+    get: () => nativeForegroundTest.turboModule,
   },
 }));
 import {
@@ -64,6 +49,21 @@ const app = s.defineApp({
 });
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
+
+function installJsiForegroundFactory() {
+  (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV1 = {
+    abiVersion: 7,
+    openAttached: (capability: Uint8Array) => {
+      nativeForegroundTest.openAttached(capability);
+      return {
+        execute: (command: Uint8Array) => nativeForegroundTest.execute!(command),
+        tick: nativeForegroundTest.tick,
+        setTickScheduler: nativeForegroundTest.setTickScheduler,
+        close: nativeForegroundTest.close,
+      };
+    },
+  };
+}
 
 function nativeRelayReceipt() {
   const commands: number[] = [];
@@ -162,8 +162,8 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     nativeForegroundTest.tick.mockClear();
     nativeForegroundTest.setTickScheduler.mockClear();
     nativeForegroundTest.close.mockClear();
-    nativeForegroundTest.install.mockClear();
     nativeForegroundTest.openAttached.mockClear();
+    installJsiForegroundFactory();
     const rowId = new Uint8Array(16).fill(7);
     const rows = encodeRows([{ table: "notes", rowId, title: "Native note" }]);
     const delta = encodeSubscriptionDelta({
@@ -242,7 +242,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     );
     expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 10, 11, 15]));
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(3);
-    expect(nativeForegroundTest.install).toHaveBeenCalledTimes(1);
+    expect(nativeForegroundTest.turboModule).not.toHaveProperty("installForegroundRuntime");
     expect(nativeForegroundTest.setTickScheduler).toHaveBeenCalledTimes(1);
     expect(nativeForegroundTest.openAttached).toHaveBeenCalledWith(nativeRelayCapability);
     // The foreground engine enters only through the capability-gated JSI host;
@@ -258,6 +258,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
   it("fails closed on an in-place auth refresh instead of reading through the prior native capability", async () => {
     nativeForegroundTest.close.mockClear();
+    installJsiForegroundFactory();
     const rows = encodeRows([
       {
         table: "notes",
