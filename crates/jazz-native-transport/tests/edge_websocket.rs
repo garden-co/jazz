@@ -113,6 +113,32 @@ async fn stalled_http_upgrade_reports_handshake_timeout() {
 }
 
 #[tokio::test]
+async fn refused_tcp_connection_remains_connect_error() {
+    // Reserve a loopback port, then release it without ever accepting. This
+    // distinguishes an immediate TCP failure from the bounded HTTP upgrade.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind refusal test listener");
+    let address = listener
+        .local_addr()
+        .expect("refusal test listener address");
+    drop(listener);
+
+    let error = WebSocketTransport::connect(
+        format!("http://{address}"),
+        AppId::from_name("adapter-refused-tcp-connection"),
+        jazz::ids::AuthorSubject::SYSTEM,
+        transport_auth("secret"),
+    )
+    .await
+    .expect_err("closed loopback port must refuse TCP connection");
+    assert!(
+        matches!(error, WebSocketClientError::Connect(_)),
+        "immediate TCP refusal must retain its connect classification: {error}"
+    );
+}
+
+#[tokio::test]
 async fn edge_builder_uses_adapter_bootstrap_url_validation() {
     let result = ServerBuilder::new(AppId::from_name("edge-plaintext-bootstrap-rejected"))
         .with_storage(StorageBackend::InMemory)
