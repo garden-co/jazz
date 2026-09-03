@@ -126,6 +126,10 @@ async function typecheckGeneratedMigration(migrationPath: string): Promise<void>
         ignoreDeprecations: "6.0",
         baseUrl: dirname(packageRoot),
         paths: { "jazz-tools": ["src/index.ts"] },
+        // This config lives under /tmp, outside node_modules ancestry. Give
+        // the real compiler the Node host types installed by this fixture;
+        // changing cwd alone does not change TypeScript's type-root lookup.
+        typeRoots: [join(dirname(packageRoot), "node_modules", "@types")],
       },
       files: [migrationPath],
     }),

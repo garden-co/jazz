@@ -38,7 +38,9 @@ fn other_author() -> AuthorSubject {
 
 fn authorization_schema(extra_columns: usize) -> JazzSchema {
     let mut table = TableSchemaBuilder::new("items")
-        .column("owner_id", ColumnType::Uuid)
+        // `session.user` is Jazz's canonical issuer-and-subject identity, so
+        // model the owner column with the same portable text representation.
+        .column("owner_id", ColumnType::Text)
         .column("name", ColumnType::Text)
         .column("score", ColumnType::Timestamp)
         .policies(
@@ -79,7 +81,10 @@ fn item_cells(index: usize, extra_columns: usize) -> BTreeMap<String, Value> {
         other_author()
     };
     let mut cells = BTreeMap::from([
-        ("owner_id".to_owned(), Value::Uuid(owner.test_uuid())),
+        (
+            "owner_id".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
         ("name".to_owned(), Value::String(format!("Item {index}"))),
         ("score".to_owned(), Value::U64(index as u64)),
     ]);
@@ -116,19 +121,25 @@ fn limited_items_query(db: &DirectDb, limit: usize) -> jazz::db::PreparedQuery {
         .expect("prepare limited items query")
 }
 
-fn read_limit(db: &DirectDb, limit: usize) -> usize {
-    let query = limited_items_query(db, limit);
-    db.read(&query)
-        .expect("core authorized limit read should succeed")
-        .len()
+fn expected_authorized_items(row_count: usize) -> usize {
+    row_count.div_ceil(2)
 }
 
-fn subscribe_limit(db: &DirectDb, limit: usize) -> usize {
-    let query = limited_items_query(db, limit);
-    let mut subscription =
-        block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe to limited items");
+fn read_limit(db: &DirectDb, row_count: usize) -> usize {
+    let query = limited_items_query(db, row_count);
+    let rows = block_on(db.all_for_identity(&query, ReadOpts::default(), author()))
+        .expect("trusted authorized limit read should succeed");
+    assert_eq!(rows.len(), expected_authorized_items(row_count));
+    rows.len()
+}
 
-    match block_on(subscription.next_event()) {
+fn subscribe_limit(db: &DirectDb, row_count: usize) -> usize {
+    let query = limited_items_query(db, row_count);
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&query, ReadOpts::default(), author()))
+            .expect("subscribe to trusted authorized limit");
+
+    let opened = match block_on(subscription.next_event()) {
         Some(SubscriptionEvent::Delta {
             reset: true,
             added,
@@ -136,7 +147,9 @@ fn subscribe_limit(db: &DirectDb, limit: usize) -> usize {
             ..
         }) => added.len() + updated.len(),
         other => panic!("expected reset subscription event, got {other:?}"),
-    }
+    };
+    assert_eq!(opened, expected_authorized_items(row_count));
+    opened
 }
 
 fn initial_authorized_scope(c: &mut Criterion) {

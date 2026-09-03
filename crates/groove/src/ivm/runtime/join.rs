@@ -43,7 +43,23 @@ pub(super) fn touched_join_keys(
 pub(super) struct JoinState;
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct AntiJoinState;
+pub(super) struct AntiJoinState {
+    // Arrangements are shared by input/key/scope, so their current-tick
+    // contents cannot describe whether *this* anti-join has already emitted
+    // a visible left row. Keep publication ownership at the operator. This
+    // matters when one atomic input batch reaches two consumers of an
+    // arrangement: the second consumer must not retract a row the first
+    // merely arranged but this operator never published.
+    published: JoinIndex,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct SemiJoinState {
+    // Semi-join arrangements are shared by input/key/scope and another
+    // consumer may advance one before this node runs. Keep publication state
+    // per semi-join node so threshold deltas never depend on arrangement order.
+    published: JoinIndex,
+}
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct ArrangementState {
@@ -229,10 +245,10 @@ impl JoinState {
     }
 }
 
-impl AntiJoinState {
+impl SemiJoinState {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn apply_semi(
-        &self,
+    pub(super) fn apply(
+        &mut self,
         left_arrangement: &mut AsOf<ArrangementState, SubTick>,
         right_arrangement: &mut AsOf<ArrangementState, SubTick>,
         left_descriptor: RecordDescriptor,
@@ -259,37 +275,9 @@ impl AntiJoinState {
         let keyed_right_delta =
             keyed_join_deltas(&right_descriptor, right_on, right_delta, comparison)?;
         let mut affected_keys = HashSet::<JoinKey>::default();
-        let mut old_right_counts = HashMap::<JoinKey, i64>::default();
-        let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::default();
         if update_mode == ArrangementUpdateMode::Accumulate {
-            for delta in &keyed_left_delta {
-                let key = &delta.key;
-                if affected_keys.insert(key.clone()) {
-                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
-                    old_left_buckets.insert(
-                        key.clone(),
-                        left_arrangement
-                            .value()
-                            .bucket(key)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
-                }
-            }
-            for delta in &keyed_right_delta {
-                let key = &delta.key;
-                if affected_keys.insert(key.clone()) {
-                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
-                    old_left_buckets.insert(
-                        key.clone(),
-                        left_arrangement
-                            .value()
-                            .bucket(key)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
-                }
-            }
+            affected_keys.extend(keyed_left_delta.iter().map(|delta| delta.key.clone()));
+            affected_keys.extend(keyed_right_delta.iter().map(|delta| delta.key.clone()));
         }
         advance_arrangement(
             left_arrangement,
@@ -308,31 +296,29 @@ impl AntiJoinState {
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
                 for key in affected_keys {
-                    let old_right_count = old_right_counts.get(&key).copied().unwrap_or_default();
-                    let new_right_count = right_arrangement.value().key_count(&key);
-                    if old_right_count == 0 && new_right_count == 0 {
-                        continue;
-                    }
-                    let old_visible = if old_right_count > 0 {
-                        old_left_buckets.get(&key)
-                    } else {
-                        None
-                    };
-                    let new_visible = if new_right_count > 0 {
-                        left_arrangement.value().bucket(&key)
-                    } else {
-                        None
-                    };
+                    let old_visible = self.published.get(&key);
+                    let new_visible = (right_arrangement.value().key_count(&key) > 0)
+                        .then(|| left_arrangement.value().bucket(&key))
+                        .flatten();
                     append_bucket_diff(&mut deltas, new_visible, old_visible);
+                    if let Some(bucket) = new_visible {
+                        self.published.insert(key, bucket.clone());
+                    } else {
+                        self.published.remove(&key);
+                    }
                 }
             }
             ArrangementUpdateMode::Replace => {
+                self.published.clear();
                 let mut left_keys = HashSet::<JoinKey>::default();
                 for delta in &keyed_left_delta {
                     let key = &delta.key;
-                    if left_keys.insert(key.clone()) && right_arrangement.value().key_count(key) > 0
+                    if left_keys.insert(key.clone())
+                        && right_arrangement.value().key_count(key) > 0
+                        && let Some(bucket) = left_arrangement.value().bucket(key)
                     {
-                        append_bucket(&mut deltas, left_arrangement.value().bucket(key), 1);
+                        append_bucket(&mut deltas, Some(bucket), 1);
+                        self.published.insert(key.clone(), bucket.clone());
                     }
                 }
             }
@@ -340,10 +326,12 @@ impl AntiJoinState {
 
         Ok(consolidate_deltas(deltas))
     }
+}
 
+impl AntiJoinState {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply(
-        &self,
+        &mut self,
         left_arrangement: &mut AsOf<ArrangementState, SubTick>,
         right_arrangement: &mut AsOf<ArrangementState, SubTick>,
         left_descriptor: &RecordDescriptor,
@@ -369,37 +357,9 @@ impl AntiJoinState {
         let keyed_right_delta =
             keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?;
         let mut affected_keys = HashSet::<JoinKey>::default();
-        let mut old_right_counts = HashMap::<JoinKey, i64>::default();
-        let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::default();
         if update_mode == ArrangementUpdateMode::Accumulate {
-            for delta in &keyed_left_delta {
-                let key = &delta.key;
-                if affected_keys.insert(key.clone()) {
-                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
-                    old_left_buckets.insert(
-                        key.clone(),
-                        left_arrangement
-                            .value()
-                            .bucket(key)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
-                }
-            }
-            for delta in &keyed_right_delta {
-                let key = &delta.key;
-                if affected_keys.insert(key.clone()) {
-                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
-                    old_left_buckets.insert(
-                        key.clone(),
-                        left_arrangement
-                            .value()
-                            .bucket(key)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
-                }
-            }
+            affected_keys.extend(keyed_left_delta.iter().map(|delta| delta.key.clone()));
+            affected_keys.extend(keyed_right_delta.iter().map(|delta| delta.key.clone()));
         }
         advance_arrangement(
             left_arrangement,
@@ -418,29 +378,31 @@ impl AntiJoinState {
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
                 for key in affected_keys {
-                    let old_right_count = old_right_counts.get(&key).copied().unwrap_or_default();
-                    let new_right_count = right_arrangement.value().key_count(&key);
-                    let old_visible = if old_right_count == 0 {
-                        old_left_buckets.get(&key)
-                    } else {
-                        None
-                    };
-                    let new_visible = if new_right_count == 0 {
+                    let old_visible = self.published.get(&key);
+                    let new_visible = if right_arrangement.value().key_count(&key) == 0 {
                         left_arrangement.value().bucket(&key)
                     } else {
                         None
                     };
                     append_bucket_diff(&mut deltas, new_visible, old_visible);
+                    if let Some(bucket) = new_visible {
+                        self.published.insert(key, bucket.clone());
+                    } else {
+                        self.published.remove(&key);
+                    }
                 }
             }
             ArrangementUpdateMode::Replace => {
+                self.published.clear();
                 let mut left_keys = HashSet::<JoinKey>::default();
                 for delta in &keyed_left_delta {
                     let key = &delta.key;
                     if left_keys.insert(key.clone())
                         && right_arrangement.value().key_count(key) == 0
+                        && let Some(bucket) = left_arrangement.value().bucket(key)
                     {
-                        append_bucket(&mut deltas, left_arrangement.value().bucket(key), 1);
+                        append_bucket(&mut deltas, Some(bucket), 1);
+                        self.published.insert(key.clone(), bucket.clone());
                     }
                 }
             }
@@ -1077,6 +1039,197 @@ mod tests {
 
         assert_eq!(replacement, incremental);
         assert_eq!(replacement.values().copied().collect::<Vec<_>>(), [6, 3]);
+    }
+
+    #[test]
+    fn semi_join_publishes_recursive_right_threshold_after_shared_arrangement_advances() {
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("route", ValueType::U64)]);
+        let keys = ["id".to_owned(), "route".to_owned()];
+        let record = Bytes::from(
+            descriptor
+                .create(&[Value::U64(7), Value::U64(11)])
+                .expect("encode routed row"),
+        );
+        let left_snapshot = [RecordDelta {
+            record: record.clone(),
+            weight: 1,
+        }];
+        let right_add = [RecordDelta {
+            record: record.clone(),
+            weight: 1,
+        }];
+        let right_remove = [RecordDelta {
+            record: record.clone(),
+            weight: -1,
+        }];
+        let hydrated = SubTick {
+            tick: 1,
+            sub_tick: 0,
+        };
+        let added = SubTick {
+            tick: 2,
+            sub_tick: 0,
+        };
+        let removed = SubTick {
+            tick: 3,
+            sub_tick: 0,
+        };
+        let mut state = SemiJoinState::default();
+        let mut left = AsOf::default();
+        let mut right = AsOf::default();
+
+        assert!(
+            state
+                .apply(
+                    &mut left,
+                    &mut right,
+                    descriptor,
+                    descriptor,
+                    &descriptor,
+                    &keys,
+                    &keys,
+                    ValueComparison::Exact,
+                    &left_snapshot,
+                    &[],
+                    hydrated,
+                    hydrated,
+                    ArrangementUpdateMode::Replace,
+                )
+                .expect("hydrate unmatched left row")
+                .is_empty()
+        );
+
+        // A recursive/provenance consumer can advance the shared right
+        // arrangement before this semi-join node is evaluated.
+        right
+            .value_mut()
+            .apply_record_deltas(
+                descriptor,
+                &keys,
+                &right_add,
+                ArrangementUpdateMode::Accumulate,
+            )
+            .expect("advance shared recursive arrangement");
+        right.mark_forward_as_of(added).expect("mark shared add");
+        assert_eq!(
+            state
+                .apply(
+                    &mut left,
+                    &mut right,
+                    descriptor,
+                    descriptor,
+                    &descriptor,
+                    &keys,
+                    &keys,
+                    ValueComparison::Exact,
+                    &[],
+                    &right_add,
+                    added,
+                    added,
+                    ArrangementUpdateMode::Accumulate,
+                )
+                .expect("publish routed recursive add"),
+            [RecordDelta {
+                record: record.clone(),
+                weight: 1,
+            }]
+        );
+
+        right
+            .value_mut()
+            .apply_record_deltas(
+                descriptor,
+                &keys,
+                &right_remove,
+                ArrangementUpdateMode::Accumulate,
+            )
+            .expect("advance shared recursive arrangement");
+        right
+            .mark_forward_as_of(removed)
+            .expect("mark shared removal");
+        assert_eq!(
+            state
+                .apply(
+                    &mut left,
+                    &mut right,
+                    descriptor,
+                    descriptor,
+                    &descriptor,
+                    &keys,
+                    &keys,
+                    ValueComparison::Exact,
+                    &[],
+                    &right_remove,
+                    removed,
+                    removed,
+                    ArrangementUpdateMode::Accumulate,
+                )
+                .expect("publish routed recursive removal"),
+            [RecordDelta { record, weight: -1 }]
+        );
+    }
+
+    #[test]
+    fn anti_join_does_not_retract_rows_only_another_consumer_arranged() {
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("route", ValueType::U64)]);
+        let keys = ["id".to_owned(), "route".to_owned()];
+        let record = Bytes::from(
+            descriptor
+                .create(&[Value::U64(7), Value::U64(11)])
+                .expect("encode routed row"),
+        );
+        let left_add = [RecordDelta {
+            record: record.clone(),
+            weight: 1,
+        }];
+        let right_add = [RecordDelta { record, weight: 1 }];
+        let shared_left_tick = SubTick {
+            tick: 2,
+            sub_tick: 0,
+        };
+        let anti_join_tick = SubTick {
+            tick: 2,
+            sub_tick: 1,
+        };
+        let mut state = AntiJoinState::default();
+        let mut left = AsOf::<ArrangementState, SubTick>::default();
+        let mut right = AsOf::<ArrangementState, SubTick>::default();
+
+        // Another terminal consuming the same source can advance the shared
+        // left arrangement before this anti-join is evaluated. That does not
+        // mean this anti-join has ever published the left row.
+        left.value_mut()
+            .apply_record_deltas(
+                descriptor,
+                &keys,
+                &left_add,
+                ArrangementUpdateMode::Accumulate,
+            )
+            .expect("advance shared left arrangement");
+        left.mark_forward_as_of(shared_left_tick)
+            .expect("mark shared left advance");
+
+        assert!(
+            state
+                .apply(
+                    &mut left,
+                    &mut right,
+                    &descriptor,
+                    &descriptor,
+                    &descriptor,
+                    &keys,
+                    &keys,
+                    ValueComparison::Exact,
+                    &[],
+                    &right_add,
+                    anti_join_tick,
+                    anti_join_tick,
+                    ArrangementUpdateMode::Accumulate,
+                )
+                .expect("apply blocker after shared left advance")
+                .is_empty(),
+            "a blocker suppresses an unpubished row instead of retracting it"
+        );
     }
 
     #[test]

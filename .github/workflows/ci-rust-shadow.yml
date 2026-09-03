@@ -45,7 +45,48 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Reject pre-checkout source residue
+        # This must run before actions/checkout: even with `clean: false`, its
+        # forced branch checkout can overwrite tracked residue. Inspect the
+        # inherited workspace before any action can repair it.
+        shell: bash
+        run: |
+          workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
+          if [[ -L "$workspace" ]]; then
+            echo "pre-checkout workspace is a symlink: $workspace" >&2
+            exit 1
+          fi
+          if [[ -e "$workspace/.git" ]]; then
+            if ! status="$(git -C "$workspace" status --short --untracked-files=all)"; then
+              echo "cannot inspect pre-checkout Git workspace: $workspace" >&2
+              exit 1
+            fi
+            if [[ -n "$status" ]]; then
+              echo "pre-checkout workspace contains source residue:" >&2
+              printf '%s\n' "$status" >&2
+              git -C "$workspace" diff --summary >&2
+              git -C "$workspace" diff --cached --summary >&2
+              exit 1
+            fi
+          elif [[ -d "$workspace" ]] && [[ -n "$(find "$workspace" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+            echo "pre-checkout workspace is not an empty Git checkout:" >&2
+            find "$workspace" -mindepth 1 -maxdepth 1 -printf '%f\n' >&2
+            exit 1
+          fi
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Do not perform checkout's preliminary clean/reset. Tracked residue
+          # is guarded above because checkout itself later forces its branch.
+          clean: false
+      - name: Record checkout source state
+        # Never repair an unexpected checkout and then attest to the repaired
+        # tree: the next baseline step must fail closed for any tracked, index,
+        # or unignored source residue. These diagnostics make that failure
+        # actionable without exposing source contents.
+        run: |
+          git status --short --untracked-files=all
+          git diff --summary
+          git diff --cached --summary
       - name: Seal clean checked-out source baseline
         # `runner` is only available once this job has been assigned a runner;
         # keeping it at step scope avoids Actions rejecting the workflow before

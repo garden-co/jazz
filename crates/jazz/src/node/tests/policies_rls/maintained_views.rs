@@ -74,7 +74,9 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
             (row(0x93), VersionLayer::Content, false),
             (row(0x93), VersionLayer::Deletion, true),
             (row(0x94), VersionLayer::Content, false),
-            (row(0x94), VersionLayer::Deletion, true),
+            // Alice cannot read Bob's retained preimage, so even the deletion
+            // replacement witness must stay outside her admitted closure.
+            (row(0x94), VersionLayer::Deletion, false),
         ],
     );
 }

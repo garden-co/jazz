@@ -108,7 +108,10 @@ impl FastResumeFixture {
         // The cursor is learned from an actual settled publication, never from
         // fixture timestamps. That keeps this receipt honest about the protocol
         // frontier used by a reconnecting peer.
-        let mut warm_peer = PeerState::relay();
+        // This receipt deliberately exercises relay fast-resume semantics.
+        // A relay must carry an admitted immutable binding even for SYSTEM;
+        // install the one concrete binding this standalone fixture represents.
+        let mut warm_peer = policy_bound_relay(subscription);
         let warm_update = block_on(warm_peer.rehydrate_query_for_subscription_with_opts(
             &mut core,
             subscription,
@@ -136,7 +139,7 @@ impl FastResumeFixture {
     /// membership transition, or version payload; CPU cost is what Divan and
     /// CodSpeed measure across fixture scales.
     pub fn caught_up_fast_resume(&mut self) -> FastResumeReceipt {
-        let mut peer = PeerState::relay();
+        let mut peer = policy_bound_relay(self.subscription);
         peer.declare_known_state(
             self.subscription,
             Some(KnownStateDeclaration::Fast {
@@ -163,6 +166,15 @@ impl FastResumeFixture {
             version_carriers: payload.version_carriers.len(),
         }
     }
+}
+
+fn policy_bound_relay(subscription: SubscriptionKey) -> PeerState {
+    let mut peer = PeerState::relay();
+    peer.set_subscription_policy_binding(
+        subscription,
+        (jazz::ids::AuthorSubject::SYSTEM, BTreeMap::new()),
+    );
+    peer
 }
 
 fn schema() -> JazzSchema {

@@ -117,6 +117,7 @@ export class DirectConnectionManager extends ConnectionManager {
       // An in-flight or failed disconnect is not permission for a
       // RemoteIfPossible read to fall back locally.
       this.isDisconnected = true;
+      this.publishExplicitOfflineState();
     });
   }
 
@@ -128,6 +129,7 @@ export class DirectConnectionManager extends ConnectionManager {
       const client = this.clientEntry?.client;
       if (client) this.connectClient(client);
       this.isDisconnected = false;
+      this.publishExplicitOfflineState();
     });
     if (!this.isDisconnected) {
       const waiters = Array.from(this.reconnectWaiters);

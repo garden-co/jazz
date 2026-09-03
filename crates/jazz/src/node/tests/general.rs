@@ -449,6 +449,7 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
                 identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::Session,
                 edge_authority: false,
+                admitted_write_authorization: false,
             }),
         )
         .resolve()
@@ -556,6 +557,7 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     assert!(matches!(
         missing
@@ -634,6 +636,7 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     let mut root = prepared
         .staged_chunks
@@ -694,6 +697,7 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     let start = receiver
         .apply_sync_message_with_ingest_context(
@@ -817,6 +821,7 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     let _ = receiver
         .apply_sync_message_with_ingest_context(
@@ -864,6 +869,7 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     let started = receiver
         .apply_sync_message_with_ingest_context(
@@ -1635,6 +1641,7 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
     );
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
+    register_whole_table_receiver(&mut client, "todos");
     client.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         client

@@ -1000,6 +1000,104 @@ async fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
     assert!(values.contains(&(vec![Value::U64(1), Value::U64(4)], 1)));
 }
 
+/// A recursion-owned side stream observes exactly the physical rows evaluated
+/// by each step.  It is intentionally a bag: two paths may derive one public
+/// reachability tuple, while the public recursive result remains set-like.
+/// The side stream is owned by the same recursive state, so an edge retraction
+/// recomputes both streams together instead of leaving stale provenance.
+#[futures_test::test]
+async fn recursive_step_witness_tracks_bounded_paths_and_retractions() {
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let reach = RecordDescriptor::new([
+        ("src", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
+    ]);
+    let seed = GraphBuilder::table("edges").project(["src", "dst"]);
+    let frontier = GraphBuilder::frontier_source("frontier", reach);
+    let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
+    let step_input = GraphBuilder::join(frontier.clone(), edge_pairs.clone(), ["dst"], ["src"]);
+    let step = step_input.clone().project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    // Keep the raw evaluated edge identity in the generic side output.  The
+    // public recursion is depth-bounded at one step round; an edge from the
+    // final frontier must not appear as a witness because it was never run.
+    let recursive =
+        GraphBuilder::recursive_with_step_witness(seed, step, step_input, "frontier", 1, true);
+    let subscription = database
+        .subscribe([
+            ("reach", recursive.clone()),
+            (
+                "witness",
+                GraphBuilder::recursive_step_witness(recursive.clone()),
+            ),
+        ])
+        .unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    insert_edge(&mut batch, 3, 3, 4);
+    // Duplicate outgoing rows derive the same public `(1, 3)` tuple but are
+    // distinct physical evaluated step witnesses.
+    insert_edge(&mut batch, 4, 2, 3);
+    // A cycle is safe because the public recursive frontier remains set-like.
+    // The witness still records the bounded step that actually traversed it.
+    insert_edge(&mut batch, 5, 3, 2);
+    database.commit_batch(batch).await.unwrap();
+    let initial = subscription.recv().unwrap();
+    let mut public = initial.get("reach").unwrap().to_values().unwrap();
+    sort_pairs_by_value(&mut public);
+    assert_eq!(
+        public,
+        [
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(2)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(4)], 1),
+            (vec![Value::U64(3), Value::U64(2)], 1),
+            (vec![Value::U64(3), Value::U64(3)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ],
+        "max depth one excludes the unevaluated 1→4 second-step path",
+    );
+    let witness = initial.get("witness").unwrap().to_values().unwrap();
+    assert!(
+        witness.iter().any(|(row, weight)| {
+            *weight > 0 && row == &vec![Value::U64(1), Value::U64(2), Value::U64(2), Value::U64(3)]
+        }),
+        "the first evaluated physical step is retained"
+    );
+    assert!(
+        witness.iter().any(|(row, weight)| {
+            *weight == 2 && row == &vec![Value::U64(1), Value::U64(2), Value::U64(2), Value::U64(3)]
+        }),
+        "duplicate path witnesses retain their bag semantics"
+    );
+    assert!(
+        witness.iter().any(|(row, weight)| {
+            *weight > 0 && row == &vec![Value::U64(3), Value::U64(2), Value::U64(2), Value::U64(3)]
+        }),
+        "the witness records the cycle step evaluated within the configured depth bound"
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    database.commit_batch(batch).await.unwrap();
+    let retracted = subscription.recv().unwrap();
+    let witness_retractions = retracted.get("witness").unwrap().to_values().unwrap();
+    assert!(
+        witness_retractions.iter().any(|(row, weight)| {
+            *weight < 0 && row == &vec![Value::U64(1), Value::U64(2), Value::U64(2), Value::U64(3)]
+        }),
+        "edge deletion retracts the recursion-owned witness rather than retaining stale provenance"
+    );
+}
+
 #[futures_test::test]
 async fn recursive_graph_subscriptions_recompute_after_edge_update() {
     let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");

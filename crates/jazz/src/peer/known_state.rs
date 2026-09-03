@@ -52,6 +52,21 @@ impl PeerState {
             .map_or(0, |state| state.authorization_progress)
     }
 
+    /// Carry an already-served authorization generation to a replacement
+    /// maintained usage. Claim rebinding changes the coverage-group key, but
+    /// does not reset the concrete downstream usages' generation: a fresh
+    /// reset from the replacement must remain comparable with their retained
+    /// fast cursors.
+    pub(crate) fn retain_authorization_progress_for_subscription(
+        &mut self,
+        subscription: SubscriptionKey,
+        authorization_progress: u64,
+    ) {
+        let state = self.publication_states.entry(subscription).or_default();
+        state.authorization_progress = authorization_progress;
+        state.has_served_authorization_progress = true;
+    }
+
     /// Drop one subscription and eagerly unregister any maintained Groove
     /// subscription from the runtime before dropping the receiver.
     pub fn forget_subscription_with_node<S>(
@@ -64,8 +79,16 @@ impl PeerState {
     {
         let Some(mut state) = self.publication_states.remove(&subscription) else {
             self.downstream_known_states.remove(&subscription);
+            // `ensure_query_subscription_registered` may have installed the
+            // node-side shape before this peer had enough state to create a
+            // maintained receiver. Retire that owner too; the node-side
+            // removal is idempotent for an already-forgotten publication.
+            node.release_query_subscription_for_peer(self.publication_owner, subscription);
             return false;
         };
+        let admitted_policy_binding = state.policy_binding.as_ref().map(|(identity, claims)| {
+            crate::protocol::PolicyBindingKey::from_canonical_parts(*identity, claims.clone())
+        });
         self.downstream_known_states.remove(&subscription);
         let unsubscribed = if state.groove_runtime_token == Some(node.groove_runtime_token()) {
             state
@@ -78,6 +101,15 @@ impl PeerState {
             false
         };
         drop(state);
+        if let Some(policy_binding) = admitted_policy_binding {
+            node.release_query_subscription_for_peer_with_admitted_policy_binding(
+                self.publication_owner,
+                subscription,
+                policy_binding,
+            );
+        } else {
+            node.release_query_subscription_for_peer(self.publication_owner, subscription);
+        }
         unsubscribed
     }
 
@@ -163,7 +195,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let SyncMessage::FetchRowVersions { requests } = message else {
+        let SyncMessage::FetchRowVersions { requests, .. } = message else {
             return Err(Error::UnsupportedSyncMessage(
                 "non-row-version-fetch peer request",
             ));
@@ -171,21 +203,52 @@ impl PeerState {
         validate_fetch_row_versions(&requests).map_err(|_| {
             Error::UnsupportedSyncMessage("row-version repair request exceeds limit")
         })?;
-        self.serve_row_versions(node, &requests).await
+        if self.role() == PeerRole::Relay {
+            return Err(Error::InvalidStoredValue(
+                "relay row-version repair requires an explicit immutable policy binding",
+            ));
+        }
+        let identity = self.permission_subject().ok_or(Error::InvalidStoredValue(
+            "direct repair is missing a terminated permission subject",
+        ))?;
+        let claims = node.session_claims_for(identity);
+        self.serve_row_versions(
+            node,
+            &requests,
+            RepairServingContext::Authority {
+                policy_binding: (identity, claims),
+            },
+        )
+        .await
     }
 
     /// Build repair-lane responses for visible requested row-version payloads.
-    pub async fn serve_row_versions<S>(
+    pub(crate) async fn serve_row_versions<S>(
         &mut self,
         node: &mut NodeState<S>,
         requests: &[RowVersionRef],
+        context: RepairServingContext,
     ) -> Result<Vec<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
     {
-        let versions = node
-            .row_version_payloads_for_refs(requests, self.identity())
-            .await?;
+        let versions = match context {
+            RepairServingContext::Authority {
+                policy_binding: (identity, claims),
+            } => node
+                .scoped_active_session_claims(identity, claims)
+                .row_version_payloads_for_refs(
+                    requests,
+                    crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(identity),
+                )
+                .await?,
+            RepairServingContext::ScopeIsolatedClientRelay => node
+                .row_version_payloads_for_refs(
+                    requests,
+                    crate::node::RowVersionRepairAuthorization::RetainedScopeLedger,
+                )
+                .await?,
+        };
         Ok(vec![SyncMessage::RowVersionPayloads {
             version_bundles: versions,
         }])
@@ -206,4 +269,14 @@ impl PeerState {
         *self.metrics.maintained_subscription_view
     }
 
+}
+
+/// Chosen by the topology boundary, rather than inferred from `PeerRole`.
+/// Multiplexed relays receive no retained-knowledge capability and must ask an
+/// authority to serve repairs.
+pub(crate) enum RepairServingContext {
+    Authority {
+        policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
+    },
+    ScopeIsolatedClientRelay,
 }
