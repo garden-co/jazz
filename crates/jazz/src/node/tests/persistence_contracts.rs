@@ -34,7 +34,6 @@ struct FailWriteManyMemoryStorage {
     fail_on_write_many: std::rc::Rc<std::cell::Cell<Option<usize>>>,
     targeted_write_many_failure:
         std::rc::Rc<std::cell::RefCell<Option<TargetedWriteManyFailure>>>,
-    fail_next_delete: std::rc::Rc<std::cell::Cell<bool>>,
     write_many_calls: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
@@ -44,7 +43,6 @@ impl FailWriteManyMemoryStorage {
             inner: MemoryStorage::new(column_families).expect("valid memory storage families"),
             fail_on_write_many: std::rc::Rc::new(std::cell::Cell::new(None)),
             targeted_write_many_failure: std::rc::Rc::new(std::cell::RefCell::new(None)),
-            fail_next_delete: std::rc::Rc::new(std::cell::Cell::new(false)),
             write_many_calls: std::rc::Rc::new(std::cell::Cell::new(0)),
         }
     }
@@ -76,10 +74,6 @@ impl FailWriteManyMemoryStorage {
             }));
     }
 
-    fn fail_next_delete(&self) {
-        self.fail_next_delete.set(true);
-    }
-
     fn write_many_call_count(&self) -> usize {
         self.write_many_calls.get()
     }
@@ -108,13 +102,6 @@ impl OrderedKvStorage for FailWriteManyMemoryStorage {
     }
 
     fn delete(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
-        if self.fail_next_delete.replace(false) {
-            return Box::pin(async {
-                Err(groove::storage::Error::InvalidStorageLayout(
-                    "injected delete failure".to_owned(),
-                ))
-            });
-        }
         self.inner.delete(cf, key)
     }
 
@@ -181,14 +168,12 @@ impl ReopenableStorage for FailWriteManyMemoryStorage {
                 inner,
                 fail_on_write_many,
                 targeted_write_many_failure,
-                fail_next_delete,
                 write_many_calls,
             } = self;
             Ok(Self {
                 inner: inner.reopen(column_families).await?,
                 fail_on_write_many,
                 targeted_write_many_failure,
-                fail_next_delete,
                 write_many_calls,
             })
         })

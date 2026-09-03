@@ -1319,7 +1319,8 @@ fn assert_eviction_failure_contract(
         .collect::<Vec<_>>();
     let storage = FailWriteManyMemoryStorage::new(&refs);
     let mut reader = NodeState::new(node(3), schema(), storage.clone()).unwrap();
-    let update = PeerState::relay()
+    register_shape_binding(&mut reader, &shape, &binding);
+    let update = relay_with_system_binding(subscription)
         .rehydrate_query_for_subscription_with_opts(
             &mut core,
             subscription,
@@ -1348,13 +1349,19 @@ fn assert_eviction_failure_contract(
     assert!(reader.cached_tx_version_tables(tx_id).is_some());
     reader.cache_tx_versions(tx_id, persisted_versions.clone());
     assert!(reader.cached_tx_versions(tx_id).is_some());
-    let binding_view_key = reader
-        .binding_view_key_for_subscription(subscription)
-        .unwrap();
-    assert_eq!(
-        reader.load_known_state_fact(binding_view_key).unwrap(),
-        Some(GlobalTime::new(global_time, 0).unwrap())
-    );
+    assert!(matches!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &[],
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
 
     match outcome {
         EvictionPersistenceOutcome::FailBeforeDelegation => {
@@ -1484,7 +1491,8 @@ fn failed_known_state_clear_leaves_eviction_bodies_and_transaction_caches_intact
         .collect::<Vec<_>>();
     let storage = FailWriteManyMemoryStorage::new(&refs);
     let mut reader = NodeState::new(node(3), schema(), storage.clone()).unwrap();
-    let update = PeerState::relay()
+    register_shape_binding(&mut reader, &shape, &binding);
+    let update = relay_with_system_binding(subscription)
         .rehydrate_query_for_subscription_with_opts(
             &mut core,
             subscription,
@@ -1498,21 +1506,42 @@ fn failed_known_state_clear_leaves_eviction_bodies_and_transaction_caches_intact
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
     let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
     reader.cache_tx_versions(tx_id, persisted_versions);
-    let binding_view_key = reader
-        .binding_view_key_for_subscription(subscription)
-        .unwrap();
-    assert!(reader.load_known_state_fact(binding_view_key).unwrap().is_some());
+    assert!(matches!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &[],
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
     assert!(reader.cached_tx_versions(tx_id).is_some());
     assert!(reader.cached_tx_version_tables(tx_id).is_some());
 
-    storage.fail_next_delete();
+    storage.fail_nth_following_write_many(1);
     reader
         .evict_cold(&PeerEvictionPins::default())
         .resolve()
         .expect_err("known-state clearing failure must stop eviction before body removal");
 
     assert_eq!(reader.row_history("todos", row_uuid).unwrap(), persisted_history);
-    assert!(reader.load_known_state_fact(binding_view_key).unwrap().is_some());
+    assert!(matches!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &[],
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
     assert!(reader.cached_tx_versions(tx_id).is_some());
     assert!(reader.cached_tx_version_tables(tx_id).is_some());
 }
