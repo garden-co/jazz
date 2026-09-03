@@ -4164,12 +4164,6 @@ mod tests {
         assert_eq!(scheduler.take(), None, "waking does not create a hot loop");
     }
 
-    /// Given alice's idle native peer closes, when its terminal resolves, then
-    /// alice's client observes it and installs a replacement without wire traffic.
-    ///
-    /// ```text
-    /// peer ──close──► alice terminal watcher ──► generation recovery ──► replacement
-    /// ```
     #[tokio::test(flavor = "current_thread")]
     async fn persistent_storage_open_yields_without_sync_polling() {
         let temp_dir = TempDir::new().expect("temp client dir");
@@ -4698,8 +4692,6 @@ mod tests {
     ///
     /// alice ──local write──► offline local store
     /// alice ──Remote read──► transient subscription ──wait──► authority
-    /// Given alice deliberately drops her native transport, when its terminal resolves,
-    /// then the client detaches it without reconnecting.
     #[tokio::test(flavor = "current_thread")]
     async fn strict_remote_one_shot_uses_transient_subscription_not_ambient_all() {
         let client = JazzClient::connect(make_offline_context(
@@ -4758,8 +4750,6 @@ mod tests {
     // means corrupt local state; creating that through the public API would
     // require deliberately corrupting a storage backend. The assertion itself
     // is public: a normal `JazzClient::query` must report the stopped driver.
-    /// Given alice shuts down, when an old peer-close terminal resolves afterward,
-    /// then the terminal watcher cannot start another connection.
     #[tokio::test(flavor = "current_thread")]
     async fn fatal_tick_driver_failure_is_reported_to_callers() {
         let client = JazzClient::connect(make_offline_context(
@@ -5078,6 +5068,12 @@ mod tests {
             .await;
     }
 
+    /// Given alice's idle native peer closes, when its terminal resolves, then
+    /// alice's client observes it and installs a replacement without wire traffic.
+    ///
+    /// ```text
+    /// peer ──close──► alice terminal watcher ──► generation recovery ──► replacement
+    /// ```
     #[tokio::test(flavor = "current_thread")]
     async fn idle_peer_closed_terminal_reconnects_without_semantic_traffic() {
         tokio::task::LocalSet::new()
@@ -5108,6 +5104,8 @@ mod tests {
             .await;
     }
 
+    /// Given alice deliberately drops her native transport, when its terminal resolves,
+    /// then the client detaches it without reconnecting.
     #[tokio::test(flavor = "current_thread")]
     async fn owner_dropped_terminal_does_not_reconnect() {
         tokio::task::LocalSet::new()
@@ -5136,6 +5134,8 @@ mod tests {
             .await;
     }
 
+    /// Given alice shuts down, when an old peer-close terminal resolves afterward,
+    /// then the terminal watcher cannot start another connection.
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_does_not_reconnect_after_terminal() {
         tokio::task::LocalSet::new()
