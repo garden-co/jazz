@@ -389,8 +389,9 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
 
     fn on_enter(&self, id: &tracing::Id, ctx: Context<'_, S>) {
         if let Some(span_ref) = ctx.span(id) {
-            if span_ref.extensions().get::<SpanTiming>().is_none() {
-                span_ref.extensions_mut().insert(SpanTiming {
+            let mut extensions = span_ref.extensions_mut();
+            if extensions.get_mut::<SpanTiming>().is_none() {
+                extensions.insert(SpanTiming {
                     start_unix_nano: unix_nano_now(),
                 });
             }
@@ -427,26 +428,28 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
         }
     }
 
-    fn on_exit(&self, id: &tracing::Id, ctx: Context<'_, S>) {
-        let should_collect_entry = trace_entry_collection_enabled();
-
-        if let Some(span_ref) = ctx.span(id) {
-            let meta = span_ref.metadata();
-            let extensions = span_ref.extensions();
-            let debug_record = extensions.get::<StringRecorder>();
-            let timing = extensions.get::<SpanTiming>();
-
-            if should_collect_entry {
-                record_span_trace_entry(meta, debug_record, timing);
-            }
+    fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+        if !trace_entry_collection_enabled() {
+            return;
         }
+
+        let Some(span_ref) = ctx.span(&id) else {
+            return;
+        };
+        let meta = span_ref.metadata();
+        let extensions = span_ref.extensions();
+        let Some(timing) = extensions.get::<SpanTiming>() else {
+            return;
+        };
+        let debug_record = extensions.get::<StringRecorder>();
+        record_span_trace_entry(meta, debug_record, timing);
     }
 }
 
 fn record_span_trace_entry(
     meta: &tracing::Metadata<'_>,
     recorder: Option<&StringRecorder>,
-    timing: Option<&SpanTiming>,
+    timing: &SpanTiming,
 ) {
     if !trace_entry_collection_enabled() {
         return;
@@ -458,9 +461,7 @@ fn record_span_trace_entry(
         name: meta.name().to_string(),
         target: meta.target().to_string(),
         level: meta.level().to_string(),
-        start_unix_nano: timing
-            .map(|value| value.start_unix_nano)
-            .unwrap_or(end_unix_nano),
+        start_unix_nano: timing.start_unix_nano,
         end_unix_nano,
         fields: recorder
             .map(|value| value.fields.clone())
