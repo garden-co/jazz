@@ -2023,9 +2023,9 @@ fn calculated_merge_commit_persists_only_emitted_target_coordinates() {
         layer: MergeAspect::Content,
         component: ContributionComponent::Column("title".to_owned()),
     };
-    let provenance = ContributionMergeProvenance::canonical(
+    let mut provenance = ContributionMergeProvenance::canonical(
         source_key,
-        target_key,
+        target_key.clone(),
         vec![ContributionSubstitution {
             target: target_coordinate,
             sources: vec![ContributionDot {
@@ -2047,6 +2047,16 @@ fn calculated_merge_commit_persists_only_emitted_target_coordinates() {
         )
         .unwrap();
     let tx_id = node.persist_and_settle_transaction(published).unwrap();
+    // The common commit path adds the exact authored branch operation without
+    // changing the calculated source substitutions or adding other coordinates.
+    provenance.branch_write_intents = vec![crate::tx::BranchWriteIntent {
+        version: 1,
+        physical_table_id: node.catalogue.physical_mappings[&schema.version_id()].tables["todos"].table_id,
+        authored_schema: schema.version_id(),
+        row_uuid,
+        head: target_key,
+        operation: crate::tx::BranchWriteOperation::ExactHeadInsert,
+    }];
     assert_eq!(
         node.transaction_record(tx_id).unwrap().contribution_merge,
         Some(provenance)

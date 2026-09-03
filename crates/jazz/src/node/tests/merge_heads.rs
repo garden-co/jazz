@@ -15,6 +15,36 @@ fn merge_head_branch_schema() -> JazzSchema {
 }
 
 #[test]
+fn immediate_branch_commit_unit_matches_durable_replay() {
+    // The wire envelope is the boundary under test: immediate publication must
+    // carry exactly the same generated intent as replay after a process restart.
+    let schema = merge_head_branch_schema();
+    let (dir, mut writer) = open_node_with_schema(node(0xb3), schema.clone());
+    let (tx_id, immediate) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0xbc), 10)
+                .branch(branch_selector(0xa3))
+                .made_by(user(0xb4))
+                .cells(BTreeMap::from([("title".to_owned(), v("retained metadata"))])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = &immediate else {
+        panic!("expected commit unit");
+    };
+    assert_eq!(tx.made_by, user(0xb4));
+    assert_eq!(
+        tx.contribution_merge.as_ref()
+            .expect("immediate publication lost its generated branch-write intent")
+            .branch_write_intents.len(),
+        1,
+        "immediate publication must retain generated branch-write intent"
+    );
+    drop(writer);
+    let mut reopened = reopen_node_at(&dir, node(0xb3), schema);
+    assert_eq!(immediate, reopened.commit_unit_for(tx_id).unwrap());
+}
+
+#[test]
 fn merge_heads_match_history_for_first_and_subsequent_authored_versions() {
     let schema = two_column_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0xa0), schema);
@@ -349,8 +379,18 @@ fn merge_heads_key_two_nondefault_branches_independently_across_reopen() {
                     .cells(BTreeMap::from([("title".to_owned(), v(format!("bob-{label}")))])),
             )
             .unwrap();
-        core.apply_sync_message_settled(alice_unit).unwrap();
-        core.apply_sync_message_settled(bob_unit).unwrap();
+        for unit in [alice_unit, bob_unit] {
+            let SyncMessage::CommitUnit { tx, .. } = &unit else {
+                panic!("expected commit unit");
+            };
+            let tx_id = tx.tx_id;
+            let receipts = core.apply_sync_message_settled(unit).unwrap();
+            assert!(receipts.iter().any(|receipt| matches!(
+                receipt,
+                SyncMessage::FateUpdate { tx_id: receipt_tx, fate: Fate::Accepted, .. }
+                    if *receipt_tx == tx_id
+            )), "both concurrent branch writes must be admitted: {receipts:?}");
+        }
     }
 
     let table_id = core.catalogue.physical_mappings[&schema.version_id()].tables["todos"].table_id;
