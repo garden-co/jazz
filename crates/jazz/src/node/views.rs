@@ -272,6 +272,9 @@ fn covered_input_version_rows_for_bundle(
 
 pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) subscription: SubscriptionKey,
+    /// Cut of the exact source receipt used by the publication owner. A relay's
+    /// own committed clock is not the authority cut of the inputs it forwards.
+    pub(crate) settled_through: GlobalTime,
     /// Peer inventory of transactions whose full row-version payload has
     /// already shipped on this link. Partial payload coverage is not recorded
     /// here, even when it is enough for a subscription-scoped exclusive result.
@@ -690,6 +693,7 @@ where
         let update = self
             .view_update_for_maintained_result_members(MaintainedViewBundleInputs {
                 subscription,
+                settled_through: self.clock.committed_global_time,
                 result_member_adds,
                 result_member_removes,
                 program_fact_adds: transitions.program_fact_adds,
@@ -714,6 +718,7 @@ where
     ) -> Result<SyncMessage, Error> {
         let MaintainedViewBundleInputs {
             subscription,
+            settled_through,
             peer_complete_tx_payloads,
             known_state,
             complete_exclusive_payloads,
@@ -1176,7 +1181,7 @@ where
         Ok(SyncMessage::ViewUpdate(
             crate::protocol::ViewUpdatePayload {
                 subscription,
-                settled_through: self.clock.committed_global_time,
+                settled_through,
                 reset_result_set: false,
                 version_carriers,
                 peer_payload_inventory: PeerPayloadInventory {

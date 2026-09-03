@@ -144,6 +144,15 @@ relation fact whose referenced row version has not been admitted as part of the
 same exact authority closure is incomplete and cannot advance settlement or
 enter the graph.
 
+A client relay preserves each version witness's physical supplying branch,
+even when the read view projects that version into another logical branch.
+For a strict authority-backed closure, it forwards the selected upstream
+receipt's settlement cut, not its own local committed clock. A newly attached
+usage receives a complete source-manifest reset: a cached cursor or known
+payload inventory does not establish a predecessor input closure for that
+usage. Known payloads may still avoid retransmitting bytes; they cannot remove
+the manifest or turn its opening into an incremental update.
+
 Compiled source-occurrence identities MUST be identical on native and WASM
 hosts. They must not incorporate pointer widths or machine-sized sentinel
 values. Implicit root references use a `reference:<column>` alias, separate

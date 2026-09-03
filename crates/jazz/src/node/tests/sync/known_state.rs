@@ -478,14 +478,45 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
         panic!("expected view update");
     };
     assert_eq!(*settled_through, GlobalTime::new(10, 0).unwrap());
-    assert!(!reset_result_set);
+    // A cursor deduplicates bodies, not the new usage's input manifest.
+    assert!(*reset_result_set);
     assert!(result_member_adds.is_empty());
     assert!(version_bundles.is_empty());
 
     let missing = reader
         .missing_known_state_row_version_refs(&update)
         .unwrap();
-    assert!(missing.is_empty());
+    assert_eq!(
+        missing,
+        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, _tx_id)]
+    );
+    // Alice's claimed cursor was ahead of her retained payloads. Repair the
+    // actual missing body, then verify the same rows as the undeduplicated
+    // control opening rather than accepting an empty apparent success.
+    let mut repair_peer = PeerState::client_link(AuthorSubject::SYSTEM);
+    let messages = repair_peer
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: missing.clone(),
+                delegated_session: None,
+            },
+        )
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
+        panic!("expected row-version payloads");
+    };
+    reader
+        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
+        .unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
+    assert_eq!(
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("known"))])
+    );
 }
 
 #[test]
@@ -713,7 +744,9 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set);
+    // Reattaching restores the full input manifest without retransmitting
+    // known bodies, even when Alice still holds the previous live closure.
+    assert!(*reset_result_set);
     assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
     assert!(version_bundles.is_empty());
@@ -804,7 +837,9 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set);
+    // Durable payload knowledge survives reopen; it does not replace the
+    // fresh attachment's complete authority input manifest.
+    assert!(*reset_result_set);
     assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
     assert!(version_bundles.is_empty());

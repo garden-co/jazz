@@ -484,9 +484,8 @@ where
                 })
             }
             SyncMessage::CommitUnit { tx, versions }
-                if tx.kind == TxKind::Mergeable
-                    && (matches!(peer.role(), PeerRole::ClientLink { .. })
-                        || peer.role() == PeerRole::Relay) =>
+                if matches!(peer.role(), PeerRole::ClientLink { .. })
+                    || peer.role() == PeerRole::Relay =>
             {
                 // Terminal authorization belongs to the immutable session
                 // selected at request admission, never to the relay's
@@ -494,6 +493,9 @@ where
                 // already been checked against its server-issued one-binding
                 // capability; a multiplexed relay has passed the corresponding
                 // transport admission check for this request.
+                // Both transaction kinds need this proof. Exclusive writes
+                // also validate their read sets at terminal ingest, but that
+                // cannot replace authorization under the delegated session.
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
                     CommitUnitTrust::Relay => session_claim_binding.0,

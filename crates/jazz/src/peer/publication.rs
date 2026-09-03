@@ -126,25 +126,22 @@ impl PeerState {
             .unwrap_or_else(|| node.committed_global_time())
     }
 
-    fn binding_settlement_time<S>(
+    fn maintained_publication_cut<S>(
         &self,
         node: &NodeState<S>,
         subscription: SubscriptionKey,
-        shape: &ValidatedQuery,
-        binding: &Binding,
     ) -> GlobalTime
     where
         S: OrderedKvStorage,
     {
-        self.settlement_time_for_publication(
-            node,
-            subscription,
-            crate::protocol::BindingViewKey::new(
-                shape.shape_id(),
-                binding.binding_id(),
-                subscription.read_view,
-            ),
-        )
+        // An authority computes a closure from its own maintained state. A
+        // strict client relay instead consumes one selected authority receipt;
+        // its local committed clock cannot certify that receipt's inputs.
+        if self.subscription_awaits_selected_authority_source(subscription) {
+            self.canonical_subscription_settlement_time(node, subscription)
+        } else {
+            node.committed_global_time()
+        }
     }
 
     pub(crate) fn canonical_subscription_settlement_time<S>(
@@ -947,7 +944,7 @@ impl PeerState {
             return Ok(Some(MaintainedCanonicalUpdate {
                 update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
-                    settled_through: self.binding_settlement_time(node, subscription, shape, binding),
+                    settled_through: self.maintained_publication_cut(node, subscription),
                     reset_result_set: false,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1216,7 +1213,7 @@ impl PeerState {
             return Ok(Some(MaintainedCanonicalUpdate {
                 update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
-                    settled_through: self.binding_settlement_time(node, subscription, shape, binding),
+                    settled_through: self.maintained_publication_cut(node, subscription),
                     reset_result_set: initial_snapshot_completed,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1248,6 +1245,7 @@ impl PeerState {
             node.reset_storage_read_metrics();
         }
         let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
+        let settled_through = self.maintained_publication_cut(node, subscription);
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
@@ -1261,6 +1259,7 @@ impl PeerState {
             scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription,
+                    settled_through,
                     peer_complete_tx_payloads,
                     known_state,
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads
@@ -1707,7 +1706,7 @@ impl PeerState {
             {
                 let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
-                    settled_through: self.binding_settlement_time(node, subscription, shape, binding),
+                    settled_through: self.maintained_publication_cut(node, subscription),
                     reset_result_set,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
@@ -1775,7 +1774,7 @@ impl PeerState {
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
             self.fast_cursor_authorization_matches(subscription, &known_state);
-        let watermark = self.binding_settlement_time(node, subscription, shape, binding);
+        let watermark = self.maintained_publication_cut(node, subscription);
         let simple_membership_delta =
             transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
         let mut result_member_adds = transitions
@@ -1824,6 +1823,7 @@ impl PeerState {
                 )
             });
         let (program_fact_adds, program_fact_removes, reset_result_set) = if reset_result_set
+            && simple_membership_delta
             && !cursor_membership_mismatch
             && let Some(position) = known_membership_position
             && watermark.0 > 0
@@ -1878,6 +1878,7 @@ impl PeerState {
             scoped.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
                 subscription,
+                settled_through: watermark,
                 peer_complete_tx_payloads,
                 known_state: bundle_known_state,
                 complete_exclusive_payloads: self.ship_complete_exclusive_payloads
@@ -2372,7 +2373,8 @@ impl PeerState {
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let mut reset_result_set = true;
-        let result_member_adds = if !authorization_mismatch
+        let result_member_adds = if current_program_fact_set.is_empty()
+            && !authorization_mismatch
             && let Some(position) = known_membership_position
             && self
                 .canonical_subscription_settlement_time(node, maintained_subscription)
@@ -2382,7 +2384,8 @@ impl PeerState {
         {
             reset_result_set = false;
             Vec::new()
-        } else if !authorization_mismatch
+        } else if current_program_fact_set.is_empty()
+            && !authorization_mismatch
             && let Some(position) = known_membership_position
             && current_result_member_set
                 .iter()
@@ -2401,6 +2404,7 @@ impl PeerState {
         };
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(target_subscription)?;
+        let settled_through = self.maintained_publication_cut(node, maintained_subscription);
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
@@ -2414,6 +2418,7 @@ impl PeerState {
             scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription: target_subscription,
+                    settled_through,
                     peer_complete_tx_payloads,
                     known_state: (!authorization_mismatch)
                         .then_some(known_state)
@@ -2593,7 +2598,8 @@ impl PeerState {
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let mut reset_result_set = true;
-        let result_member_adds = if !authorization_mismatch
+        let result_member_adds = if current_program_fact_set.is_empty()
+            && !authorization_mismatch
             && let Some(position) = known_membership_position
             && self
                 .canonical_subscription_settlement_time(node, maintained_subscription)
@@ -2603,7 +2609,8 @@ impl PeerState {
         {
             reset_result_set = false;
             Vec::new()
-        } else if !authorization_mismatch
+        } else if current_program_fact_set.is_empty()
+            && !authorization_mismatch
             && let Some(position) = known_membership_position
             && current_result_member_set
                 .iter()
@@ -2621,6 +2628,7 @@ impl PeerState {
             current_result_member_set.iter().cloned().collect()
         };
         let (policy_identity, _) = self.served_subscription_policy_binding(target_subscription)?;
+        let settled_through = self.maintained_publication_cut(node, maintained_subscription);
         let target_reset = {
             let maintained = &self
                 .publication_states
@@ -2633,6 +2641,7 @@ impl PeerState {
             node.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription: target_subscription,
+                    settled_through,
                     peer_complete_tx_payloads,
                     known_state: (!authorization_mismatch)
                         .then_some(known_state)

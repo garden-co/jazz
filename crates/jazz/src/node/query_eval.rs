@@ -1163,7 +1163,8 @@ where
                 &source_request.source.table,
                 request.reads.primary.read_schema,
             )?;
-            let metadata = read_sources::inline_source_metadata(&source_request.requirements, None);
+            let metadata =
+                read_sources::covered_input_source_metadata(&source_request.requirements, &table);
             let descriptor =
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
                     &table, &metadata,
