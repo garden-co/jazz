@@ -750,13 +750,21 @@ impl WriteStream {
             !authors.is_empty(),
             "write stream authors must be non-empty"
         );
+        assert!(
+            edits_per_sec > 0,
+            "write stream edits per second must be positive"
+        );
         let mut rng = Lcg::new(seed);
         let row_zipf = Zipf::new(rows.len(), row_zipf_s);
         let author_zipf = Zipf::new(authors.len(), author_zipf_s);
-        let interval_ms = 1_000 / edits_per_sec.max(1);
         let steps = (0..steps)
             .map(|idx| WriteStep {
-                at_ms: idx as u64 * interval_ms,
+                at_ms: u64::try_from(
+                    (u128::try_from(idx).expect("write stream step index must fit in u128")
+                        * 1_000)
+                        / u128::from(edits_per_sec),
+                )
+                .expect("write stream timestamp must fit in u64"),
                 row_uuid: rows[row_zipf.sample(&mut rng)],
                 author: authors[author_zipf.sample(&mut rng)],
             })
