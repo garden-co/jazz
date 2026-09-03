@@ -1252,7 +1252,6 @@ fn fast_known_state_requires_a_live_receipt_after_reopen_and_eviction() {
             .unwrap(),
         Some(crate::protocol::KnownStateDeclaration::Fast { .. })
     ));
-
     let mut reopened = reader.reopen_in_place().unwrap();
     let declaration = reopened
         .known_state_declaration_for_subscription(
@@ -1349,6 +1348,21 @@ fn assert_eviction_failure_contract(
     assert!(reader.cached_tx_version_tables(tx_id).is_some());
     reader.cache_tx_versions(tx_id, persisted_versions.clone());
     assert!(reader.cached_tx_versions(tx_id).is_some());
+    // Internal durable-boundary receipt: a reopened node intentionally lacks
+    // the live authority handoff needed to declare Fast, so that public API
+    // result alone cannot distinguish an evicted durable fact from a stale
+    // one. This isolated store has exactly this subscription's fact.
+    let known_state_facts = reader
+        .database
+        .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
+        .unwrap();
+    assert_eq!(
+        futures::executor::block_on(known_state_facts.prefix_entries(&[]))
+            .unwrap()
+            .len(),
+        1,
+        "the settled update must persist its fast known-state fact before eviction"
+    );
     assert!(matches!(
         reader
             .known_state_declaration_for_subscription(
@@ -1397,6 +1411,16 @@ fn assert_eviction_failure_contract(
     drop(reader);
 
     let mut reopened = NodeState::new(node(3), schema(), storage).unwrap();
+    let known_state_facts = reopened
+        .database
+        .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
+        .unwrap();
+    assert!(
+        futures::executor::block_on(known_state_facts.prefix_entries(&[]))
+            .unwrap()
+            .is_empty(),
+        "eviction must durably remove every fast known-state fact even when body persistence fails"
+    );
     let reopened_history = reopened.row_history("todos", row_uuid).unwrap();
     match outcome {
         EvictionPersistenceOutcome::FailBeforeDelegation => {
