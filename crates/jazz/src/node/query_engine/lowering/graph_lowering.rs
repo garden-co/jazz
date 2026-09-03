@@ -1040,47 +1040,38 @@ pub(super) fn lower_recursive_relation_cached(
     // before the normalized recursive projection discards them. The runtime
     // executes this side graph with the exact same frontier/depth as `step`;
     // it is not a second reachability traversal.
-    let mut witness_step_plan = relation.step.clone();
-    let Some(LinearStep::Project(_)) = witness_step_plan.steps.last() else {
-        return Err(UnsupportedReason::Operator(
-            "recursive step witness requires a final projection".to_owned(),
-        ));
-    };
-    witness_step_plan.steps.pop();
-    // The recursion-owned side output is frozen as a receiver input. Keep
-    // only receiver-owned routes; policy claims scope the authority proof but
-    // must not become recursive frontier fields.
-    let public_routes = receiver_routing_fields(request)?;
-    let mut witness_sources = resolved_sources.clone();
-    for source in witness_sources.values_mut() {
-        source
-            .routing_fields
-            .retain(|field| public_routes.contains(field));
-    }
-    let witness_step_source = witness_sources.get(step_source_id).ok_or_else(|| {
-        UnsupportedReason::Runtime(format!(
-            "recursive witness step source {step_source_id:?} was not resolved"
-        ))
-    })?;
-    let mut witness_children = BTreeMap::new();
-    for step in &witness_step_plan.steps {
-        if let LinearStep::Join { right, .. } = step {
-            witness_children.insert(
-                relation_input_key(right),
-                lower_relation_input(right, &witness_sources, request)?,
-            );
+    let step_witness = {
+        let mut witness_step_plan = relation.step.clone();
+        let Some(LinearStep::Project(_)) = witness_step_plan.steps.last() else {
+            return Err(UnsupportedReason::Operator(
+                "recursive step witness requires a final projection".to_owned(),
+            ));
+        };
+        witness_step_plan.steps.pop();
+        // The side output is still authority-local until its terminal is routed
+        // to an admitted session. Preserve the same route carriers as the main
+        // step; the wire encoder, not this graph, removes private claim fields.
+        let witness_step_source = step_source;
+        let mut witness_children = BTreeMap::new();
+        for step in &witness_step_plan.steps {
+            if let LinearStep::Join { right, .. } = step {
+                witness_children.insert(
+                    relation_input_key(right),
+                    lower_relation_input(right, resolved_sources, request)?,
+                );
+            }
         }
-    }
-    let step_witness = lower_linear_plan_steps_cached(
-        witness_step_source.graph.clone(),
-        &witness_step_plan,
-        witness_step_source,
-        &witness_sources,
-        request,
-        Some(&witness_children),
-        Some(&witness_step_plan),
-        false,
-    )?;
+        lower_linear_plan_steps_cached(
+            witness_step_source.graph.clone(),
+            &witness_step_plan,
+            witness_step_source,
+            resolved_sources,
+            request,
+            Some(&witness_children),
+            Some(&witness_step_plan),
+            false,
+        )?
+    };
     let truncate_at_max_iters = matches!(relation.bound, RecursionBound::MaxDepth(_));
     let max_iters = match relation.bound {
         RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
@@ -1107,24 +1098,6 @@ pub(super) fn lower_recursive_relation_cached(
         nullable_field_depths: BTreeMap::new(),
         union_occurrence_carrier: None,
     })
-}
-
-/// Routes which are safe to carry into a receiver-local runtime graph.
-///
-/// `ParameterDomain` distinguishes application binding values from trusted
-/// policy claims.  Both can influence authority compilation, but only the
-/// former are stable, receiver-owned routing keys.  Keeping this distinction
-/// here prevents a raw provenance side output from accidentally retaining an
-/// authority-only claim carrier after the ordinary recursive projection has
-/// correctly discarded it.
-pub(crate) fn receiver_routing_fields(
-    request: &QueryProgramRequest,
-) -> Result<BTreeSet<String>, UnsupportedReason> {
-    Ok(parameter_domain_for_request(request)?
-        .user_params
-        .keys()
-        .map(|param| route_param_field(param))
-        .collect())
 }
 
 pub(super) fn lower_linear_plan_steps(

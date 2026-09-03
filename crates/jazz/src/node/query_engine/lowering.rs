@@ -923,8 +923,6 @@ use terminals::*;
 #[cfg(test)]
 pub(crate) use graph_lowering::binding_value_source_projection_fields_for_test;
 #[cfg(test)]
-pub(crate) use graph_lowering::receiver_routing_fields;
-#[cfg(test)]
 pub(crate) use planning::analyzed_union_labels;
 #[cfg(test)]
 pub(crate) use requirements::source_requirements_for_test;

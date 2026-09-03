@@ -467,6 +467,69 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
     assert_eq!(received_seed_rows, BTreeMap::from([(row(0x42), expected_seed_body)]));
 }
 
+#[test]
+fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x78), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let bob_seed = row(0x43);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("group_access_edges", bob_seed, 4).cells(BTreeMap::from([
+            (
+                "user_id".to_owned(),
+                Value::String(bob.canonical().to_owned()),
+            ),
+            ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
+        ])),
+    );
+    let shape = m3_differential_shapes(&schema)
+        .into_iter()
+        .find(|shape| shape.name == "docs_edge_seeded_reachable")
+        .unwrap();
+    let seed_rows = |update: &SyncMessage| {
+        version_bundles_for_update(update)
+            .into_iter()
+            .flat_map(|bundle| bundle.versions)
+            .filter(|version| version.table() == "group_access_edges")
+            .map(|version| version.row_uuid())
+            .collect::<BTreeSet<_>>()
+    };
+    let mut alice_peer = PeerState::client_link(alice);
+    let mut bob_peer = PeerState::client_link(bob);
+    let alice_update = alice_peer
+        .rehydrate_query(&mut core, &shape.shape, &shape.binding)
+        .unwrap();
+    let bob_update = bob_peer
+        .rehydrate_query(&mut core, &shape.shape, &shape.binding)
+        .unwrap();
+    assert_eq!(seed_rows(&alice_update), BTreeSet::from([row(0x42)]));
+    assert_eq!(seed_rows(&bob_update), BTreeSet::from([bob_seed]));
+
+    // Opening Bob's identical query must not contaminate Alice's live route.
+    let refreshed = alice_peer
+        .rehydrate_query(&mut core, &shape.shape, &shape.binding)
+        .unwrap();
+    let SyncMessage::ViewUpdate(payload) = refreshed else {
+        panic!("expected source reset")
+    };
+    let covered_seeds = payload
+        .program_fact_adds
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                if input.source.table.as_str() == "group_access_edges" =>
+            {
+                Some(input.source_row)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(covered_seeds, BTreeSet::from([row(0x42)]));
+}
+
 fn run_m3_aggregate_churn_curve() {
     let schema = m3_differential_schema();
     let column_families = schema.column_families();

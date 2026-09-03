@@ -208,6 +208,11 @@ pub(super) fn reachable_step_witness_membership_graph(
         None,
     )
     .map_err(single_gap_report)?;
+    let route_fields = edge_source
+        .routing_fields
+        .intersection(route_fields)
+        .cloned()
+        .collect();
     Ok(
         GraphBuilder::recursive_step_witness(lowered.graph).project_fields(
             project_join_contribution_fields_with_root_routes(edge_source, &route_fields),
@@ -251,6 +256,11 @@ pub(super) fn reachable_seed_membership_graph(
     })?;
     let seed = lower_recursive_seed_membership(recursive, seed_source, resolved_sources, request)
         .map_err(single_gap_report)?;
+    let route_fields = seed_source
+        .routing_fields
+        .intersection(route_fields)
+        .cloned()
+        .collect();
     Ok(Some((
         seed_id.clone(),
         seed.graph.project_fields(project_source_fields_with_routes(

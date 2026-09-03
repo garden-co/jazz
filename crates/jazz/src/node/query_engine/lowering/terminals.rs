@@ -244,7 +244,9 @@ pub(super) fn lowered_terminals(
     // Recursive reachability is receiver-local semantics too. Its admitted
     // access rows are exact source inputs, not authority-only proof, so emit
     // them under their own source occurrence just like join contributors.
-    let receiver_route_fields = receiver_routing_fields(request).map_err(single_gap_report)?;
+    // These graphs still run on the authority: retain policy routes until
+    // multisink partitioning chooses the recipient. CoveredInput encodes only
+    // source/version identities, never these private routing fields.
     for contribution in &request.input.shape.reachable_contributions {
         let access_source = resolved_sources
             .get(&contribution.access_source)
@@ -254,8 +256,7 @@ pub(super) fn lowered_terminals(
                     contribution.access_source
                 )))
             })?;
-        let access_route_fields =
-            source_terminal_route_fields(access_source, &receiver_route_fields);
+        let access_route_fields = source_terminal_route_fields(access_source, &root_route_fields);
         let graph = closure::reachable_contribution_membership_graph(
             visible_root_with_routes.clone(),
             contribution,
@@ -277,7 +278,7 @@ pub(super) fn lowered_terminals(
             &request.input.shape.nodes,
             resolved_sources,
             request,
-            &receiver_route_fields,
+            &root_route_fields,
         )?;
         covered_source_members
             .entry(contribution.edge_source.clone())
@@ -290,7 +291,7 @@ pub(super) fn lowered_terminals(
             &request.input.shape.nodes,
             resolved_sources,
             request,
-            &receiver_route_fields,
+            &root_route_fields,
         )?;
         if let Some((seed_source, seed)) = seed {
             covered_source_members

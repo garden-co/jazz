@@ -307,6 +307,14 @@ subscription's visible-current base source. Claim operands are rewritten to
 server-derived parameters before lowering. `claim("user")` is the stable subject
 identity. Recognized claims that do not yet have a runtime value fail closed.
 
+Authority-side source and version-witness terminals retain the routing fields
+needed to partition prepared results by the admitted session, including for
+recursive seed, step, and access rows. Removing claim routes before that
+partition can mix recipients or leave a terminal without its required fields.
+These are internal authority fields: the wire closure contains only source and
+version identities plus their ordinary row bodies, and the client compiles its
+own source descriptors without inheriting the authority's policy claims.
+
 Policy composition is not merely an output filter. Policy dependency tables are
 part of the maintained graph. If a membership row, access row, join witness, or
 recursive edge row changes visibility, the maintained view must emit the same
