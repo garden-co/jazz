@@ -10,8 +10,6 @@ import type {
   BrowserForegroundNodeLeaseProbeRequest,
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
-  BrowserInspectorControlEvent,
-  BrowserInspectorControlRequest,
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
