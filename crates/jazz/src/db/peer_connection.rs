@@ -1072,7 +1072,9 @@ where
                 && group.upstream_opts.binding_source != BindingSource::RelayAuthoritySession
             {
                 let mut owners = self.relay_upstream_subscription_owners.borrow_mut();
-                if let Some(owner) = owners.get_mut(&group.upstream_subscription) {
+                if let Some(owner) =
+                    owners.get_mut(&(group.upstream_subscription, connection_epoch))
+                {
                     debug_assert_eq!(
                         owner.downstream_connection_epoch, connection_epoch,
                         "direct claim refresh found an upstream handle owned by another connection"
@@ -1123,12 +1125,16 @@ where
                         && let Some(downstream_subscription) = group.subscribers.first().copied()
                     {
                         let old_upstream_subscription = group.upstream_subscription;
-                        let fresh_upstream_subscription = relay_upstream_subscription_key(
+                        let fresh_upstream_subscription = self.relay_upstream_subscription_owners
+                            .borrow().iter()
+                            .find(|(_, owner)| owner.coverage == *coverage && owner.policy_binding == refreshed_direct_binding)
+                            .map(|((subscription, _), _)| *subscription)
+                            .unwrap_or_else(|| relay_upstream_subscription_key(
                             connection_epoch,
                             downstream_subscription,
                             group.upstream_opts.read_view_key(),
                             &refreshed_direct_binding,
-                        );
+                        ));
                         if old_upstream_subscription != fresh_upstream_subscription {
                             group.upstream_subscription = fresh_upstream_subscription;
                             debug_assert_eq!(
@@ -1224,34 +1230,36 @@ where
             // queued wire unsubscribe remains responsible for the remote
             // receiver; `apply_unsubscribe` is idempotent when the old open
             // had not left the pending queue yet.
-            self.node
-                .borrow_mut()
-                .apply_unsubscribe(old_upstream_subscription);
             let mut pending = upstream_subscriptions.borrow_mut();
-            // If admission had not reached the upstream owner yet, removing
-            // the retained old open is sufficient. Otherwise its local and
-            // remote receiver both need the normal unsubscribe lifecycle.
-            let old_open_was_pending = pending.iter().any(|command| {
-                matches!(
-                    command,
-                    PendingUpstreamCommand::Subscribe(subscription)
-                        if subscription.subscription == old_upstream_subscription
-                )
-            });
-            pending.retain(|command| {
-                !matches!(
-                    command,
-                    PendingUpstreamCommand::Subscribe(subscription)
-                        if subscription.subscription == old_upstream_subscription
-                )
-            });
-            if old_owner.is_some() && !old_open_was_pending {
-                pending.push(PendingUpstreamCommand::Unsubscribe(
-                    old_upstream_subscription,
-                ));
+            if old_owner.is_some() {
+                self.node
+                    .borrow_mut()
+                    .apply_unsubscribe(old_upstream_subscription);
+                // If admission had not reached the upstream owner yet, removing
+                // the retained old open is sufficient. Otherwise its local and
+                // remote receiver both need the normal unsubscribe lifecycle.
+                let old_open_was_pending = pending.iter().any(|command| {
+                    matches!(
+                        command,
+                        PendingUpstreamCommand::Subscribe(subscription)
+                            if subscription.subscription == old_upstream_subscription
+                    )
+                });
+                pending.retain(|command| {
+                    !matches!(
+                        command,
+                        PendingUpstreamCommand::Subscribe(subscription)
+                            if subscription.subscription == old_upstream_subscription
+                    )
+                });
+                if old_owner.is_some() && !old_open_was_pending {
+                    pending.push(PendingUpstreamCommand::Unsubscribe(
+                        old_upstream_subscription,
+                    ));
+                }
             }
             self.relay_upstream_subscription_owners.borrow_mut().insert(
-                fresh_upstream_subscription,
+                (fresh_upstream_subscription, connection_epoch),
                 RelayUpstreamSubscriptionOwner {
                     downstream_connection_epoch: connection_epoch,
                     coverage,
@@ -2606,8 +2614,9 @@ where
                                     let policy_binding = self
                                         .relay_upstream_subscription_owners
                                         .borrow()
-                                        .get(&subscription)
-                                        .map(|owner| owner.policy_binding.clone())
+                                        .iter()
+                                        .find(|((candidate, _), _)| *candidate == subscription)
+                                        .map(|(_, owner)| owner.policy_binding.clone())
                                         .ok_or_else(|| Error::new(
                                             ErrorCode::Protocol,
                                             "row-version repair lost its subscription policy binding",
@@ -2631,10 +2640,12 @@ where
                                 subscription,
                                 reason,
                             } => {
-                                if let Some(owner) = take_relay_upstream_subscription_owner(
+                                let relay_owners = take_relay_upstream_subscription_owner(
                                     &self.relay_upstream_subscription_owners,
                                     subscription,
-                                ) {
+                                );
+                                if !relay_owners.is_empty() {
+                                    for owner in relay_owners {
                                     self.pending_relay_subscription_rejections
                                         .borrow_mut()
                                         .entry(owner.downstream_connection_epoch)
@@ -2644,8 +2655,9 @@ where
                                             policy_binding: owner.policy_binding,
                                             downstream_subscriptions: owner
                                                 .downstream_subscriptions,
-                                            reason,
+                                            reason: reason.clone(),
                                         });
+                                    }
                                     // The authority has already retired its
                                     // own attempt, but sending an explicit
                                     // unsubscribe makes reconnect/replay
@@ -4091,19 +4103,23 @@ where
                             } else {
                                 opts.clone()
                             };
-                            // This is an upstream usage-site handle, not the
-                            // canonical binding id. Distinct downstream views
-                            // can normalize to identical Global coverage, but
-                            // each retains independent subscribe/unsubscribe
-                            // ownership. The upstream node's CoverageKey groups
-                            // them onto one evaluator without conflating their
-                            // wire lifecycles.
-                            let upstream_subscription = relay_upstream_subscription_key(
+                            // A scope relay has one authority stream per exact
+                            // admitted coverage. Foreground connections pin
+                            // it independently; their disconnects do not each
+                            // own a duplicate predecessor sequence.
+                            let shared_upstream = if scope_relay {
+                                self.relay_upstream_subscription_owners.borrow().iter()
+                                    .find(|(_, owner)| owner.coverage == coverage && owner.policy_binding == subscription_policy_binding)
+                                    .map(|((subscription, _), _)| *subscription)
+                            } else {
+                                None
+                            };
+                            let upstream_subscription = shared_upstream.unwrap_or_else(|| relay_upstream_subscription_key(
                                 connection_epoch,
                                 subscription,
                                 upstream_opts.read_view_key(),
                                 &subscription_policy_binding,
-                            );
+                            ));
                             // This is a topology-role distinction, not a
                             // transport-direction distinction.  The browser
                             // worker receives its foreground subscriber on a
@@ -4350,7 +4366,7 @@ where
                                 };
                                 self.relay_upstream_subscription_owners
                                     .borrow_mut()
-                                    .entry(group.upstream_subscription)
+                                    .entry((group.upstream_subscription, connection_epoch))
                                     .and_modify(|existing| {
                                         debug_assert_eq!(
                                             existing.downstream_connection_epoch,
@@ -4474,7 +4490,7 @@ where
                                         if let Some(owner) = self
                                             .relay_upstream_subscription_owners
                                             .borrow_mut()
-                                            .get_mut(&group.upstream_subscription)
+                                            .get_mut(&(group.upstream_subscription, connection_epoch))
                                             && owner.downstream_connection_epoch == connection_epoch
                                             && owner.coverage == coverage
                                         {
@@ -6208,7 +6224,7 @@ fn rollback_rejected_subscriber_admission<S>(
     if group.upstream_opts.propagate_upstream {
         if let Some(owner) = relay_upstream_subscription_owners
             .borrow_mut()
-            .get_mut(&group.upstream_subscription)
+            .get_mut(&(group.upstream_subscription, connection_epoch))
             && owner.downstream_connection_epoch == connection_epoch
             && owner.coverage == coverage
         {

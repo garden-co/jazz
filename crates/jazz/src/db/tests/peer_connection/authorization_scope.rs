@@ -1374,6 +1374,155 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
 }
 
 #[test]
+fn scope_relay_shares_upstream_across_foregrounds_until_final_detach() {
+    // Public reads prove convergence; connection inspection pins the wire
+    // ownership invariant that cannot be inferred from equal result values.
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let core = open_core(0x54, AuthorSubject::SYSTEM, &schema);
+    let relay = open_db(0x55, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let first = open_db(0x56, author, &schema);
+    let second = open_db(0x57, author, &schema);
+    let original = row(0x58);
+    core.insert_with_id("todos", original, cells("live", false, author))
+        .unwrap();
+    let (relay_transport, core_transport) = duplex();
+    let relay_upstream = block_on(relay.connect_upstream(relay_transport));
+    let core_relay =
+        core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 1);
+    let (first_transport, relay_first_transport) = duplex();
+    let _first_upstream = block_on(first.connect_upstream(first_transport));
+    let relay_first =
+        relay.accept_subscriber_with_claims(relay_first_transport, author, BTreeMap::new());
+    let (second_transport, relay_second_transport) = duplex();
+    let _second_upstream = block_on(second.connect_upstream(second_transport));
+    let _relay_second =
+        relay.accept_subscriber_with_claims(relay_second_transport, author, BTreeMap::new());
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let first_query = prepared(&first, &query);
+    let second_query = prepared(&second, &query);
+    let first_read = first
+        .attach_query_with_opts(&first_query, global_subscribe_opts())
+        .unwrap();
+    let second_read = second
+        .attach_query_with_opts(&second_query, global_subscribe_opts())
+        .unwrap();
+    let drive = || {
+        first.tick().unwrap();
+        second.tick().unwrap();
+        relay.tick().unwrap();
+        core.tick().unwrap();
+        relay.tick().unwrap();
+        first.tick().unwrap();
+        second.tick().unwrap();
+    };
+    for _ in 0..32 {
+        drive();
+        if first.query_attachment_is_covered(&first_read)
+            && second.query_attachment_is_covered(&second_read)
+        {
+            break;
+        }
+    }
+    assert!(first.query_attachment_is_covered(&first_read));
+    assert!(second.query_attachment_is_covered(&second_read));
+    assert_eq!(
+        row_ids(&prepared_all(&first, &query, global_subscribe_opts())),
+        vec![original]
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&second, &query, global_subscribe_opts())),
+        vec![original]
+    );
+    {
+        let owners = relay.node.relay_upstream_subscription_owners.borrow();
+        assert_eq!(owners.len(), 2, "each foreground owns its own pin");
+        assert_eq!(
+            owners
+                .keys()
+                .map(|(subscription, _)| *subscription)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+        let connection = core_relay.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert_eq!(state.served.len(), 1);
+    }
+    assert!(relay.detach_connection(&relay_upstream));
+    assert!(core.server.detach_connection(&core_relay));
+    let (relay_transport, core_transport) = duplex();
+    let _replacement_upstream = block_on(relay.connect_upstream(relay_transport));
+    let core_relay =
+        core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 2);
+    for _ in 0..8 {
+        drive();
+    }
+    {
+        let connection = core_relay.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert_eq!(
+            state.served.len(),
+            1,
+            "reconnect replays the shared stream only once"
+        );
+    }
+    assert!(relay.detach_connection(&relay_first));
+    for _ in 0..4 {
+        drive();
+    }
+    {
+        let connection = core_relay.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert_eq!(
+            state.served.len(),
+            1,
+            "one departing foreground cannot retire its sibling's stream"
+        );
+    }
+    core.update(
+        "todos",
+        original,
+        BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+    )
+    .unwrap();
+    for _ in 0..32 {
+        drive();
+        if prepared_all(&second, &query, global_subscribe_opts()).is_empty() {
+            break;
+        }
+    }
+    assert!(prepared_all(&second, &query, global_subscribe_opts()).is_empty());
+    second.detach_query(second_read);
+    for _ in 0..4 {
+        drive();
+    }
+    let connection = core_relay.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!()
+    };
+    assert!(
+        state.served.is_empty(),
+        "final pin releases the upstream receiver"
+    );
+    assert!(
+        relay
+            .node
+            .relay_upstream_subscription_owners
+            .borrow()
+            .is_empty()
+    );
+    first.detach_query(first_read);
+}
+
+#[test]
 fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa3; 16]);

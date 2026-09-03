@@ -1538,9 +1538,10 @@ type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 /// Relay-owned upstream usage sites are distinct from public `SubscriptionStream`
 /// owners. A served connection can disappear without dropping a public stream,
-/// so relay lifecycle has to retain its own connection-scoped ownership record.
+/// so each connection retains its own pin on a possibly shared upstream handle.
+/// The tuple key separates wire identity from connection lifetime.
 type RelayUpstreamSubscriptionOwners =
-    Rc<RefCell<BTreeMap<SubscriptionKey, RelayUpstreamSubscriptionOwner>>>;
+    Rc<RefCell<BTreeMap<(SubscriptionKey, u64), RelayUpstreamSubscriptionOwner>>>;
 type PendingRelaySubscriptionRejections =
     Rc<RefCell<BTreeMap<u64, VecDeque<RelaySubscriptionRejection>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
@@ -2151,12 +2152,11 @@ enum CoveragePolicyBindingOrigin {
     Delegated,
 }
 
-/// One propagated coverage group owned by one downstream relay connection.
+/// One downstream connection's pin on a propagated coverage stream.
 ///
 /// `upstream_subscription` is a usage-site wire handle, while `coverage`
-/// identifies the local shared evaluator that must be retired with it. Keeping
-/// both prevents a dropped connection from removing an unrelated sibling's
-/// logically identical coverage.
+/// identifies this connection's local evaluator. Only releasing the final pin
+/// retires the upstream handle; local evaluator cleanup remains per connection.
 struct RelayUpstreamSubscriptionOwner {
     downstream_connection_epoch: u64,
     coverage: CoverageKey,

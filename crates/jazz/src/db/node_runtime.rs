@@ -1831,7 +1831,8 @@ where
                         .coverage_groups
                         .iter()
                         .filter_map(|(coverage, group)| {
-                            let owner = owners.get(&group.upstream_subscription)?;
+                            let owner = owners
+                                .get(&(group.upstream_subscription, connection.connection_epoch))?;
                             (group.upstream_opts.propagate_upstream
                                 && owner.downstream_connection_epoch == connection.connection_epoch
                                 && owner.coverage == *coverage)
@@ -3764,10 +3765,8 @@ pub(super) fn unregister_upstream_subscription_owner(
     }
 }
 
-/// Retire one relay-owned upstream usage site only when it still belongs to
-/// the expected downstream connection and coverage group. The exact match is
-/// what keeps a stale unsubscribe/rejection from removing a sibling relay
-/// connection that happens to request identical coverage.
+/// Release the matching connection pin. Return an owner only when this was
+/// the final pin and the caller must retire the upstream stream itself.
 pub(super) fn retire_relay_upstream_subscription(
     owners: &RelayUpstreamSubscriptionOwners,
     subscription: SubscriptionKey,
@@ -3775,24 +3774,39 @@ pub(super) fn retire_relay_upstream_subscription(
     coverage: &CoverageKey,
 ) -> Option<RelayUpstreamSubscriptionOwner> {
     let mut owners = owners.borrow_mut();
-    let owner = owners.get(&subscription)?;
+    let key = (subscription, downstream_connection_epoch);
+    let owner = owners.get(&key)?;
     if owner.downstream_connection_epoch != downstream_connection_epoch
         || owner.coverage != *coverage
     {
         return None;
     }
-    owners.remove(&subscription)
+    let removed = owners.remove(&key)?;
+    // The departing connection releases its pin, not another connection's
+    // shared stream. Only the last pin authorizes wire/local retirement.
+    (!owners
+        .keys()
+        .any(|(candidate, _)| *candidate == subscription))
+    .then_some(removed)
 }
 
 /// Retire a relay owner after its authority has terminally rejected the wire
 /// subscription. Unlike an ordinary unsubscribe there is no downstream link
 /// assertion here: the opaque upstream handle itself is the unforgeable owner
-/// token, and the returned record tells us exactly where to route the result.
+/// token, and all returned pins identify downstream recipients of the rejection.
 pub(super) fn take_relay_upstream_subscription_owner(
     owners: &RelayUpstreamSubscriptionOwners,
     subscription: SubscriptionKey,
-) -> Option<RelayUpstreamSubscriptionOwner> {
-    owners.borrow_mut().remove(&subscription)
+) -> Vec<RelayUpstreamSubscriptionOwner> {
+    let mut owners = owners.borrow_mut();
+    let keys = owners
+        .keys()
+        .filter(|(candidate, _)| *candidate == subscription)
+        .copied()
+        .collect::<Vec<_>>();
+    keys.into_iter()
+        .filter_map(|key| owners.remove(&key))
+        .collect()
 }
 
 /// Take every propagated upstream owner for a disconnected downstream link.
@@ -3812,10 +3826,9 @@ pub(super) fn retire_relay_upstream_subscriptions_for_connection(
         .collect::<Vec<_>>();
     subscriptions
         .into_iter()
-        .filter_map(|subscription| {
-            owners
-                .remove(&subscription)
-                .map(|owner| (subscription, owner))
+        .filter_map(|key| {
+            let owner = owners.remove(&key)?;
+            (!owners.keys().any(|(candidate, _)| *candidate == key.0)).then_some((key.0, owner))
         })
         .collect()
 }
