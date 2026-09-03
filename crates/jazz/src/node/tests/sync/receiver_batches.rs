@@ -1179,6 +1179,7 @@ fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
 fn reset_rejects_divergent_complete_sets_and_bad_counts_atomically() {
     for bad_count in [false, true] {
         let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
         let tx_id = TxId::new(TxTime::from(10), node(1));
         let tx = reset_scope_tx(tx_id, 2);

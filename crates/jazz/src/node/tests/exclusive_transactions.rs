@@ -1538,9 +1538,9 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
 
     assert!(matches!(
         err,
-        Error::MalformedViewUpdate(
-            "covered input is not witnessed by admitted payload"
-        )
+        Error::InvalidAuthoritySourceClosure { subscription: rejected, transition }
+            if rejected == subscription
+                && transition == "covered input is not witnessed by admitted payload"
     ));
     assert!(reader
             .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorSubject::SYSTEM)
@@ -1623,6 +1623,8 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_reader_a_dir, mut reader_a) = open_node_with_schema(node(3), schema.clone());
     let (_reader_system_dir, mut reader_system) = open_node_with_schema(node(4), schema);
+    register_whole_table_receiver(&mut reader_a, "todos");
+    register_whole_table_receiver(&mut reader_system, "todos");
     let author_a = user(0xa1);
     let author_b = user(0xb2);
     install_test_uuid_sub_claim(&mut core, author_a);
@@ -1651,6 +1653,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let version_bundles = version_bundles_for_update(&update_a);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
+        program_fact_adds,
         ..
     }) = &update_a
     else {
@@ -1665,10 +1668,12 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     );
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row(1), version_bundles[0].tx.tx_id)]
-    );
+    assert!(result_member_adds.is_empty());
+    assert_eq!(program_fact_adds.iter().filter_map(|fact| match fact {
+        crate::protocol::ProgramFactEntry::CoveredInput(input) =>
+            Some((input.version_table.clone(), input.source_row, input.version.tx)),
+        _ => None,
+    }).collect::<Vec<_>>(), vec![("todos".to_owned().into(), row(1), version_bundles[0].tx.tx_id)]);
     assert!(link_a.shipped_complete_tx_payloads().is_empty());
     reader_a.apply_sync_message_settled(update_a).unwrap();
     assert_eq!(
