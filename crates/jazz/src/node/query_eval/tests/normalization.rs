@@ -3,6 +3,49 @@
 use super::*;
 use crate::node::query_eval::normalization::source_column_value;
 
+// Public row equality cannot detect native/WASM source-name disagreement on
+// one host. Pin the compiler-owned protocol identities to literal names.
+#[test]
+fn implicit_reference_source_identities_are_pointer_width_independent() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .nullable_fk_column("parent", "todos")
+                    .nullable_fk_column("project", "projects"),
+            ),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x73; 16]), schema.clone());
+    let shape = Query::from("todos").validate_runtime(&schema).unwrap();
+    let normalized = node
+        .normalized_row_set_shape(&shape, &shape.bind(BTreeMap::new()).unwrap())
+        .unwrap();
+    assert_eq!(
+        normalized.auxiliary_sources,
+        BTreeSet::from([
+            SourceId {
+                table: "todos".to_owned(),
+                path: SourcePath {
+                    components: vec![
+                        SourceRole::Root,
+                        SourceRole::Alias("reference:parent".to_owned())
+                    ]
+                },
+            },
+            SourceId {
+                table: "projects".to_owned(),
+                path: SourcePath {
+                    components: vec![
+                        SourceRole::Root,
+                        SourceRole::Alias("reference:project".to_owned())
+                    ]
+                },
+            },
+        ]),
+    );
+}
+
 #[test]
 fn payload_enum_normalization_uses_case_local_field_types() {
     let descriptor = RecordDescriptor::new([

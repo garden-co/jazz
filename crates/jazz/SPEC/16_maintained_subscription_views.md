@@ -137,6 +137,12 @@ relation fact whose referenced row version has not been admitted as part of the
 same exact authority closure is incomplete and cannot advance settlement or
 enter the graph.
 
+Compiled source-occurrence identities MUST be identical on native and WASM
+hosts. They must not incorporate pointer widths or machine-sized sentinel
+values. Implicit root references use a `reference:<column>` alias, separate
+from explicit `include:<include-index>:<segment-index>` aliases; both are
+root-relative identities under the query's schema.
+
 A deletion-register witness is not authorization by itself. Its source
 occurrence MUST also be admitted by the same current policy-filtered
 `IncludeDeleted` preimage, matched to the exact deleted row and deletion
