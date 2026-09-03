@@ -265,11 +265,21 @@ impl Lens {
         direction: Direction,
     ) -> Option<(String, String)> {
         let transform = self.transform(direction);
-        let current_table = self.translate_table(table, direction)?;
+        let mut current_table = table.to_string();
         let mut current_column = column.to_string();
 
         for op in &transform.ops {
             match op {
+                LensOp::RenameTable { old_name, new_name } => {
+                    if current_table == *old_name {
+                        current_table = new_name.clone();
+                    }
+                }
+                LensOp::AddTable { table, .. } | LensOp::RemoveTable { table, .. } => {
+                    if current_table == *table {
+                        return None;
+                    }
+                }
                 LensOp::RenameColumn {
                     table: op_table,
                     old_name,
@@ -291,9 +301,6 @@ impl Lens {
                 LensOp::AddColumn { .. } => {
                     // New columns don't affect existing column references.
                 }
-                LensOp::RenameTable { .. }
-                | LensOp::AddTable { .. }
-                | LensOp::RemoveTable { .. } => {}
             }
         }
 
@@ -533,6 +540,8 @@ mod tests {
         );
     }
 
+    // This stays at the lens seam because callers observe only the translated
+    // identifier, not the operation-by-operation identity transitions.
     #[test]
     fn lens_translate_table_and_column_applies_mixed_renames_in_operation_order() {
         let source = make_hash(1);
