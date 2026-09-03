@@ -1612,7 +1612,7 @@ describe("broker worker context initialization", () => {
     expect(control.messages).toContainEqual({
       type: "result",
       id: 3,
-      error: "Inspector context is no longer available",
+      error: expect.objectContaining({ message: "Inspector context is no longer available" }),
     });
   });
 });
