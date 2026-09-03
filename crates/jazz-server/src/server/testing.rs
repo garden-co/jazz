@@ -5,7 +5,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
@@ -141,16 +140,6 @@ impl JazzServerBuilder {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct JwtClaims {
-    sub: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    iss: Option<String>,
-    aud: String,
-    claims: JsonValue,
-    exp: u64,
-}
-
 pub struct TestJwtOptions {
     pub expires_in: Duration,
     pub issuer: Option<String>,
@@ -211,24 +200,28 @@ impl TestJwtIssuer {
         options: TestJwtOptions,
         now: SystemTime,
     ) -> String {
-        let claims = JwtClaims {
-            sub: sub.to_string(),
-            iss: options.issuer,
-            aud: TEST_JWT_AUDIENCE.to_owned(),
-            claims,
-            exp: now
-                .duration_since(UNIX_EPOCH)
-                .expect("clock drift")
-                .as_secs()
-                + options.expires_in.as_secs(),
-        };
+        let mut payload = claims.as_object().cloned().unwrap_or_default();
+        payload.insert("sub".to_owned(), json!(sub));
+        if let Some(issuer) = options.issuer {
+            payload.insert("iss".to_owned(), json!(issuer));
+        }
+        payload.insert("aud".to_owned(), json!(TEST_JWT_AUDIENCE));
+        payload.insert(
+            "exp".to_owned(),
+            json!(
+                now.duration_since(UNIX_EPOCH)
+                    .expect("clock drift")
+                    .as_secs()
+                    + options.expires_in.as_secs()
+            ),
+        );
 
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some(JWT_KID.to_string());
 
         encode(
             &header,
-            &claims,
+            &JsonValue::Object(payload),
             &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
         )
         .expect("encode jwt")

@@ -97,34 +97,18 @@ export interface JwtPayload {
   exp?: unknown;
 }
 
-const REGISTERED_JWT_POLICY_FIELDS = new Set(["sub", "exp", "nbf", "iat", "iss", "aud", "jti"]);
+/** RFC 7519 registered transport/security claims. They never come from app metadata. */
+const REGISTERED_JWT_CLAIMS = new Set(["iss", "sub", "aud", "exp", "nbf", "iat", "jti"]);
 
 /**
- * Mirror server JWT admission's supported policy-claim corpus.
- *
- * The server accepts both the conventional `claims` object and supported custom
- * top-level JWT fields. Iterating UTF-8 lexical names matches the server's
- * `BTreeMap` traversal: a top-level field after `claims` overwrites the nested
- * value of the same name, while an earlier one is overwritten by `claims`.
+ * Select the app metadata in a standard flat JWT payload. The registered JWT
+ * claims above are transport/security fields; every other JSON value, including
+ * `null`, arrays, and objects, remains available to application code.
  */
 function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> | null {
   const claims: Record<string, unknown> = {};
   for (const [name, value] of Object.entries(payload).sort(compareUtf8)) {
-    if (REGISTERED_JWT_POLICY_FIELDS.has(name)) continue;
-    if (name === "claims") {
-      if (!isRecord(value)) return null;
-      for (const [nestedName, nestedValue] of Object.entries(value).sort(compareUtf8)) {
-        const admitted = supportedPolicyClaim(nestedValue);
-        // The server rejects a `claims` object containing unsupported nested
-        // values rather than silently dropping a policy input.
-        if (admitted === undefined) return null;
-        claims[nestedName] = admitted;
-      }
-      continue;
-    }
-    const admitted = supportedPolicyClaim(value);
-    // Unrelated nested JWT metadata is not a policy claim.
-    if (admitted !== undefined) claims[name] = admitted;
+    if (!REGISTERED_JWT_CLAIMS.has(name)) claims[name] = value;
   }
   return claims;
 }
@@ -137,16 +121,6 @@ function reservedPolicyClaimsFromJwtPayload(payload: JwtPayload): Record<string,
   // different authorization scope even though anonymous policy is shared.
   const { jazz_pub_key: _proofKey, ...policyPayload } = payload;
   return policyClaimsFromJwtPayload(policyPayload);
-}
-
-function supportedPolicyClaim(value: unknown): unknown | undefined {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
-  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
-  if (Array.isArray(value)) {
-    const values = value.map(supportedPolicyClaim);
-    return values.some((entry) => entry === undefined) ? undefined : values;
-  }
-  return undefined;
 }
 
 function compareUtf8([left]: [string, unknown], [right]: [string, unknown]): number {

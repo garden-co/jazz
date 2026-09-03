@@ -143,8 +143,11 @@ field really has one of those names, mark that one field explicitly with
 See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and filter on these
 columns.
 
-Jazz exposes admitted provider claims under `session.claims`; verified `iss` and `sub` override any
-same-named values supplied inside a provider claims payload. Jazz separately derives the reserved
+Jazz exposes every non-registered top-level JWT claim under `session.claims`, including `null`, arrays,
+and objects. The registered JWT transport/security claims are `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`,
+and `jti`; they are not provider metadata. Jazz does not require, unwrap, or give special meaning to a
+nested `claims` object: if present, it is simply `session.claims.claims`. Verified `iss` and `sub`
+separately derive the reserved
 logical `session.user` from that exact `[iss, sub]` pair. Its portable value is an opaque canonical
 JSON encoding and is used for transaction authorship, `$createdBy`, `$updatedBy`, and provenance
 policies; it is interned only inside a running core. On backends,

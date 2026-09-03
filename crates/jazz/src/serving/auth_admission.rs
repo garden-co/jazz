@@ -443,8 +443,10 @@ fn jwt_error(error: jsonwebtoken::errors::Error) -> AuthAdmissionError {
     AuthAdmissionError::InvalidJwt(error.to_string())
 }
 
-/// Convert verified JWT JSON claims into scalar policy values. Registered
-/// identity fields are excluded because admission supplies verified values.
+/// Convert flat verified JWT metadata into scalar policy values. RFC 7519
+/// registered transport/security fields are excluded because admission supplies
+/// verified identity separately. Objects remain available to application
+/// handlers as session metadata but are not representable in core policies.
 pub fn jwt_json_claims_to_policy_claims(
     extra: BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, Value>, AuthAdmissionError> {
@@ -454,22 +456,6 @@ pub fn jwt_json_claims_to_policy_claims(
             name.as_str(),
             "sub" | "exp" | "nbf" | "iat" | "iss" | "aud" | "jti"
         ) {
-            continue;
-        }
-        if name == "claims" {
-            let serde_json::Value::Object(nested) = value else {
-                return Err(AuthAdmissionError::InvalidJwt(
-                    "JWT claims claim must be an object".to_owned(),
-                ));
-            };
-            for (nested_name, nested_value) in nested {
-                let value = json_claim_to_policy_claim(nested_value)?.ok_or_else(|| {
-                    AuthAdmissionError::InvalidJwt(
-                        "nested JWT claim objects are not supported".to_owned(),
-                    )
-                })?;
-                claims.insert(nested_name, value);
-            }
             continue;
         }
         if let Some(value) = json_claim_to_policy_claim(value)? {
@@ -666,13 +652,14 @@ mod tests {
             claims.is_empty(),
             "unrepresentable OIDC metadata stays ignored"
         );
+        let claims = jwt_json_claims_to_policy_claims(BTreeMap::from([(
+            "claims".to_owned(),
+            serde_json::json!({ "profile": { "department": "engineering" } }),
+        )]))
+        .unwrap();
         assert!(
-            jwt_json_claims_to_policy_claims(BTreeMap::from([(
-                "claims".to_owned(),
-                serde_json::json!({ "profile": { "department": "engineering" } }),
-            )]))
-            .is_err(),
-            "the dedicated policy claims object rejects nested objects"
+            claims.is_empty(),
+            "a top-level claims object is ordinary unsupported object metadata, never a second flattening path"
         );
     }
 }

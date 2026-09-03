@@ -53,6 +53,12 @@ Invariant digest:
   Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
   the reserved system issuer. Local intern handles MUST never become wire,
   storage, query, equality, or ordering values.
+- `INV-RLS-25`: External JWT application metadata MUST use the flat JWT
+  payload: every non-registered top-level claim is exposed at
+  `session.claims[<name>]`. The registered transport/security claim names are
+  exactly `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, and `jti`. Jazz MUST NOT
+  require, unwrap, merge, or otherwise specially interpret a nested `claims`
+  object; it is ordinary application metadata when present.
 - `INV-RLS-24`: Client mutation staging MUST NOT issue a definitive read- or write-policy verdict from partial local state. Update/upsert read visibility and write policy are enforced by the fate authority against its complete admitted policy inputs.
 
 ## Details
@@ -113,6 +119,18 @@ admission paths select the latter three only for their named authentication
 modes. The distinguished system subject bypasses policy for
 internal authority work; it is not a JWT identity and cannot be forged by
 supplying claims (`INV-RLS-23`).
+
+#### External JWT claim shape
+
+External JWTs use the standard flat payload shape. `iss`, `sub`, `aud`, `exp`,
+`nbf`, `iat`, and `jti` are reserved registered transport/security claims and
+are not application metadata. The exact verified `iss` and `sub` determine
+`session.user`; no custom ID claim can replace either component. Every other
+top-level JSON claim is exposed by name in `session.claims`, including `null`,
+arrays, and objects. A top-level `claims` key is not special and remains
+`session.claims.claims`; Jazz neither requires it nor flattens it. Core policy
+evaluation supports its documented scalar/array corpus, so object metadata is
+available to handlers but is not a core policy value (`INV-RLS-25`).
 
 For the two self-signed issuers, the signed `jazz_pub_key` verifies the proof
 and derives `sub`; it is not copied into `session.claims` as an application
