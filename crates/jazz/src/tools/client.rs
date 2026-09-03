@@ -548,13 +548,6 @@ impl Backend {
         self.0.prepare_query_for_open_schema(query)
     }
 
-    fn row_provenance(
-        &self,
-        row: &crate::node::CurrentRow,
-    ) -> std::result::Result<Option<crate::node::RowProvenance>, CoreDbError> {
-        self.0.row_provenance(row)
-    }
-
     async fn row_provenance_for_subscription(
         &self,
         row: &crate::node::CurrentRow,
@@ -2701,7 +2694,6 @@ impl JazzClient {
 impl PublicQueryDecoder {
     fn core_rows_to_public(
         &self,
-        db: &Backend,
         query: &Query,
         rows: Vec<crate::node::CurrentRow>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
@@ -2780,9 +2772,7 @@ impl PublicQueryDecoder {
                 let values = columns
                     .iter()
                     .map(|column| {
-                        if let Some(value) =
-                            self.core_magic_value(db, table, core_row_id, &row, column)?
-                        {
+                        if let Some(value) = self.core_magic_value(table, &row, column)? {
                             return Ok(value);
                         }
                         let position =
@@ -2825,7 +2815,6 @@ impl PublicQueryDecoder {
 
     fn core_rows_to_query_results(
         &self,
-        db: &Backend,
         query: &Query,
         rows: Vec<crate::node::CurrentRow>,
     ) -> Result<Vec<QueryResult>> {
@@ -2834,7 +2823,7 @@ impl PublicQueryDecoder {
             .map(|row| ResultKey::from_occurrence(crate::db::subscription_row_occurrence_id(row)))
             .collect::<Vec<_>>();
         let names = self.query_result_column_names(query)?;
-        let values = self.core_rows_to_public(db, query, rows)?;
+        let values = self.core_rows_to_public(query, rows)?;
         keys.into_iter()
             .zip(values)
             .map(|(key, (_, values))| {
@@ -2945,7 +2934,7 @@ impl PublicQueryDecoder {
         );
         #[cfg(feature = "testing")]
         let public = {
-            let fields = match self.core_rows_to_query_results(db, query, vec![row.row.clone()]) {
+            let fields = match self.core_rows_to_query_results(query, vec![row.row.clone()]) {
                 Ok(mut results) => results
                     .pop()
                     .map(|result| result.fields)
@@ -3040,9 +3029,7 @@ impl PublicQueryDecoder {
 impl PublicQueryDecoder {
     fn core_magic_value(
         &self,
-        db: &Backend,
         table: &str,
-        _row_id: CoreRowUuid,
         row: &crate::node::CurrentRow,
         column: &str,
     ) -> Result<Option<Value>> {
@@ -3053,20 +3040,20 @@ impl PublicQueryDecoder {
                 )));
             }
             "$createdAt" | "$updatedAt" | "$createdBy" | "$updatedBy" => {
-                let provenance = db
-                    .row_provenance(row)
+                // A collector may project just one magic column. Decode that
+                // typed field rather than demanding the other three as well.
+                let value = row
+                    .provenance_value(column)
                     .map_err(|error| JazzError::Query(error.to_string()))?;
-                let Some(provenance) = provenance else {
+                let Some(value) = value else {
                     return Err(JazzError::Query(format!(
                         "row missing provenance for magic column {column} on table {table}"
                     )));
                 };
-                match column {
-                    "$createdAt" => Value::Timestamp(provenance.created_at),
-                    "$updatedAt" => Value::Timestamp(provenance.updated_at),
-                    "$createdBy" => Value::Text(provenance.created_by.canonical().to_owned()),
-                    "$updatedBy" => Value::Text(provenance.updated_by.canonical().to_owned()),
-                    _ => unreachable!("matched provenance magic column"),
+                match value {
+                    CoreValue::U64(timestamp) => Value::Timestamp(timestamp),
+                    CoreValue::String(author) => Value::Text(author),
+                    _ => unreachable!("provenance_value returns typed timestamps or authors"),
                 }
             }
             _ => return Ok(None),
@@ -3329,10 +3316,9 @@ impl JazzClient {
                 .query_rows(query.clone(), opts, table, wait_for_coverage)
                 .await?
         };
-        let db = self.db.inner.borrow().backend_clone()?;
         self.db
             .query_decoder
-            .core_rows_to_query_results(&db, &query, rows)
+            .core_rows_to_query_results(&query, rows)
     }
 
     /// Create a new row in a table.
