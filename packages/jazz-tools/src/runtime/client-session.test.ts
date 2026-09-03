@@ -96,7 +96,7 @@ describe("client session resolution", () => {
       subject: "application-owned-subject",
       issuer: "application-owned-issuer",
       sub: "application-owned-sub",
-      nested: { role: "editor" },
+      role: "editor",
     };
 
     expect(
@@ -114,7 +114,7 @@ describe("client session resolution", () => {
     const providerClaims = {
       iss: "spoofed-issuer",
       sub: "spoofed-subject",
-      nested: { roles: ["writer"] },
+      roles: ["writer"],
     };
     const session = resolveClientSessionSync({
       appId: "public-session-boundary",
@@ -125,23 +125,61 @@ describe("client session resolution", () => {
       }),
     })!;
 
-    providerClaims.nested.roles.push("admin");
+    providerClaims.roles.push("admin");
     expect(session).toEqual({
       user: '["https://issuer.example","verified-subject"]',
       claims: {
         iss: "https://issuer.example",
         sub: "verified-subject",
-        nested: { roles: ["writer"] },
+        roles: ["writer"],
       },
       authMode: "external",
     });
     expect(Object.isFrozen(session)).toBe(true);
     expect(Object.isFrozen(session.claims)).toBe(true);
-    expect(Object.isFrozen(session.claims.nested)).toBe(true);
-    expect(Object.isFrozen((session.claims.nested as { roles: string[] }).roles)).toBe(true);
+    expect(Object.isFrozen(session.claims.roles)).toBe(true);
     for (const transportField of ["issuer", "user_id", "userId", "author"]) {
       expect(session).not.toHaveProperty(transportField);
     }
+  });
+
+  it("mirrors server JWT policy-claim admission, including deterministic collision precedence", () => {
+    const session = resolveClientSessionSync({
+      appId: "app-jwt-policy-claim-corpus",
+      jwtToken: makeJwt({
+        iss: "https://issuer.example",
+        sub: "alice",
+        // `claims` is visited before `role`; the later top-level custom claim
+        // wins exactly as server admission's BTreeMap traversal does.
+        claims: { role: "nested", issuer: "nested-issuer" },
+        role: "top-level",
+        issuer: "custom-provider-issuer",
+        metadata: { intentionally: "not policy-visible" },
+      }),
+    });
+
+    expect(session).toMatchObject({
+      claims: {
+        role: "top-level",
+        issuer: "custom-provider-issuer",
+        iss: "https://issuer.example",
+        sub: "alice",
+      },
+    });
+    expect(session?.claims.metadata).toBeUndefined();
+  });
+
+  it("rejects unsupported nested policy claims instead of diverging from server admission", () => {
+    expect(
+      resolveClientSessionSync({
+        appId: "app-jwt-nested-policy-claim",
+        jwtToken: makeJwt({
+          iss: "https://issuer.example",
+          sub: "alice",
+          claims: { profile: { role: "writer" } },
+        }),
+      }),
+    ).toBeNull();
   });
 
   it("preserves exact nonblank JWT issuer and subject bytes and rejects ASCII-whitespace-only components", () => {

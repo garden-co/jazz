@@ -144,6 +144,10 @@ pub(crate) struct ResolvedSource {
     pub(crate) content_version: Option<ContentVersionSource>,
     /// Deletion register rows for the same source, when requested explicitly.
     pub(crate) deletion_register: Option<DeletionRegisterSource>,
+    /// Current authorized deleted-row preimage for this same source
+    /// occurrence. The deletion terminal semijoins its raw register witness
+    /// against this graph, so a tombstone is never authorization by itself.
+    pub(crate) authorized_deletion_preimage: Option<GraphBuilder>,
 }
 
 /// Concrete content-version source selected by node-side source resolution.

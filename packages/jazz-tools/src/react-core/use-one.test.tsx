@@ -1,7 +1,7 @@
 import * as React from "react";
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
-import type { QueryBuilder } from "../runtime/db.js";
+import type { DbDeltaSubscriptionCallbacks, QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
@@ -27,9 +27,9 @@ function makeHarness() {
     getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
-    subscribeDelta: (query: QueryBuilder<Todo>, next: (delta: SubscriptionDelta<Todo>) => void) => {
+    subscribeDelta: (query: QueryBuilder<Todo>, callbacks: DbDeltaSubscriptionCallbacks<Todo>) => {
       subscribedQuery = query;
-      callback = next;
+      callback = callbacks.onDelta;
       return vi.fn();
     },
   };

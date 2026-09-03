@@ -4,6 +4,7 @@ import {
   createSessionContext,
   relationExistsToPolicy,
   relationToIr,
+  type PermissionExpressionInput,
   type PermissionRelation,
 } from "./index.js";
 import type { PolicyExpr } from "../schema.js";
@@ -49,6 +50,20 @@ interface Project {
 interface ProjectWhere {
   id?: string;
   ownerId?: string;
+}
+
+interface Document {
+  id: string;
+  type: string;
+  title: string;
+  projectId: string;
+}
+
+interface DocumentWhere {
+  id?: string;
+  type?: string;
+  title?: string;
+  projectId?: string;
 }
 
 interface TodoShare {
@@ -166,6 +181,13 @@ class TodoShareQueryBuilder {
 class ProjectQueryBuilder {
   declare readonly _rowType: Project;
   where(_input: ProjectWhere): ProjectQueryBuilder {
+    return this;
+  }
+}
+
+class DocumentQueryBuilder {
+  declare readonly _rowType: Document;
+  where(_input: DocumentWhere): DocumentQueryBuilder {
     return this;
   }
 }
@@ -329,6 +351,32 @@ const appWithoutSchema = {
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
 };
 
+const documentApp = {
+  documents: new DocumentQueryBuilder(),
+  projects: new ProjectQueryBuilder(),
+  wasmSchema: {
+    documents: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "type", column_type: { type: "Text" }, nullable: false },
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "projectId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "projects",
+        },
+      ],
+    },
+    projects: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Uuid" }, nullable: false },
+      ],
+    },
+  },
+};
+
 const socialApp = {
   profiles: new ProfileQueryBuilder(),
   people: new PersonQueryBuilder(),
@@ -391,6 +439,212 @@ describe("permissions DSL", () => {
     ).toThrow(
       /Generated relation name "owner" is ambiguous on table "todos".*"todos.ownerId".*"todos.owner_id"/,
     );
+  });
+
+  it("rejects an unbranded policy expression on a table without a type column", () => {
+    // Simulate plain JavaScript or an outdated structurally typed helper bypassing the type brand.
+    const unbrandedExpression = { type: "True" };
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where(unbrandedExpression as never),
+      ]),
+    ).toThrowError(
+      'Unbranded permission condition with policy expression discriminator "True" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).',
+    );
+  });
+
+  it("rejects an unbranded policy expression in a nested table exists condition", () => {
+    const unbrandedExpression = { type: "True" } as unknown as PermissionExpressionInput;
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where(policy.projects.exists.where(unbrandedExpression as never)),
+      ]),
+    ).toThrowError(
+      'Unbranded permission condition with policy expression discriminator "True" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).',
+    );
+  });
+
+  it("keeps session.where(...) generic when its input has a policy discriminator", () => {
+    const session = createSessionContext();
+
+    expect(() => session.where({ type: "True" })).not.toThrow();
+  });
+
+  it("keeps table relation where conditions generic for type discriminators", () => {
+    const withTypeColumn = definePermissions(documentApp, ({ policy }) => [
+      policy.projects.allowRead.where(
+        policy.exists(policy.documents.where({ type: "True" } as Record<string, unknown>)),
+      ),
+    ]);
+    const withoutTypeColumn = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where(
+        policy.exists(policy.projects.where({ type: "True" } as Record<string, unknown>)),
+      ),
+    ]);
+
+    expect(
+      toAssertionPolicyExprWithRelForTest(withTypeColumn.projects!.select?.using),
+    ).toMatchObject({
+      type: "ExistsRel",
+      rel: { type: "Filter" },
+    });
+    expect(
+      toAssertionPolicyExprWithRelForTest(withoutTypeColumn.todos!.select?.using),
+    ).toMatchObject({
+      type: "ExistsRel",
+      rel: { type: "Filter" },
+    });
+  });
+
+  it("keeps non-discriminator type comparisons in nested table exists conditions", () => {
+    const ordinaryTypeComparison = { type: "custom-row-kind" };
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where(policy.projects.exists.where(ordinaryTypeComparison as never)),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Exists",
+      table: "projects",
+      condition: {
+        type: "Cmp",
+        column: "type",
+        op: "Eq",
+        value: { type: "Literal", value: "custom-row-kind" },
+      },
+    });
+  });
+
+  it("treats a real type column as row data in nested table exists conditions", () => {
+    const compiled = definePermissions(documentApp, ({ policy }) => [
+      policy.projects.allowRead.where(
+        policy.documents.exists.where({ type: "True", title: "Visible" }),
+      ),
+    ]);
+
+    expect(compiled.projects!.select?.using).toEqual({
+      type: "Exists",
+      table: "documents",
+      condition: {
+        type: "And",
+        exprs: [
+          {
+            type: "Cmp",
+            column: "type",
+            op: "Eq",
+            value: { type: "Literal", value: "True" },
+          },
+          {
+            type: "Cmp",
+            column: "title",
+            op: "Eq",
+            value: { type: "Literal", value: "Visible" },
+          },
+        ],
+      },
+    });
+  });
+
+  it("treats a type column as row data inside compound conditions", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf }) => [
+      policy.documents.allowRead.where(allOf([{ type: "True" }, { title: "Visible" }])),
+    ]);
+
+    expect(compiled.documents!.select?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "type",
+          op: "Eq",
+          value: { type: "Literal", value: "True" },
+        },
+        {
+          type: "Cmp",
+          column: "title",
+          op: "Eq",
+          value: { type: "Literal", value: "Visible" },
+        },
+      ],
+    });
+  });
+
+  it("uses raw() to opt into a policy atom on a table with a type column", () => {
+    const compiled = definePermissions(documentApp, ({ policy, raw }) => [
+      policy.documents.allowRead.where(raw({ type: "True" })),
+    ]);
+
+    expect(compiled.documents!.select?.using).toEqual({ type: "True" });
+  });
+
+  it("preserves DSL branding through public condition input annotations", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf, raw }) => {
+      const reusableCondition: PermissionExpressionInput = allOf([
+        { type: "True" },
+        raw({ type: "True" }),
+      ]);
+
+      return [policy.documents.allowRead.where(reusableCondition)];
+    });
+
+    expect(compiled.documents!.select?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "type",
+          op: "Eq",
+          value: { type: "Literal", value: "True" },
+        },
+        { type: "True" },
+      ],
+    });
+  });
+
+  it("composes a type-column row predicate with isCreator", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf, isCreator }) => [
+      policy.documents.allowRead.where(allOf([{ type: "Cmp" }, isCreator])),
+    ]);
+
+    expect(compiled.documents!.select?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "type",
+          op: "Eq",
+          value: { type: "Literal", value: "Cmp" },
+        },
+        creatorCondition,
+      ],
+    });
+  });
+
+  it("composes a type-column row predicate with allowedTo", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf, allowedTo }) => [
+      policy.documents.allowUpdate.where(
+        allOf([{ type: "Inherits" }, allowedTo.update("projectId")]),
+      ),
+    ]);
+
+    expect(compiled.documents!.update?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "type",
+          op: "Eq",
+          value: { type: "Literal", value: "Inherits" },
+        },
+        {
+          type: "Inherits",
+          operation: "Update",
+          via_column: "projectId",
+        },
+      ],
+    });
+    expect(compiled.documents!.update?.with_check).toEqual(compiled.documents!.update?.using);
   });
 
   it("compiles read/insert/update/delete policies", () => {
@@ -764,10 +1018,10 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("supports bounded recursive referencing inherits depth override", () => {
+  it("supports zero recursive referencing inherits depth", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.projects.allowRead.where(
-        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 3 }),
+        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 0 }),
       ),
     ]);
 
@@ -776,7 +1030,7 @@ describe("permissions DSL", () => {
       operation: "Select",
       source_table: "todos",
       via_column: "projectId",
-      max_depth: 3,
+      max_depth: 0,
     });
   });
 
@@ -1136,25 +1390,24 @@ describe("permissions DSL", () => {
     }
   });
 
-  it("supports bounded recursive inherits depth override", () => {
+  it("supports zero bounded recursive inherits depth and rejects invalid overrides", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 3 })),
+      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
       type: "Inherits",
       operation: "Select",
       via_column: "projectId",
-      max_depth: 3,
+      max_depth: 0,
     });
-  });
-
-  it("rejects invalid recursive depth overrides", () => {
-    expect(() =>
-      definePermissions(app, ({ policy, allowedTo }) => [
-        policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
-      ]),
-    ).toThrow(/maxdepth must be a positive integer/i);
+    for (const maxDepth of [-1, 1.5]) {
+      expect(() =>
+        definePermissions(app, ({ policy, allowedTo }) => [
+          policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth })),
+        ]),
+      ).toThrow(/maxdepth must be a non-negative integer/i);
+    }
   });
 
   it("compiles gather/hopTo recursive relation with policy.exists(relation)", () => {
@@ -1166,7 +1419,7 @@ describe("permissions DSL", () => {
         },
         step: ({ current }) =>
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
-        maxDepth: 3,
+        maxDepth: 0,
       });
 
       const hasResourceRole = (resource: unknown, role: string) =>
@@ -1198,6 +1451,65 @@ describe("permissions DSL", () => {
       throw new Error("Expected relation IR join.");
     }
     expect(using.rel.input.input.left.type).toBe("Gather");
+    if (using.rel.input.input.left.type !== "Gather") {
+      throw new Error("Expected recursive relation IR.");
+    }
+    expect(using.rel.input.input.left.maxDepth).toBe(0);
+  });
+
+  it("keeps recursive relation starts generic for type discriminators", () => {
+    const compiled = definePermissions(app, ({ policy }) => {
+      const reachableTeams = policy.teams.gather({
+        start: { type: "True" } as Record<string, unknown>,
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+
+      return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
+    });
+
+    expect(toAssertionPolicyExprWithRelForTest(compiled.todos!.select?.using)).toMatchObject({
+      type: "ExistsRel",
+      rel: { type: "Gather" },
+    });
+  });
+
+  it("composes nested table exists with recursive relation exists", () => {
+    const compiled = definePermissions(app, ({ policy, allOf, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          kind: "individual",
+          identity_key: session.claims["sub"],
+        },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+
+      return [
+        policy.todos.allowRead.where((todo) =>
+          allOf([
+            policy.projects.exists.where({ id: todo.projectId }),
+            policy.exists(
+              reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+                "resource_access_edges.resource": todo.id,
+                grant_role: "viewer",
+              }),
+            ),
+          ]),
+        ),
+      ];
+    });
+
+    const using = toAssertionPolicyExprWithRelForTest(compiled.todos!.select?.using);
+    expect(using).toMatchObject({
+      type: "And",
+      exprs: [
+        { type: "Exists", table: "projects" },
+        { type: "ExistsRel", rel: { type: "Project" } },
+      ],
+    });
   });
 
   it("lowers hop relation plans to relation IR join + project", () => {
@@ -1286,6 +1598,66 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("projects team keys through reachable_via recursion frontiers", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy, session }) => {
+      relation = policy.projects
+        .reachable_via(
+          "resource_access_edges",
+          "resource",
+          "team",
+          session.claims["sub"],
+          "team_team_edges",
+          "child_team",
+          "parent_team",
+        )
+        .seeded_by("user_team_edges", "user_id", "sub", "team");
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected reachable relation to be initialized.");
+    }
+
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Filter");
+    if (ir.type !== "Filter" || ir.input.type !== "Join") {
+      throw new Error("Expected filtered reachable access join.");
+    }
+    const gather = ir.input.left;
+    expect(gather.type).toBe("Gather");
+    if (gather.type !== "Gather") {
+      throw new Error("Expected reachable gather relation.");
+    }
+    expect(gather.seed).toMatchObject({
+      type: "Project",
+      columns: [
+        {
+          alias: "id",
+          expr: {
+            type: "Column",
+            column: { scope: "user_team_edges", column: "team" },
+          },
+        },
+      ],
+    });
+    expect(gather.step).toMatchObject({
+      type: "Project",
+      columns: [
+        {
+          alias: "id",
+          expr: {
+            type: "Column",
+            column: { scope: "team_team_edges", column: "parent_team" },
+          },
+        },
+      ],
+    });
+    if (gather.step.type !== "Project") {
+      throw new Error("Expected projected reachable recursion step.");
+    }
+    expect(gather.step.input.type).toBe("Filter");
+  });
+
   it("allows gather(...) to start from a same-table hop relation seed", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy }) => {
@@ -1349,20 +1721,23 @@ describe("permissions DSL", () => {
     }
     expect(ir.seed.type).toBe("Project");
     expect(ir.step.type).toBe("Project");
-    if (ir.step.type !== "Project" || ir.step.input.type !== "Join") {
-      throw new Error("Expected projected recursive step join.");
+    if (ir.step.type !== "Project" || ir.step.input.type !== "Filter") {
+      throw new Error("Expected projected scalar recursive step.");
     }
-    const stepJoin = ir.step.input;
-    expect(stepJoin.on[0]?.left).toEqual({
-      scope: "team_team_edges",
-      column: "parent_team",
-    });
-    expect(stepJoin.left.type).toBe("Filter");
-    if (stepJoin.left.type !== "Filter") {
-      throw new Error("Expected filtered step relation.");
-    }
-    expect(JSON.stringify(stepJoin.left.predicate)).toContain('"scope":"team_team_edges"');
-    expect(JSON.stringify(stepJoin.left.predicate)).toContain('"column":"child_team"');
+    expect(ir.step.columns).toEqual([
+      {
+        alias: "id",
+        expr: {
+          type: "Column",
+          column: {
+            scope: "team_team_edges",
+            column: "parent_team",
+          },
+        },
+      },
+    ]);
+    expect(JSON.stringify(ir.step.input.predicate)).toContain('"scope":"team_team_edges"');
+    expect(JSON.stringify(ir.step.input.predicate)).toContain('"column":"child_team"');
   });
 
   it("allows gather(...) to start from a union of same-table relations", () => {
@@ -2082,8 +2457,8 @@ describe("permissions DSL", () => {
       },
     };
 
-    const compiled = definePermissions(app, ({ policy }) => [
-      policy.todos.allowRead.where(manualExistsExpr),
+    const compiled = definePermissions(app, ({ policy, raw }) => [
+      policy.todos.allowRead.where(raw(manualExistsExpr)),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual(manualExistsExpr);
@@ -2101,8 +2476,8 @@ describe("permissions DSL", () => {
     };
 
     expect(() =>
-      definePermissions(app, ({ policy }) => [
-        policy.todos.allowRead.where(invalidManualExistsExpr),
+      definePermissions(app, ({ policy, raw }) => [
+        policy.todos.allowRead.where(raw(invalidManualExistsExpr)),
       ]),
     ).toThrow(/available fk columns: todoId/i);
   });

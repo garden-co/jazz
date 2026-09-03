@@ -55,6 +55,10 @@ export class BrowserConnectionManager extends ConnectionManager {
   private openBrowserWorkerConnection(): BrowserWorkerConnection {
     const input = this.browserConnectionInput;
     if (!input) throw new Error("Browser worker connection requires an initialized client");
+    // An Inspector receipt authenticates one worker connection, not a durable
+    // database coordinate. Replacing a failed follower must therefore revoke
+    // the old receipt before the new generation can begin serving reads.
+    this.host.clearAuthenticatedInspectorLocalReads();
     const workerConfig = { ...this.host.config };
     setTrustedReservedSession(workerConfig, getTrustedReservedSession(this.host.config));
     const connection = this.host.runtimeSource.createBrowserWorkerConnection({
@@ -81,6 +85,11 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.connectionReady = connection.ready().then(
       () => {
         if (this.connection !== connection) return;
+        const inspectorPhysicalDbName =
+          connection.getAuthenticatedInspectorAttachmentPhysicalDbName?.();
+        if (inspectorPhysicalDbName) {
+          this.host.enableAuthenticatedInspectorLocalReads(inspectorPhysicalDbName);
+        }
         // The worker sends an initial transport-state event before resolving
         // follower init. Once this resolves, this manager has an authoritative
         // namespace-wide explicit-offline snapshot.
@@ -166,6 +175,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       await this.connection?.disconnect();
       // Keep RemoteIfPossible strict until the worker confirms disconnect.
       this.disconnected = true;
+      this.publishExplicitOfflineState();
     });
   }
 
@@ -184,6 +194,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         runtimeSessionClaims(this.host.config),
       );
       this.disconnected = false;
+      this.publishExplicitOfflineState();
     });
     if (!this.disconnected) this.resolveReconnectWaiters();
   }
@@ -225,6 +236,7 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   private beginStorageReset(connection: BrowserWorkerConnection): void {
     if (this.connection !== connection || this.storageReset) return;
+    this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
     this.initialExplicitOfflineStateKnown = false;
@@ -246,6 +258,7 @@ export class BrowserConnectionManager extends ConnectionManager {
    */
   private reopenFailedFollower(): void {
     if (!this.recoverableConnectionFailure) return;
+    this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
     this.connectionError = null;
@@ -326,6 +339,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private setExplicitOffline(connection: BrowserWorkerConnection, offline: boolean): void {
     if (this.connection !== connection) return;
     this.disconnected = offline;
+    this.publishExplicitOfflineState();
     if (!offline) this.resolveReconnectWaiters();
   }
 

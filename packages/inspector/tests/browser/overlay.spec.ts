@@ -186,6 +186,14 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
       timeout: 10_000,
     });
 
+    // This is an aggregated control session: switching changes the attached
+    // worker peer, not merely a UI label. The secondary auth scope has no
+    // primary rows, so the normal `useAll` call in the grid must use the
+    // newly constructed Inspector-local source rather than a cached query
+    // from the first context.
+    await reloadedInspector.getByRole("link", { name: "Data Explorer" }).click();
+    await expect(reloadedInspector.getByText("First seeded todo")).toBeHidden({ timeout: 30_000 });
+
     // The host's `useAll(app.todos)` subscription is pushed to the Subscriptions tab.
     await reloadedInspector.getByRole("link", { name: "Subscriptions" }).click();
     await expect(reloadedInspector.getByRole("cell", { name: "todos", exact: true })).toBeVisible({

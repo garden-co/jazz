@@ -390,6 +390,51 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("rejects a removed upsert branch option by JavaScript property presence", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const db = NapiDb.openMemory(
+      encodeSchema(TEST_SCHEMA),
+      openConfig(
+        deterministicBytes("napi-upsert-removed-branch:node"),
+        testAuthorBytes("napi-upsert-removed-branch:author"),
+        1,
+        true,
+      ),
+    );
+    const upsert = (options: object) =>
+      // The rejected options must win over deliberately invalid row bytes: this
+      // exercises the raw native JavaScript boundary, not only the Rust parser.
+      (
+        db as unknown as {
+          upsertEncoded(
+            table: string,
+            rowId: Uint8Array,
+            cells: Uint8Array,
+            options: object,
+          ): unknown;
+        }
+      ).upsertEncoded("todos", new Uint8Array(16), new Uint8Array(), options);
+
+    const removed = /option `branch` is not supported; use `head`/;
+    expect(() => upsert({ branch: undefined })).toThrow(removed);
+    expect(() => upsert({ branch: null })).toThrow(removed);
+    expect(() => upsert({ branch: undefined, head: { branch: "draft" } })).toThrow(removed);
+
+    const inherited = Object.create({ branch: undefined });
+    expect(() => upsert(inherited)).toThrow(removed);
+
+    const getter = Object.defineProperty({}, "branch", {
+      get() {
+        throw new Error("removed branch getter must never be evaluated");
+      },
+    });
+    expect(() => upsert(getter)).toThrow(removed);
+
+    const proxied = new Proxy({}, { has: (_target, key) => key === "branch" });
+    expect(() => upsert(proxied)).toThrow(removed);
+    db.close?.();
+  });
+
   it("selects and filters public provenance authors as canonical text", async () => {
     const { NapiDb } = await loadNapiModule();
     const authorSeed = "jazz-napi-public-provenance:author";
@@ -1050,8 +1095,20 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     async () => {
       const { NapiDb } = await loadNapiModule();
       const fixture = debugSubscriptionEventFixture!;
-      const [unsupportedEvent, pendingEvent, serverFailureEvent, closedEvent] = fixture();
-      expect([unsupportedEvent, pendingEvent, serverFailureEvent, closedEvent]).toStrictEqual([
+      const [
+        unsupportedEvent,
+        pendingEvent,
+        serverFailureEvent,
+        invalidAuthorityEvent,
+        closedEvent,
+      ] = fixture();
+      expect([
+        unsupportedEvent,
+        pendingEvent,
+        serverFailureEvent,
+        invalidAuthorityEvent,
+        closedEvent,
+      ]).toStrictEqual([
         {
           type: "rejected",
           reason: {
@@ -1067,9 +1124,22 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           type: "rejected",
           reason: { type: "ServerFailure", code: "QueryValidation" },
         },
+        {
+          type: "rejected",
+          reason: {
+            type: "InvalidAuthoritySourceClosure",
+            transition: "fixture invalid transition",
+          },
+        },
         { type: "closed" },
       ]);
-      if (!unsupportedEvent || !pendingEvent || !serverFailureEvent || !closedEvent) {
+      if (
+        !unsupportedEvent ||
+        !pendingEvent ||
+        !serverFailureEvent ||
+        !invalidAuthorityEvent ||
+        !closedEvent
+      ) {
         throw new Error("jazz-napi test fixture returned incomplete events");
       }
 
@@ -2067,14 +2137,16 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
       const reader = openRuntime("reader", 42, server);
       const queryJson = JSON.stringify({ table: "todos" });
-      const propagatedRow = await waitFor(async () => {
-        const rows = (await reader.query(queryJson, null, "edge")) as Array<{
-          id: string;
-          table: string;
-          values: unknown[];
-        }>;
-        return rows.find((row) => row.id === inserted.id);
-      }, "reader persistent edge query did not receive the propagated row add after server recovery");
+      // A fresh strict-remote read owns its first authority receipt.  It must
+      // not resolve with the reader's empty local state while the restarted
+      // server is still delivering that receipt; callers should receive the
+      // persisted row from this one read.
+      const rows = (await reader.query(queryJson, null, "edge")) as Array<{
+        id: string;
+        table: string;
+        values: unknown[];
+      }>;
+      const propagatedRow = rows.find((row) => row.id === inserted.id);
 
       expect(propagatedRow).toEqual({
         id: inserted.id,

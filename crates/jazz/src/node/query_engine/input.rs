@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::{ProgramSourceId, ProgramSourceRole};
 
 /// One validated API request before semantic lowering.
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +97,13 @@ pub(crate) struct NormalizedRowSetShape {
     /// Join-side rows that are part of the materialized maintained/sync
     /// payload when they contribute to a visible root result.
     pub(crate) join_contributions: Vec<JoinContribution>,
+    /// Parent rows consumed by a caller-requested `inherits` semi-join.
+    ///
+    /// Unlike policy-internal inheritance proofs, these rows remain part of
+    /// the receiver's query semantics. The authority filters them through the
+    /// parent read policy, then publishes precisely the admitted parents that
+    /// visible child rows reference.
+    pub(crate) inherited_contributions: Vec<InheritedContribution>,
     /// Reachable access rows that contribute to a visible root result through
     /// a recursive closure.
     pub(crate) reachable_contributions: Vec<ReachableContribution>,
@@ -162,6 +170,19 @@ pub(crate) struct JoinContribution {
     pub(crate) membership: PredicateExpr,
 }
 
+/// One caller-requested inherited-parent source consumed by a root semi-join.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InheritedContribution {
+    /// Stable normalized path, for example `query:inherits:0`.
+    pub(crate) id: String,
+    /// Parent source occurrence read by the receiver query.
+    pub(crate) source: SourceId,
+    /// Parent relation after its authority-side read policy has been applied.
+    pub(crate) input: RowSetNodeId,
+    /// The child-reference = parent-row-id semi-join predicate.
+    pub(crate) membership: PredicateExpr,
+}
+
 /// One reachable-via access contribution rooted at the app result rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReachableContribution {
@@ -169,6 +190,10 @@ pub(crate) struct ReachableContribution {
     pub(crate) id: String,
     /// Access source occurrence for the contributing access rows.
     pub(crate) access_source: SourceId,
+    /// Physical edge occurrence evaluated by the recursive step. Its admitted
+    /// rows are carried through the recursion-owned witness stream, not
+    /// reconstructed from the final reachable frontier.
+    pub(crate) edge_source: SourceId,
     /// Normalized access rows already joined against the recursive closure.
     pub(crate) access_input: RowSetNodeId,
     /// Public access-row column that references the root result row id.
@@ -195,6 +220,36 @@ pub(crate) struct SourceId {
     pub(crate) table: String,
     /// Stable path/role inside the normalized query.
     pub(crate) path: SourcePath,
+}
+
+impl SourceId {
+    /// Convert the normalized source identity into the frozen wire vocabulary.
+    /// This is deliberately structural: sink names and runtime graph ids are
+    /// diagnostic implementation details and are not safe cross-peer keys.
+    pub(crate) fn program_source_id(&self) -> ProgramSourceId {
+        ProgramSourceId {
+            table: self.table.clone().into(),
+            path: self
+                .path
+                .components
+                .iter()
+                .map(|role| match role {
+                    SourceRole::Root => ProgramSourceRole::Root,
+                    SourceRole::Alias(name) => ProgramSourceRole::Alias(name.clone()),
+                    SourceRole::RecursiveSeed(name) => {
+                        ProgramSourceRole::RecursiveSeed(name.clone())
+                    }
+                    SourceRole::RecursiveStep(name) => {
+                        ProgramSourceRole::RecursiveStep(name.clone())
+                    }
+                    SourceRole::CorrelatedChild(name) => {
+                        ProgramSourceRole::CorrelatedChild(name.clone())
+                    }
+                    SourceRole::Policy(name) => ProgramSourceRole::Policy(name.clone()),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Stable source path inside a normalized row-set program.

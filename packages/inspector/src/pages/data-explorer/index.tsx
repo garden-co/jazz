@@ -3,7 +3,10 @@ import { Group, Panel, Separator } from "react-resizable-panels";
 import { NavLink, Outlet, useNavigate, useOutletContext, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
-import type { TableMutationState } from "../../components/data-explorer/TableDataGrid.js";
+import type {
+  PendingTableSave,
+  TableMutationState,
+} from "../../components/data-explorer/TableDataGrid.js";
 import styles from "./index.module.css";
 
 const TABLES_SIDEBAR_SIZE_STORAGE_KEY = "jazz.inspector.dataExplorer.tablesSidebarSize";
@@ -80,14 +83,21 @@ export function DataExplorer() {
     Record<string, TableMutationState>
   >({});
   const activeSaveTokens = useRef(new Map<string, symbol>());
+  const [pendingSaveByTable, setPendingSaveByTable] = useState(
+    () => new Map<string, PendingTableSave>(),
+  );
   const outletContext: {
     mutationStateByTable: Record<string, TableMutationState>;
     setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
+    pendingSaveByTable: ReadonlyMap<string, PendingTableSave>;
+    setPendingSaveByTable: Dispatch<SetStateAction<Map<string, PendingTableSave>>>;
     beginSave: (table: string) => symbol | null;
     finishSave: (table: string, token: symbol) => boolean;
   } = {
     mutationStateByTable,
     setMutationStateByTable,
+    pendingSaveByTable,
+    setPendingSaveByTable,
     beginSave: (table) => {
       if (activeSaveTokens.current.has(table)) return null;
       const token = Symbol(table);

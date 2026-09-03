@@ -65,4 +65,8 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
   async openInspectorControlPort(): Promise<MessagePort> {
     throw new Error("Inspector peers cannot open nested inspector sessions");
   }
+
+  getAuthenticatedInspectorAttachmentPhysicalDbName(): string | null {
+    return this.connection.getAuthenticatedInspectorAttachmentPhysicalDbName();
+  }
 }

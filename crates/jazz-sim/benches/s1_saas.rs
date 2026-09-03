@@ -530,11 +530,16 @@ fn edge_acceptance_phase(
     let SyncMessage::CommitUnit { tx, versions } = delivered.message else {
         unreachable!();
     };
+    // This direct edge probe uses the unadmitted SYSTEM peer, whose immutable
+    // request snapshot is the empty claim object.
+    let policy_claims = BTreeMap::new();
     let outcome = block_on(PeerState::new().ingest_edge_mergeable_commit_unit(
         &mut edge.node,
         tx,
         versions,
         u64::MAX,
+        u64::MAX,
+        policy_claims,
     ))
     .unwrap();
     let updates = settle_outcome(&mut edge.node, outcome).unwrap();
@@ -1296,6 +1301,7 @@ fn register_binding(
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     );
     let delivered = ctx.recv("core");
@@ -1328,6 +1334,7 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .unwrap();
