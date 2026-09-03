@@ -2357,6 +2357,16 @@ describe("permissions DSL", () => {
       ]),
     ).toThrow(/unsupported session\.where operator "startsWith"/i);
   });
+  it.each(["gt", "gte", "lt", "lte"] as const)(
+    "rejects session.where range operator %s synchronously",
+    (operator) => {
+      expect(() =>
+        definePermissions(app, ({ policy, session }) => [
+          policy.todos.allowRead.where(session.where({ "claims.age": { [operator]: 18 } })),
+        ]),
+      ).toThrow(new RegExp(`Unsupported session\\.where operator "${operator}"`));
+    },
+  );
 
   it("rejects unsupported where operators and invalid compound combinator inputs", () => {
     expect(() =>
