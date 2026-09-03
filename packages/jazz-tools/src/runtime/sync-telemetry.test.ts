@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 
 const otelMocks = vi.hoisted(() => {
   const traceExporterConstructors = vi.fn();
@@ -446,5 +447,80 @@ describe("telemetry OTLP helpers", () => {
     expect(wasmModule.subscribers).toHaveLength(0);
     expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
     expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(2);
+  });
+  it("shares one collector stream for compatible leases on one WASM namespace", () => {
+    const wasmModule = createWasmModule([[]]);
+    const first = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418/v1/traces",
+      appId: "first-app",
+      runtimeThread: "main",
+    });
+    const second = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418/v1/logs",
+      appId: "second-app",
+      runtimeThread: "worker",
+    });
+
+    expect(wasmModule.subscribeTraceEntries).toHaveBeenCalledTimes(1);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(1);
+    expect(wasmModule.subscribers).toHaveLength(1);
+
+    second();
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(1);
+    first();
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("rejects an incompatible endpoint pair before mutating the existing collector", () => {
+    const wasmModule = createWasmModule();
+    const live = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "live-app",
+      runtimeThread: "main",
+    });
+
+    expect(() =>
+      installWasmTelemetry({
+        wasmModule,
+        collectorUrl: "http://127.0.0.1:54419",
+        appId: "other-app",
+        runtimeThread: "worker",
+      }),
+    ).toThrow("incompatible WASM telemetry collector");
+    expect(wasmModule.subscribeTraceEntries).toHaveBeenCalledTimes(1);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(1);
+    live();
+  });
+  it("keeps collector resources app-neutral", async () => {
+    const wasmModule = createWasmModule([
+      [
+        {
+          kind: "log",
+          sequence: 0,
+          target: "jazz",
+          level: "INFO",
+          message: "hello",
+          timestampUnixNano: [1, 0],
+        },
+      ],
+    ]);
+    const dispose = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "must-not-be-exported",
+      runtimeThread: "main",
+    });
+
+    wasmModule.subscribers[0]!();
+    await vi.waitFor(() => expect(otelMocks.emitLog).toHaveBeenCalledOnce());
+
+    expect(resourceFromAttributes).toHaveBeenCalledWith({
+      "service.name": "jazz-browser",
+      "telemetry.sdk.language": "webjs",
+    });
+    dispose();
   });
 });
