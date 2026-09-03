@@ -1023,17 +1023,7 @@ pub fn resolve_verified_jwt_session(
         .ok_or_else(|| UnauthenticatedResponse::invalid("JWT iss claim is required"))?
         .to_owned();
 
-    let claims = match verified.claims {
-        serde_json::Value::Object(mut map) => {
-            map.insert("subject".to_string(), serde_json::json!(subject));
-            map.insert("issuer".to_string(), serde_json::json!(issuer.clone()));
-            serde_json::Value::Object(map)
-        }
-        _ => serde_json::json!({
-            "subject": subject,
-            "issuer": issuer.clone(),
-        }),
-    };
+    let claims = verified.claims;
 
     Ok(Session {
         issuer,
@@ -1436,7 +1426,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(session.user_id, subject);
-        assert_eq!(session.claims["subject"], subject);
+        assert_eq!(session.claims, serde_json::json!({}));
     }
 
     #[test]
@@ -1468,6 +1458,8 @@ mod tests {
             "jti": "transport-token-id",
             "better_auth_user_id": "better-auth-user-123",
             "profile_id": "profile-456",
+            "issuer": "application-issuer",
+            "subject": "application-subject",
             "roles": ["editor", "beta"],
             "profile": {"name": "Alice"},
             "revoked_at": null,
@@ -1487,6 +1479,8 @@ mod tests {
             "better-auth-user-123"
         );
         assert_eq!(session.claims["profile_id"], "profile-456");
+        assert_eq!(session.claims["issuer"], "application-issuer");
+        assert_eq!(session.claims["subject"], "application-subject");
         assert_eq!(
             session.claims["roles"],
             serde_json::json!(["editor", "beta"])
@@ -1500,7 +1494,7 @@ mod tests {
             session.claims["claims"],
             serde_json::json!({"legacy": "not flattened"})
         );
-        for reserved in ["aud", "exp", "nbf", "iat", "jti"] {
+        for reserved in ["iss", "sub", "aud", "exp", "nbf", "iat", "jti"] {
             assert!(
                 session.claims.get(reserved).is_none(),
                 "{reserved} is transport metadata"
@@ -1673,8 +1667,7 @@ mod tests {
 
         assert_eq!(session.user_id, "user-42");
         assert_eq!(session.auth_mode, jazz::tools::AuthMode::External);
-        assert_eq!(session.claims["subject"], "user-42");
-        assert_eq!(session.claims["issuer"], "https://issuer.jazz.test");
+        assert_eq!(session.claims, serde_json::json!({}));
     }
 
     #[test]
@@ -1708,7 +1701,7 @@ mod tests {
         })
         .expect("non-empty issuer is retained exactly");
         assert_eq!(session.issuer, " https://issuer.example ");
-        assert_eq!(session.claims["issuer"], " https://issuer.example ");
+        assert_eq!(session.claims, serde_json::json!({}));
     }
 
     #[tokio::test]
