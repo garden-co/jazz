@@ -144,7 +144,7 @@ export function withJazz(
       typeof serverOpt === "object" && serverOpt !== null && "backendSecret" in serverOpt
         ? serverOpt.backendSecret
         : undefined;
-    const backendSecret = explicitBackendSecret || process.env.BACKEND_SECRET || undefined;
+    const backendSecret = explicitBackendSecret ?? process.env.BACKEND_SECRET;
 
     const resolvedAppRoot = options.appRoot ?? process.cwd();
     const managed = await runtime.initialize({

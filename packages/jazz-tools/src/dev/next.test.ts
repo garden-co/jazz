@@ -254,6 +254,21 @@ describe("withJazz", () => {
     expect(process.env.BACKEND_SECRET).toBe("caller-owned-backend-secret");
   }, 30_000);
 
+  it("preserves an explicit empty backend secret instead of falling back to the environment", async () => {
+    process.env.BACKEND_SECRET = "ambient-backend-secret";
+    vi.spyOn(devServer, "startLocalJazzServer").mockImplementation(async (options) => {
+      expect(options.backendSecret).toBe("");
+      throw new Error("backend secret must not be blank");
+    });
+
+    await expect(
+      resolveWrappedConfig(
+        withJazz({}, { server: { adminSecret: "next-empty-backend-secret", backendSecret: "" } }),
+        DEVELOPMENT_PHASE,
+      ),
+    ).rejects.toThrow("backend secret must not be blank");
+  });
+
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-retry-");
