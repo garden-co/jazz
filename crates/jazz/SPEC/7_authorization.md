@@ -129,8 +129,11 @@ are not application metadata. The exact verified `iss` and `sub` determine
 top-level JSON claim is exposed by name in `session.claims`, including `null`,
 arrays, and objects. A top-level `claims` key is not special and remains
 `session.claims.claims`; Jazz neither requires it nor flattens it. Core policy
-evaluation supports its documented scalar/array corpus, so object metadata is
-available to handlers but is not a core policy value (`INV-RLS-25`).
+evaluation projects only scalar values and arrays whose members are likewise
+representable. Objects, and arrays containing an object at any depth, remain
+available to handlers but are omitted from the Groove policy identity; they do
+not reject authentication. Recursive object-policy values are not supported
+(`INV-RLS-25`).
 
 For the two self-signed issuers, the signed `jazz_pub_key` verifies the proof
 and derives `sub`; it is not copied into `session.claims` as an application
