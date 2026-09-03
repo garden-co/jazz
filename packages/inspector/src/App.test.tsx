@@ -316,7 +316,6 @@ describe("App", () => {
     expect(localStorage.getItem(STORAGE_KEY)).toBe(storedBeforeEdit);
   });
 
-
   it("prefills the connection form from partial hash params", async () => {
     localStorage.setItem(
       STORAGE_KEY,
