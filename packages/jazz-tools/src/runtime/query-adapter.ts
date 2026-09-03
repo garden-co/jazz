@@ -21,7 +21,7 @@ import {
   type NormalizedIncludeEntry,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
-import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
+import { resolveIncludeColumnNames, resolveSelectedColumns } from "./select-projection.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -301,6 +301,7 @@ function toArraySubqueries(
   const tableRels = relations.get(tableName) || [];
   const subqueries: object[] = [];
   const requireCurrentLevelIncludes = options?.requireIncludes === true;
+  const includeColumnNames = resolveIncludeColumnNames(tableName, Object.keys(includes), schema);
 
   for (const [relName, spec] of Object.entries(includes)) {
     const rel = tableRels.find((r) => r.name === relName);
@@ -326,9 +327,7 @@ function toArraySubqueries(
       requireIncludes: spec.requireIncludes,
     });
     const selectColumns = visibleFullSelectColumns(resolvedSelectColumns);
-    const outputColumnName = schema[tableName]?.columns.some((column) => column.name === relName)
-      ? hiddenIncludeColumnName(relName)
-      : relName;
+    const outputColumnName = includeColumnNames.get(relName) ?? relName;
 
     // Build the subquery based on relation type
     if (rel.type === "forward") {
@@ -616,8 +615,8 @@ function gatherToRelExpr(
   if (!schema[gather.step_table]) {
     throw new Error(`Unknown gather step table "${gather.step_table}"`);
   }
-  if (!Number.isInteger(gather.max_depth) || gather.max_depth <= 0) {
-    throw new Error("gather(...) max_depth must be a positive integer.");
+  if (!Number.isInteger(gather.max_depth) || gather.max_depth < 0) {
+    throw new Error("gather(...) max_depth must be a non-negative integer.");
   }
 
   const stepHops = Array.isArray(gather.step_hops)

@@ -9,6 +9,7 @@
   "files": [
     "bin/**",
     "dist/**",
+    "jazz-source-snapshot.json",
     "skills/**",
     "README.md"
   ],

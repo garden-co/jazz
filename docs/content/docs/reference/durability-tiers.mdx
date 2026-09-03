@@ -30,23 +30,22 @@ Transactions use `.wait(...)` and report errors in the same way as individual mu
 
 ## Read tiers
 
-Read choices control when the **first result** of a query or subscription is delivered.
-They are intentionally separate from write durability: write APIs and `wait({ tier })`
-continue to use local, edge, and global.
-
-| Option         | Values                                                  | Default         | What it does                                                                                                                                                                                                                                                                     |
-| -------------- | ------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tier`         | `"local-first"` \| `"remote"` \| `"remote-if-possible"` | runtime default | Product-level read choice; the older values remain available as legacy controls.                                                                                                                                                                                                 |
-| `localUpdates` | `"immediate"` \| `"deferred"`                           | `"immediate"`   | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
-| `propagation`  | `"full"` \| `"local-only"`                              | `"full"`        | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
+Read choices control which data a query uses and when its **first result** is delivered.
+They are intentionally separate from write durability.
 
 New applications should use the product read choices `"local-first"`,
-`"remote"`, and `"remote-if-possible"`. Local-first uses local knowledge;
-remote waits for the ordinary remote view. Remote-if-possible uses local knowledge
-only after the app explicitly calls `db.disconnect()`; a timeout, connection
-error, or slow response never triggers that fallback. A one-shot keeps its initial
-choice, while a disconnected subscription starts locally and is replaced with the
-ordinary remote subscription after reconnect.
+`"remote"`, and `"remote-if-possible"`:
+
+- `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
+- `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
+- `"remote-if-possible"` prioritizes remote data, but falls back to local data if the app explicitly calls `db.disconnect()` (a timeout, connection error, or slow response never triggers that fallback).
+  Online, pending edits/deletes to in-scope rows and matching new inserts appear before server approval. Editing an existing out-of-scope row does not bring it into the result; cached related rows are not pulled in automatically.
+
+A one-shot keeps its initial choice. A `"remote-if-possible"` subscription follows
+confirmed disconnect/reconnect transitions in both directions, waiting for a fresh
+remote scope on reconnect. Losing remote access does not erase cached data:
+local-first and offline fallback may still show it. An actual synced deletion,
+however, hides the row from local reads too.
 
 The older read values `"local"`, `"edge"`, and `"global"` remain accepted
 with their existing semantics during migration. They are legacy read controls only;

@@ -175,9 +175,13 @@ query.
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `start`    | A `where` filter selecting the root rows to begin traversal from                                                                                            |
 | `step`     | A callback that receives `{ current }` (a token for the row being visited) and returns a query with one `.hopTo()` call specifying which relation to follow |
-| `maxDepth` | Maximum recursion depth (default: `10`)                                                                                                                     |
+| `maxDepth` | Maximum recursive hops (default: `10`). The start rows are depth `0`, so `0` returns only those rows                                                        |
 
 Inside the `step` callback, call `hopTo(relation)` to tell Jazz which reference to follow at each level.
+
+Depth is counted from the start relation: `maxDepth: 0` returns only the start rows, while
+`maxDepth: 1` may also return rows reached by one `step` hop. A zero bound never performs an
+implicit first hop.
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts

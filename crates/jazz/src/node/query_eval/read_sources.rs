@@ -6,12 +6,21 @@
 //! rows.
 
 use super::*;
-use crate::node::query_engine::BranchViewSourceBase;
+use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
 use std::{future::Future, pin::Pin};
 pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+    /// Receiver-local mutable inputs for one exact authority-covered program
+    /// closure. The mapping is keyed by normalized source identity, never by
+    /// a table name, sink, collector, or storage prefix.
+    pub(super) covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+    /// The exact compiler-owned descriptor registered for each receiver
+    /// source. Input lowering must reuse it rather than reconstructing an
+    /// authored descriptor after the physical catalogue has selected a
+    /// canonical enum/schema boundary.
+    pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     /// Whether access-path metrics should account for this logical graph
     /// fragment. A policy proof specialized from its outer source reuses the
@@ -61,6 +70,97 @@ where
         let Some(source) = self.read_view.sources.get(&request.source) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
+        // The overlay is explicit in the source expression; Local-first is
+        // ordinary local storage, never an implicit authority-scoped overlay.
+        let pending_current = match source {
+            SourceExpr::WithOverlays { input, overlays }
+                if overlays.entries == [OverlayRef::PendingLocal] =>
+            {
+                match input.as_ref() {
+                    SourceExpr::SettledBindingView { projection, .. } => {
+                        Some(SourceExpr::VisibleCurrent {
+                            projection: projection.clone(),
+                            data: DataSource::Current,
+                            tier: DurabilityTier::Local,
+                        })
+                    }
+                    _ => return Err(source_resolution_error(request, SourceGap::Coverage)),
+                }
+            }
+            _ => None,
+        };
+        let pending_overlay = pending_current.is_some();
+        let source = pending_current.as_ref().unwrap_or(source);
+        let (covered_input_source, covered_input_descriptor) =
+            if request.visibility == RowVisibility::Visible {
+                (
+                    self.covered_input_sources.get(&request.source).copied(),
+                    self.covered_input_descriptors.get(&request.source).cloned(),
+                )
+            } else {
+                (None, None)
+            };
+        if covered_input_source.is_some() != covered_input_descriptor.is_some() {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        }
+
+        // A receiver-local Local source has exactly two possible inputs: the
+        // authority-covered frontier and this node's still-pending Ahead
+        // overlay.  It must never reopen the ordinary Local source here:
+        // that source also contains Global rows previously received from the
+        // authority, which would keep a retracted covered row alive.
+        let receiver_local_overlay = covered_input_source.is_some() && pending_overlay;
+        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+            && !self.covered_input_sources.is_empty()
+        {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=covered_input_lookup request={:?} matched={} candidates={:?}",
+                request.source,
+                covered_input_source.is_some(),
+                self.covered_input_sources.keys().collect::<Vec<_>>(),
+            );
+        }
+        if let Some(input_source) = covered_input_source
+            && (matches!(source, SourceExpr::SettledBindingView { .. })
+                // Strict remote source occurrences have no eligible local
+                // alternative. Aggregate output is synthetic, so its raw
+                // remote contributor source likewise has to bottom out at
+                // the covered input rather than storage.
+                || matches!(
+                    source,
+                    SourceExpr::VisibleCurrent { tier, .. } if *tier >= DurabilityTier::Edge
+                ))
+        {
+            // The compiler created this source map only for an exact
+            // authority-covered occurrence. The explicit map, rather than
+            // the source expression's spelling, is the capability.
+            if request.visibility != RowVisibility::Visible {
+                return Err(source_resolution_error(request, SourceGap::Coverage));
+            }
+            let table = self
+                .node
+                .table_in_schema(&request.source.table, self.read_view.read_schema)
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let metadata = inline_source_metadata(&request.requirements, None);
+            let descriptor = covered_input_descriptor
+                .clone()
+                .expect("checked alongside compiler-owned covered input source");
+            return Ok(ResolvedSource {
+                table_schema: table,
+                graph: GraphBuilder::input_source(input_source, descriptor.clone()),
+                row_shape: SourceRowShape {
+                    source: request.source.clone(),
+                    descriptor,
+                    row_uuid_field: "row_uuid".to_owned(),
+                    metadata,
+                },
+                routing_fields: BTreeSet::new(),
+                requires_result_payload: false,
+                content_version: None,
+                deletion_register: None,
+                authorized_deletion_preimage: None,
+            });
+        }
         let (projection, graph_tier, history_position, snapshot, open_tx_overlay, branch_view) =
             match source {
                 SourceExpr::VisibleCurrent {
@@ -91,87 +191,14 @@ where
                     data: DataSource::Current,
                     snapshot,
                 } => (projection, None, None, Some(snapshot.clone()), None, None),
-                SourceExpr::SettledBindingView {
-                    projection,
-                    binding_view,
-                    rows,
-                    requires_result_payload,
-                } => {
-                    if request.visibility != RowVisibility::Visible {
-                        return Err(source_resolution_error(request, SourceGap::Coverage));
-                    }
-                    if !matches!(projection.schema_family, SchemaFamilySelection::Current)
-                        || !matches!(projection.storage, StorageSchemaSelection::Single(_))
-                        || !matches!(projection.lens, LensSelection::Canonical)
-                    {
-                        return Err(source_resolution_error(
-                            request,
-                            SourceGap::SchemaProjection,
-                        ));
-                    }
-                    match self
-                        .node
-                        .settled_binding_view_source_rows(
-                            &request.source.table,
-                            self.read_view.read_schema,
-                            *binding_view,
-                            *rows,
-                        )
-                        .await
-                    {
-                        Ok(rows) => {
-                            let table = self
-                                .node
-                                .table_in_schema(&request.source.table, self.read_view.read_schema)
-                                .map_err(|_| {
-                                    source_resolution_error(request, SourceGap::SchemaProjection)
-                                })?;
-                            let schema_version_alias = self
-                                .node
-                                .ensure_schema_version_alias(self.read_view.read_schema)
-                                .await
-                                .map_err(|_| {
-                                    source_resolution_error(request, SourceGap::Coverage)
-                                })?;
-                            let (graph, descriptor, metadata) =
-                                inline_current_graph_with_source_metadata(
-                                    &table,
-                                    rows,
-                                    schema_version_alias,
-                                    "settled-binding-view",
-                                    &request.requirements,
-                                )
-                                .map_err(|_| {
-                                    source_resolution_error(request, SourceGap::Coverage)
-                                })?;
-                            return Ok(ResolvedSource {
-                                table_schema: table,
-                                graph,
-                                row_shape: SourceRowShape {
-                                    source: request.source.clone(),
-                                    descriptor,
-                                    row_uuid_field: "row_uuid".to_owned(),
-                                    metadata,
-                                },
-                                routing_fields: BTreeSet::new(),
-                                requires_result_payload: *requires_result_payload,
-                                content_version: None,
-                                deletion_register: None,
-                            });
-                        }
-                        Err(Error::MissingTransaction(_)) => {}
-                        Err(_) => {
-                            return Err(source_resolution_error(request, SourceGap::Coverage));
-                        }
-                    }
-                    (
-                        projection,
-                        Some(DurabilityTier::Global),
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
+                // A settled authority binding is not a source of application
+                // rows. The caller must provide an exact, descriptor-bound
+                // CoveredInput source for every compiled occurrence before
+                // this resolver runs. Falling back to result members,
+                // ResultPayload, or retained Global storage would create a
+                // second evaluator and could resurrect revoked rows.
+                SourceExpr::SettledBindingView { .. } => {
+                    return Err(source_resolution_error(request, SourceGap::Coverage));
                 }
                 SourceExpr::WithOverlays { input, overlays } => {
                     let (projection, tier) = match input.as_ref() {
@@ -266,11 +293,14 @@ where
                 requires_result_payload: false,
                 content_version: None,
                 deletion_register: None,
+                authorized_deletion_preimage: None,
             });
         }
         let (graph, descriptor, metadata, routing_fields) = if let Some((head, base)) = branch_view
         {
-            if request.visibility == RowVisibility::IncludeDeleted && base.is_none() {
+            if request.visibility == RowVisibility::IncludeDeleted
+                && base.is_none_or(|base| matches!(base, BranchViewSourceBase::Current(_)))
+            {
                 let tier = graph_tier.expect("branch view has a current tier");
                 let head_keys = self
                     .node
@@ -280,12 +310,58 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let content = self
+                let head_content = self
                     .projected_branch_content_source_graph(request, &table, tier, &head_keys)
                     .await?;
-                let deletions = self
+                let head_deletions = self
                     .projected_branch_deletion_source_graph(request, tier, &head_keys)
                     .await?;
+                // A head-over-current BranchView selects its winner from the
+                // head when present and otherwise from the base.  The
+                // IncludeDeleted sibling must use that exact same selection
+                // before policy evaluation, or an authorized base preimage
+                // could accidentally attest to a distinct head deletion.
+                let (content, deletions) = match base {
+                    Some(BranchViewSourceBase::Current(base)) if base != head => {
+                        let base_keys = self
+                            .node
+                            .equivalent_stored_branch_keys(
+                                &request.source.table,
+                                self.read_view.read_schema,
+                                base,
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let base_content = self
+                            .projected_branch_content_source_graph(
+                                request, &table, tier, &base_keys,
+                            )
+                            .await?;
+                        let base_deletions = self
+                            .projected_branch_deletion_source_graph(request, tier, &base_keys)
+                            .await?;
+                        (
+                            GraphBuilder::union([
+                                head_content.clone(),
+                                GraphBuilder::anti_join(
+                                    base_content,
+                                    head_content,
+                                    ["row_uuid"],
+                                    ["row_uuid"],
+                                ),
+                            ]),
+                            GraphBuilder::union([
+                                head_deletions.clone(),
+                                GraphBuilder::anti_join(
+                                    base_deletions,
+                                    head_deletions,
+                                    ["row_uuid"],
+                                    ["row_uuid"],
+                                ),
+                            ]),
+                        )
+                    }
+                    _ => (head_content, head_deletions),
+                };
                 let base = include_deleted_branch_graph(&table, head, content, deletions)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let graph = match &authorization {
@@ -343,6 +419,7 @@ where
                     requires_result_payload: false,
                     content_version: None,
                     deletion_register: None,
+                    authorized_deletion_preimage: None,
                 });
             }
             if request.visibility != RowVisibility::Visible {
@@ -495,6 +572,7 @@ where
                     requires_result_payload: true,
                     content_version,
                     deletion_register,
+                    authorized_deletion_preimage: None,
                 });
             }
             if matches!(base, Some(BranchViewSourceBase::Snapshot(_, _))) {
@@ -734,6 +812,7 @@ where
                             row_uuid_field: "row_uuid".to_owned(),
                         }),
                     deletion_register: None,
+                    authorized_deletion_preimage: None,
                 });
             }
             let rows = self
@@ -1053,6 +1132,7 @@ where
             (graph, descriptor, metadata, BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
             && self.needs_projected_current_source(&request.source.table)
+            && !receiver_local_overlay
         {
             if !request.requirements.metadata.is_empty() {
                 let source = self
@@ -1155,6 +1235,24 @@ where
                 };
                 (graph, source.descriptor, source.metadata, BTreeSet::new())
             }
+        } else if request.visibility == RowVisibility::IncludeDeleted && pending_overlay {
+            // A receiver's own pending deletion needs no read-policy proof.
+            // Do not reopen persisted Global data for this internal sibling.
+            let graph = self
+                .pending_deletion_winner_graph(request)?
+                .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                .project_fields([
+                    ProjectField::named("row_uuid"),
+                    ProjectField::named("tx_time"),
+                    ProjectField::named("tx_node_id"),
+                    ProjectField::literal("__jazz_deleted", Value::Bool(true)),
+                ]);
+            (
+                graph,
+                include_deleted_current_row_descriptor(&table),
+                BTreeMap::new(),
+                BTreeSet::new(),
+            )
         } else if request.visibility == RowVisibility::IncludeDeleted
             && self.needs_projected_current_source(&request.source.table)
         {
@@ -1257,23 +1355,36 @@ where
             )
         } else {
             let tier = graph_tier.expect("visible current source has a tier");
-            let selected_base = self
-                .selected_global_current_source_graph(request, &table, tier)
-                .await?;
-            let selected_base = match selected_base {
-                Some(selected_base) => Some(selected_base),
-                None => match self.cached_policy_authorization_access_path(request)? {
-                    Some(access_path) => {
-                        self.selected_global_current_source_graph_for_access_path(
-                            request,
-                            &table,
-                            tier,
-                            access_path,
-                        )
-                        .await?
-                    }
-                    None => None,
-                },
+            let selected_base = if receiver_local_overlay {
+                // This is deliberately an Ahead-only source.  The companion
+                // CoveredInput source is the complete, policy-scoped remote
+                // frontier.  A normal Local read is Global ∪ Ahead, but using
+                // it here would accidentally turn durable authority storage
+                // into a second receiver input path.
+                self.node.query_engine_read_metrics.source_full_scans += 1;
+                Some(
+                    self.pending_local_current_source_graph(request, &table)
+                        .await?,
+                )
+            } else {
+                let selected_base = self
+                    .selected_global_current_source_graph(request, &table, tier)
+                    .await?;
+                match selected_base {
+                    Some(selected_base) => Some(selected_base),
+                    None => match self.cached_policy_authorization_access_path(request)? {
+                        Some(access_path) => {
+                            self.selected_global_current_source_graph_for_access_path(
+                                request,
+                                &table,
+                                tier,
+                                access_path,
+                            )
+                            .await?
+                        }
+                        None => None,
+                    },
+                }
             };
             if selected_base.is_none() {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
@@ -1307,6 +1418,76 @@ where
                 open_tx_overlay,
             )
             .await?;
+        // The descriptor attached to the receiver input is the compiler's
+        // canonical current-storage descriptor. The physical current arm
+        // reaches that same boundary through its variant projection; retain
+        // the allocated descriptor for the row shape rather than reconstruct
+        // the authored enum occurrence above.
+        let descriptor = covered_input_descriptor.clone().unwrap_or(descriptor);
+        let graph = if let Some(input_source) = covered_input_source {
+            // Online remote-if-possible composes the authority closure with the
+            // eligible local-current overlay before it enters the same
+            // maintained program. The union is per normalized source
+            // occurrence; table-level union would conflate aliases/self-joins.
+            // Both sides can carry the same already-admitted version (the
+            // local store retains received authority data), so select their
+            // single current winner by the normal version identity before
+            // the graph can observe it. A locally pending successor wins;
+            // rejection retracts that ahead record and deterministically
+            // reveals the covered authority version again.
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=union_covered_input request={:?} descriptor={descriptor:?}",
+                    request.source,
+                );
+            }
+            let covered_descriptor = covered_input_descriptor
+                .expect("checked alongside compiler-owned covered input source");
+            let covered = GraphBuilder::input_source(input_source, covered_descriptor.clone());
+            let graph = if receiver_local_overlay {
+                // Existing cached rows outside this exact source occurrence
+                // cannot enter merely because they have a pending edit.
+                // Pending inserts have no accepted content predecessor.
+                let projection_target = self.current_projection_target(request, &table)?;
+                let accepted = self
+                    .node
+                    .physical_current_source_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        projection_target,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
+                    .project(["row_uuid"]);
+                let out_of_scope = GraphBuilder::anti_join(
+                    accepted,
+                    covered.clone().project(["row_uuid"]),
+                    ["row_uuid"],
+                    ["row_uuid"],
+                );
+                GraphBuilder::anti_join(graph, out_of_scope, ["row_uuid"], ["row_uuid"])
+            } else {
+                graph
+            };
+            let inputs = vec![covered, graph];
+
+            let winner = GraphBuilder::arg_max_by(
+                GraphBuilder::union(inputs),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            );
+            if receiver_local_overlay {
+                let deleted = self
+                    .pending_deletion_winner_graph(request)?
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                    .project(["row_uuid"]);
+                GraphBuilder::anti_join(winner, deleted, ["row_uuid"], ["row_uuid"])
+            } else {
+                winner
+            }
+        } else {
+            graph
+        };
         Ok(ResolvedSource {
             table_schema: table,
             graph,
@@ -1320,6 +1501,7 @@ where
             requires_result_payload: false,
             content_version,
             deletion_register,
+            authorized_deletion_preimage: None,
         })
     }
 
@@ -1418,6 +1600,7 @@ where
             requires_result_payload: false,
             content_version,
             deletion_register,
+            authorized_deletion_preimage: None,
         })
     }
 
@@ -1576,6 +1759,7 @@ where
             requires_result_payload: false,
             content_version,
             deletion_register,
+            authorized_deletion_preimage: None,
         })
     }
 }
@@ -1654,6 +1838,7 @@ where
             requires_result_payload: false,
             content_version: None,
             deletion_register: None,
+            authorized_deletion_preimage: None,
         })
     }
 }
@@ -1666,6 +1851,15 @@ where
         &'a mut self,
         request: &'a SourceRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+        // A receiver-owned covered source must take the single resolver path
+        // that either uses the strict authority frontier directly or unions
+        // it with the eligible local frontier.  The visible-current fast
+        // paths only know how to lower storage-backed input, which would
+        // silently leave the allocated runtime source disconnected from the
+        // graph on a Local query.
+        if self.covered_input_sources.contains_key(&request.source) {
+            return Box::pin(self.prepare_source_graph_dispatch(request));
+        }
         let visible_current = match self.read_view.sources.get(&request.source) {
             Some(SourceExpr::VisibleCurrent {
                 projection,
@@ -1852,6 +2046,59 @@ where
             .await
     }
 
+    /// The only storage-backed half of a Local-first covered receiver input.
+    ///
+    /// `Ahead` contains versions this node has not yet retired into the
+    /// durable Global winner (pending local work, including a pending local
+    /// deletion).  The matching complete Global frontier is supplied only by
+    /// the authority's exact `CoveredInput` receipt.  Keeping these sources
+    /// distinct is what makes an authority retraction observable even though
+    /// the client may retain an old received Global row in its database.
+    async fn pending_local_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        self.visible_current_physical_source_graph(
+            request,
+            table,
+            PhysicalCurrentClass::Ahead,
+            DurabilityTier::Local,
+        )
+        .await
+    }
+
+    /// Read a physical current arm with the ordinary deletion fence. The
+    /// authority input remains independent of this storage-backed Ahead arm.
+    async fn visible_current_physical_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        current_class: PhysicalCurrentClass,
+        deletion_tier: DurabilityTier,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let projection_target = self.current_projection_target(request, table)?;
+        let content = self
+            .node
+            .physical_current_source_graph_with_projection_target(
+                self.read_view.read_schema,
+                &request.source.table,
+                current_class,
+                projection_target,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let deleted_winners = self
+            .projected_deletion_register_current_source_graph(request, deletion_tier)?
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+            .project(["row_uuid"]);
+        Ok(GraphBuilder::anti_join(
+            content,
+            deleted_winners,
+            ["row_uuid"],
+            ["row_uuid"],
+        ))
+    }
+
     /// Reuse the access paths chosen while compiling the already-prepared
     /// policy dependency. Source resolution does not inspect policy syntax or
     /// select a policy-specific path; it only consumes this generic planner
@@ -1929,6 +2176,30 @@ where
         }
     }
 
+    fn pending_deletion_winner_graph(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let ahead = if self.needs_projected_current_source(&request.source.table) {
+            let table_id = self
+                .node
+                .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            GraphBuilder::table(physical_register_ahead_current_table_name(table_id))
+        } else {
+            GraphBuilder::table(register_ahead_current_table_name(&request.source.table))
+        };
+        let fields = register_storage_fields_for_query_engine("");
+        // Ahead can contain several unconfirmed operations for the same row.
+        // A pending restore must supersede an earlier pending deletion.
+        Ok(GraphBuilder::arg_max_by(
+            ahead.project_fields(fields.clone()),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project_fields(fields))
+    }
+
     pub(crate) fn deletion_register_source_for_request(
         &mut self,
         request: &SourceRequest,
@@ -1952,6 +2223,15 @@ where
             || open_tx_overlay.is_some()
         {
             return Err(source_resolution_error(request, SourceGap::Coverage));
+        }
+        if matches!(self.read_view.sources.get(&request.source),
+            Some(SourceExpr::WithOverlays { overlays, .. })
+                if overlays.entries == [OverlayRef::PendingLocal])
+        {
+            return Ok(Some(DeletionRegisterSource {
+                graph: self.pending_deletion_winner_graph(request)?,
+                row_uuid_field: "row_uuid".to_owned(),
+            }));
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(DeletionRegisterSource {
@@ -3279,6 +3559,43 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
     current_row_descriptor_with_hidden_source_fields_for_branch(table, metadata, false)
 }
 
+/// The current-source compatibility boundary is the schema's canonical
+/// current-row representation, not the authored column spelling.  Physical
+/// catalogue registration assigns stable enum identities there; a
+/// receiver-owned input that later unions with a current arm must retain those
+/// identities exactly.
+pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_storage(
+    table: &TableSchema,
+    metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+) -> RecordDescriptor {
+    let logical = current_row_descriptor_with_hidden_source_fields(table, metadata);
+    let current = table.global_current_storage_tables()[0].record_schema();
+    let current_types = table
+        .columns
+        .iter()
+        .filter_map(|column| {
+            let storage_name = format!("user_{}", column.name);
+            current
+                .field_index(&storage_name)
+                .and_then(|index| current.fields().get(index))
+                .map(|field| (user_column_field(&column.name), field.value_type.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    RecordDescriptor::new(logical.fields().iter().map(|field| {
+        let name = field
+            .name
+            .clone()
+            .expect("compiler-owned current source descriptor fields are named");
+        (
+            name.clone(),
+            current_types
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| field.value_type.clone()),
+        )
+    }))
+}
+
 fn current_row_descriptor_with_hidden_source_fields_for_branch(
     table: &TableSchema,
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
@@ -3351,14 +3668,14 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
     {
         fields.push(("supplying_branch_key".to_owned(), ValueType::Bytes));
     }
-    if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
-        fields.push(("coverage".to_owned(), ValueType::String));
-    }
     if metadata.contains_key(&SourceMetadataRequirement::SettlePosition) {
         fields.push((
             "settle_position".to_owned(),
             ValueType::Nullable(Box::new(ValueType::U64)),
         ));
+    }
+    if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
+        fields.push(("coverage".to_owned(), ValueType::String));
     }
     if include_deletion_marker {
         fields.push(("__jazz_deleted".to_owned(), ValueType::Bool));
@@ -3498,6 +3815,7 @@ where
             shape.schema_version(),
             shape.schema_version(),
             tier,
+            None,
             None,
             false,
         );
@@ -3920,20 +4238,7 @@ fn normalized_bound_value(
 }
 
 pub(super) fn current_row_fields(table: &TableSchema) -> Vec<String> {
-    let mut fields = vec!["row_uuid".to_owned()];
-    fields.extend(
-        table
-            .columns
-            .iter()
-            .map(|column| user_column_field(&column.name)),
-    );
-    fields.push("$createdBy".to_owned());
-    fields.push("$createdAt".to_owned());
-    fields.push("$updatedBy".to_owned());
-    fields.push("$updatedAt".to_owned());
-    fields.push("tx_time".to_owned());
-    fields.push("tx_node_id".to_owned());
-    fields
+    current_row_field_names(table)
 }
 
 pub(super) fn global_current_storage_fields(
@@ -4121,7 +4426,7 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
     ))
 }
 
-fn inline_source_metadata(
+pub(super) fn inline_source_metadata(
     requirements: &SourceRequirements,
     branch_witness_field: Option<&str>,
 ) -> BTreeMap<SourceMetadataRequirement, SourceMetadataFields> {
@@ -4202,6 +4507,25 @@ fn inline_current_record_with_source_metadata(
     )
 }
 
+/// Encode one already-authorized current row for a receiver-owned covered
+/// input. The descriptor comes from the exact compiled source occurrence;
+/// callers must never synthesize it from a table or result collector.
+pub(super) fn covered_input_record(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+) -> Result<Vec<u8>, Error> {
+    inline_current_record_with_source_metadata(
+        table,
+        descriptor,
+        row,
+        schema_version_alias,
+        "authority-covered-input",
+        None,
+    )
+}
+
 fn inline_current_record_with_source_metadata_and_deletion(
     table: &TableSchema,
     descriptor: &RecordDescriptor,
@@ -4255,11 +4579,11 @@ fn inline_current_record_with_source_metadata_and_deletion(
     if let Some((_, branch_key)) = branch_witness {
         values.push(Value::Bytes(branch_key.canonical_bytes()));
     }
-    if descriptor.field_index("coverage").is_some() {
-        values.push(Value::String(coverage.to_owned()));
-    }
     if descriptor.field_index("settle_position").is_some() {
         values.push(Value::Nullable(None));
+    }
+    if descriptor.field_index("coverage").is_some() {
+        values.push(Value::String(coverage.to_owned()));
     }
     if let Some(deleted) = deletion_marker {
         values.push(Value::Bool(deleted));

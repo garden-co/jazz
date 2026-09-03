@@ -137,6 +137,104 @@ where
             .await
     }
 
+    /// A session update/upsert of an existing row also requires that the fate
+    /// authority can read that previous row. This is deliberately decided at
+    /// authority admission, never while a client stages its mergeable
+    /// transaction: a replica can retain the target preimage without the
+    /// private support rows that make its read policy true.
+    pub(super) async fn version_satisfies_read_for_write_visibility(
+        &mut self,
+        version: &VersionRecord,
+        author: AuthorSubject,
+        candidate_tx_id: Option<TxId>,
+    ) -> Result<bool, Error> {
+        if author == AuthorSubject::SYSTEM || version.deletion() == Some(DeletionEvent::Deleted) {
+            return Ok(true);
+        }
+        let (policy_schema_version, table, _) =
+            self.policy_projection_for_version_record(version)?;
+        let Some(read_policy) = table.read_policy.clone() else {
+            return Ok(true);
+        };
+        let Some(previous) = self
+            .policy_previous_content_subject_row(
+                policy_schema_version,
+                &table,
+                version,
+                candidate_tx_id,
+            )
+            .await?
+        else {
+            // This is an INSERT (including an absent-target UPSERT), for
+            // which INV-RLS-20 does not require prior read visibility.
+            return Ok(true);
+        };
+        let previous_cells = table
+            .columns
+            .iter()
+            .filter_map(|column| {
+                previous
+                    .cell(&table, &column.name)
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let provenance = previous.provenance()?.unwrap_or_else(unresolved_provenance);
+        self.read_policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            &table,
+            &read_policy,
+            previous.row_uuid(),
+            &previous_cells,
+            author,
+            provenance,
+        )
+        .await
+    }
+
+    /// Prove read-for-write visibility of the logical branch-view source that
+    /// was copied into a first physical head overlay.
+    ///
+    /// A normal mergeable update obtains its prior row from the target's
+    /// physical history. A first branch overlay has intentionally no
+    /// cross-branch parent, so that lookup says "insert". Its separately
+    /// versioned evidence lets the authority resolve the inherited source and
+    /// evaluate the ordinary read policy against it without turning the source
+    /// into a causal dependency or exposing policy support to the client.
+    pub(super) async fn branch_view_copy_satisfies_read_for_write_visibility(
+        &mut self,
+        evidence: &crate::tx::BranchViewCopyEvidence,
+        authored_schema: SchemaVersionId,
+        author: AuthorSubject,
+        candidate_tx_id: Option<TxId>,
+    ) -> Result<bool, Error> {
+        if author == AuthorSubject::SYSTEM {
+            return Ok(true);
+        }
+        let Some(source) = self
+            .resolve_branch_view_copy_evidence(evidence, authored_schema, candidate_tx_id)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let source = self.version_record_from_row(&source)?;
+        let (policy_schema_version, table, cells) =
+            self.policy_projection_for_version_record(&source)?;
+        let Some(read_policy) = table.read_policy.clone() else {
+            return Ok(true);
+        };
+        let provenance = version_provenance(&source);
+        self.read_policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            &table,
+            &read_policy,
+            source.row_uuid(),
+            &cells,
+            author,
+            provenance,
+        )
+        .await
+    }
+
     async fn write_policy_allows_version_record_for_view(
         &mut self,
         version: &VersionRecord,

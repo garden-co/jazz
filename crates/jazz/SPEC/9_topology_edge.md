@@ -17,7 +17,7 @@ versions merely because it has the payload (`INV-TX-23`).
 
 Invariant digest:
 
-- `INV-EDGE-1`: A `PeerRole::Relay` link MUST use `AuthorSubject::SYSTEM` as its link identity and MUST NOT terminate a client identity.
+- `INV-EDGE-1`: A `PeerRole::Relay` link MUST authenticate as an explicit relay transport capability, MUST carry no permission subject, and MUST NOT terminate a client identity.
 - `INV-EDGE-2`: A relay MUST store/forward `TxKind::Mergeable` and `TxKind::Exclusive` commit units as `Fate::Pending` with `DurabilityTier::Local` and MUST NOT assign an authority fate.
 - `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as `PeerRole::ClientLink { identity }`, and downstream reads on that link MUST use that identity for policy composition.
 - `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST remain outside edge history in in-memory deferred-admission state. Once settled, an authorized transaction is ingested and edge-accepted exactly once; a denied transaction is rejected without ingestion.
@@ -36,7 +36,12 @@ Invariant digest:
 - `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("user")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
 - `INV-EDGE-18`: An edge MUST share a settled permission-scope subscription among all dependent acceptance gates it can satisfy.
 - `INV-EDGE-19`: A dynamically catalogued serving authority MUST NOT accept an uploaded commit unit until an authority has published a permissions head selecting its write schema and table policies. If no head is published, it MUST reject the unit with `permissions_head_missing`, rather than silently accepting it.
-- `INV-EDGE-20`: A worker's relay-authority source identity MUST be used only for selected authority-membership handoffs; it MUST NOT create a second projection of ordinary Edge reads or deliver one transaction through conflicting view bundles.
+- `INV-EDGE-20`: A worker's authority-result source identity MUST carry the exact upstream membership for every Edge/Global handoff; it MUST NOT create a second public projection or deliver one transaction through conflicting view bundles.
+- `INV-EDGE-21`: A scope-isolated client relay MUST attach foregrounds from exactly one durable authentication scope, MUST remain a non-authority, and MUST serve those foregrounds from retained authorized knowledge without re-evaluating read policy.
+- `INV-EDGE-22`: Authoritative result state retained by a relay MUST be identified by the complete canonical query identity and exact immutable policy binding; result members, generations, receipts, repair state, and persistence from different policy bindings MUST never share a mutable result identity.
+- `INV-EDGE-23`: A scope-isolated client relay MAY answer same-scope row-version repair without re-evaluating policy only for a version in that scope's previously delivered authorized payload closure or a same-scope authored pending version. Other relays MUST prove that exact closure membership or forward repair to an authority.
+- `INV-EDGE-24`: Application and wire callers MUST NOT choose internal authority-result source identities or policy bindings. The receiving topology assigns and validates them from the authenticated connection and admitted session.
+- `INV-EDGE-25`: A fate authority receiving a mergeable commit through a scope-isolated client relay MUST authorize it only under that relay attachment's immutable server-admitted foreground binding, then pass an internal non-wire proof into terminal admission. Transaction authorship, relay transport, `SYSTEM`, persisted state, stale epochs, and mutable session-claim refresh MUST NOT substitute for or widen that binding.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
@@ -49,7 +54,8 @@ Trust is the axis:
 
 - **client** — untrusted; no fate authority; local preview only.
 - **relay** — semi-trusted passthrough/cache; never assigns fates or enforces
-  per-user permissions; forwards opaquely under `AuthorSubject::SYSTEM`.
+  per-user permissions; forwards under an explicit transport capability with no
+  permission subject.
 - **edge** — operator-trusted; may finally decide _mergeable_ fates and enforces
   read/write policy for the identities it terminates.
 - **core** — operator-trusted; the exclusive-transaction authority and global
@@ -143,31 +149,120 @@ The relay forwards later Edge/Global durability and authority fates back over th
 same client-worker link. A worker without an upstream can therefore satisfy
 `Local` waits while Edge/Global waits remain unavailable.
 
-The worker may give an upstream authority receipt an internal
-`RelayAuthoritySession` source identity. That source is a topology-local
-discriminator, never an application option, persisted field, or policy input:
-it prevents a worker-owned authority receipt from being confused with ordinary
-Global coverage for the same shape and bindings. It is selected only when a
-downstream Edge handoff must reuse authority membership rather than re-evaluate
-the worker cache: a nonzero window (whose offset must not be applied twice) or
-a read-policy-scoped exact-ID read (whose cached row must not survive read
-membership revocation). A write-only policy does not scope read membership and
-therefore does not select this source. Other Edge reads keep the ordinary relay path. In particular, adding a worker
-authority source MUST NOT create a second result projection or cause the same
-transaction to be delivered through incompatible view bundles.
+The browser worker is a **scope-isolated client relay**. Its physical store and
+every foreground attached to it belong to exactly one durable authentication
+scope: the same app, environment, and canonical authentication identity named
+by the owner marker above. Credential refresh within that identity is allowed;
+a different identity cannot attach to or reuse the store. This isolation is a
+capability boundary, not permission authority: the worker neither evaluates
+read policy nor assigns write fate.
+
+The worker may retain an upstream authority's result membership under an
+internal authority-result source identity. That identity is assigned by the
+topology, never supplied by an application or accepted from an untrusted wire
+caller. It means “the upstream authority selected these members for this exact
+policy binding”; it does **not** mean that the worker may act as that authority.
+
+The physical worker-to-upstream link remains an authenticated relay transport
+with no permission subject, but each
+foreground Edge/Global request on it carries an immutable delegated-session
+binding created from the worker's admitted same-scope foreground. The receiving
+edge/core, not the worker, resolves that binding to trusted claims and performs
+policy composition. A generic relay message without such an admitted binding
+remains unbound and cannot request a user's narrowed result. The worker
+cannot invent, alter, or refresh delegated claims through application query or
+wire fields (`INV-EDGE-24`).
+
+This delegation exists only inside a closed, server-issued relay capability.
+After authenticating the requested scope-isolated relay attachment, the server
+binds the canonical foreground identity and claims to that exact durable scope
+and mints a fresh admission epoch. An inbound delegated request is valid only
+while that capability is live and only when its binding, scope, and epoch match
+exactly. A disconnect, authority switch, or transport replacement retires the
+epoch. Reconnect and process-local transport resume MUST mint a new epoch and
+re-admit the preserved binding; persisted result state, a stale receipt, or a
+replayed `(identity, claims)` snapshot never constitutes live admission.
+
+Every retained authoritative result has a collision-free identity containing:
+
+- the canonical query shape, binding, and read-view identity; and
+- the exact immutable policy binding selected from the authenticated session,
+  including its canonical claims rather than a truncated or hash-only alias.
+
+That complete identity keys all mutable and durable result state: member sets,
+facts, generations, known-state cursors, reset/open/deferred state, repair
+bookkeeping, persistence, and relay-source selection. A live authority receipt
+is narrower still: it additionally belongs to the selected authority connection
+epoch and exact usage-site subscription, and is retired on disconnect,
+authority switch, or detachment. Persisted members or cursors never become a
+live receipt merely by reopening (`INV-SYNC-30`). Two sessions or
+claims revisions may share content-addressed payloads, but they MUST NOT share a
+mutable authoritative result merely because their application query is equal
+(`INV-EDGE-22`).
+
+The worker uses authoritative membership for every Edge/Global observation it
+serves to a foreground. This is not limited to windows or exact-ID reads:
+unbounded queries, joins, includes, and ordinary reads have the same boundary.
+The worker may evaluate the application query locally over that exact member
+source to construct the requested projection, but it MUST use client-local
+lowering and MUST NOT compose or re-run read policy. Adding an internal
+authority-result source MUST NOT create a second public projection or deliver
+one transaction through incompatible view bundles (`INV-EDGE-20`).
+
+Local observations use the worker's retained authorized knowledge plus the
+foreground's optimistic local writes. An upstream addition makes newly
+delivered material part of that retained knowledge and MUST wake affected Local
+subscriptions. An upstream removal changes future authoritative Edge/Global
+membership, but does not retroactively redact material already delivered to the
+scope-isolated store; Local may continue to expose it (`INV-RLS-6`).
+`Propagation::LocalOnly` prevents asking upstream and does not change these
+Local semantics. While connected, `RemoteIfPossible` obtains its opening,
+completeness, and non-local membership from the authoritative source while
+still overlaying immediate own-local writes. It falls back to retained Local
+knowledge only after an explicit or otherwise conclusive offline state, never
+from timeout or ordinary reconnect. On reconnect, a fresh authority
+confirmation atomically replaces the local native subscription; the two are not
+concurrent public query paths (ch. 13).
+
+Every worker-to-foreground read, subscription, and row-version repair uses an
+explicit client-local serving context. Client-local lowering is its own
+policy-free query mode; it MUST NOT impersonate `AuthorSubject::SYSTEM`, select
+trusted serving, manufacture authority, or change authorship.
 
 ### 9.3 Relays
 
 Relays provide unopinionated transport and caching. A relay link uses
-`PeerRole::Relay` with identity `AuthorSubject::SYSTEM` (`INV-EDGE-1`) and forwards
+`PeerRole::Relay` with an explicit relay transport capability and no permission
+subject (`INV-EDGE-1`), and forwards
 both mergeable and exclusive commit units without deciding their outcome: stored
 units remain `Fate::Pending` / `DurabilityTier::Local`, and the relay assigns no
 fate (`INV-EDGE-2`).
 
-A relay may cache encrypted read-side data at rest, but it never enforces
-permissions and never accepts or rejects a transaction. The default browser
-architecture is a shared-worker relay, where one worker relays for all tabs in
-the browser. Server-deployed relays are the exception.
+A relay may cache read-side data at rest, but it never enforces permissions and
+never accepts or rejects a transaction. Relay transport authority is not an
+authenticated user, row author, or permission identity. `SYSTEM` remains
+reserved for an actual trusted internal principal that deliberately bypasses
+policy; relay transport MUST NOT acquire that bypass merely by carrying data.
+
+A scope-isolated client relay may answer an exactly same-scope foreground repair
+without re-evaluating policy only for a version recorded in that scope's
+previously delivered authorized result/payload closure, or for a same-scope
+authored pending version. Mere physical co-location is insufficient: hidden
+policy evidence, catalogue internals, and unrelated cached rows are not thereby
+foreground-repairable. Revocation remains forward-looking for material already
+delivered (`INV-RLS-6`, `INV-EDGE-23`). A multiplexed relay is stricter. It may
+deduplicate immutable payload bytes, but before serving a principal it MUST
+prove the requested version belongs to that principal's exact authorized
+payload closure—not merely that the same row is currently a result member—or
+forward the repair upstream. Possession of cached bytes alone is not a
+cross-scope capability.
+
+The default browser architecture is a shared-worker relay isolated to one auth
+scope, where one worker relays for all same-scope tabs. A server-deployed or
+otherwise multiplexed relay MUST preserve the policy-scoped result identities
+defined above rather than relying on physical-store isolation. Native/RN client
+relays have the same semantic boundary even when their storage-owner and
+lifecycle mechanism differs from the browser's IndexedDB marker.
 
 ### 9.4 The edge-client boundary
 
@@ -182,6 +277,17 @@ serving link is explicitly trusted as a backend. For a backend link, policy is
 evaluated under the backend link identity and `made_by` is stored only as
 attribution (`INV-RLS-18`, ch. 7). This is where per-user read narrowing happens:
 the last hop to the client.
+
+A commit relayed from a scope-isolated client is different from both cases. The
+relay transport has no permission subject, so the receiving fate authority
+proves the mergeable commit under the immutable foreground binding in the live,
+server-issued relay capability. Only that proof may enable terminal admission;
+it is internal state and is never accepted from the wire. `Transaction.made_by`
+remains authorship rather than permission evidence, and neither `SYSTEM`, a
+persisted result, a stale admission epoch, nor a mutable subscriber-claims field
+may substitute for or widen the capability. Disconnect or transport replacement
+invalidates the proof and requires authorization under the freshly admitted
+epoch (`INV-EDGE-25`).
 
 ### 9.5 Mergeable fate authority
 

@@ -10,12 +10,14 @@ import {
 import { installJazzSkills } from "./agent-skills.js";
 
 const REPO = "garden-co/jazz";
+const PACKAGE_DIR = path.resolve(import.meta.dirname, "..");
 const CREATE_JAZZ_VERSION = (
-  JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8")) as {
+  JSON.parse(fs.readFileSync(path.join(PACKAGE_DIR, "package.json"), "utf-8")) as {
     version: string;
   }
 ).version;
 const RELEASE_REF = `v${CREATE_JAZZ_VERSION}`;
+const PREVIEW_SNAPSHOT_FILE = "jazz-source-snapshot.json";
 const DEFAULT_STARTER = "next-betterauth";
 
 export const KNOWN_STARTERS = [
@@ -73,16 +75,58 @@ export interface ScaffoldOptions {
 
 const SCAFFOLD_COPY_SKIP = new Set(["node_modules", ".next", ".jazz", ".turbo", ".env", ".git"]);
 
-function sourceSnapshotError(action: string, cause: unknown): Error {
+export interface SourceSnapshot {
+  ref: string;
+  remoteRef: string;
+  label: string;
+}
+
+/** Resolve the immutable source snapshot bundled with this CLI package. */
+export function readSourceSnapshot(packageDir = PACKAGE_DIR): SourceSnapshot {
+  const snapshotPath = path.join(packageDir, PREVIEW_SNAPSHOT_FILE);
+  if (!fs.existsSync(snapshotPath)) {
+    return {
+      ref: RELEASE_REF,
+      remoteRef: `refs/tags/${RELEASE_REF}`,
+      label: RELEASE_REF,
+    };
+  }
+  let snapshot: { schema?: unknown; packageVersion?: unknown; commit?: unknown };
+  try {
+    snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as typeof snapshot;
+  } catch (cause) {
+    throw new Error(`Invalid bundled preview source snapshot: ${String(cause)}`, { cause });
+  }
+  if (
+    snapshot.schema !== 1 ||
+    snapshot.packageVersion !== CREATE_JAZZ_VERSION ||
+    typeof snapshot.commit !== "string" ||
+    !/^[a-f0-9]{40}$/.test(snapshot.commit)
+  )
+    throw new Error(
+      "Invalid bundled preview source snapshot; refusing to fall back to a release tag or main.",
+    );
+  return {
+    ref: snapshot.commit,
+    remoteRef: snapshot.commit,
+    label: `preview commit ${snapshot.commit}`,
+  };
+}
+
+function sourceSnapshotError(action: string, snapshot: SourceSnapshot, cause: unknown): Error {
   return new Error(
-    `Could not ${action} from immutable source snapshot ${RELEASE_REF} for create-jazz@${CREATE_JAZZ_VERSION}. ` +
+    `Could not ${action} from immutable source snapshot ${snapshot.label} for create-jazz@${CREATE_JAZZ_VERSION}. ` +
       "Jazz deliberately does not fall back to main, because that could scaffold code incompatible with the installed CLI. " +
       "This release snapshot may be unavailable; upgrade with `npm create jazz@latest` and try again.",
     { cause },
   );
 }
 
-async function fetchStarter(starter: StarterName, dir: string): Promise<void> {
+async function fetchStarter(
+  starter: StarterName,
+  dir: string,
+  snapshot: SourceSnapshot,
+): Promise<void> {
   const localPath = process.env.JAZZ_STARTER_PATH;
   if (localPath) {
     await fs.promises.cp(localPath, dir, {
@@ -92,16 +136,17 @@ async function fetchStarter(starter: StarterName, dir: string): Promise<void> {
     return;
   }
   const tiged = (await import("tiged")).default;
-  const emitter = tiged(`${REPO}/starters/${starter}#${RELEASE_REF}`, { disableCache: true });
+  const emitter = tiged(`${REPO}/starters/${starter}#${snapshot.ref}`, { disableCache: true });
   try {
     await emitter.clone(dir);
   } catch (cause) {
-    throw sourceSnapshotError(`fetch starter "${starter}"`, cause);
+    throw sourceSnapshotError(`fetch starter "${starter}"`, snapshot, cause);
   }
 }
 
 async function resolveManifest(
   manifest: PackageManifest,
+  snapshot: SourceSnapshot,
   onProgress?: ResolveProgressCallback,
 ): Promise<PackageManifest> {
   const localPath = process.env.JAZZ_STARTER_PATH;
@@ -109,17 +154,16 @@ async function resolveManifest(
     return resolveLocalDeps(manifest, path.resolve(localPath, "../.."), onProgress);
   }
   try {
-    return await resolveRemoteDeps(
-      manifest,
-      { repo: REPO, ref: `refs/tags/${RELEASE_REF}` },
-      onProgress,
-    );
+    return await resolveRemoteDeps(manifest, { repo: REPO, ref: snapshot.remoteRef }, onProgress);
   } catch (cause) {
-    throw sourceSnapshotError("resolve starter dependencies", cause);
+    throw sourceSnapshotError("resolve starter dependencies", snapshot, cause);
   }
 }
 
-export async function scaffold(options: ScaffoldOptions): Promise<void> {
+export async function scaffold(
+  options: ScaffoldOptions,
+  sourceSnapshot = readSourceSnapshot(),
+): Promise<void> {
   validateAppName(options.appName);
 
   const starter = options.starter ?? DEFAULT_STARTER;
@@ -142,12 +186,12 @@ export async function scaffold(options: ScaffoldOptions): Promise<void> {
   // directory we just created.
   try {
     options.onStep?.("Fetching starter");
-    await fetchStarter(starter, options.targetDir);
+    await fetchStarter(starter, options.targetDir, sourceSnapshot);
 
     options.onStep?.("Resolving dependencies");
     const pkgJsonPath = path.join(options.targetDir, "package.json");
     const rawManifest = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8")) as PackageManifest;
-    const resolved = await resolveManifest(rawManifest, (done, total) => {
+    const resolved = await resolveManifest(rawManifest, sourceSnapshot, (done, total) => {
       options.onStep?.(`Resolving dependencies (${done}/${total})`);
     });
     const finalManifest = { ...resolved, name: options.appName };

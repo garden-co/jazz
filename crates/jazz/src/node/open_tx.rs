@@ -6,6 +6,7 @@
 //! writes become protocol commit units.
 
 use super::*;
+use crate::tx::{BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation};
 
 impl<S> NodeState<S>
 where
@@ -81,21 +82,6 @@ where
             OpenTransactionKind::Mergeable { .. } | OpenTransactionKind::Exclusive { .. } => {
                 Ok(false)
             }
-        }
-    }
-
-    /// Return the policy identity bound to an open mergeable transaction.
-    pub(crate) fn mergeable_transaction_permission_subject(
-        &self,
-        id: OpenTransactionId,
-    ) -> Result<Option<AuthorSubject>, Error> {
-        match self.open_tx(id)?.kind {
-            OpenTransactionKind::Mergeable {
-                permission_subject, ..
-            } => Ok(permission_subject),
-            OpenTransactionKind::Exclusive { .. } => Err(Error::InvalidMergeableCommit(
-                "open transaction is not mergeable",
-            )),
         }
     }
 
@@ -487,6 +473,7 @@ where
             refresh_parents_at_commit: false,
             known_fresh_row: false,
             verified_inherited_cells: None,
+            branch_view_copy: None,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
@@ -589,6 +576,8 @@ where
             branch,
             known_fresh_row,
             None,
+            false,
+            None,
         )
     }
 
@@ -611,6 +600,8 @@ where
         branch: BranchSelector,
         known_fresh_row: bool,
         verified_inherited_cells: Option<BTreeMap<String, Value>>,
+        replace_pending_deletion: bool,
+        branch_view_copy: Option<BranchViewCopyEvidence>,
     ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
@@ -637,7 +628,9 @@ where
                 refresh_parents_at_commit,
                 known_fresh_row,
                 verified_inherited_cells,
+                branch_view_copy,
             },
+            replace_pending_deletion,
         )
     }
 
@@ -678,6 +671,7 @@ where
             patch,
             now_ms,
             BranchSelector::default(),
+            false,
         )
         .await
     }
@@ -692,6 +686,7 @@ where
         patch: BTreeMap<String, Value>,
         now_ms: Option<u64>,
         branch: BranchSelector,
+        replace_pending_deletion: bool,
     ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
@@ -702,17 +697,9 @@ where
             ));
         }
         let mut staged_cells = self
-            .visible_current_cells_in_branch(table, &branch, row_uuid)
+            .tx_visible_current_cells_in_branch(tx_id, table, row_uuid, &branch)
             .await?
             .unwrap_or_default();
-        for write in self.open_tx(tx_id)?.writes.iter().filter(|write| {
-            write.table == table && write.row_uuid == row_uuid && write.branch == branch
-        }) {
-            match &write.cells {
-                PendingCells::Replace(cells) => staged_cells = cells.clone(),
-                PendingCells::Patch(patch) => staged_cells.extend(patch.clone()),
-            }
-        }
         staged_cells.extend(patch.clone());
         validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
         let table_schema = self.table_in_schema(table, write_schema_version)?;
@@ -731,6 +718,70 @@ where
                 refresh_parents_at_commit: false,
                 known_fresh_row: false,
                 verified_inherited_cells: None,
+                branch_view_copy: None,
+            },
+            replace_pending_deletion,
+        )
+    }
+
+    pub(crate) async fn tx_current_row_state_in_branch(
+        &mut self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_uuid: RowUuid,
+        branch: &BranchSelector,
+    ) -> Result<TransactionBranchRowState, Error> {
+        let mut cells = self
+            .visible_current_cells_in_branch(table, branch, row_uuid)
+            .await?;
+        let mut pending_deletion = false;
+        let mut staged_content = false;
+        for write in self.open_tx(tx_id)?.writes.iter().filter(|write| {
+            write.table == table && write.row_uuid == row_uuid && &write.branch == branch
+        }) {
+            match write.deletion {
+                Some(DeletionEvent::Deleted) => {
+                    cells = None;
+                    pending_deletion = true;
+                    continue;
+                }
+                Some(DeletionEvent::Restored) => pending_deletion = false,
+                None => {}
+            }
+            staged_content = true;
+            match &write.cells {
+                PendingCells::Replace(replacement) => cells = Some(replacement.clone()),
+                PendingCells::Patch(patch) => cells.get_or_insert_default().extend(patch.clone()),
+            }
+        }
+        if pending_deletion {
+            return Ok(TransactionBranchRowState::PendingDeletion);
+        }
+        Ok(match cells {
+            Some(cells) => TransactionBranchRowState::Visible {
+                cells,
+                staged: staged_content,
+            },
+            None => TransactionBranchRowState::Absent,
+        })
+    }
+
+    pub(crate) async fn tx_visible_current_cells_in_branch(
+        &mut self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_uuid: RowUuid,
+        branch: &BranchSelector,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        Ok(
+            match self
+                .tx_current_row_state_in_branch(tx_id, table, row_uuid, branch)
+                .await?
+            {
+                TransactionBranchRowState::Visible { cells, .. } => Some(cells),
+                TransactionBranchRowState::PendingDeletion | TransactionBranchRowState::Absent => {
+                    None
+                }
             },
         )
     }
@@ -739,11 +790,24 @@ where
         &mut self,
         tx_id: OpenTransactionId,
         mut pending: PendingWrite,
+        replace_pending_deletion: bool,
     ) -> Result<(), Error> {
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
             .base_snapshot_rows
             .retain(|(_, table, row), _| table != &pending.table || *row != pending.row_uuid);
+        // A branch-view upsert may supersede a delete staged by this same
+        // transaction. Reach this point only after validating the replacement,
+        // then remove exactly that coordinate's pending tombstone atomically
+        // with staging the visible content.
+        if replace_pending_deletion {
+            open_tx.writes.retain(|write| {
+                write.table != pending.table
+                    || write.row_uuid != pending.row_uuid
+                    || write.branch != pending.branch
+                    || write.deletion != Some(DeletionEvent::Deleted)
+            });
+        }
         if pending.deletion.is_none() {
             if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
                 write.table == pending.table
@@ -759,6 +823,11 @@ where
                     && pending.verified_inherited_cells.is_none()
                 {
                     pending.verified_inherited_cells = existing.verified_inherited_cells.clone();
+                }
+                if matches!(pending.cells, PendingCells::Patch(_))
+                    && pending.branch_view_copy.is_none()
+                {
+                    pending.branch_view_copy = existing.branch_view_copy.clone();
                 }
                 let cells = match (&existing.cells, &pending.cells) {
                     (PendingCells::Replace(existing), PendingCells::Patch(patch)) => {
@@ -1132,6 +1201,88 @@ where
                 "open transaction is not mergeable",
             ));
         };
+        // A non-root branch version must never arrive at authority as an
+        // unclassified insert-shaped overlay.  Capture a sorted exact-version
+        // intent before lowering pending writes; this is non-causal metadata
+        // carried through the ordinary transaction/outbox/relay path.
+        let mut branch_write_intents = open_tx
+            .writes
+            .iter()
+            .filter(|write| !write.branch.values.is_empty())
+            .map(|write| {
+                let schema = self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&write.schema_version)
+                    .ok_or(Error::InvalidStoredValue("write schema is missing"))?
+                    .schema
+                    .clone();
+                let table = self.table_in_schema(&write.table, write.schema_version)?;
+                let (head, _) = schema
+                    .project_branch_view_selector(&table, &write.branch)
+                    .map_err(Error::InvalidBranchKey)?;
+                Ok(BranchWriteIntent {
+                    version: 1,
+                    physical_table_id: self
+                        .physical_table_id_for_schema(write.schema_version, &write.table)?,
+                    authored_schema: write.schema_version,
+                    row_uuid: write.row_uuid,
+                    head,
+                    operation: match (&write.cells, &write.branch_view_copy) {
+                        (_, Some(evidence)) => {
+                            BranchWriteOperation::ViewUpdateCopy(evidence.clone())
+                        }
+                        (PendingCells::Patch(_), None) => BranchWriteOperation::ExactHeadUpdate,
+                        (PendingCells::Replace(_), None) => BranchWriteOperation::ExactHeadInsert,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        branch_write_intents.sort_by(|left, right| {
+            (
+                left.physical_table_id,
+                left.authored_schema,
+                left.row_uuid,
+                &left.head,
+            )
+                .cmp(&(
+                    right.physical_table_id,
+                    right.authored_schema,
+                    right.row_uuid,
+                    &right.head,
+                ))
+        });
+        for pair in branch_write_intents.windows(2) {
+            if pair[0].physical_table_id == pair[1].physical_table_id
+                && pair[0].authored_schema == pair[1].authored_schema
+                && pair[0].row_uuid == pair[1].row_uuid
+                && pair[0].head == pair[1].head
+                && pair[0].operation != pair[1].operation
+            {
+                return Err(Error::InvalidMergeableCommit(
+                    "branch writes for one physical row must have one operation identity",
+                ));
+            }
+        }
+        branch_write_intents.dedup_by(|left, right| {
+            left.physical_table_id == right.physical_table_id
+                && left.authored_schema == right.authored_schema
+                && left.row_uuid == right.row_uuid
+                && left.head == right.head
+        });
+        // Copy evidence is stored by index inside the intent operation enum.
+        // Keep that side-list as the exact canonical projection of sorted
+        // intents rather than public write order, so a durable round trip
+        // cannot relabel equivalent coordinates with another source proof.
+        let branch_view_copies = branch_write_intents
+            .iter()
+            .filter_map(|intent| match &intent.operation {
+                BranchWriteOperation::ViewUpdateCopy(evidence) => Some(evidence.clone()),
+                BranchWriteOperation::ExactHeadInsert | BranchWriteOperation::ExactHeadUpdate => {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
             let parents = if write.refresh_parents_at_commit {
@@ -1241,8 +1392,24 @@ where
             }
             None => self.mint_tx_time(first.1.now_ms)?,
         };
+        let contribution_merge = if branch_view_copies.is_empty() && branch_write_intents.is_empty()
+        {
+            None
+        } else {
+            Some(ContributionMergeProvenance {
+                source: BranchKey::default(),
+                target: BranchKey::default(),
+                substitutions: Vec::new(),
+                branch_view_copies,
+                branch_write_intents,
+            })
+        };
         let committed = self
-            .commit_mergeable_many_at_with_schema_versions(commits, made_at)
+            .commit_mergeable_many_at_with_schema_versions_and_provenance(
+                commits,
+                made_at,
+                contribution_merge,
+            )
             .await?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
@@ -1257,6 +1424,16 @@ where
             .ok_or(Error::MissingOpenBatch(tx_id))?;
         self.open_tx.closed_batches.insert(tx_id);
         Ok(())
+    }
+
+    /// Terminalize every transaction still owned by this runtime.
+    ///
+    /// Database shutdown closes transaction admission before calling this, so
+    /// moving the live ids into `closed_batches` is the final ownership pass.
+    pub(crate) fn abandon_all_open_transactions(&mut self) {
+        self.open_tx
+            .closed_batches
+            .extend(std::mem::take(&mut self.open_tx.open_transactions).into_keys());
     }
 
     /// Return whether local transaction time advanced after this transaction opened.
@@ -1530,6 +1707,22 @@ where
     }
 }
 
+/// Exact-branch row state after applying one open transaction's staged writes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TransactionBranchRowState {
+    /// Visible content, with whether this transaction supplied any of it.
+    Visible {
+        /// Current exact-branch cells after applying the staged overlay.
+        cells: BTreeMap<String, Value>,
+        /// Whether at least one visible content write came from this transaction.
+        staged: bool,
+    },
+    /// A delete staged by this transaction hides otherwise visible content.
+    PendingDeletion,
+    /// Neither committed nor staged content exists in the exact branch.
+    Absent,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenTransactionKind {
     Exclusive {
@@ -1596,6 +1789,9 @@ pub(super) struct PendingWrite {
     /// Engine-private cells read from a branch-view base while creating the
     /// first target-branch overlay. This never originates in public input.
     verified_inherited_cells: Option<BTreeMap<String, Value>>,
+    /// Exact logical source used to create this first head overlay. It is
+    /// carried to authority admission but never made causal.
+    branch_view_copy: Option<BranchViewCopyEvidence>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

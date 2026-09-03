@@ -8,6 +8,7 @@ import {
 } from "./client-session.js";
 import {
   selfSignedClientProofFromConfig,
+  browserWorkerTransportAuth,
   trustAttachedBrowserWorkerSession,
 } from "./default-runtime-source.js";
 import { getTrustedReservedSession } from "./db-internal-session.js";
@@ -18,6 +19,24 @@ function unsignedJwt(payload: Record<string, unknown>): string {
     Buffer.from(JSON.stringify(value)).toString("base64url");
   return `${encode({ alg: "EdDSA", typ: "JWT" })}.${encode(payload)}.test-signature`;
 }
+
+describe("browserWorkerTransportAuth", () => {
+  it("keeps a user's relay session separate from incidental deployment credentials", () => {
+    expect(
+      browserWorkerTransportAuth({
+        appId: "relay-auth-app",
+        jwtToken: "alice-session-token",
+        adminSecret: "deployment-only-secret",
+      }),
+    ).toEqual({ jwt_token: "alice-session-token" });
+    expect(
+      browserWorkerTransportAuth({
+        appId: "relay-auth-app",
+        adminSecret: "deployment-only-secret",
+      }),
+    ).not.toHaveProperty("admin_secret");
+  });
+});
 
 describe("selfSignedClientProofFromConfig", () => {
   it("binds local-first and anonymous runtime opens to their signed author", () => {

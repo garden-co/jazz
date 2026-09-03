@@ -52,6 +52,7 @@ const relatedSchema = {
         to: (value) => (value === null ? null : value.replace(/^item:/, "")),
       }),
     itemIds: s.array(s.ref("items")),
+    __jazz_include_items: s.string(),
   }),
   items: s.table({
     score: s.int().transform<number>({
@@ -172,10 +173,12 @@ describe("TS transformed columns", () => {
     const { value: emptyParent } = activeDb.insert(relatedAppWithPermissions.parents, {
       item: null,
       itemIds: [],
+      __jazz_include_items: "empty sentinel",
     });
     const { value: populatedParent } = activeDb.insert(relatedAppWithPermissions.parents, {
       item: `item:${firstItem.id}`,
       itemIds: [firstItem.id, secondItem.id],
+      __jazz_include_items: "populated sentinel",
     });
 
     const emptyIncluded = await activeDb.one(
@@ -185,6 +188,7 @@ describe("TS transformed columns", () => {
     );
     expect(emptyIncluded?.item).toBeNull();
     expect(emptyIncluded?.items).toEqual([]);
+    expect(emptyIncluded?.__jazz_include_items).toBe("empty sentinel");
 
     const firstExpected = {
       id: firstItem.id,
@@ -202,6 +206,7 @@ describe("TS transformed columns", () => {
         .include({ item: true, items: true }),
     );
     expect(included?.item).toEqual(firstExpected);
+    expect(included?.__jazz_include_items).toBe("populated sentinel");
     expect(included?.items).toHaveLength(2);
     expect(included?.items).toEqual(expect.arrayContaining([firstExpected, secondExpected]));
 

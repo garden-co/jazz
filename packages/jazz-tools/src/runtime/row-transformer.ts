@@ -7,7 +7,7 @@ import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
-import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
+import { resolveIncludeColumnNames, resolveSelectedColumns } from "./select-projection.js";
 
 export type { WasmValue };
 
@@ -212,6 +212,11 @@ function transformRowValues(
   }
 
   const baseColumns = resolveBaseColumns(tableName, schema, projection);
+  const includeColumnNames = resolveIncludeColumnNames(
+    tableName,
+    includePlans.map((plan) => plan.relation.name),
+    schema,
+  );
 
   for (let i = 0; i < baseColumns.length; i++) {
     const col = baseColumns[i];
@@ -229,14 +234,12 @@ function transformRowValues(
   for (let i = 0; i < includePlans.length; i++) {
     const plan = includePlans[i];
     if (!plan) continue;
-    const hiddenColumnName = hiddenIncludeColumnName(plan.relation.name);
-    const value = hasNamedValue(valuesByColumn, hiddenColumnName)
-      ? getNamedValue(valuesByColumn, hiddenColumnName)
-      : hasNamedValue(valuesByColumn, plan.relation.name)
-        ? getNamedValue(valuesByColumn, plan.relation.name)
-        : valuesByColumn
-          ? undefined
-          : values[baseColumns.length + i];
+    const outputColumnName = includeColumnNames.get(plan.relation.name) ?? plan.relation.name;
+    const value = hasNamedValue(valuesByColumn, outputColumnName)
+      ? getNamedValue(valuesByColumn, outputColumnName)
+      : valuesByColumn
+        ? undefined
+        : values[baseColumns.length + i];
     if (value === undefined) {
       obj[plan.relation.name] = plan.relation.isArray ? [] : null;
       continue;

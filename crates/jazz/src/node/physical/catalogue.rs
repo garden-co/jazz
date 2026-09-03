@@ -30,7 +30,7 @@ pub(super) struct TablePhysicalMapping {
     /// are resolved from the introducing schema; the opaque physical case tag
     /// never uses an authored ordinal or display name as identity.
     #[serde(default)]
-    pub(super) payload_enum_cases: BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
+    pub(super) payload_enum_cases: BTreeMap<PhysicalColumnId, Vec<GlobalEnumCaseId>>,
     /// Recursive scalar enum occurrences below a direct user column.  The
     /// structural key is stable across array/nullable/tuple/record lowering;
     /// payload children are rooted under their parent case identity by the
@@ -43,7 +43,7 @@ pub(super) struct TablePhysicalMapping {
     /// the selected *global* parent case rather than an authored ordinal.
     #[serde(default)]
     pub(super) nested_payload_enum_cases:
-        BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>,
+        BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalEnumCaseId>>>,
 }
 
 /// A source cell while lowering a migration-lens path into a physical current
@@ -216,16 +216,36 @@ pub(super) struct GlobalScalarEnumCaseId {
     pub(super) introducing_ordinal: u8,
 }
 
-impl PartialEq for GlobalScalarEnumCaseId {
-    fn eq(&self, other: &Self) -> bool { self.id == other.id }
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(super) struct GlobalEnumCaseId {
+    pub(super) id: crate::ids::GlobalPhysicalEnumVariantId,
+    pub(super) introducing_schema: SchemaVersionId,
+    pub(super) introducing_ordinal: u32,
 }
-impl Eq for GlobalScalarEnumCaseId {}
-impl PartialOrd for GlobalScalarEnumCaseId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+
+macro_rules! impl_enum_case_identity {
+    ($type:ty) => {
+        impl PartialEq for $type {
+            fn eq(&self, other: &Self) -> bool {
+                self.id == other.id
+            }
+        }
+        impl Eq for $type {}
+        impl PartialOrd for $type {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for $type {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.id.cmp(&other.id)
+            }
+        }
+    };
 }
-impl Ord for GlobalScalarEnumCaseId {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.id.cmp(&other.id) }
-}
+
+impl_enum_case_identity!(GlobalScalarEnumCaseId);
+impl_enum_case_identity!(GlobalEnumCaseId);
 
 /// Explicit authored-to-physical tags for every enum occurrence beneath one
 /// user column. Paths are structural (`root`, `nullable`, `array`,
@@ -242,10 +262,26 @@ fn physical_scalar_enum_case_name(case: &GlobalScalarEnumCaseId) -> String {
     format!("case-{}", case.id.0.simple())
 }
 
+fn physical_enum_case_name(case: &GlobalEnumCaseId) -> String {
+    format!("case-{}", case.id.0.simple())
+}
+
 fn compare_scalar_enum_cases(
     aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     left: &GlobalScalarEnumCaseId,
     right: &GlobalScalarEnumCaseId,
+) -> std::cmp::Ordering {
+    aliases
+        .get(&left.introducing_schema)
+        .cmp(&aliases.get(&right.introducing_schema))
+        .then_with(|| left.introducing_ordinal.cmp(&right.introducing_ordinal))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn compare_global_enum_cases(
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    left: &GlobalEnumCaseId,
+    right: &GlobalEnumCaseId,
 ) -> std::cmp::Ordering {
     // A case's *introducing* schema alias is its authoritative, durable
     // introduction position.  Descendants retain the original identity, so
@@ -286,8 +322,8 @@ fn physical_nested_enum_value_type(
     value_type: &records::ValueType,
     path: &str,
     scalar_registries: &BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
-    payload_registries: &BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
-    payload_layouts: &BTreeMap<(String, GlobalScalarEnumCaseId), records::RecordDescriptor>,
+    payload_registries: &BTreeMap<String, Vec<GlobalEnumCaseId>>,
+    payload_layouts: &BTreeMap<(String, GlobalEnumCaseId), records::RecordDescriptor>,
     column_id: PhysicalColumnId,
 ) -> Result<records::ValueType, Error> {
     use records::ValueType;
@@ -382,7 +418,7 @@ fn physical_nested_enum_value_type(
                         unreachable!("record lowering preserves record shape");
                     };
                     Ok(records::EnumCase::new(
-                        physical_scalar_enum_case_name(identity),
+                        physical_enum_case_name(identity),
                         *payload,
                     ))
                 })
@@ -403,15 +439,15 @@ fn physical_nested_enum_value_type(
 }
 
 /// Collect the authored payload layout for each durable nested payload case.
-/// The same `GlobalScalarEnumCaseId` can be observed through many descendant
+/// The same `GlobalEnumCaseId` can be observed through many descendant
 /// schemas, but it must always describe one layout.  Comparing the complete
 /// descriptor here prevents a later sibling declaration from changing the
 /// meaning of an already-persisted compact tag.
 fn collect_nested_payload_enum_layouts(
     value_type: &records::ValueType,
     path: &str,
-    identities: &BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
-    output: &mut BTreeMap<(String, GlobalScalarEnumCaseId), records::RecordDescriptor>,
+    identities: &BTreeMap<String, Vec<GlobalEnumCaseId>>,
+    output: &mut BTreeMap<(String, GlobalEnumCaseId), records::RecordDescriptor>,
 ) -> Result<(), Error> {
     use records::ValueType;
     match value_type {

@@ -10,6 +10,7 @@ import { userIdentity } from "jazz-tools";
 import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { join } from "node:path";
 import {
   createServer,
@@ -18,7 +19,6 @@ import {
   type RunningServer,
   type Todo,
 } from "../src/main.ts";
-import { app } from "../schema.js";
 
 const EXTERNAL_ISSUER = "https://todo-server.example.test";
 
@@ -150,6 +150,25 @@ describe("Todo Server Integration", () => {
   });
 
   describe("Error Handling", () => {
+    it("rejects startup with the underlying listen error when the port is occupied", async () => {
+      const occupied = createHttpServer();
+      await new Promise<void>((resolve) => occupied.listen(0, resolve));
+      const address = occupied.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP listener");
+
+      const candidate = await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl });
+      try {
+        await expect(startServer(candidate, address.port)).rejects.toMatchObject({
+          code: "EADDRINUSE",
+        });
+      } finally {
+        await candidate.shutdown();
+        await new Promise<void>((resolve, reject) =>
+          occupied.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    });
+
     it("returns 404 for non-existent todo", async () => {
       const res = await authenticatedFetch(`${baseUrl}/todos/00000000-0000-0000-0000-000000000000`);
       expect(res.status).toBe(404);
@@ -265,11 +284,12 @@ describe("Todo Server Integration", () => {
         0,
       );
 
-      // This receipt is specifically about the local Fjall store surviving a
-      // cold restart. The HTTP route uses an Edge read, whose immediate
-      // read-your-writes behavior after reopening is intentionally tracked in
-      // https://github.com/garden-co/jazz/issues/1995.
-      const todos = await server2.db.all(app.todos, { tier: "local" });
+      // The server's public authenticated route must be able to serve the
+      // persisted current state immediately after reopening, rather than only
+      // exposing it through the administrative local handle.
+      const response = await authenticatedFetch(`${server2.baseUrl}/todos`);
+      expect(response.status).toBe(200);
+      const todos = (await response.json()) as Todo[];
 
       // Both todos should be present
       expect(todos.length).toBe(2);
@@ -285,6 +305,53 @@ describe("Todo Server Integration", () => {
       expect(found2!.title).toBe("Also persist");
 
       await stopServer(server2);
+    });
+
+    it("returns the current value after dense update history and a restart", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "jazz-dense-history-"));
+      const dbPath = join(dataDir, "jazz.db");
+      const server1 = await startServer(
+        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
+
+      let todoId: string | undefined;
+      try {
+        const create = await authenticatedFetch(`${server1.baseUrl}/todos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "revision 0" }),
+        });
+        expect(create.status).toBe(201);
+        todoId = ((await create.json()) as Todo).id;
+
+        for (let revision = 1; revision <= 256; revision++) {
+          const update = await authenticatedFetch(`${server1.baseUrl}/todos/${todoId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: `revision ${revision}` }),
+          });
+          expect(update.status).toBe(200);
+        }
+        server1.flush();
+      } finally {
+        await stopServer(server1);
+      }
+
+      const server2 = await startServer(
+        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
+      try {
+        const response = await authenticatedFetch(`${server2.baseUrl}/todos/${todoId}`);
+        expect(response.status).toBe(200);
+        expect((await response.json()) as Todo).toMatchObject({
+          id: todoId,
+          title: "revision 256",
+        });
+      } finally {
+        await stopServer(server2);
+      }
     });
   });
 

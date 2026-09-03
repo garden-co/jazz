@@ -31,13 +31,20 @@ fn core_creates_merge_versions_for_concurrent_heads() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
+        program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert_eq!(result_member_adds.len(), 1);
+    assert!(result_member_adds.is_empty());
     assert!(result_member_removes.is_empty());
+    let covered_rows = program_fact_adds.iter().filter_map(|fact| match fact {
+        crate::protocol::ProgramFactEntry::CoveredInput(input) =>
+            Some((input.version_table.clone(), input.source_row, input.version.tx)),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(covered_rows.len(), 1);
     let merge = version_bundles
         .iter()
         .find(|bundle| bundle.tx.tx_id.node == node(9))
@@ -58,7 +65,7 @@ fn core_creates_merge_versions_for_concurrent_heads() {
         ])
     );
     assert_eq!(
-        result_member_adds,
+        covered_rows,
         vec![("todos".to_owned().into(), row, merge.tx.tx_id)]
     );
 }
@@ -169,6 +176,7 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
 
         for (_, writer) in &mut writers {
             let mut peer = PeerState::new();
+            register_whole_table_receiver(writer, "counters");
             writer
                 .apply_sync_message_settled(peer.current_rows_update(&mut core, "counters").unwrap())
                 .unwrap();

@@ -2,8 +2,30 @@ import type { WasmSchema } from "../drivers/types.js";
 
 export const HIDDEN_INCLUDE_COLUMN_PREFIX = "__jazz_include_";
 
-export function hiddenIncludeColumnName(relationName: string): string {
-  return `${HIDDEN_INCLUDE_COLUMN_PREFIX}${relationName}`;
+export function resolveIncludeColumnNames(
+  tableName: string,
+  relationNames: readonly string[],
+  schema: WasmSchema,
+): ReadonlyMap<string, string> {
+  const columnNames = new Set(schema[tableName]?.columns.map((column) => column.name) ?? []);
+  const occupiedNames = new Set([...columnNames, ...relationNames]);
+  const outputNames = new Map<string, string>();
+
+  for (const relationName of relationNames) {
+    if (!columnNames.has(relationName)) {
+      outputNames.set(relationName, relationName);
+      continue;
+    }
+
+    let outputName = `${HIDDEN_INCLUDE_COLUMN_PREFIX}${relationName}`;
+    while (occupiedNames.has(outputName)) {
+      outputName = `${HIDDEN_INCLUDE_COLUMN_PREFIX}${outputName}`;
+    }
+    occupiedNames.add(outputName);
+    outputNames.set(relationName, outputName);
+  }
+
+  return outputNames;
 }
 
 export function resolveSelectedColumns(

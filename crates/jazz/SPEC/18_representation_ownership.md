@@ -24,6 +24,27 @@ Indexed root row deltas + descendant terminal operations
 TypeScript subscription result
 ```
 
+Peer sync enters this pipeline before local execution, never after the remote
+collector:
+
+```text
+authority-maintained authorization and coverage
+        │  safe canonical source closure + residual-program identity
+        ▼
+receiver source/frontier reconciliation  ◀── eligible local pending inputs
+        │
+        ▼
+the same receiver-local LoweredGraph
+        │
+        ▼
+receiver-local terminal operations → application result
+```
+
+There is no authority-terminal arrow into the root delta reducer. An ordered
+terminal operation belongs to the Groove execution that produced it. It may
+cross the local binding ABI after Rust has reduced/indexed it, but it never
+crosses peer sync as result truth (`INV-SYNC-36`).
+
 ## Ownership and boundary
 
 | Stage              | Authoritative owner                                                                                                                                                      | Representation                                                                     | Boundary                                           | Rule that must survive it                                                                                                                                                                |
@@ -46,9 +67,10 @@ TypeScript subscription result
   postcard-encoded `SyncMessage` defined in `protocol.rs`. This is the only
   portable transport-byte contract. Its target subscription representation is
   canonical authored facts, ordered catalogue/lens lineage, and
-  authority-filtered witness/admission facts — never projected app rows or a
-  terminal cache as truth (ch. 8 §8.4.1). Bindings move these bytes but do not
-  treat `SyncMessage` as their application API.
+  authority-filtered witness/admission facts — never projected app rows,
+  collector indices, structural terminal operations, or a terminal cache as
+  truth (ch. 8 §8.4.1). Bindings move these bytes but do not treat
+  `SyncMessage` as their application API.
 - **Binding ABI:** descriptors and packed `Record` row bytes, aligned
   occurrence identities and root indices, plus descendant terminal operations.
   It is deliberately separate from peer wire protocol and may use native host

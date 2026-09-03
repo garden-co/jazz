@@ -1134,6 +1134,7 @@ export class TypedTableQueryBuilder<
   gather(options: {
     start?: TableWhereFromMeta<TMeta>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
   }): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
     if (typeof options.step !== "function") {
@@ -1141,8 +1142,8 @@ export class TypedTableQueryBuilder<
     }
 
     const maxDepth = options.maxDepth ?? 10;
-    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
-      throw new Error("gather(...) maxDepth must be a positive integer.");
+    if (!Number.isInteger(maxDepth) || maxDepth < 0) {
+      throw new Error("gather(...) maxDepth must be a non-negative integer.");
     }
     if (Object.keys(this._includes).length > 0) {
       throw new Error("gather(...) does not support include(...) in MVP.");
@@ -1350,6 +1351,7 @@ export interface Query<
   gather(options: {
     start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
   }): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
 }
