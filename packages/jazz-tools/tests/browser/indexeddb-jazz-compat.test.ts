@@ -21,6 +21,7 @@ import {
   type DbConfig,
 } from "../../src/runtime/db.js";
 import {
+  INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
   INDEXEDDB_STORAGE_MANIFEST,
@@ -86,7 +87,7 @@ describe("browser Jazz storage compatibility corpus", () => {
   });
 
   it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
-    const server = await getJazzServerInfo("browser-storage-compat-historical-v1");
+    const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
     await deploy({
       appId: server.appId,
       serverUrl: server.serverUrl,
@@ -98,6 +99,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     const dbName = "browser-storage-compat-historical-root-v1";
     const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
     const config = persistentConfig(dbName, secret, server);
+    expect(server.appId).toBe("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
     const physicalDbName = resolveDefaultPersistentDbName(config);
     databaseNames.add(physicalDbName);
     const rawBeforeReadOnlyInspection = JSON.parse(historicalCorpus) as Record<string, string>;
@@ -395,7 +397,7 @@ async function replaceManifest(name: string, manifest: unknown): Promise<void> {
 }
 
 async function installRawRecords(name: string, records: Record<string, string>): Promise<void> {
-  const request = indexedDB.open(name, 1);
+  const request = indexedDB.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
   request.onupgradeneeded = () => {
     const database = request.result;
     database.createObjectStore(INDEXEDDB_BTREE_PAGES_STORE);
@@ -411,16 +413,33 @@ async function installRawRecords(name: string, records: Record<string, string>):
   const transaction = database.transaction(names, "readwrite");
   for (const storeName of names) {
     for (const [key, value] of JSON.parse(records[storeName] ?? "[]") as [IDBValidKey, unknown][]) {
-      const binary =
-        Array.isArray(value) &&
-        (storeName === INDEXEDDB_BTREE_PAGES_STORE || key === "replica-node-v1");
       transaction
         .objectStore(storeName)
-        .put(binary ? Uint8Array.from(value as number[]).buffer : value, key);
+        .put(
+          restoreStructuredCloneValue(
+            value,
+            storeName === INDEXEDDB_BTREE_PAGES_STORE || key === "replica-node-v1",
+          ),
+          key,
+        );
     }
   }
   await transactionDone(transaction);
   database.close();
+}
+
+function restoreStructuredCloneValue(value: unknown, binary = false, property?: string): unknown {
+  if (Array.isArray(value)) {
+    if (binary || property === "node") return Uint8Array.from(value as number[]).buffer;
+    return value.map((nested) => restoreStructuredCloneValue(nested));
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      restoreStructuredCloneValue(nested, false, key),
+    ]),
+  );
 }
 
 function serializeRawRecord(value: unknown): unknown {
