@@ -1287,6 +1287,15 @@ where
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
                         );
+                    // Use the same projected read view as dependency preparation:
+                    // an old-schema reader still evaluates the current policy.
+                    let policy_request = policy_request.map(|mut request| {
+                        request.reads.primary = policy_read_view_projected_through(
+                            &request.reads.primary,
+                            self.read_view,
+                        );
+                        request
+                    });
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
                     self.node
@@ -1335,6 +1344,13 @@ where
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
                         );
+                    let policy_request = policy_request.map(|mut request| {
+                        request.reads.primary = policy_read_view_projected_through(
+                            &request.reads.primary,
+                            self.read_view,
+                        );
+                        request
+                    });
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
                     self.node
