@@ -1463,6 +1463,61 @@ fn budgeted_eviction_write_through_error_removes_body_and_clears_fast_known_stat
 }
 
 #[test]
+fn failed_known_state_clear_leaves_eviction_bodies_and_transaction_caches_intact() {
+    // Internal persistence-boundary coverage: public recovery only observes
+    // the eventual refetch. This direct failpoint proves clearing the fast
+    // declaration is the barrier before eviction can publish any body delete.
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    let row_uuid = row(0x7c);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row_uuid, 18).cells(title_cells("clear failure")),
+    );
+    let column_families = schema().column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailWriteManyMemoryStorage::new(&refs);
+    let mut reader = NodeState::new(node(3), schema(), storage.clone()).unwrap();
+    let update = PeerState::relay()
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .unwrap()
+        .expect("expected view update");
+    reader.apply_sync_message_settled(update).unwrap();
+    let persisted_history = reader.row_history("todos", row_uuid).unwrap();
+    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    reader.cache_tx_versions(tx_id, persisted_versions);
+    let binding_view_key = reader
+        .binding_view_key_for_subscription(subscription)
+        .unwrap();
+    assert!(reader.load_known_state_fact(binding_view_key).unwrap().is_some());
+    assert!(reader.cached_tx_versions(tx_id).is_some());
+    assert!(reader.cached_tx_version_tables(tx_id).is_some());
+
+    storage.fail_next_delete();
+    reader
+        .evict_cold(&PeerEvictionPins::default())
+        .resolve()
+        .expect_err("known-state clearing failure must stop eviction before body removal");
+
+    assert_eq!(reader.row_history("todos", row_uuid).unwrap(), persisted_history);
+    assert!(reader.load_known_state_fact(binding_view_key).unwrap().is_some());
+    assert!(reader.cached_tx_versions(tx_id).is_some());
+    assert!(reader.cached_tx_version_tables(tx_id).is_some());
+}
+
+#[test]
 fn storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
