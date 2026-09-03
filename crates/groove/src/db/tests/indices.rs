@@ -1065,6 +1065,8 @@ async fn unique_indices_reject_existing_conflicting_values() {
     );
 }
 
+// This stays at the Groove database seam because unique-index delta ordering
+// is consolidated before any public Jazz query or mutation result exists.
 #[futures_test::test]
 async fn durable_unique_indices_allow_atomic_replacement_within_one_batch() {
     let storage =
