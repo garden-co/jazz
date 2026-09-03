@@ -257,7 +257,7 @@ describe("withJazz", () => {
   it("preserves an explicit empty backend secret instead of falling back to the environment", async () => {
     process.env.BACKEND_SECRET = "ambient-backend-secret";
     vi.spyOn(devServer, "startLocalJazzServer").mockImplementation(async (options) => {
-      expect(options.backendSecret).toBe("");
+      expect(options?.backendSecret).toBe("");
       throw new Error("backend secret must not be blank");
     });
 
