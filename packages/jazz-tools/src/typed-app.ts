@@ -11,13 +11,14 @@ import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
-import type { WasmSchema } from "./drivers/types.js";
+import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import {
   PROVENANCE_MAGIC_COLUMNS,
   magicColumnType,
   type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
+import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
@@ -1297,21 +1298,25 @@ export class TypedTableQueryBuilder<
 
   private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
     const built: BuiltCondition[] = [];
+    const tableSchema = this._schema[this._table];
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
-      const magicType = magicColumnType(key);
-      const recordLiteral =
-        magicType?.type === "Row" &&
-        typeof value === "object" &&
-        value !== null &&
-        magicType.columns.some((column) => Object.hasOwn(value, column.name));
-      if (
-        typeof value === "object" &&
-        value !== null &&
-        !Array.isArray(value) &&
-        !(value instanceof Date) &&
-        !recordLiteral
-      ) {
+      const declaredColumn = tableSchema?.columns.find((column) => column.name === key);
+      const columnType: ColumnType | undefined =
+        key === "id" ? { type: "Uuid" } : (magicColumnType(key) ?? declaredColumn?.column_type);
+      const isObjectValue = typeof value === "object" && value !== null && !Array.isArray(value);
+      const hasRecognizedOperator = isObjectValue
+        ? Object.keys(value).some((op) => WHERE_OPERATORS.includes(op as WhereOperator))
+        : false;
+      const isDirectObjectValue =
+        isObjectValue &&
+        ((columnType?.type === "Json" && !hasRecognizedOperator) ||
+          (columnType?.type === "Timestamp" && value instanceof Date) ||
+          (columnType?.type === "Bytea" && value instanceof Uint8Array) ||
+          (columnType?.type === "Row" &&
+            columnType.columns.some((column) => Object.hasOwn(value, column.name))));
+
+      if (isObjectValue && !isDirectObjectValue) {
         for (const [op, opValue] of Object.entries(value)) {
           if (opValue !== undefined) {
             built.push({ column: key, op, value: opValue });
