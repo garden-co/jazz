@@ -987,17 +987,14 @@ where
                 // settled authority view.  Dropping version witnesses here
                 // would leave it with no source registry and tempt the
                 // runtime to reopen local storage for an authority reset.
-                // The storage-backed optimization remains valid for a cold
-                // local-only maintained view, where there is no remote
-                // closure to claim.
-                // Client-local programs use the same mutable source slots
-                // for ordinary propagated Local reads and strict remote
-                // reads.  At opening time the latter has not yet learnt its
-                // settled binding view, so that view cannot safely decide
-                // whether source witnesses are needed.  Keep the registry
-                // for every client-local maintained program; only trusted
-                // serving may take the storage-backed shortcut.
-                && authorization_mode != QueryAuthorizationMode::ClientLocal
+                // Local-first keeps ordinary local storage as its source for
+                // its entire lifetime, including when propagation is enabled.
+                // It may load exact result payloads from that storage rather
+                // than retaining every source payload in every query. Cold
+                // remote receivers still retain witnesses even before their
+                // first authority receipt; they may not fall back to storage.
+                && (authorization_mode != QueryAuthorizationMode::ClientLocal
+                    || tier == DurabilityTier::Local)
                 && settled_binding_view.is_none()
                 && !root_has_read_policy
                 && self.storage_backed_maintained_root_has_identity_table_mapping(
