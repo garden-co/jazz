@@ -197,6 +197,15 @@ answer may be published; it does not select another evaluator:
 - a local-only internal execution suppresses upstream registration but still
   uses the same lowered graph over its local source.
 
+In a split foreground/persistent-owner client, the owner's same-scope stored
+data is local knowledge too. A one-shot local-first read from a newly opened
+memory-only foreground must receive the owner's query answer (including a
+confirmed empty answer) before returning. This is local storage delivery, not
+authority settlement: it completes while the owner is offline or while its
+edge/core connection is stalled. Ordinary upstream propagation remains enabled
+when requested. A standalone durable runtime can read its local storage directly
+and does not acquire this foreground delivery prerequisite.
+
 Source membership and stored row state are distinct. Scope withdrawal neither
 deletes nor redacts previously downloaded content. An actually admitted deletion
 version, however, updates locally known row state and suppresses that row in

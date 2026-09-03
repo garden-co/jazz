@@ -164,6 +164,8 @@ where
         identity: AuthorSubject,
         requires_current_authority_receipt: bool,
     ) -> Result<QueryAttachment, Error> {
+        let requires_delivery_receipt = requires_current_authority_receipt
+            || self.node.upstream_durability_floor.get() == DurabilityTier::Local;
         let binding_view = BindingViewKey::new(
             shape.shape_id(),
             binding.binding_id(),
@@ -221,6 +223,7 @@ where
             return Ok(QueryAttachment {
                 subscriptions: vec![subscription],
                 required_after: vec![(binding_view, required_after)],
+                requires_delivery_receipt,
                 requires_current_authority_receipt,
                 registrations: vec![subscription],
                 refreshes: vec![(coverage, required_after)],
@@ -252,6 +255,7 @@ where
         Ok(QueryAttachment {
             subscriptions: vec![subscription],
             required_after: vec![(binding_view, required_after)],
+            requires_delivery_receipt,
             requires_current_authority_receipt,
             registrations: vec![subscription],
             refreshes: Vec::new(),
@@ -308,12 +312,13 @@ where
         self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
-    /// Local reads are immediately ready. For remote reads, require a newer
-    /// logical server receipt than the one captured during registration.
+    /// Durable local reads are immediately ready. Memory-only foregrounds
+    /// first receive their owner's local query answer; remote reads additionally
+    /// require a current authority receipt. Neither local case waits on an edge.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
-        // Propagation may register a remote stream for a Local read, but that
-        // stream must never gate evaluation against ordinary local knowledge.
-        if !attachment.requires_current_authority_receipt {
+        // Local propagation does not gate a durable node's local knowledge.
+        // A foreground's empty memory is not yet its durable owner's answer.
+        if !attachment.requires_delivery_receipt {
             return true;
         }
         let node = self.node.node.borrow();

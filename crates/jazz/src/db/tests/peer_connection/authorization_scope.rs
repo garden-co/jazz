@@ -14,6 +14,62 @@ fn schema_with_explicit_public_read() -> JazzSchema {
     )
 }
 
+/// Alice's fresh foreground cannot treat its empty memory as the persistent
+/// owner's answer. Initial local delivery must work without any authority.
+/// Foreground --Local query--> same-scope relay --cached rows/empty--> foreground.
+#[test]
+fn foreground_local_attachment_waits_for_owner_delivery_not_authority() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    for seed_cache in [false, true] {
+        let relay = open_db(0x71, author, &schema);
+        relay.set_relay_authority_session_owner_for_test();
+        let cached = row(0x72);
+        if seed_cache {
+            relay
+                .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+                .unwrap();
+            relay.tick().unwrap();
+        }
+        let foreground = open_db(0x73, author, &schema);
+        foreground.set_non_durable_client();
+        let (up, down) = duplex();
+        let _upstream = block_on(foreground.connect_upstream(up));
+        let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+        let query = prepared(&foreground, &Query::from("todos"));
+        let local = ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        };
+        let attachment = foreground
+            .attach_query_with_opts(&query, local.clone())
+            .unwrap();
+        assert!(!foreground.query_attachment_is_covered(&attachment));
+        foreground.tick().unwrap();
+        assert!(!foreground.query_attachment_is_covered(&attachment));
+        for _ in 0..16 {
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+        }
+        assert!(foreground.query_attachment_is_covered(&attachment));
+        assert_eq!(
+            row_ids(&block_on(foreground.all(&query, local)).unwrap()),
+            if seed_cache { vec![cached] } else { vec![] },
+        );
+        foreground.detach_query(attachment);
+        let remote = foreground
+            .attach_query_with_opts(&query, global_subscribe_opts())
+            .unwrap();
+        for _ in 0..16 {
+            relay.tick().unwrap();
+            foreground.tick().unwrap();
+        }
+        assert!(!foreground.query_attachment_is_covered(&remote));
+        foreground.detach_query(remote);
+    }
+}
+
 /// Alice inserts after both clients settle empty reads; Bob must receive the
 /// update through his separate scope-isolated relay, including after a transient
 /// read joins and releases the same query.

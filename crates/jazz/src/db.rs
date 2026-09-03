@@ -2432,6 +2432,9 @@ impl InitialSyncFlushCadence {
 pub struct QueryAttachment {
     subscriptions: Vec<SubscriptionKey>,
     required_after: Vec<(BindingViewKey, u64)>,
+    /// A memory-only foreground reads local state from its durable owner.
+    /// That delivery is required independently of any remote authority receipt.
+    requires_delivery_receipt: bool,
     /// Edge/Global coverage is live authority evidence, not merely a newer
     /// durable view generation.
     requires_current_authority_receipt: bool,

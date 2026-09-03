@@ -2951,10 +2951,10 @@ export class NativeRuntimeAdapter implements Runtime {
     );
     if (attachment === undefined) return;
     this.emitQueryCoverageTrace("attach");
-    // Local+Full has two independent axes: registering the attachment starts
-    // normal upstream propagation, but the public Local read is complete from
-    // current local knowledge and must not wait for that remote coverage.
-    if (tier === "local") return attachment;
+    // Durable Local reads returned above. A memory-only foreground must first
+    // receive its persistent owner's local answer, including an empty answer.
+    // The core attachment distinguishes that delivery from authority coverage:
+    // Local still completes while the owner is disconnected from edge/core.
     if (!this.db.queryAttachmentIsCovered) return attachment;
     const coverageKey = this.coverageKey(readContext, session);
     const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
