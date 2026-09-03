@@ -487,14 +487,20 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids_for_author(author, true)
+        self.below_global_transaction_ids(Some(author), false)
             .await
     }
 
-    async fn below_global_transaction_ids_for_author(
+    /// Edge-host recovery includes accepted writes from every originating
+    /// client, plus edge-generated merges; it is not local-author recovery.
+    pub(crate) async fn pending_edge_authority_transaction_ids(&mut self) -> Result<Vec<TxId>, Error> {
+        self.below_global_transaction_ids(None, true).await
+    }
+
+    async fn below_global_transaction_ids(
         &mut self,
-        author: AuthorSubject,
-        include_accepted: bool,
+        author: Option<AuthorSubject>,
+        edge_only: bool,
     ) -> Result<Vec<TxId>, Error> {
         let mut candidates = Vec::new();
         for raw in self
@@ -508,15 +514,16 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            if AuthorSubject::from_canonical(
+            let made_by = AuthorSubject::from_canonical(
                 record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
             )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                != author
-                || !(fate == 0 || (include_accepted && fate == 1))
-                || durability_from_discriminant(
-                    record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
-                )? >= DurabilityTier::Global
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
+            let durability = durability_from_discriminant(
+                record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+            )?;
+            if author.is_some_and(|author| made_by != author)
+                || if edge_only { fate != 1 || durability != DurabilityTier::Edge }
+                   else { !(fate == 0 || fate == 1) || durability >= DurabilityTier::Global }
             {
                 continue;
             }

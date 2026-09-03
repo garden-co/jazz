@@ -224,15 +224,16 @@ async fn ws_admission(
             .map_err(|(_, message)| message.to_owned())?;
         // An admin credential authenticates Edge's control plane, but ordinary
         // relay commits must retain their transaction permission subject for
-        // application-policy evaluation. Catalogue bootstrap is the sole
-        // privileged admission, and is further checked at the protocol edge.
+        // application-policy evaluation. Complete authority publications have
+        // their own prior-edge-admission capability, never inferred from SYSTEM
+        // or from an ordinary backend credential.
         let trust = if prelude.bootstrap_catalogue
             && peer_identity == AuthorSubject::SYSTEM
             && state.topology == crate::server::ServerTopology::Core
         {
             CommitUnitTrust::TrustedAdmin
         } else {
-            CommitUnitTrust::TrustedBackend
+            CommitUnitTrust::TrustedAuthority
         };
         return Ok(WebSocketAdmission {
             identity: peer_identity,
@@ -1447,7 +1448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_admin_secret_only_elevates_system_catalogue_bootstrap_at_core() {
+    async fn ws_admin_authority_capability_is_distinct_from_backend_attribution() {
         let state = make_ws_test_state().await;
         let relay = ws_admission(
             WebSocketPrelude {
@@ -1465,7 +1466,7 @@ mod tests {
         .await
         .expect("admit authenticated edge relay");
         assert_eq!(relay.credential, WebSocketCredential::Admin);
-        assert_eq!(relay.trust, CommitUnitTrust::TrustedBackend);
+        assert_eq!(relay.trust, CommitUnitTrust::TrustedAuthority);
 
         let bootstrap = ws_admission(
             WebSocketPrelude {
@@ -1501,7 +1502,24 @@ mod tests {
         )
         .await
         .expect("admit authentication before protocol bootstrap rejection");
-        assert_eq!(non_system.trust, CommitUnitTrust::TrustedBackend);
+        assert_eq!(non_system.trust, CommitUnitTrust::TrustedAuthority);
+
+        let backend = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    backend_secret: Some("backend-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("ordinary backend is authenticated, but has no prior-edge-admission proof");
+        assert_eq!(backend.trust, CommitUnitTrust::TrustedBackend);
     }
 
     #[tokio::test]

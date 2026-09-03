@@ -318,6 +318,51 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
 
     vec![
         (
+            "authority_publication_two_complete_transactions",
+            "AuthorityPublication",
+            SyncMessage::AuthorityPublication(jazz::protocol::AuthorityPublication {
+                tx_id,
+                commits: (0..2)
+                    .map(|index| {
+                        let schema = compiled_todos_schema(&["title"]);
+                        jazz::protocol::AuthorityCommitUnit {
+                            tx: Transaction {
+                                tx_id: TxId::new(TxTime(12 + index), node),
+                                kind: TxKind::Mergeable,
+                                n_total_writes: 1,
+                                made_by: author,
+                                permission_subject: None,
+                                base_snapshot: None,
+                                row_read_set: None,
+                                absent_read_set: None,
+                                predicate_read_set: None,
+                                user_metadata_json: None,
+                                contribution_merge: None,
+                            },
+                            versions: vec![
+                                VersionRecord::from_cells(
+                                    &schema.tables()[0],
+                                    schema_version,
+                                    row,
+                                    if index == 0 { Vec::new() } else { vec![tx_id] },
+                                    author,
+                                    12,
+                                    author,
+                                    12 + index,
+                                    &BTreeMap::from([(
+                                        "title".to_owned(),
+                                        format!("publication-{index}"),
+                                    )]),
+                                    None,
+                                )
+                                .expect("publication fixture row encodes"),
+                            ],
+                        }
+                    })
+                    .collect(),
+            }),
+        ),
+        (
             "chunk_upload_start_root_descriptor",
             "ChunkUploadStart",
             SyncMessage::ChunkUploadStart(jazz::protocol::ChunkUploadStart {
@@ -430,7 +475,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
-            "view_update_reset_with_row_add",
+            "view_update_reset_with_covered_input",
             "ViewUpdate",
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
@@ -442,9 +487,24 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     authorization_progress: Some(9),
                     opening_pending: false,
                 },
-                result_member_adds: vec![result_row_entry(tx_id).into()],
+                result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
+                program_fact_adds: vec![ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                    source: ProgramSourceId {
+                        table: "todos".to_owned().into(),
+                        path: vec![ProgramSourceRole::Root],
+                    },
+                    version_table: "todos".to_owned().into(),
+                    source_row: row,
+                    version: RowVersionRefEntry {
+                        tx: tx_id,
+                        schema_version: Some(schema_version),
+                        layer: ResultRowLayer::Content,
+                        batch: Some(tx_id),
+                        branch_or_prefix: Some(Vec::new()),
+                        row_digest: None,
+                    },
+                })],
                 program_fact_removes: Vec::new(),
             }),
         ),
@@ -703,7 +763,11 @@ fn fixture_manifest() -> Manifest {
     let fixtures = wire_fixture_messages()
         .into_iter()
         .map(|(name, message_family, message)| {
-            let payload = encode_sync_message(&message).expect("sync message encodes");
+            message.validate_wire_contract().unwrap_or_else(|error| {
+                panic!("wire fixture {name} violates its semantic contract: {error:?}")
+            });
+            let payload = encode_sync_message(&message)
+                .unwrap_or_else(|error| panic!("wire fixture {name} cannot encode: {error}"));
             let frame = WireFrame::Message(WireEnvelope::new(
                 WIRE_PROTOCOL_VERSION,
                 FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -960,6 +1024,28 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
             "{name}: a canonical payload must reject a suffix"
         );
     }
+}
+
+/// An authority may send source inputs to Alice's client, never a collector
+/// result that bypasses Alice's compiled query: authority --result row--> reject.
+#[test]
+fn peer_wire_rejects_authority_result_members() {
+    let (_, _, message) = wire_fixture_messages()
+        .into_iter()
+        .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
+        .unwrap();
+    let SyncMessage::ViewUpdate(mut view) = message else {
+        panic!("view fixture")
+    };
+    view.result_member_adds
+        .push(result_row_entry(TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]))).into());
+    let invalid = SyncMessage::ViewUpdate(view);
+    assert!(encode_sync_message(&invalid).is_err());
+    let bytes = postcard::to_allocvec(&invalid).unwrap();
+    assert!(
+        decode_sync_message(&bytes).is_err(),
+        "raw legacy result-member payload must also fail closed"
+    );
 }
 
 #[test]

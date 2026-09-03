@@ -59,6 +59,8 @@ pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
+/// Complete edge-authority publications, reconciled as a group at core.
+pub const FEATURE_AUTHORITY_PUBLICATIONS: WireFeatures = 1 << 10;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -636,6 +638,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+        | FEATURE_AUTHORITY_PUBLICATIONS
         | runtime_transport_compression_features()
 }
 

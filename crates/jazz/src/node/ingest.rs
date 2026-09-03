@@ -19,6 +19,15 @@ pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
 pub(super) const MAX_SCHEMA_LINEAGE_NAME_BYTES: usize = 1024;
 pub(super) const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
 
+fn authority_wall_clock_ms() -> Result<u64, Error> {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_err(|_| Error::InvalidStoredValue("authority clock precedes Unix epoch"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| Error::InvalidStoredValue("authority clock exceeds u64 milliseconds"))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {
     ingest_context: Option<CommitUnitIngestContext>,

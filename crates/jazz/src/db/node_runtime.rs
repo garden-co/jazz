@@ -745,6 +745,25 @@ where
         Ok(())
     }
 
+    /// Restore complete accepted authority publications, without waiting for
+    /// the originating clients to reconnect. Only an edge host calls this.
+    pub(super) async fn restore_edge_authority_uploads(&self) -> Result<(), Error> {
+        let mut node = self.node.lock().await;
+        let pending = node.pending_edge_authority_transaction_ids().await?;
+        let mut covered = BTreeSet::new();
+        // Newer frontier publications already include their unsettled parents.
+        // Do not reconstruct one growing ancestry prefix per historical edit.
+        for tx_id in pending.into_iter().rev() {
+            if covered.contains(&tx_id) {
+                continue;
+            }
+            let publication = node.edge_authority_publication_for(tx_id).await?;
+            covered.extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
+            self.queue_pending_upload(tx_id, Some(SyncMessage::AuthorityPublication(publication)));
+        }
+        Ok(())
+    }
+
     fn restore_local_subscriber(
         &self,
         author: AuthorSubject,
@@ -2085,7 +2104,9 @@ where
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         let peer = match trust {
-            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
+            CommitUnitTrust::TrustedBackend
+            | CommitUnitTrust::TrustedAuthority
+            | CommitUnitTrust::TrustedAdmin => {
                 PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
             CommitUnitTrust::Session => PeerState::edge_client(identity),
@@ -2124,7 +2145,9 @@ where
         // session. Only the worker's *upstream* Relay transport is subjectless
         // and therefore requires a per-request delegated binding.
         let peer = match trust {
-            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
+            CommitUnitTrust::TrustedBackend
+            | CommitUnitTrust::TrustedAuthority
+            | CommitUnitTrust::TrustedAdmin => {
                 PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
             CommitUnitTrust::Session => PeerState::client_link(identity),
@@ -2674,7 +2697,7 @@ where
     fn release_outbox_uploads(&self, released_tx_ids: HashSet<TxId>) {
         let mut outbox = self.outbox.borrow_mut();
         let mut remaining = released_tx_ids.clone();
-        outbox.remove_released(&mut remaining);
+        let released_tx_ids = outbox.remove_released(&mut remaining);
         drop(outbox);
         for connection in self.connections.borrow().iter() {
             connection

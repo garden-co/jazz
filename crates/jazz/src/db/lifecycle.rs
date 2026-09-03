@@ -315,6 +315,7 @@ where
             NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
+        node.restore_edge_authority_uploads().await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: bootstrap_schema,

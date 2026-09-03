@@ -247,6 +247,9 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
+    /// Complete edge-admitted frontier, accepted only on an authenticated
+    /// authority link. Core reconciles after all members have been admitted.
+    AuthorityPublication(AuthorityPublication),
 }
 
 /// Shared payload for ordinary and authorization-scope view updates.
@@ -573,6 +576,25 @@ pub struct CatalogueSnapshot {
 }
 
 impl SyncMessage {
+    /// Complete uploaded versions, including every member of an authority
+    /// publication. Shared by chunk staging and upload validation.
+    pub fn uploaded_versions(&self) -> impl Iterator<Item = &VersionRecord> {
+        let single = match self {
+            Self::CommitUnit { versions, .. } => Some(versions),
+            _ => None,
+        };
+        let publication = match self {
+            Self::AuthorityPublication(publication) => Some(publication),
+            _ => None,
+        };
+        single.into_iter().flatten().chain(
+            publication
+                .into_iter()
+                .flat_map(|publication| &publication.commits)
+                .flat_map(|unit| &unit.versions),
+        )
+    }
+
     /// Optional wire capabilities required to serialize this semantic message.
     ///
     /// Kept on the semantic type so every codec caller uses one exhaustive
@@ -580,6 +602,7 @@ impl SyncMessage {
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
         match self {
+            Self::AuthorityPublication(_) => crate::wire::FEATURE_AUTHORITY_PUBLICATIONS,
             Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             }
@@ -603,6 +626,12 @@ impl SyncMessage {
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
         match self {
             Self::CommitUnit { versions, .. } => validate_version_records(versions),
+            Self::AuthorityPublication(publication) => {
+                for unit in &publication.commits {
+                    validate_version_records(&unit.versions)?;
+                }
+                Ok(())
+            }
             Self::RowVersionPayloads { version_bundles } => {
                 validate_version_bundles(version_bundles)
             }

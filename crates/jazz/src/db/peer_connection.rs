@@ -453,7 +453,9 @@ where
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
                     CommitUnitTrust::Relay => session_claim_binding.0,
-                    CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
+                    CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                        tx.permission_subject.unwrap_or(tx.made_by)
+                    }
                     CommitUnitTrust::TrustedAdmin => ingest_context.identity,
                 };
                 let admitted_write_authorization = {
@@ -807,11 +809,8 @@ fn collect_large_value_refs(value: &Value, refs: &mut Vec<groove::large_values::
 }
 
 fn commit_unit_large_value_refs(unit: &SyncMessage) -> Vec<groove::large_values::LargeValueRef> {
-    let SyncMessage::CommitUnit { versions, .. } = unit else {
-        return Vec::new();
-    };
     let mut refs = Vec::new();
-    for version in versions {
+    for version in unit.uploaded_versions() {
         for position in 0..version.application_cell_count() {
             if let Some(value) = version.cell_at(position) {
                 collect_large_value_refs(&value, &mut refs);
@@ -3124,6 +3123,9 @@ where
                                     SyncMessage::FateUpdate { tx_id, .. }
                                         if self.edge_fate_routes.borrow().contains_key(tx_id)
                                 );
+                                let publication_fate = matches!(&message,
+                                    SyncMessage::FateUpdate { tx_id, .. }
+                                        if outbox.borrow().authority_members.contains(tx_id));
                                 // The Edge outbox is tied to an authenticated
                                 // selected authority. Ordinary direct uploads
                                 // keep their legacy featureless-link receipt
@@ -3131,7 +3133,7 @@ where
                                 // discharge.
                                 let outbox_release_receipt_eligible =
                                     current_authority_receipt_eligible
-                                        || (!routed_fate
+                                        || (!routed_fate && !publication_fate
                                             && authority_receipt_eligible
                                             && expected_scope_authority.is_none());
                                 if let SyncMessage::FateUpdate { tx_id: _, .. } = &message {
@@ -3145,7 +3147,7 @@ where
                                     // transaction's local state. Ordinary Core
                                     // client links have no edge route and retain
                                     // their normal fate transport.
-                                    if routed_fate && !current_authority_receipt_eligible {
+                                    if (routed_fate || publication_fate) && !current_authority_receipt_eligible {
                                         drop_peer_request(&self.node);
                                         continue;
                                     }
@@ -4754,7 +4756,7 @@ where
                                     )?;
                                 }
                             }
-                            if let Some((tx_id, unit)) = edge_upload {
+                            if let Some((tx_id, _)) = edge_upload {
                                 let admitted = self
                                     .node
                                     .lock()
@@ -4766,6 +4768,9 @@ where
                                             && durability >= DurabilityTier::Edge
                                     });
                                 if admitted {
+                                    let publication = self.node.lock().await
+                                        .edge_authority_publication_for(tx_id).await?;
+                                    let unit = SyncMessage::AuthorityPublication(publication);
                                     if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
                                         schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                     }
@@ -4847,7 +4852,8 @@ where
                         }
                     }
                     for tx_id in admitted {
-                        let unit = self.node.lock().await.commit_unit_for(tx_id).await?;
+                        let unit = SyncMessage::AuthorityPublication(self.node.lock().await
+                            .edge_authority_publication_for(tx_id).await?);
                         if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
                             schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                         }

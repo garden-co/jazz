@@ -8,6 +8,152 @@ use crate::db::peer_connection::{
 use crate::node::SKEW_TOLERANCE_MS;
 
 #[test]
+fn restarted_edge_forwards_complete_publication_without_original_clients() {
+    // Internal topology test: inspect exact merge authorship and the durable
+    // outbox while exercising the real peer-connection scheduler/storage.
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ),
+    );
+    let edge_id = NodeUuid::from_bytes([0xe6; 16]);
+    let core_id = NodeUuid::from_bytes([0xc6; 16]);
+    let dir = tempfile::tempdir().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut edge_state = NodeState::new(
+        edge_id,
+        schema.clone(),
+        RocksDbStorage::open(dir.path(), &refs).unwrap(),
+    )
+    .unwrap();
+    let shared_row = RowUuid::from_bytes([0x66; 16]);
+    let mut writes = Vec::new();
+    for (writer_id, column, value) in [(0xa6, "title", "left"), (0xb6, "body", "right")] {
+        let mut writer = NodeState::new(
+            NodeUuid::from_bytes([writer_id; 16]),
+            schema.clone(),
+            rocks_storage(&schema),
+        )
+        .unwrap();
+        let (tx_id, unit) = writer
+            .commit_mergeable_unit_settled(
+                MergeableCommit::new("todos", shared_row, 10)
+                    .made_by(AuthorSubject::for_test_bytes([writer_id; 16]))
+                    .cells(BTreeMap::from([(
+                        column.to_owned(),
+                        Value::String(value.to_owned()),
+                    )])),
+            )
+            .unwrap();
+        let SyncMessage::CommitUnit { tx, versions } = unit else {
+            panic!("commit unit")
+        };
+        let outcome = edge_state
+            .ingest_edge_authority_mergeable_commit_unit(tx, versions, 100)
+            .unwrap();
+        block_on(edge_state.persist_and_settle_outcome(outcome)).unwrap();
+        writes.push(tx_id);
+    }
+    let publication = edge_state
+        .edge_authority_publication_for(writes[1])
+        .unwrap();
+    let merge_tx = publication
+        .commits
+        .iter()
+        .find(|unit| unit.tx.tx_id.node == edge_id)
+        .unwrap()
+        .tx
+        .tx_id;
+    drop(edge_state);
+
+    let reopened = NodeState::new(
+        edge_id,
+        schema.clone(),
+        RocksDbStorage::open(dir.path(), &refs).unwrap(),
+    )
+    .unwrap();
+    let edge = Node::new(reopened);
+    block_on(edge.restore_edge_authority_uploads()).unwrap();
+    assert_eq!(
+        edge.outbox.borrow().len(),
+        1,
+        "recover one frontier, not one growing history prefix per write"
+    );
+    let anchor = edge.outbox.borrow().iter().next().unwrap().tx_id;
+    let completed = edge
+        .outbox
+        .borrow_mut()
+        .remove_released(&mut HashSet::from([anchor]));
+    assert!(completed.is_empty());
+    assert_eq!(
+        edge.outbox.borrow().len(),
+        1,
+        "an anchor receipt alone must not retire a publication with unacknowledged members"
+    );
+    assert!(
+        writes
+            .iter()
+            .all(|tx_id| edge.outbox.borrow().authority_members.contains(tx_id)),
+        "recovered member fates remain bound to the selected authority after a partial acknowledgement"
+    );
+    let core = open_core(0xc6, AuthorSubject::SYSTEM, &schema);
+    let (edge_transport, core_transport) =
+        duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_id, 61, core_id, 62);
+    let _upstream = block_on(edge.connect_upstream(edge_transport));
+    let _subscriber = core.accept_subscriber_with_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedAuthority,
+    );
+    for _ in 0..16 {
+        block_on(edge.tick()).unwrap();
+        core.tick().unwrap();
+        block_on(edge.tick()).unwrap();
+        if edge.outbox.borrow().len() == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        edge.outbox.borrow().len(),
+        0,
+        "core's accepted receipts must discharge the recovered publication"
+    );
+    for tx_id in writes.into_iter().chain([merge_tx]) {
+        assert!(matches!(
+            edge.node().borrow_mut().transaction_state(tx_id).resolve(),
+            Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+        ));
+    }
+    let rows = core.read(&Query::from("todos")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables()[0], "title"),
+        Some(Value::String("left".to_owned()))
+    );
+    assert_eq!(
+        rows[0].cell(&schema.tables()[0], "body"),
+        Some(Value::String("right".to_owned()))
+    );
+    assert_eq!(
+        core.node()
+            .borrow_mut()
+            .current_row_tx_id(&rows[0])
+            .resolve(),
+        Some(merge_tx),
+        "forwarding must not create a redundant core merge"
+    );
+    block_on(edge.restore_edge_authority_uploads()).unwrap();
+    assert_eq!(
+        edge.outbox.borrow().len(),
+        0,
+        "globally acknowledged history is not recovered again"
+    );
+}
+
+#[test]
 fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
     let identity = AuthorSubject::for_test_bytes([0xc1; 16]);
     let schema = schema();
@@ -3567,7 +3713,11 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         20,
     );
     let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
-    let a = authority_a.accept_subscriber(a_transport, identity);
+    let a = authority_a.accept_subscriber_with_trust(
+        a_transport,
+        identity,
+        CommitUnitTrust::TrustedAuthority,
+    );
     let (edge_b_transport, b_transport) = duplex_with_admitted_session_context(
         identity,
         edge_node,
@@ -3576,7 +3726,11 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         21,
     );
     let edge_b = crate::db::block_on(edge.server.connect_upstream(edge_b_transport));
-    let _b = authority_b.accept_subscriber(b_transport, identity);
+    let _b = authority_b.accept_subscriber_with_trust(
+        b_transport,
+        identity,
+        CommitUnitTrust::TrustedAuthority,
+    );
 
     let client = open_db(0xc1, identity, &schema);
     let (client_transport, edge_transport) = duplex_with_admitted_session_context(
@@ -3726,7 +3880,11 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         20,
     );
     let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
-    let _a = authority_a.accept_subscriber(a_transport, identity);
+    let _a = authority_a.accept_subscriber_with_trust(
+        a_transport,
+        identity,
+        CommitUnitTrust::TrustedAuthority,
+    );
 
     let client = open_db(0xc1, identity, &schema);
     let (client_transport, edge_transport) = duplex_with_admitted_session_context(
@@ -3777,7 +3935,11 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         22,
     );
     let _edge_c = crate::db::block_on(edge.server.connect_upstream(edge_c_transport));
-    let _c = authority_c.accept_subscriber(c_transport, identity);
+    let _c = authority_c.accept_subscriber_with_trust(
+        c_transport,
+        identity,
+        CommitUnitTrust::TrustedAuthority,
+    );
     edge.tick().unwrap();
     authority_c.tick().unwrap();
     edge.tick().unwrap();
@@ -3866,10 +4028,22 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         .iter()
         .find(|pending| pending.tx_id == tx_id)
         .expect("accepted Edge write remains queued for its future Core");
+    let Some(SyncMessage::AuthorityPublication(publication)) = retained.unit.as_ref() else {
+        panic!("edge must retain a coherent publication, not a bare write");
+    };
+    assert_eq!(publication.tx_id, tx_id);
+    let unit = publication
+        .commits
+        .iter()
+        .find(|unit| unit.tx.tx_id == tx_id)
+        .unwrap();
     assert_eq!(
-        retained.unit.as_ref(),
-        Some(&canonical),
-        "the exact inbound unit must replace an earlier same-tx reconstruction"
+        SyncMessage::CommitUnit {
+            tx: unit.tx.clone(),
+            versions: unit.versions.clone()
+        },
+        canonical,
+        "the publication must retain the exact canonical admitted write"
     );
     drop(outbox);
     client_upstream
@@ -3903,8 +4077,17 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
     let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
     let core_session = core.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
     edge.tick().unwrap();
-    let uploaded = std::iter::from_fn(|| core_session.borrow_mut().transport.try_recv())
-        .any(|message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id));
+    let uploaded =
+        std::iter::from_fn(|| core_session.borrow_mut().transport.try_recv()).any(|message| {
+            matches!(message,
+            SyncMessage::AuthorityPublication(publication)
+                if publication.tx_id == tx_id
+                    && publication.commits.iter().any(|unit|
+                        SyncMessage::CommitUnit {
+                            tx: unit.tx.clone(),
+                            versions: unit.versions.clone(),
+                        } == canonical))
+        });
     assert!(
         uploaded,
         "binding the first authority redrives the parked unit"
@@ -4162,7 +4345,8 @@ fn outbox_release_requires_current_admitted_authority_receipt() {
     edge.tick().unwrap();
     assert!(
         std::iter::from_fn(|| reconnected.borrow_mut().transport.try_recv()).any(
-            |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+            |message| matches!(message, SyncMessage::AuthorityPublication(publication)
+                if publication.tx_id == tx_id && publication.commits.iter().any(|unit| unit.tx.tx_id == tx_id))
         ),
         "the retained canonical upload must be retransmitted after authority reconnect"
     );

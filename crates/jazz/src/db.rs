@@ -2251,12 +2251,18 @@ type Outbox = Rc<RefCell<UploadOutbox>>;
 struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
+    authority_members: HashSet<TxId>,
+    authority_receipts: HashSet<TxId>,
 }
 
 impl UploadOutbox {
     fn push(&mut self, pending: PendingUpload) -> bool {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;
+        }
+        if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
+            self.authority_members
+                .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
         }
         self.entries.push_back(pending);
         true
@@ -2275,9 +2281,46 @@ impl UploadOutbox {
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
+        self.reindex_authority_members();
     }
 
-    fn remove_released(&mut self, released: &mut HashSet<TxId>) {
+    fn reindex_authority_members(&mut self) {
+        self.authority_members.clear();
+        for pending in &self.entries {
+            if let Some(SyncMessage::AuthorityPublication(publication)) = &pending.unit {
+                self.authority_members
+                    .extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
+            }
+        }
+        self.authority_receipts
+            .retain(|tx_id| self.authority_members.contains(tx_id));
+    }
+
+    fn remove_released(&mut self, released: &mut HashSet<TxId>) -> HashSet<TxId> {
+        if !self.authority_members.is_empty() {
+            self.authority_receipts.extend(
+                released
+                    .iter()
+                    .filter(|tx_id| self.authority_members.contains(tx_id))
+                    .copied(),
+            );
+            let completed = self
+                .entries
+                .iter()
+                .filter(|pending| match &pending.unit {
+                    Some(SyncMessage::AuthorityPublication(publication)) => publication
+                        .commits
+                        .iter()
+                        .all(|unit| self.authority_receipts.contains(&unit.tx.tx_id)),
+                    _ => released.contains(&pending.tx_id),
+                })
+                .map(|pending| pending.tx_id)
+                .collect::<HashSet<_>>();
+            self.retain(|pending| !completed.contains(&pending.tx_id));
+            return completed;
+        }
+        // Ordinary single-transaction uploads retain their prefix fast path.
+        let completed = released.clone();
         while self
             .entries
             .front()
@@ -2290,9 +2333,10 @@ impl UploadOutbox {
             self.tx_ids.remove(&pending.tx_id);
         }
         if released.is_empty() {
-            return;
+            return completed;
         }
         self.retain(|pending| !released.contains(&pending.tx_id));
+        completed
     }
 }
 
@@ -2321,6 +2365,7 @@ fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessag
         // but before subscriber ingest queues the exact inbound unit. The
         // canonical payload must win even when both entries have a body.
         pending.unit = Some(unit);
+        outbox.reindex_authority_members();
         return true;
     }
     outbox.push(PendingUpload { tx_id, unit });
@@ -2993,9 +3038,9 @@ fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> Option<Auth
     match ingest.trust {
         CommitUnitTrust::Session => Some(ingest.identity),
         CommitUnitTrust::Relay => None,
-        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
-            Some(AuthorSubject::SYSTEM)
-        }
+        CommitUnitTrust::TrustedBackend
+        | CommitUnitTrust::TrustedAuthority
+        | CommitUnitTrust::TrustedAdmin => Some(AuthorSubject::SYSTEM),
     }
 }
 

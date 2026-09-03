@@ -24,6 +24,17 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::CommitUnit { tx, versions } => {
             transaction_wire_bytes(tx) + versions.iter().map(version_record_bytes).sum::<u64>()
         }
+        SyncMessage::AuthorityPublication(publication) => {
+            tx_id_wire_bytes()
+                + publication
+                    .commits
+                    .iter()
+                    .map(|unit| {
+                        transaction_wire_bytes(&unit.tx)
+                            + unit.versions.iter().map(version_record_bytes).sum::<u64>()
+                    })
+                    .sum::<u64>()
+        }
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.

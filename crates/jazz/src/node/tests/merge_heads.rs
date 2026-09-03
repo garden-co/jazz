@@ -14,6 +14,67 @@ fn merge_head_branch_schema() -> JazzSchema {
     )
 }
 
+fn assert_authority_publication_reopen_is_atomic(
+    schema: &JazzSchema,
+    publication: &crate::protocol::AuthorityPublication,
+) {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    // Cancel admission at each durable write boundary, including writes that
+    // allocate aliases. Reopening must expose either the whole publication or
+    // none of it, never an accepted prefix that core might merge independently.
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut reached_completion = false;
+    for allowed_writes in 0..12 {
+        let (storage, control) = TestStorage::controlled(&refs);
+        let reopen_handle = storage.clone();
+        let mut receiver = NodeState::new_history_complete(node(0xee), schema.clone(), storage).unwrap();
+        control.take_observed();
+        control.pause_on(TestStorageOperation::WriteMany);
+        let mut admission = Box::pin(receiver.ingest_edge_authority_publication(publication.clone(), 100));
+        let mut released_writes = 0;
+        let mut stopped = false;
+        for _ in 0..50_000 {
+            let poll = std::future::Future::poll(admission.as_mut(),
+                &mut std::task::Context::from_waker(std::task::Waker::noop()));
+            if let std::task::Poll::Ready(result) = poll {
+                assert!(result.unwrap().publications.is_empty());
+                reached_completion = true;
+                stopped = true;
+                break;
+            }
+            let writes = control.observed().iter().filter(|operation|
+                **operation == TestStorageOperation::WriteMany).count();
+            if writes > allowed_writes {
+                stopped = true;
+                break;
+            }
+            if writes > released_writes {
+                control.release_one();
+                released_writes = writes;
+            }
+        }
+        assert!(stopped, "publication did not reach a bounded persistence point");
+        drop(admission);
+        drop(receiver);
+        control.resume();
+        let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
+        let mut reopened = NodeState::new_history_complete(node(0xee), schema.clone(), storage).unwrap();
+        let mut present = 0;
+        for unit in &publication.commits {
+            if let Some(stored) = reopened.query_transaction(unit.tx.tx_id).unwrap() {
+                assert_eq!(stored.fate, Fate::Accepted);
+                assert_eq!(stored.durability, DurabilityTier::Global);
+                present += 1;
+            }
+        }
+        assert!(present == 0 || present == publication.commits.len(),
+            "cancellation after {allowed_writes} writes exposed only {present} publication members");
+        if reached_completion { break; }
+    }
+    assert!(reached_completion, "the persistence-boundary sweep must include completed admission");
+}
+
 #[test]
 fn immediate_branch_commit_unit_matches_durable_replay() {
     // The wire envelope is the boundary under test: immediate publication must
@@ -273,12 +334,44 @@ fn edge_creates_edge_durable_merge_for_concurrent_inserts_and_edits() {
         assert_eq!(merge_heads_from_value(replayed[0].record().get_idx(3).unwrap()).unwrap(), heads);
 
         let publication = edge.edge_authority_publication_for(right_tx).unwrap();
+        assert_authority_publication_reopen_is_atomic(&schema, &publication);
         drop(edge);
         let mut edge = reopen_node_at(&edge_dir, node(0xc9), schema);
         assert_eq!(edge.edge_authority_publication_for(right_tx).unwrap(), publication,
             "publication reconstruction must survive an edge restart");
-        for _ in 0..2 {
-            let outcome = core.ingest_edge_authority_publication(publication.clone(), 100).unwrap();
+        let message = SyncMessage::AuthorityPublication(publication.clone());
+        let bytes = crate::wire::encode_sync_message(&message).unwrap();
+        assert!(crate::wire::decode_sync_message_for_features(&bytes,
+            crate::wire::current_wire_features() & !crate::wire::FEATURE_AUTHORITY_PUBLICATIONS).is_err());
+        let message = crate::wire::decode_sync_message_for_features(&bytes,
+            crate::wire::current_wire_features()).unwrap();
+        assert_eq!(message, SyncMessage::AuthorityPublication(publication.clone()));
+        for trust in [CommitUnitTrust::Session, CommitUnitTrust::Relay,
+            CommitUnitTrust::TrustedBackend] {
+            let result = core.apply_sync_message_with_ingest_context(message.clone(),
+                Some(CommitUnitIngestContext {
+                    identity: AuthorSubject::SYSTEM, trust, edge_authority: false,
+                    admitted_write_authorization: true,
+                })).resolve();
+            assert!(matches!(result, Err(Error::UnsupportedSyncMessage(_))),
+                "{trust:?} must not claim prior edge authorization");
+            for unit in &publication.commits {
+                assert!(core.query_transaction(unit.tx.tx_id).unwrap().is_none());
+            }
+        }
+        let mut malformed = publication.clone();
+        malformed.commits.last_mut().unwrap().tx.n_total_writes += 1;
+        assert!(core.ingest_edge_authority_publication(malformed, 100).is_err());
+        for unit in &publication.commits {
+            assert!(core.query_transaction(unit.tx.tx_id).unwrap().is_none(),
+                "a malformed last member must not admit an earlier member");
+        }
+        for trust in [CommitUnitTrust::TrustedAuthority, CommitUnitTrust::TrustedAdmin] {
+            let outcome = core.apply_sync_message_with_ingest_context(message.clone(),
+                Some(CommitUnitIngestContext {
+                    identity: AuthorSubject::SYSTEM, trust,
+                    edge_authority: false, admitted_write_authorization: false,
+                })).resolve().unwrap();
             assert!(outcome.publications.is_empty(),
                 "a reconciled edge publication must not generate any new core merge publication");
             settle_outcome(&mut core, outcome).unwrap();

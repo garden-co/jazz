@@ -1227,13 +1227,20 @@ pub enum CommitUnitTrust {
     Relay,
     /// Trusted backends may preserve user provenance in `made_by`.
     TrustedBackend,
+    /// Authenticated authority control-plane link. Ordinary writes retain
+    /// their permission subject; only complete authority publications carry
+    /// a prior edge-admission proof. Never inferred from a wire identity.
+    TrustedAuthority,
     /// Administrators may preserve provenance and bypass application write policies.
     TrustedAdmin,
 }
 
 impl CommitUnitTrust {
     pub(crate) fn is_trusted(self) -> bool {
-        matches!(self, Self::TrustedBackend | Self::TrustedAdmin)
+        matches!(
+            self,
+            Self::TrustedBackend | Self::TrustedAuthority | Self::TrustedAdmin
+        )
     }
 }
 
