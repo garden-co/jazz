@@ -4164,6 +4164,12 @@ mod tests {
         assert_eq!(scheduler.take(), None, "waking does not create a hot loop");
     }
 
+    /// Given alice's idle native peer closes, when its terminal resolves, then
+    /// alice's client observes it and installs a replacement without wire traffic.
+    ///
+    /// ```text
+    /// peer ──close──► alice terminal watcher ──► generation recovery ──► replacement
+    /// ```
     #[tokio::test(flavor = "current_thread")]
     async fn persistent_storage_open_yields_without_sync_polling() {
         let temp_dir = TempDir::new().expect("temp client dir");
@@ -4692,6 +4698,8 @@ mod tests {
     ///
     /// alice ──local write──► offline local store
     /// alice ──Remote read──► transient subscription ──wait──► authority
+    /// Given alice deliberately drops her native transport, when its terminal resolves,
+    /// then the client detaches it without reconnecting.
     #[tokio::test(flavor = "current_thread")]
     async fn strict_remote_one_shot_uses_transient_subscription_not_ambient_all() {
         let client = JazzClient::connect(make_offline_context(
@@ -4750,6 +4758,8 @@ mod tests {
     // means corrupt local state; creating that through the public API would
     // require deliberately corrupting a storage backend. The assertion itself
     // is public: a normal `JazzClient::query` must report the stopped driver.
+    /// Given alice shuts down, when an old peer-close terminal resolves afterward,
+    /// then the terminal watcher cannot start another connection.
     #[tokio::test(flavor = "current_thread")]
     async fn fatal_tick_driver_failure_is_reported_to_callers() {
         let client = JazzClient::connect(make_offline_context(
@@ -5153,6 +5163,12 @@ mod tests {
             .await;
     }
 
+    /// Given alice's peer closes or fails and its first replacement is refused, when
+    /// retry backoff expires, then the same generation admits the next replacement.
+    ///
+    /// ```text
+    /// peer ──close/fail──► alice ──refused reconnect──► backoff ──► replacement
+    /// ```
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn recoverable_native_terminals_retry_refused_replacement() {
         tokio::task::LocalSet::new()
@@ -5196,6 +5212,8 @@ mod tests {
             .await;
     }
 
+    /// Given alice receives both a core reconnect error and a peer-close terminal for
+    /// one generation, when recovery starts, then only one replacement admission owns it.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn tick_error_and_terminal_coalesce_to_one_recovery_owner() {
         tokio::task::LocalSet::new()
@@ -5247,6 +5265,8 @@ mod tests {
             .await;
     }
 
+    /// Given alice begins an old reconnect admission and a newer generation wins, when
+    /// the old admission completes, then it cannot install or replace the newer upstream.
     #[tokio::test(flavor = "current_thread")]
     async fn stale_admission_completion_cannot_install_after_newer_generation() {
         tokio::task::LocalSet::new()
@@ -5297,6 +5317,8 @@ mod tests {
             .await;
     }
 
+    /// Given alice loses recovery ownership by shutdown or deliberate owner drop during
+    /// backoff, when the delay expires, then no replacement admission is installed.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn ownership_loss_during_retry_prevents_installation() {
         tokio::task::LocalSet::new()
@@ -5357,6 +5379,8 @@ mod tests {
             .await;
     }
 
+    /// Given alice's old recovery is about to exhaust while a newer generation is live,
+    /// when the old retry finishes, then it neither detaches nor poisons the replacement.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn stale_exhaustion_does_not_poison_current_generation() {
         tokio::task::LocalSet::new()
@@ -5446,6 +5470,8 @@ mod tests {
             .await;
     }
 
+    /// Given alice is waiting to retry a refused peer-failure replacement, when she
+    /// commits local work, then local durability progresses before retry backoff ends.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn local_tick_work_remains_responsive_during_retry_delay() {
         tokio::task::LocalSet::new()
