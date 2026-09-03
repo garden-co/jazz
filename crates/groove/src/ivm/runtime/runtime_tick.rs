@@ -641,12 +641,43 @@ impl EvaluationWorkQueue {
 }
 
 impl IncrementalEvaluation<'_> {
+    /// Base-table frontiers describe resident row visibility, not completion
+    /// of every dependent evaluator branch. Publish them monotonically when
+    /// this evaluation parks so independent snapshots cannot reuse an old
+    /// table-source cache; retain all operator state until full installation.
+    fn install_input_frontiers(&self, runtime: &mut IvmRuntime) {
+        for (table, frontier) in &self.table_frontiers {
+            runtime
+                .table_frontiers
+                .entry(table.clone())
+                .and_modify(|live| *live = (*live).max(*frontier))
+                .or_insert(*frontier);
+        }
+        for (binding, frontier) in &self.binding_frontiers {
+            runtime
+                .binding_frontiers
+                .entry(binding.clone())
+                .and_modify(|live| *live = (*live).max(*frontier))
+                .or_insert(*frontier);
+        }
+        for (node, staged) in &self.node_meta {
+            if let Some(live) = runtime.node_meta.get_mut(node) {
+                live.input_generation = live.input_generation.max(staged.input_generation);
+            }
+        }
+    }
+
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
-        self.discarded = self
-            .work_queue
-            .roots
-            .iter()
-            .all(|root| nodes.contains(root));
+        // An empty set is the explicit cancellation path used by an owner
+        // which is abandoning the whole uninstalled evaluation. Scoped
+        // failures carry their downstream closure and may leave independent
+        // roots publishable.
+        self.discarded = nodes.is_empty()
+            || self
+                .work_queue
+                .roots
+                .iter()
+                .all(|root| nodes.contains(root));
         self.work_queue.abandon(nodes);
         // A scoped failure owns only its downstream slice. Keep evaluating
         // disjoint roots in this tick; their prepared state and notifications
@@ -715,7 +746,10 @@ impl IncrementalEvaluation<'_> {
         // suspended continuation resumes after lifecycle activity.
         for node in &self.relevant_nodes {
             match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
-                (Some(meta), Some(live)) => meta.retainers = live.retainers.clone(),
+                (Some(meta), Some(live)) => {
+                    meta.retainers = live.retainers.clone();
+                    meta.input_generation = meta.input_generation.max(live.input_generation);
+                }
                 (None, Some(live)) => {
                     self.node_meta.insert(*node, live.clone());
                 }
@@ -725,13 +759,8 @@ impl IncrementalEvaluation<'_> {
         runtime
             .node_meta
             .extend(std::mem::take(&mut self.node_meta));
-        runtime
-            .table_frontiers
-            .extend(std::mem::take(&mut self.table_frontiers));
-        runtime
-            .binding_frontiers
-            .extend(std::mem::take(&mut self.binding_frontiers));
-        runtime.current_tick = self.current_tick;
+        self.install_input_frontiers(runtime);
+        runtime.current_tick = runtime.current_tick.max(self.current_tick);
         runtime
             .pending_binding_retractions
             .drain(..self.pending_binding_retractions);
@@ -1041,7 +1070,21 @@ impl IncrementalEvaluation<'_> {
                 .or(self.notification_publication);
             queued.publication = notification_publication;
             if !queued.deltas.is_empty() {
-                self.pending_notifications.push((*subscription_id, queued));
+                if let Some(pending) = &self.pending_resident_publication
+                    && queued.publication.is_none()
+                {
+                    // A resident publication may have an independent cold
+                    // branch still parked. Its completed subscriptions are
+                    // already a valid publication slice, so hand their
+                    // notifications to the resident receipt now instead of
+                    // waiting for the unrelated branch to hydrate.
+                    pending
+                        .notifications
+                        .borrow_mut()
+                        .push((*subscription_id, queued));
+                } else {
+                    self.pending_notifications.push((*subscription_id, queued));
+                }
             }
             self.published_subscriptions.insert(*subscription_id);
         }
@@ -1776,6 +1819,7 @@ impl IvmRuntime {
             Poll::Ready(Err(failure)) => return Err(failure.into_error()),
             Poll::Pending => {
                 evaluation.work_queue.drain_completed_events();
+                evaluation.install_input_frontiers(self);
                 let mut pending = self.pending_incremental.0.borrow_mut();
                 let evaluation_id = pending.next_id;
                 pending.next_id = pending.next_id.saturating_add(1);
