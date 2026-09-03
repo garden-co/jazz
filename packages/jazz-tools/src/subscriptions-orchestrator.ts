@@ -167,6 +167,23 @@ const SHARED_PENDING: UseAllStatePending<any> = {
 };
 
 export class SubscriptionsOrchestrator {
+  private readonly traceId = Math.random().toString(36).slice(2);
+  private trace(event: string, entry: InternalCacheEntry<any>, detail?: unknown): void {
+    if (!(globalThis as { __JAZZ_SUBSCRIPTION_TRACE__?: boolean }).__JAZZ_SUBSCRIPTION_TRACE__)
+      return;
+    console.debug(
+      "JAZZ_SUBSCRIPTION_TRACE",
+      JSON.stringify({
+        owner: this.traceId,
+        event,
+        key: entry.key,
+        generation: entry.generation,
+        state: entry.state.status,
+        listeners: entry.listeners.size,
+        detail,
+      }),
+    );
+  }
   private readonly cleanupDelayMs = 30_000;
   private readonly entries = new Map<string, InternalCacheEntry<any>>();
   private readonly queryDefinitions = new Map<string, QueryDefinition<any>>();
@@ -376,6 +393,7 @@ export class SubscriptionsOrchestrator {
   }
 
   private destroyEntry(entry: InternalCacheEntry<any>): void {
+    this.trace("destroy", entry);
     if (entry.unsubscribe) {
       entry.unsubscribe();
     }
@@ -391,8 +409,10 @@ export class SubscriptionsOrchestrator {
   }
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+    this.trace("subscribe", entry);
     const generation = entry.generation;
     const reject = (error: unknown) => {
+      this.trace("reject", entry, String(error));
       if (entry.generation !== generation || entry.state.status === "rejected") return;
       entry.state = { status: "rejected", data: undefined, error };
       entry.rejectfulfilled(error);
@@ -410,6 +430,7 @@ export class SubscriptionsOrchestrator {
         entry.query,
         {
           onDelta: (delta) => {
+            this.trace("delta", entry, delta);
             if (entry.generation !== generation || entry.state.status === "rejected") return;
             const wasPending = entry.state.status === "pending";
             const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
@@ -474,8 +495,10 @@ export class SubscriptionsOrchestrator {
     setTimeout(() => {
       entry.emptyRefreshScheduled = false;
       if (!this.entries.has(entry.key) || entry.generation !== generation) return;
+      this.trace("empty-refresh-start", entry);
       void Promise.resolve(this.db.all!(entry.query, entry.options, session))
         .then((snapshot) => {
+          this.trace("empty-refresh-result", entry, { rows: snapshot.length });
           if (!this.entries.has(entry.key) || entry.generation !== generation) return;
           if (entry.state.status === "rejected") return;
           if (entry.state.status === "fulfilled" && entry.state.data.length > 0) return;
@@ -493,7 +516,9 @@ export class SubscriptionsOrchestrator {
             listener.onfulfilled?.(entry.state.data);
           }
         })
-        .catch(() => undefined);
+        .catch((error) => {
+          this.trace("empty-refresh-error", entry, String(error));
+        });
     }, 0);
   }
 
