@@ -352,8 +352,11 @@ export interface AuthConfig {
 export type DurabilityTier = "local" | "edge" | "global";
 /** Product-facing policy for reads. It deliberately does not change write durability. */
 export const ReadTier = {
+  /** Cached local knowledge and pending writes; still syncs while connected. */
   LocalFirst: "local-first",
+  /** Current remote query scope, without pending local writes; waits offline. */
   Remote: "remote",
+  /** Remote scope plus pending scoped edits/new inserts online; local knowledge after explicit disconnect. */
   RemoteIfPossible: "remote-if-possible",
 } as const;
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];

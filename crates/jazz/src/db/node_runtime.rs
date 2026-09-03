@@ -2686,36 +2686,6 @@ where
     }
 }
 
-async fn optimistic_transaction_row_keys_for_query<S>(
-    node: &SharedNodeState<S>,
-    cache: &mut BTreeMap<AuthorSubject, BTreeSet<(String, RowUuid)>>,
-    shape: &ValidatedQuery,
-    author: AuthorSubject,
-) -> Result<BTreeSet<(String, RowUuid)>, Error>
-where
-    S: OrderedKvStorage,
-{
-    let row_keys = match cache.entry(author) {
-        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            let transactions = node
-                .lock()
-                .await
-                .unresolved_transaction_ids_for_author(author)
-                .await?;
-            let row_keys = node
-                .lock()
-                .await
-                .transaction_row_keys(&transactions)
-                .await?;
-            entry.insert(row_keys)
-        }
-    };
-    Ok(node
-        .borrow()
-        .transaction_row_keys_for_query(shape, row_keys))
-}
-
 /// Temporarily owns a maintained Groove handle while subscription refresh does
 /// asynchronous work. Restoring on drop keeps every `?`/`continue` exit safe
 /// without lending the subscription's `RefCell` contents across an await.
@@ -2806,7 +2776,6 @@ where
 {
     let mut retained = Vec::new();
     let mut changed = 0;
-    let mut optimistic_row_keys_by_author = BTreeMap::new();
     let pending_authoritative_resets = node.lock().await.take_pending_authoritative_resets();
     let mut consumed_authoritative_resets = BTreeSet::new();
     node.lock()
@@ -2826,6 +2795,7 @@ where
         }
         let (
             read_tier,
+            pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
             remote_propagate_upstream,
@@ -2840,6 +2810,7 @@ where
             let state = state.borrow();
             (
                 state.read_tier,
+                state.pending_overlay,
                 state.remote_read_tier,
                 state.requires_authority_receipt,
                 state.remote_propagate_upstream,
@@ -2915,6 +2886,7 @@ where
                     &read_view,
                     Some(prepared_plan),
                     authorization_mode,
+                    pending_overlay,
                     progress_waker,
                 )
                 .await?;
@@ -2981,24 +2953,7 @@ where
                         .filter(|key| pending_authoritative_resets.contains(*key))
                         .cloned()
                 });
-            let local_overlay_row_keys = if authorization_mode
-                == QueryAuthorizationMode::ClientLocal
-                && read_tier == DurabilityTier::Local
-                && remote_read_tier.is_some_and(|tier| tier >= DurabilityTier::Edge)
-                && node.borrow().authored_commit_durability() == DurabilityTier::None
-                && active_authority_view_receipts.borrow().is_some()
-                && supports_pending_overlay_reconciliation(shape.query())
-            {
-                optimistic_transaction_row_keys_for_query(
-                    node,
-                    &mut optimistic_row_keys_by_author,
-                    &shape,
-                    author,
-                )
-                .await?
-            } else {
-                BTreeSet::new()
-            };
+            let local_overlay_row_keys = BTreeSet::new();
             if let Some(authority_result_key) = pending_authority_result {
                 // A client receiver only ever advances from the exact
                 // CoveredInput closure into its own maintained terminal. A
@@ -3201,7 +3156,13 @@ where
                         .filter(|key| pending_authoritative_resets.contains(*key))
                         .cloned()
                 });
-            let authoritative_reset_pending = authoritative_reset_result.is_some();
+            // A propagation receipt is not a replacement input frontier for
+            // local-first. Its ordinary local graph observes synced storage
+            // changes, and must keep draining even when remote scope changes.
+            let authority_scoped = authorization_mode != QueryAuthorizationMode::ClientLocal
+                || read_tier >= DurabilityTier::Edge;
+            let authoritative_reset_pending =
+                authority_scoped && authoritative_reset_result.is_some();
             // Optimistic local writes are represented as eligible local input
             // records in the receiver graph. They are not reconciled against
             // authority output membership at the facade boundary.
@@ -3271,6 +3232,7 @@ where
                         &read_view,
                         None,
                         authorization_mode,
+                        pending_overlay,
                         progress_waker,
                     )
                     .await?;
@@ -3305,16 +3267,11 @@ where
                     refresh.maintained.as_mut()
                 {
                     let mut node_ref = node.lock().await;
-                    // Every client-local remote subscription must
-                    // drain against the authority's binding view. The
-                    // non-durable browser runtime additionally uses
-                    // that same view to preserve its local overlay;
-                    // restricting the view to only that runtime makes
-                    // ordinary Local clients miss a later authority
-                    // revoke until a further refresh.
+                    // Only a scope-bound source consumes authority inputs.
+                    // Local-first remains an ordinary storage-backed graph.
                     let authoritative_result_key = (authorization_mode
                         == QueryAuthorizationMode::ClientLocal
-                        && remote_read_tier.is_some())
+                        && maintained.has_covered_input_sources())
                     .then(|| settled_authority_result.clone())
                     .flatten();
                     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {

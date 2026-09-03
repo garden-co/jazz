@@ -335,6 +335,10 @@ impl<O> Default for OverlayStack<O> {
 /// Requested own-pending overlay included in current reads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum OverlayRef {
+    /// Live pending local changes over exact authority inputs. Existing rows
+    /// must already be in that source's scope; pending inserts may enter it.
+    /// This is host-selected runtime configuration, not a wire capability.
+    PendingLocal,
     /// Include one own-pending direct/local batch.
     DirectBatch(BatchId),
     /// Include one accepted transaction whose payload is local but not yet

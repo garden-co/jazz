@@ -2720,21 +2720,6 @@ fn effective_read_tier(opts: &ReadOpts) -> DurabilityTier {
     }
 }
 
-fn supports_pending_overlay_reconciliation(query: &Query) -> bool {
-    // ponytail: row-key reconciliation currently covers flat root results;
-    // add contributor provenance before enabling structured or aggregate shapes.
-    query.aggregate.is_none()
-        && query.flat_join.is_none()
-        && query.array_subqueries.is_empty()
-        && query.includes.is_empty()
-        && query.joins.is_empty()
-        && query.policy_branches.is_empty()
-        && query.inherits.is_empty()
-        && query.reachable.is_empty()
-        && query.limit.is_none()
-        && query.offset == 0
-}
-
 fn upstream_register_shape_options(
     tier: DurabilityTier,
     read_view: ReadViewSpec,
@@ -4114,6 +4099,8 @@ struct SubscriptionState {
     author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
+    /// Online remote-if-possible overlays pending changes on scoped inputs.
+    pending_overlay: bool,
     remote_read_tier: Option<DurabilityTier>,
     /// Once this stream has an upstream, cached durable state needs a receipt
     /// from each replacement connection before it can be settled again.

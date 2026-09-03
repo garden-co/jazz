@@ -1136,19 +1136,16 @@ where
     fn allocate_client_receiver_input_sources(
         &mut self,
         request: &QueryProgramRequest,
-        include_local_first_bootstrap: bool,
     ) -> Result<
         (
             BTreeMap<SourceId, InputSourceId>,
             BTreeMap<SourceId, RecordDescriptor>,
-            BTreeMap<SourceId, InputSourceId>,
             BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
         ),
         Error,
     > {
         let mut runtime_sources = BTreeMap::new();
         let mut runtime_source_descriptors = BTreeMap::new();
-        let mut provisional_local_gates = BTreeMap::new();
         let mut sources = BTreeMap::new();
         for source_request in query_program_source_requests(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?
@@ -1159,16 +1156,16 @@ where
             let Some(expression) = request.reads.primary.sources.get(&source_request.source) else {
                 continue;
             };
+            let expression = match expression {
+                SourceExpr::WithOverlays { input, overlays }
+                    if overlays.entries == [OverlayRef::PendingLocal] =>
+                {
+                    input.as_ref()
+                }
+                other => other,
+            };
             let settled = matches!(expression, SourceExpr::SettledBindingView { .. });
-            let local_first = include_local_first_bootstrap
-                && matches!(
-                    expression,
-                    SourceExpr::VisibleCurrent {
-                        tier: DurabilityTier::Local,
-                        ..
-                    }
-                );
-            if !(settled || local_first) {
+            if !settled {
                 continue;
             }
             let table = self.table_in_schema(
@@ -1181,11 +1178,7 @@ where
                     &table, &metadata,
                 );
             let input = self.database.allocate_input_source(descriptor.clone());
-            let provisional_local_gate = local_first.then(|| {
-                self.database.allocate_input_source(
-                    maintained_views::local_first_bootstrap_gate_descriptor(),
-                )
-            });
+
             let source_id = source_request.source.program_source_id();
             if sources
                 .insert(
@@ -1193,7 +1186,6 @@ where
                     maintained_views::CoveredInputSource {
                         id: input,
                         descriptor,
-                        provisional_local_gate,
                     },
                 )
                 .is_some()
@@ -1204,16 +1196,8 @@ where
             }
             runtime_sources.insert(source_request.source.clone(), input);
             runtime_source_descriptors.insert(source_request.source.clone(), descriptor);
-            if let Some(gate) = provisional_local_gate {
-                provisional_local_gates.insert(source_request.source, gate);
-            }
         }
-        Ok((
-            runtime_sources,
-            runtime_source_descriptors,
-            provisional_local_gates,
-            sources,
-        ))
+        Ok((runtime_sources, runtime_source_descriptors, sources))
     }
 
     /// Recompile one client-side settled read against ephemeral, exact
@@ -1233,8 +1217,8 @@ where
         read_view: &ReadViewSpec,
         authority_result_key: &AuthorityResultKey,
     ) -> Result<Option<(QueryProgram, maintained_views::CoveredInputReceiver)>, Error> {
-        let (runtime_sources, runtime_source_descriptors, provisional_local_gates, sources) =
-            self.allocate_client_receiver_input_sources(&request, false)?;
+        let (runtime_sources, runtime_source_descriptors, sources) =
+            self.allocate_client_receiver_input_sources(&request)?;
         if sources.is_empty() {
             return Err(Error::InvalidStoredValue(
                 "client settled read has no covered-input source occurrences",
@@ -1247,7 +1231,6 @@ where
                 access_paths,
                 runtime_sources,
                 runtime_source_descriptors,
-                provisional_local_gates,
             )
             .await
         {
@@ -1279,20 +1262,14 @@ where
         Ok(Some((program, receiver)))
     }
 
-    /// Every descriptor-bound receiver allocation has both a data source and,
-    /// for Local-first, an optional bootstrap gate. Compilation/closure
-    /// validation failures happen before either is owned by a subscription, so
-    /// they must retire both rather than leaving unreachable Groove inputs.
+    /// Compilation/closure validation failures happen before these runtime
+    /// inputs are owned by a subscription, so retire the allocations here.
     async fn retire_covered_input_sources(
         &mut self,
         sources: &BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
     ) -> Result<(), Error> {
         self.database
-            .retire_input_sources(
-                sources.values().flat_map(|source| {
-                    std::iter::once(source.id).chain(source.provisional_local_gate)
-                }),
-            )
+            .retire_input_sources(sources.values().map(|source| source.id))
             .await
             .map(|_| ())
             .map_err(Error::Groove)
@@ -1857,130 +1834,19 @@ where
         if tier == DurabilityTier::None {
             return None;
         }
+        // Local-first never substitutes a remote scope for local knowledge.
+        // Propagation remains enabled independently of this source choice.
         if tier == DurabilityTier::Local {
-            // A Local subscription still propagates. Once its own exact
-            // authority closure has arrived, an identical Local read must
-            // consume that receiver-local source graph rather than reopening
-            // the raw overlay. This direct receipt is distinct from the
-            // bounded Edge-page reuse below: the latter is a compiler-owned
-            // containment optimization for a *different* Local query shape.
-            let local_read_view = RegisterShapeOptions {
-                tier: DurabilityTier::Local,
-                read_view: read_view.clone(),
-                ..RegisterShapeOptions::default()
-            }
-            .read_view_key();
-            let direct = self
-                .query
-                .authority_results
-                .iter()
-                .filter_map(|(authority_key, state)| {
-                    (authority_key.binding_view
-                        == BindingViewKey::new(
-                            shape.shape_id(),
-                            binding.binding_id(),
-                            local_read_view,
-                        )
-                        && matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. }))
-                    .then_some(ClientSettledBindingView {
-                        key: authority_key.binding_view,
-                        retained_window: RetainedRootWindowSource::for_shape(shape)
-                            .is_bounded()
-                            .then(|| RetainedRootWindowSource::for_shape(shape)),
-                    })
-                })
-                .collect::<Vec<_>>();
-            if direct.len() == 1 {
-                return direct.into_iter().next();
-            }
-            if direct.len() > 1 {
-                // A public local facade may not guess across policy scopes.
-                return None;
-            }
-            // A non-durable foreground can use an active exact source page,
-            // or reuse a detached page only through its compiler-owned
-            // descriptor. There is deliberately no search through similarly
-            // shaped registrations or authority output.
-            if self.authored_commit_durability != DurabilityTier::None {
-                return None;
-            }
-            let edge_read_view = RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
-                read_view: read_view.clone(),
-                ..RegisterShapeOptions::default()
-            }
-            .read_view_key();
-            let active = self
-                .query
-                .authority_results
-                .iter()
-                .filter_map(|(authority_key, state)| {
-                    if authority_key.binding_view.binding_id != binding.binding_id()
-                        || authority_key.binding_view.read_view != edge_read_view
-                        || !matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
-                    {
-                        return None;
-                    }
-                    let source_shape = self
-                        .query
-                        .registered_shapes
-                        .get(&authority_key.binding_view.shape_id)?;
-                    let descriptor = RetainedRootWindowSource::for_shape(source_shape);
-                    descriptor
-                        .is_bounded()
-                        .then_some(descriptor)
-                        .filter(|descriptor| descriptor.contains_target(shape))
-                        .map(|descriptor| ClientSettledBindingView {
-                            key: authority_key.binding_view,
-                            retained_window: Some(descriptor),
-                        })
-                })
-                .collect::<Vec<_>>();
-            if active.len() == 1 {
-                return active.into_iter().next();
-            }
-            // More than one active policy scope is not a public local-read
-            // capability. The ordinary local overlay remains available, but
-            // cannot impersonate either policy-scoped authority source.
-            if active.len() > 1 {
-                return None;
-            }
-            let matches = self
-                .query
-                .retained_root_window_sources
-                .iter()
-                .filter(|(authority_key, descriptor)| {
-                    authority_key.binding_view.binding_id == binding.binding_id()
-                        && authority_key.binding_view.read_view == edge_read_view
-                        && descriptor.is_bounded()
-                        && descriptor.contains_target(shape)
-                })
-                .map(|(authority_key, descriptor)| ClientSettledBindingView {
-                    key: authority_key.binding_view,
-                    retained_window: Some(descriptor.clone()),
-                })
-                .collect::<Vec<_>>();
-            // A query facade has no caller-controlled policy selector. Never
-            // guess across two scoped receipts; the scope owner must open a
-            // fresh authority usage site instead.
-            return (matches.len() == 1)
-                .then(|| matches.into_iter().next().expect("one retained window"));
+            return None;
         }
         let settled_tier = tier;
         let binding_view = BindingViewKey::new(
             shape.shape_id(),
             binding.binding_id(),
             RegisterShapeOptions {
-                // A non-durable browser-side runtime consumes the worker
-                // relay's Edge handoff. Ordinary durable clients retain the
-                // Global source their upstream coverage actually populated.
-                // The relay-only authority source is selected explicitly by
-                // `open_seeded_relay_edge_subscription_view` below.
-                tier: if self.authored_commit_durability == DurabilityTier::None {
-                    settled_tier
-                } else {
-                    DurabilityTier::Global
-                },
+                // Storage durability does not select a different authority
+                // subscription. Consume the exact tier the caller requested.
+                tier: settled_tier,
                 read_view: read_view.clone(),
                 ..RegisterShapeOptions::default()
             }
@@ -2048,6 +1914,7 @@ where
         })
     }
 
+    #[cfg(test)]
     fn query_storage_read_tables(&self, shape: &ValidatedQuery) -> Option<BTreeSet<String>> {
         let query = shape.query();
         let read_schema_version = shape.schema_version();
@@ -2071,19 +1938,7 @@ where
         Some(tables)
     }
 
-    pub(crate) fn transaction_row_keys_for_query(
-        &self,
-        shape: &ValidatedQuery,
-        row_keys: &BTreeSet<(String, RowUuid)>,
-    ) -> BTreeSet<(String, RowUuid)> {
-        let query_tables = self.query_storage_read_tables(shape);
-        let mut row_keys = row_keys.clone();
-        if let Some(query_tables) = query_tables {
-            row_keys.retain(|(table, _)| query_tables.contains(table));
-        }
-        row_keys
-    }
-
+    #[cfg(test)]
     fn collect_include_read_tables(
         &self,
         root_table: &str,
@@ -3414,6 +3269,7 @@ where
             None,
             None,
             PreparedClaimBindingMode::Strict,
+            false,
             progress_waker,
         )
         .await
@@ -3514,6 +3370,7 @@ where
                 settled_binding_view,
                 Some(authority_result_key.clone()),
                 PreparedClaimBindingMode::Strict,
+                false,
                 progress_waker,
             )
             .await?;
@@ -3657,6 +3514,7 @@ where
             None,
             None,
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
+            false,
             progress_waker,
         )
         .await
@@ -3686,6 +3544,7 @@ where
         settled_binding_view: Option<BindingViewKey>,
         settled_authority_result_key: Option<AuthorityResultKey>,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
+        pending_overlay: bool,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
@@ -3734,6 +3593,23 @@ where
                 }
             }
         }
+        if pending_overlay {
+            if authorization_mode != QueryAuthorizationMode::ClientLocal {
+                return Err(Error::InvalidStoredValue(
+                    "pending receiver overlay requires client-local execution",
+                ));
+            }
+            for source in request.reads.primary.sources.values_mut() {
+                if matches!(source, SourceExpr::SettledBindingView { .. }) {
+                    *source = SourceExpr::WithOverlays {
+                        input: Box::new(source.clone()),
+                        overlays: OverlayStack {
+                            entries: vec![OverlayRef::PendingLocal],
+                        },
+                    };
+                }
+            }
+        }
         let mut access_paths = self.current_query_primary_key_access_paths(&shape, &binding)?;
         access_paths.extend(
             self.query_program_access_paths(&request, true)?
@@ -3744,21 +3620,17 @@ where
         // requirements before any source is resolved. This keeps the initial
         // lowering from consulting an authority result just to discover a
         // descriptor.
-        let (
-            runtime_sources,
-            runtime_source_descriptors,
-            provisional_local_gates,
-            covered_input_sources,
-        ) = if authorization_mode == QueryAuthorizationMode::ClientLocal {
-            self.allocate_client_receiver_input_sources(&request, true)?
-        } else {
-            (
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-            )
-        };
+        let (runtime_sources, runtime_source_descriptors, covered_input_sources) =
+            if authorization_mode == QueryAuthorizationMode::ClientLocal {
+                // Local-first uses ordinary local current state for its entire
+                // lifetime. Receiving an authority scope does not revoke cached
+                // knowledge. Only settled remote source expressions require an
+                // exact receiver input; do not convert Local into a provisional
+                // authority-scoped read.
+                self.allocate_client_receiver_input_sources(&request)?
+            } else {
+                (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
+            };
         let program = if runtime_sources.is_empty() {
             match self
                 .compile_query_program_request_with_access_paths(request, access_paths)
@@ -3779,7 +3651,6 @@ where
                     access_paths,
                     runtime_sources,
                     runtime_source_descriptors,
-                    provisional_local_gates,
                 )
                 .await
             {
@@ -3806,19 +3677,7 @@ where
                 program.source_descriptors.keys().collect::<Vec<_>>(),
             );
         }
-        // Before the first exact authority closure, Local-first preserves its
-        // immediate cached-open behavior through descriptor-bound runtime
-        // inputs.  This is retired wholesale by the first claimed closure;
-        // strict remote sources have no provisional records.
-        if authorization_mode == QueryAuthorizationMode::ClientLocal
-            && let Err(error) = self
-                .start_provisional_local_receiver_inputs(&covered_input_sources)
-                .await
-        {
-            self.retire_covered_input_sources(&covered_input_sources)
-                .await?;
-            return Err(error);
-        }
+
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         let binding_source_shape = program
@@ -4280,6 +4139,8 @@ fn collect_operand_param(operand: &Operand, params: &mut BTreeSet<String>) {
         params.insert(param.clone());
     }
 }
+
+#[cfg(test)]
 
 fn collect_join_read_tables(join: &crate::query::JoinVia, tables: &mut BTreeSet<String>) {
     tables.insert(join.table.clone());

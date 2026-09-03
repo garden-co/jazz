@@ -109,8 +109,9 @@ the write-durability values used by `wait({ tier })`.
 
 The read tier also determines how a subscription treats your own local writes:
 
-- `"local-first"` and `"remote-if-possible"` show your own local writes immediately once the subscription has settled at least once.
-- `"remote"` defers your own local writes until the server accepts them.
+- `"local-first"` shows pending local writes using locally known data.
+- Online `"remote-if-possible"` shows pending edits/deletes to rows already in remote scope, plus matching new inserts. Existing out-of-scope rows and cached related rows are not pulled in merely because of a pending edit. After an explicit disconnect, it uses local knowledge instead.
+- `"remote"` has no pending overlay: writes appear when reflected in the server's query scope.
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including which APIs accept these options and how they compose.
 

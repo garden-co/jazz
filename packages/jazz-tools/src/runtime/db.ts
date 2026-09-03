@@ -2827,33 +2827,36 @@ export class Db {
     } else {
       startNativeSubscription(initialSubscription);
     }
-    // A remote-if-possible subscription opened during an explicit disconnect
-    // truthfully starts from local state, then replaces that native stream with
-    // the ordinary edge-gated stream after reconnect. Transport errors never
-    // take this branch.
-    if (remoteIfPossibleOffline) {
-      void this.connection
-        .waitForReconnect(readyAbort.signal)
-        .then(async () => {
-          if (unsubscribed || readyAbort.signal.aborted || activeSubscription === null) return;
-          await this.ensureReady("edge", readyAbort.signal);
-          if (unsubscribed || readyAbort.signal.aborted || activeSubscription === null) return;
-          const retired = activeSubscription;
-          // Selecting the replacement generation retires callbacks from the
-          // local stream atomically. The local handle itself remains attached
-          // until replacement installation either succeeds or terminalizes.
-          const replacement = createSubscriptionGeneration(retired);
-          if (
-            startNativeSubscription(replacement, { ...queryOptions, tier: "edge" }) === replacement
-          ) {
-            retireNativeSubscription(retired);
-            replacement.predecessor = null;
-          }
-        })
-        .catch((error: unknown) => {
-          if (unsubscribed || readyAbort.signal.aborted || activeSubscription === null) return;
-          terminalizeSubscription(activeSubscription, error);
-        });
+    // Connectivity changes select inputs, not a second result merger. Retire
+    // the old generation immediately so late local/remote callbacks cannot
+    // cross the transition. Reconnecting waits for a fresh remote opening.
+    if (options?.tier === ReadTier.RemoteIfPossible) {
+      let selectedOffline = remoteIfPossibleOffline;
+      this.connection.onExplicitOfflineChange((offline) => {
+        if (
+          offline === selectedOffline ||
+          unsubscribed ||
+          terminalized ||
+          activeSubscription === null
+        )
+          return;
+        selectedOffline = offline;
+        const retired = activeSubscription;
+        const replacement = createSubscriptionGeneration();
+        retireNativeSubscription(retired);
+        bufferedDeltas.length = 0;
+        const replacementOptions = {
+          ...queryOptions,
+          tier: offline ? ("local" as const) : ReadTier.RemoteIfPossible,
+        };
+        if (offline) {
+          startNativeSubscription(replacement, replacementOptions);
+        } else {
+          void this.ensureReady("edge", readyAbort.signal)
+            .then(() => startNativeSubscription(replacement, replacementOptions))
+            .catch((error: unknown) => terminalizeSubscription(replacement, error));
+        }
+      }, readyAbort.signal);
     }
     if (
       this.config.serverUrl &&

@@ -30,20 +30,22 @@ Transactions use `.wait(...)` and report errors in the same way as individual mu
 
 ## Read tiers
 
-Read choices control when the **first result** of a query or subscription is delivered.
+Read choices control which data a query uses and when its **first result** is delivered.
 They are intentionally separate from write durability.
 
 New applications should use the product read choices `"local-first"`,
 `"remote"`, and `"remote-if-possible"`:
 
-- `"local-first"` show local data before the server's, and shows your own local writes immediately.
-- `"remote"` shows only data accepted by the server.
+- `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
+- `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
 - `"remote-if-possible"` prioritizes remote data, but falls back to local data if the app explicitly calls `db.disconnect()` (a timeout, connection error, or slow response never triggers that fallback).
-  Local writes are optimistically shown before server approval.
+  Online, pending edits/deletes to in-scope rows and matching new inserts appear before server approval. Editing an existing out-of-scope row does not bring it into the result; cached related rows are not pulled in automatically.
 
-A one-shot keeps its initial choice, while a disconnected `"remote-if-possible"`
-subscription starts locally and is replaced with the ordinary remote subscription
-after reconnect.
+A one-shot keeps its initial choice. A `"remote-if-possible"` subscription follows
+confirmed disconnect/reconnect transitions in both directions, waiting for a fresh
+remote scope on reconnect. Losing remote access does not erase cached data:
+local-first and offline fallback may still show it. An actual synced deletion,
+however, hides the row from local reads too.
 
 The older read values `"local"`, `"edge"`, and `"global"` remain accepted
 with their existing semantics during migration. They are legacy read controls only;

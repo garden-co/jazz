@@ -458,7 +458,6 @@ where
             access_paths,
             BTreeMap::new(),
             BTreeMap::new(),
-            BTreeMap::new(),
         )
         .await
     }
@@ -475,7 +474,6 @@ where
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
         covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
-        provisional_local_gates: BTreeMap<SourceId, groove::ivm::InputSourceId>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
             request,
@@ -483,7 +481,6 @@ where
             access_paths,
             covered_input_sources,
             covered_input_descriptors,
-            provisional_local_gates,
             true,
         )
         .await
@@ -500,7 +497,6 @@ where
             access_paths,
             BTreeMap::new(),
             BTreeMap::new(),
-            BTreeMap::new(),
             false,
         )
         .await
@@ -513,7 +509,6 @@ where
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
         covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
-        provisional_local_gates: BTreeMap<SourceId, groove::ivm::InputSourceId>,
         count_access_path_metrics: bool,
     ) -> Result<QueryProgram, Error> {
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
@@ -536,7 +531,6 @@ where
             inline_sources,
             covered_input_sources,
             covered_input_descriptors,
-            provisional_local_gates,
             access_paths,
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
@@ -587,7 +581,6 @@ where
                 inline_sources: BTreeMap::new(),
                 covered_input_sources: BTreeMap::new(),
                 covered_input_descriptors: BTreeMap::new(),
-                provisional_local_gates: BTreeMap::new(),
                 access_paths: BTreeMap::new(),
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),

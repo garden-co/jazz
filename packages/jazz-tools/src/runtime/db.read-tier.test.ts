@@ -469,12 +469,12 @@ describe("Db ReadTier.RemoteIfPossible", () => {
 
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
     expect(client.subscribe).toHaveBeenCalledTimes(2);
-    expect(client.subscribe.mock.calls[1]?.[2]).toMatchObject({ tier: "edge" });
+    expect(client.subscribe.mock.calls[1]?.[2]).toMatchObject({ tier: ReadTier.RemoteIfPossible });
 
     unsubscribe();
   });
 
-  it("keeps local updates live during handoff and rejects callbacks from the retired stream", async () => {
+  it("waits for fresh remote inputs on reconnect and rejects retired local callbacks", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {
@@ -507,10 +507,10 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await db.reconnect();
     await settle();
     expect(client.subscribe).toHaveBeenCalledOnce();
-    expect(client.unsubscribe).not.toHaveBeenCalled();
+    expect(client.unsubscribe).toHaveBeenCalledWith(1);
 
     localCallback(added("during", "during handoff"));
-    expect(publications.at(-1)).toEqual(["during handoff"]);
+    expect(publications.at(-1)).toEqual([]);
 
     edgeReady.resolve();
     await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
@@ -520,8 +520,50 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(publications).toHaveLength(publicationCount);
 
     client.subscriptionCallbacks.get(2)!(added("remote", "remote"));
-    expect(publications.at(-1)).toEqual(["remote", "during handoff"]);
+    expect(publications.at(-1)).toEqual(["remote"]);
     unsubscribe();
+  });
+
+  it("switches an existing remote-if-possible stream repeatedly without admitting retired callbacks", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-repeated-transition",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    const onDelta = vi.fn();
+    const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+      query(),
+      { onDelta },
+      {
+        tier: ReadTier.RemoteIfPossible,
+      },
+    );
+    for (const [index, offline] of [true, false, true, false].entries()) {
+      const previous = client.subscriptionCallbacks.get(index + 1)!;
+      if (offline) await db.disconnect();
+      else await db.reconnect();
+      await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(index + 2));
+      expect(client.subscribe.mock.calls[index + 1]?.[2]).toMatchObject({
+        tier: offline ? "local" : ReadTier.RemoteIfPossible,
+      });
+      onDelta.mockClear();
+      previous(added("stale", "retired generation"));
+      expect(onDelta).not.toHaveBeenCalled();
+      client.subscriptionCallbacks.get(index + 2)!(added(`live-${index}`, "current generation"));
+      expect(onDelta).toHaveBeenCalledOnce();
+    }
+    unsubscribe();
+    const count = client.subscribe.mock.calls.length;
+    await db.disconnect();
+    await db.reconnect();
+    await settle();
+    expect(client.subscribe).toHaveBeenCalledTimes(count);
+    expect(client.subscriptionCallbacks.size).toBe(0);
   });
 
   it("terminalizes the local generation when reconnect handoff readiness fails", async () => {

@@ -21,10 +21,6 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// authored descriptor after the physical catalogue has selected a
     /// canonical enum/schema boundary.
     pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
-    /// Local-first bootstrap gates keyed by the same exact source occurrence
-    /// as its CoveredInput slot. The gate controls only the provisional
-    /// retained-local arm and is cleared with the first exact closure.
-    pub(super) provisional_local_gates: BTreeMap<SourceId, groove::ivm::InputSourceId>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     /// Whether access-path metrics should account for this logical graph
     /// fragment. A policy proof specialized from its outer source reuses the
@@ -74,25 +70,46 @@ where
         let Some(source) = self.read_view.sources.get(&request.source) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
-        let covered_input_source = self.covered_input_sources.get(&request.source).copied();
-        let covered_input_descriptor = self.covered_input_descriptors.get(&request.source).cloned();
+        // The overlay is explicit in the source expression; Local-first is
+        // ordinary local storage, never an implicit authority-scoped overlay.
+        let pending_current = match source {
+            SourceExpr::WithOverlays { input, overlays }
+                if overlays.entries == [OverlayRef::PendingLocal] =>
+            {
+                match input.as_ref() {
+                    SourceExpr::SettledBindingView { projection, .. } => {
+                        Some(SourceExpr::VisibleCurrent {
+                            projection: projection.clone(),
+                            data: DataSource::Current,
+                            tier: DurabilityTier::Local,
+                        })
+                    }
+                    _ => return Err(source_resolution_error(request, SourceGap::Coverage)),
+                }
+            }
+            _ => None,
+        };
+        let pending_overlay = pending_current.is_some();
+        let source = pending_current.as_ref().unwrap_or(source);
+        let (covered_input_source, covered_input_descriptor) =
+            if request.visibility == RowVisibility::Visible {
+                (
+                    self.covered_input_sources.get(&request.source).copied(),
+                    self.covered_input_descriptors.get(&request.source).cloned(),
+                )
+            } else {
+                (None, None)
+            };
         if covered_input_source.is_some() != covered_input_descriptor.is_some() {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         }
-        let provisional_local_gate = self.provisional_local_gates.get(&request.source).copied();
+
         // A receiver-local Local source has exactly two possible inputs: the
         // authority-covered frontier and this node's still-pending Ahead
         // overlay.  It must never reopen the ordinary Local source here:
         // that source also contains Global rows previously received from the
         // authority, which would keep a retracted covered row alive.
-        let receiver_local_overlay = covered_input_source.is_some()
-            && matches!(
-                source,
-                SourceExpr::VisibleCurrent {
-                    tier: DurabilityTier::Local,
-                    ..
-                }
-            );
+        let receiver_local_overlay = covered_input_source.is_some() && pending_overlay;
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
             && !self.covered_input_sources.is_empty()
         {
@@ -1218,6 +1235,24 @@ where
                 };
                 (graph, source.descriptor, source.metadata, BTreeSet::new())
             }
+        } else if request.visibility == RowVisibility::IncludeDeleted && pending_overlay {
+            // A receiver's own pending deletion needs no read-policy proof.
+            // Do not reopen persisted Global data for this internal sibling.
+            let graph = self
+                .pending_deletion_winner_graph(request)?
+                .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                .project_fields([
+                    ProjectField::named("row_uuid"),
+                    ProjectField::named("tx_time"),
+                    ProjectField::named("tx_node_id"),
+                    ProjectField::literal("__jazz_deleted", Value::Bool(true)),
+                ]);
+            (
+                graph,
+                include_deleted_current_row_descriptor(&table),
+                BTreeMap::new(),
+                BTreeSet::new(),
+            )
         } else if request.visibility == RowVisibility::IncludeDeleted
             && self.needs_projected_current_source(&request.source.table)
         {
@@ -1390,7 +1425,7 @@ where
         // the authored enum occurrence above.
         let descriptor = covered_input_descriptor.clone().unwrap_or(descriptor);
         let graph = if let Some(input_source) = covered_input_source {
-            // Local-first composes the authority's approved closure with the
+            // Online remote-if-possible composes the authority closure with the
             // eligible local-current overlay before it enters the same
             // maintained program. The union is per normalized source
             // occurrence; table-level union would conflate aliases/self-joins.
@@ -1408,41 +1443,48 @@ where
             }
             let covered_descriptor = covered_input_descriptor
                 .expect("checked alongside compiler-owned covered input source");
-            let mut inputs = vec![
-                GraphBuilder::input_source(input_source, covered_descriptor.clone()),
-                graph,
-            ];
-            if let Some(gate) = provisional_local_gate {
-                if !receiver_local_overlay {
-                    return Err(source_resolution_error(request, SourceGap::Coverage));
-                }
-                let provisional_global_base = self
-                    .provisional_local_global_source_graph(request, &table)
-                    .await?;
-                let (provisional_global, _provisional_descriptor, _, _) =
-                    resolved_current_source_graph(
-                        self.node,
-                        &table,
-                        DurabilityTier::Global,
-                        &request.requirements,
-                        &authorization,
-                        self.read_view.policy_schema,
-                        Some(self.read_view),
-                        None,
-                        Some(provisional_global_base),
+            let covered = GraphBuilder::input_source(input_source, covered_descriptor.clone());
+            let graph = if receiver_local_overlay {
+                // Existing cached rows outside this exact source occurrence
+                // cannot enter merely because they have a pending edit.
+                // Pending inserts have no accepted content predecessor.
+                let projection_target = self.current_projection_target(request, &table)?;
+                let accepted = self
+                    .node
+                    .physical_current_source_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        projection_target,
                     )
-                    .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
-                inputs.push(gate_provisional_local_graph(
-                    provisional_global,
-                    &descriptor,
-                    gate,
-                ));
-            }
-            GraphBuilder::arg_max_by(
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
+                    .project(["row_uuid"]);
+                let out_of_scope = GraphBuilder::anti_join(
+                    accepted,
+                    covered.clone().project(["row_uuid"]),
+                    ["row_uuid"],
+                    ["row_uuid"],
+                );
+                GraphBuilder::anti_join(graph, out_of_scope, ["row_uuid"], ["row_uuid"])
+            } else {
+                graph
+            };
+            let inputs = vec![covered, graph];
+
+            let winner = GraphBuilder::arg_max_by(
                 GraphBuilder::union(inputs),
                 ["row_uuid"],
                 ["tx_time", "tx_node_id"],
-            )
+            );
+            if receiver_local_overlay {
+                let deleted = self
+                    .pending_deletion_winner_graph(request)?
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                    .project(["row_uuid"]);
+                GraphBuilder::anti_join(winner, deleted, ["row_uuid"], ["row_uuid"])
+            } else {
+                winner
+            }
         } else {
             graph
         };
@@ -2026,35 +2068,8 @@ where
         .await
     }
 
-    /// Retained current state participates in Local-first only while its
-    /// descriptor-bound bootstrap gate is installed.  The gate is cleared in
-    /// the same runtime replacement batch as the first exact authority
-    /// closure, so this physical source cannot become a post-settlement
-    /// authority fallback.
-    async fn provisional_local_global_source_graph(
-        &mut self,
-        request: &SourceRequest,
-        table: &TableSchema,
-    ) -> Result<GraphBuilder, SourceResolutionError> {
-        self.visible_current_physical_source_graph(
-            request,
-            table,
-            PhysicalCurrentClass::Global,
-            DurabilityTier::Global,
-        )
-        .await
-    }
-
-    /// Read one physical current arm as logical *visible* rows.  Receiver
-    /// input arms are still physical storage-backed graphs, but they must
-    /// share the ordinary visible-current deletion fence: a pending deletion
-    /// retracts its pending content row, and a retained global deletion never
-    /// leaks through the provisional Local-first bootstrap gate.
-    ///
-    /// `deletion_tier` deliberately differs by arm.  The Ahead arm is overlaid
-    /// by the current Local deletion winner (Global ∪ Ahead), while the
-    /// provisional Global arm is fenced only by the settled Global register.
-    /// The exact authority CoveredInput arm remains independent of storage.
+    /// Read a physical current arm with the ordinary deletion fence. The
+    /// authority input remains independent of this storage-backed Ahead arm.
     async fn visible_current_physical_source_graph(
         &mut self,
         request: &SourceRequest,
@@ -2161,6 +2176,30 @@ where
         }
     }
 
+    fn pending_deletion_winner_graph(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let ahead = if self.needs_projected_current_source(&request.source.table) {
+            let table_id = self
+                .node
+                .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            GraphBuilder::table(physical_register_ahead_current_table_name(table_id))
+        } else {
+            GraphBuilder::table(register_ahead_current_table_name(&request.source.table))
+        };
+        let fields = register_storage_fields_for_query_engine("");
+        // Ahead can contain several unconfirmed operations for the same row.
+        // A pending restore must supersede an earlier pending deletion.
+        Ok(GraphBuilder::arg_max_by(
+            ahead.project_fields(fields.clone()),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project_fields(fields))
+    }
+
     pub(crate) fn deletion_register_source_for_request(
         &mut self,
         request: &SourceRequest,
@@ -2184,6 +2223,15 @@ where
             || open_tx_overlay.is_some()
         {
             return Err(source_resolution_error(request, SourceGap::Coverage));
+        }
+        if matches!(self.read_view.sources.get(&request.source),
+            Some(SourceExpr::WithOverlays { overlays, .. })
+                if overlays.entries == [OverlayRef::PendingLocal])
+        {
+            return Ok(Some(DeletionRegisterSource {
+                graph: self.pending_deletion_winner_graph(request)?,
+                row_uuid_field: "row_uuid".to_owned(),
+            }));
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(DeletionRegisterSource {
@@ -3633,32 +3681,6 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
         fields.push(("__jazz_deleted".to_owned(), ValueType::Bool));
     }
     RecordDescriptor::new(fields)
-}
-
-/// Keep the provisional retained-local source inside the same receiver graph
-/// without giving it a second terminal path. Its one-row gate is an internal
-/// lifecycle control, not a table/result/collector selector.
-fn gate_provisional_local_graph(
-    graph: GraphBuilder,
-    descriptor: &RecordDescriptor,
-    gate: groove::ivm::InputSourceId,
-) -> GraphBuilder {
-    let fields = descriptor_field_names(descriptor)
-        .expect("compiler-owned receiver source descriptor always has named fields");
-    let gate_field = super::maintained_views::LOCAL_FIRST_BOOTSTRAP_GATE_FIELD;
-    let gated = graph.project_fields(fields.iter().cloned().map(ProjectField::named).chain(
-        std::iter::once(ProjectField::literal(gate_field, Value::Bool(true))),
-    ));
-    GraphBuilder::semi_join(
-        gated,
-        GraphBuilder::input_source(
-            gate,
-            super::maintained_views::local_first_bootstrap_gate_descriptor(),
-        ),
-        [gate_field],
-        [gate_field],
-    )
-    .project(fields)
 }
 
 impl<S> NodeState<S>

@@ -31,16 +31,6 @@ pub(crate) struct LocalMaintainedViewSubscription {
 pub(crate) struct CoveredInputSource {
     pub(super) id: InputSourceId,
     pub(super) descriptor: RecordDescriptor,
-    /// A Local-first source may read retained local state while its gate is
-    /// present. The first claimed closure clears that gate atomically; strict
-    /// remote sources have no gate.
-    pub(super) provisional_local_gate: Option<InputSourceId>,
-}
-
-pub(crate) const LOCAL_FIRST_BOOTSTRAP_GATE_FIELD: &str = "__jazz_local_first_bootstrap";
-
-pub(crate) fn local_first_bootstrap_gate_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([(LOCAL_FIRST_BOOTSTRAP_GATE_FIELD.to_owned(), ValueType::Bool)])
 }
 
 /// Runtime-local state for the exact, policy-scoped source closure installed
@@ -230,38 +220,6 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Start the bounded Local-first bootstrap phase without synchronously
-    /// scanning storage. The receiving graph's retained-local arm is gated by
-    /// one runtime record, so asynchronous storage loading happens through
-    /// its ordinary Groove source after opening returns.
-    pub(crate) async fn start_provisional_local_receiver_inputs(
-        &mut self,
-        sources: &BTreeMap<ProgramSourceId, CoveredInputSource>,
-    ) -> Result<(), Error> {
-        let gate_descriptor = local_first_bootstrap_gate_descriptor();
-        let gate_record = gate_descriptor.create(&[Value::Bool(true)])?;
-        let replacements = sources
-            .values()
-            .filter_map(|source| {
-                source
-                    .provisional_local_gate
-                    .map(|id| InputSourceReplacement {
-                        id,
-                        descriptor: gate_descriptor.clone(),
-                        records: vec![gate_record.clone()],
-                    })
-            })
-            .collect::<Vec<_>>();
-        if replacements.is_empty() {
-            return Ok(());
-        }
-        self.database
-            .replace_input_sources(replacements)
-            .await
-            .map_err(Error::Groove)?;
-        Ok(())
-    }
-
     #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_maintained_view_subscription_in_authorization_mode(
         &mut self,
@@ -281,6 +239,7 @@ where
             read_view,
             retained_prepared_plan,
             authorization_mode,
+            false,
             None,
         )
         .await
@@ -297,6 +256,7 @@ where
         read_view: &ReadViewSpec,
         retained_prepared_plan: Option<SubscriptionPreparedPlan>,
         authorization_mode: QueryAuthorizationMode,
+        pending_overlay: bool,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
         if let Some(retained) = retained_prepared_plan.as_ref() {
@@ -345,6 +305,7 @@ where
                 settled_binding_view,
                 settled_authority_result_key.clone(),
                 PreparedClaimBindingMode::Strict,
+                pending_overlay,
                 progress_waker,
             )
             .await?;
@@ -389,7 +350,9 @@ where
         let _initial_delta = self
             .apply_local_maintained_view_transitions(&mut local, transitions)
             .await?;
-        if let Some(authority_result_key) = settled_authority_result_key.clone() {
+        if local.has_covered_input_sources()
+            && let Some(authority_result_key) = settled_authority_result_key.clone()
+        {
             if self
                 .install_opened_local_covered_receiver(
                     &mut local,
@@ -573,6 +536,12 @@ where
         receiver: &CoveredInputReceiver,
         authority_result_key: &AuthorityResultKey,
     ) -> bool {
+        // A local-knowledge graph has no authority input slots to replace.
+        // Remote receipts can advance sync without gating or retiring its
+        // locally stored rows and pending writes.
+        if receiver.is_empty() {
+            return false;
+        }
         let Some(authority_result) = self.query.authority_results.get(authority_result_key) else {
             return false;
         };
@@ -985,7 +954,7 @@ where
             .iter()
             .map(|(source, rows)| (source.clone(), rows.len()))
             .collect::<Vec<_>>();
-        let mut replacements = receiver
+        let replacements = receiver
             .sources
             .iter()
             .map(|(source, runtime_source)| InputSourceReplacement {
@@ -997,20 +966,7 @@ where
                     .unwrap_or_default(),
             })
             .collect::<Vec<_>>();
-        // Retire every Local-first provisional cache gate in this *same*
-        // runtime batch. The receiver graph therefore observes either the
-        // provisional retained-local source or the complete authority closure,
-        // never both frontiers after settlement.
-        let gate_descriptor = local_first_bootstrap_gate_descriptor();
-        replacements.extend(receiver.sources.values().filter_map(|source| {
-            source
-                .provisional_local_gate
-                .map(|id| InputSourceReplacement {
-                    id,
-                    descriptor: gate_descriptor.clone(),
-                    records: Vec::new(),
-                })
-        }));
+
         let replacement_metrics = self
             .database
             .replace_input_sources(replacements)

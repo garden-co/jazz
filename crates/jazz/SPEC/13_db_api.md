@@ -245,11 +245,24 @@ events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `DurabilityTier` remains the protocol/core lattice and the write-settlement API.
 Bindings expose the separate, read-only `ReadTier` vocabulary:
 
-| `ReadTier`         | binding behavior                                                                                                      | own local writes | core lowering                                                                       |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------- |
-| `LocalFirst`       | return/evaluate local knowledge                                                                                       | immediate        | `DurabilityTier::Local`                                                             |
-| `Remote`           | wait for the ordinary remote/edge view                                                                                | deferred         | legacy remote durability tier                                                       |
-| `RemoteIfPossible` | use local knowledge only after an application explicitly disconnects; otherwise use the same initial gate as `Remote` | immediate        | local only for that explicit-offline start, otherwise legacy remote durability tier |
+| `ReadTier`         | binding behavior                                                                | own local writes                     | core lowering                                                              |
+| ------------------ | ------------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------- |
+| `LocalFirst`       | evaluate cached local knowledge, online or offline                              | immediate                            | local current state plus pending changes                                   |
+| `Remote`           | wait for the current authority scope; wait while offline                        | excluded                             | remote accepted inputs only                                                |
+| `RemoteIfPossible` | online: authority inputs plus bounded pending overlay; offline: local knowledge | immediate within the selected inputs | remote scope with pending edits/deletes and new inserts, or local fallback |
+
+The online bounded overlay applies edits/deletes to authority-scoped rows and
+admits eligible pending new inserts through the same query. An edit does not
+itself admit an existing out-of-scope row, nor does a relationship expand into
+cached dependencies. Existing data newly relevant because of a pending edit
+may wait for the authority's next scope update. Broader expansion is an open
+question in [#2501](https://github.com/garden-co/jazz/issues/2501).
+
+Remote scope withdrawal is not a deletion or a persistent client permission
+filter. LocalFirst may still show downloaded rows; RemoteIfPossible may show
+them again on offline fallback. An actual authorized deletion version updates
+local knowledge and must suppress ordinary local reads too. Clients do not
+reevaluate read permissions. See ch. 16 §16.1.1 for source and deletion rules.
 
 Bindings MUST infer the own-local-write policy from `ReadTier`; they MUST NOT
 expose `LocalUpdates` as a product query option. The low-level core `ReadOpts`
@@ -262,10 +275,10 @@ binding `ReadTier` type.
 
 `RemoteIfPossible` does **not** infer offline state from a timeout, connection
 error, slow response, or an ordinary transport reconnect. A one-shot read
-chooses once. A subscription that starts while explicitly offline starts local,
-then atomically replaces that local native subscription with the remote one on
-reconnect; it never creates a second query path or replays a historical remote
-failure. Low-level `ReadOpts` and the legacy binding entrypoints still accept
+chooses once. A subscription follows definite connectivity transitions in both
+directions: offline uses local knowledge; online requires fresh remote scope
+with the bounded pending overlay. It never creates a second query engine or
+replays a historical remote failure. Low-level `ReadOpts` and the legacy binding entrypoints still accept
 `DurabilityTier` unchanged during the migration. The native Rust facade has no
 public explicit-offline toggle, so its `RemoteIfPossible` always uses the remote
 initial gate while retaining the immediate own-write policy.

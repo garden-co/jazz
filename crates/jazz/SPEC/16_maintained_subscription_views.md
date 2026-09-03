@@ -159,29 +159,36 @@ exact authority-covered inputs ----+
 eligible local inputs --------------+
 ```
 
-Before that first exact closure, Local-first has one explicitly bounded
-bootstrap phase. A descriptor-bound gate may admit retained **scope-local local
-knowledge** into the same receiver graph while it separately observes its
-eligible Ahead/pending overlay. This permits an immediate offline/cached open;
-it is neither an authority result nor a second evaluator. The first claimed
-closure atomically replaces every covered source slot and clears every
-bootstrap gate, thereby retiring those provisional cached inputs even if their
-physical copies remain in local storage. A later revocation therefore cannot
-resurrect a cached row. Strict remote has no provisional phase: it publishes
-only after its fresh exact closure is installed. Reconnect starts a new
-bootstrap/receipt lifecycle and cannot reuse a detached receipt as its first
-closure.
-
 The requested tier determines which inputs participate and when the first
 answer may be published; it does not select another evaluator:
 
-- a strict remote authority tier waits for a fresh settled closure for its
-  exact usage-site subscription and evaluates only that authorized closure;
-- a local-first result may additionally contain eligible local pending state,
-  so it can differ meaningfully from the authority's simultaneous result while
-  preserving the same query semantics;
+- `local-first` evaluates locally known current data plus pending local
+  changes, online or offline. Installing a remote closure does not retire its
+  cached inputs. Remote scope withdrawal is not a stored client-side revocation;
+- `remote` waits for a fresh settled closure for its exact usage-site
+  subscription and evaluates only that closure, without pending local changes.
+  It waits while offline;
+- online `remote-if-possible` evaluates the exact authority inputs with pending
+  edits/deletes applied to those inputs, plus eligible pending new inserts.
+  An edit alone does not admit an existing out-of-scope row. Relationships use
+  only these inputs, without expanding into cached dependency rows. Inserts
+  participate in the ordinary query, including its joins, filters and windows;
+- offline `remote-if-possible` evaluates local knowledge plus pending changes,
+  like `local-first`. It may therefore show cached rows excluded by the last
+  remote closure. Returning online replaces that fallback with fresh authority
+  inputs and the bounded pending overlay. Do not reuse a detached receipt as
+  fresh authority coverage;
 - a local-only internal execution suppresses upstream registration but still
   uses the same lowered graph over its local source.
+
+Source membership and stored row state are distinct. Scope withdrawal neither
+deletes nor redacts previously downloaded content. An actually admitted deletion
+version, however, updates locally known row state and suppresses that row in
+ordinary local reads too. Pending delete/restore candidates use the ordinary
+current-winner relation before the query runs: a newer pending restore supersedes
+a pending delete; rejection retracts the rejected candidate and reveals the
+remaining winner. No terminal-side workaround may independently reconcile this
+state. Broader online local dependency expansion is deferred to #2501.
 
 The authority never chooses positions in the receiver's application value.
 Explicit `order_by`, implicit row-id order, stable tie breakers, relation-local
@@ -204,17 +211,17 @@ Worked examples:
   and C while the receiver has an eligible pending child B. The receiving
   child collector computes `[A, B, C]`. An authority operation saying “insert C
   at index 1” would be wrong for this receiver and is therefore never sent.
-- **Permission revocation.** A successor authority closure retracts the opaque
+- **Remote permission revocation.** A successor authority closure retracts the opaque
   admission or safe source witness that supported row A. That input retraction
   enters the same local graph and its collector removes every affected root or
-  descendant occurrence. The client does not re-evaluate the hidden policy and
-  the authority does not send a presentation-level remove.
-- **Cached Local-first open.** Before a new connection has delivered a closure,
-  a client may show its retained same-scope Global A plus a pending local B from
-  the one local receiver graph. When the first closure admits only C, one
-  atomic source replacement retires provisional A, retains or reconciles B by
-  normal version order, and lets that same collector publish C. The server did
-  not send `[C]` as a result snapshot.
+  descendant occurrence in a remote-scoped result. The client does not
+  re-evaluate the hidden policy, and the authority sends no presentation-level
+  remove. Local-first may still show the cached row; offline fallback may show
+  it again after an online remote-if-possible result excluded it.
+- **Cached Local-first open.** A client can show retained same-scope A plus a
+  pending insert B. A new authority closure containing only C does not evict A
+  from local-first knowledge. Online remote-if-possible instead uses C plus B
+  (if B matches using available query inputs); remote uses only C.
 - **Reconnect.** A fresh usage-site subscription cannot reuse its detached
   predecessor's result or terminal sequence. It verifies a fresh exact closure,
   installs it, and lets the local graph publish the corresponding reset.
@@ -693,6 +700,7 @@ result changes back to the correct parent output.
 
 ## Open Questions
 
+- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand online remote-if-possible inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.

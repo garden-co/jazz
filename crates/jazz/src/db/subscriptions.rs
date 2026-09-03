@@ -483,16 +483,10 @@ where
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
         let requested_read_tier = effective_read_tier(&opts);
-        let authored_commit_durability = self.node.node.lock().await.authored_commit_durability();
-        let read_tier = if opts.local_updates == LocalUpdates::Immediate
-            && opts.propagation == Propagation::Full
-            && supports_pending_overlay_reconciliation(prepared.shape.query())
-            && authored_commit_durability == DurabilityTier::None
-        {
-            DurabilityTier::Local
-        } else {
-            requested_read_tier
-        };
+        let read_tier = requested_read_tier;
+        let pending_overlay = authorization_mode == QueryAuthorizationMode::ClientLocal
+            && requested_read_tier >= DurabilityTier::Edge
+            && opts.local_updates == LocalUpdates::Immediate;
         self.node
             .node
             .lock()
@@ -536,6 +530,7 @@ where
                 &opts.read_view,
                 Some(_local_plan),
                 authorization_mode,
+                pending_overlay,
                 progress_waker.as_ref(),
             )
             .await?;
@@ -762,6 +757,7 @@ where
             author,
             authorization_mode,
             read_tier,
+            pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
             remote_propagate_upstream,

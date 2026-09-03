@@ -1036,10 +1036,21 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i"), ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    let mut remote = prepared_subscribe(
+        &client,
+        &Query::from("res_i"),
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            local_updates: LocalUpdates::Deferred,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
+    assert!(opened_rows(block_on(remote.next_event()).unwrap()).is_empty());
     while let Some(event) = subscription.try_next_event() {
         if let SubscriptionEvent::Delta {
             added,
@@ -1066,6 +1077,8 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     client.tick().unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![resource]);
+    let (remote_added, _, _) = delta_rows(block_on(remote.next_event()).unwrap());
+    assert_eq!(row_ids(&remote_added), vec![resource]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
@@ -1079,7 +1092,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(remote.next_event()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -1087,6 +1100,22 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
             .into_iter()
             .map(|row| row.row_uuid)
             .collect::<Vec<_>>(),
+        vec![resource]
+    );
+    while let Some(event) = subscription.try_next_event() {
+        if let SubscriptionEvent::Delta { removed, .. } = event {
+            assert!(
+                removed.is_empty(),
+                "scope withdrawal is not a local-first revocation"
+            );
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(
+            &client,
+            &Query::from("res_i"),
+            ReadOpts::default()
+        )),
         vec![resource]
     );
 }
@@ -1330,12 +1359,24 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i_child"), ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    let mut remote = prepared_subscribe(
+        &client,
+        &Query::from("res_i_child"),
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            local_updates: LocalUpdates::Deferred,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![child]);
+    let remote_open = block_on(remote.next_event()).unwrap();
+    assert_eq!(row_ids(&opened_rows(remote_open)), vec![child]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
@@ -1349,7 +1390,7 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(remote.next_event()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -1357,6 +1398,22 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
             .into_iter()
             .map(|row| row.row_uuid)
             .collect::<Vec<_>>(),
+        vec![child]
+    );
+    while let Some(event) = subscription.try_next_event() {
+        if let SubscriptionEvent::Delta { removed, .. } = event {
+            assert!(
+                removed.is_empty(),
+                "scope withdrawal must not retract cached local-first content"
+            );
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(
+            &client,
+            &Query::from("res_i_child"),
+            ReadOpts::default()
+        )),
         vec![child]
     );
 }
