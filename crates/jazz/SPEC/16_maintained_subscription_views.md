@@ -613,6 +613,16 @@ page after its authority usage site detaches retains a typed **window-source
 capability**, not a boolean saying that some result happened to be
 materialized.
 
+For a live exact-query receiver, that source contract is known at compilation,
+before its `RegisterShape` message has been processed or its opening receipt
+has arrived. A cold and a warm receiver therefore compile the same relative
+window. For example, authority `OFFSET 2 LIMIT 1` over `A,B,C,D` supplies `C`;
+the receiver orders that input and uses relative `OFFSET 0 LIMIT 1`. It does
+not skip two more rows, and it retains the limit when pending inserts join
+those inputs. Ordinary local-first evaluation has no such authority-selected
+source and continues to apply `OFFSET 2` to its local current inputs. Equal
+numeric offsets and limits alone never establish compatible source identity.
+
 That capability contains the exact normalized source occurrence, full
 validated source shape, root/parent partition, user order keys and directions,
 the compiler's deterministic tie keys, window offset/limit, and the

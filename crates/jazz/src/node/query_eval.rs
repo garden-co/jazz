@@ -834,6 +834,7 @@ where
         force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
         let policy = self.query_program_policy_context(identity);
+        let requested_shape_id = shape.shape_id();
         // Linked shapes carry read-policy alternatives so a trusted serving
         // authority can establish the authorized residual frontier.  Neither
         // System authority nor a client-local receiver may evaluate those
@@ -900,28 +901,22 @@ where
         };
         let mut input_shape = self.normalized_row_set_shape(shape, binding)?;
         let settled_view_matches_query_window = settled_binding_view.is_some_and(|binding_view| {
-            self.query
-                .registered_shapes
-                .get(&binding_view.shape_id)
-                .is_some_and(|source_shape| {
-                    source_shape.query().offset == shape.query().offset
-                        && source_shape.query().limit == shape.query().limit
-                })
+            // A cold receiver is compiled before RegisterShape is processed.
+            // Its exact requested shape already identifies the input window;
+            // registry timing must not decide whether to apply its offset twice.
+            binding_view.shape_id == requested_shape_id
         });
-        let settled_window_input = (settled_view_matches_query_window
-            && shape.query().aggregate.is_none())
-        .then(|| match input_shape.nodes.get(&input_shape.root) {
-            Some(RowSetExpr::Slice { input, .. }) => Some(input.clone()),
-            _ => None,
-        })
-        .flatten();
-        if let Some(input) = settled_window_input {
-            // The settled binding source is the authority-selected result
-            // membership, including LIMIT/OFFSET. Keep evaluating the public
-            // row shape over those members, but do not slice that window a
-            // second time on the client.
-            input_shape.nodes.remove(&input_shape.root);
-            input_shape.root = input;
+        if settled_view_matches_query_window
+            && shape.query().aggregate.is_none()
+            && let Some(RowSetExpr::Slice { offset, .. }) =
+                input_shape.nodes.get_mut(&input_shape.root)
+        {
+            // Covered inputs for this exact root occurrence are already the
+            // output of the authority window. Evaluate order and limit with
+            // the ordinary Groove operator, relative to that page. Keeping
+            // the limit also bounds newly inserted pending overlay rows.
+            // Local-first has no settled source and retains its absolute offset.
+            *offset = 0;
         }
         let policy_schema_version = self.read_policy_schema_for_table_name(
             &shape.query().table,
