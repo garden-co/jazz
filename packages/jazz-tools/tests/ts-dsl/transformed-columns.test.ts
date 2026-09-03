@@ -41,6 +41,49 @@ function applyPermissions(permissions: CompiledPermissions): s.App<PriorityAppSc
     wasmSchema,
   } as s.App<PriorityAppSchema>;
 }
+const relatedSchema = {
+  parents: s.table({
+    itemId: s.ref("items").optional(),
+    itemIds: s.array(s.ref("items")),
+  }),
+  items: s.table({
+    score: s.int().transform<number>({
+      from: (value) => value * 10,
+      to: (value) => value / 10,
+    }),
+    label: s.string().transform<string>({
+      from: (value) => `label:${value}`,
+      to: (value) => value.replace(/^label:/, ""),
+    }),
+  }),
+};
+
+type RelatedAppSchema = s.Schema<typeof relatedSchema>;
+const relatedApp: s.App<RelatedAppSchema> = s.defineApp(relatedSchema);
+const relatedPermissions = s.definePermissions(relatedApp, ({ policy }) => {
+  policy.parents.allowRead.where({});
+  policy.parents.allowInsert.where({});
+  policy.items.allowRead.where({});
+  policy.items.allowInsert.where({});
+});
+const relatedAppWithPermissions: s.App<RelatedAppSchema> = applyRelatedPermissions(relatedPermissions);
+
+function applyRelatedPermissions(permissions: CompiledPermissions): s.App<RelatedAppSchema> {
+  const wasmSchema = schemaToWasm(
+    mergePermissionsIntoSchema(schemaDefinitionToAst(relatedSchema), permissions),
+  );
+
+  return {
+    parents: new TypedTableQueryBuilder(
+      "parents",
+      wasmSchema,
+      relatedApp.parents._columnTransforms,
+    ),
+    items: new TypedTableQueryBuilder("items", wasmSchema, relatedApp.items._columnTransforms),
+    wasmSchema,
+  } as s.App<RelatedAppSchema>;
+}
+
 
 describe("TS transformed columns", () => {
   let db: Db | undefined;
@@ -101,5 +144,59 @@ describe("TS transformed columns", () => {
     );
 
     unsubscribe();
+  });
+  it("applies target transforms in included and hopped rows without changing relation shape", async () => {
+    const activeDb = db!;
+
+    const { value: firstItem } = activeDb.insert(relatedAppWithPermissions.items, {
+      score: 3,
+      label: "alpha",
+    });
+    const { value: secondItem } = activeDb.insert(relatedAppWithPermissions.items, {
+      score: 7,
+      label: "beta",
+    });
+    const { value: emptyParent } = activeDb.insert(relatedAppWithPermissions.parents, {
+      itemId: null,
+      itemIds: [],
+    });
+    const { value: populatedParent } = activeDb.insert(relatedAppWithPermissions.parents, {
+      itemId: firstItem.id,
+      itemIds: [firstItem.id, secondItem.id],
+    });
+
+    const emptyIncluded = await activeDb.one(
+      relatedAppWithPermissions.parents
+        .where({ id: { eq: emptyParent.id } })
+        .include({ item: true, items: true }),
+    );
+    expect(emptyIncluded?.item).toBeNull();
+    expect(emptyIncluded?.items).toEqual([]);
+
+    const firstExpected = {
+      id: firstItem.id,
+      score: 30,
+      label: "label:alpha",
+    };
+    const secondExpected = {
+      id: secondItem.id,
+      score: 70,
+      label: "label:beta",
+    };
+    const included = await activeDb.one(
+      relatedAppWithPermissions.parents
+        .where({ id: { eq: populatedParent.id } })
+        .include({ item: true, items: true }),
+    );
+    expect(included?.item).toEqual(firstExpected);
+    expect(included?.items).toHaveLength(2);
+    expect(included?.items).toEqual(expect.arrayContaining([firstExpected, secondExpected]));
+
+    const hopped = await activeDb.one(
+      relatedAppWithPermissions.parents
+        .where({ id: { eq: populatedParent.id } })
+        .hopTo("item"),
+    );
+    expect(hopped).toEqual(firstExpected);
   });
 });
