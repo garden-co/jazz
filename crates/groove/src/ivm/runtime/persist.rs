@@ -305,6 +305,8 @@ mod tests {
     use crate::ivm::RecordDelta;
     use crate::storage::{TestStorage, TestStorageOperation};
 
+    /// `alice` and `bob` submit conflicting positive index entries in both
+    /// orders; pre-submit resolution rejects them without writing storage.
     #[futures_test::test]
     async fn unique_index_positive_conflict_is_pre_submit_in_both_orders() {
         for records in [
