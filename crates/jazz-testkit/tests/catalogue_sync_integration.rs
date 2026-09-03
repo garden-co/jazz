@@ -49,6 +49,114 @@ fn user_values_v3(
     row_input!("id" => id, "name" => name, "email" => email, "role" => role)
 }
 
+/// A cold old-schema reader can request one new-schema row by physical ID
+/// without first hydrating the table. Alice stays on v1; Bob writes a v2 array
+/// field which the backward lens must omit from Alice's result.
+///
+/// alice(v1) connects --> bob(v2) inserts --> edge --> alice's ID-filtered read
+#[tokio::test]
+async fn cold_old_schema_id_query_reads_new_array_column_row() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let old = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("todos")
+                        .column("title", ColumnType::Text)
+                        .column("done", ColumnType::Boolean),
+                )
+                .build();
+            let new = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("todos")
+                        .column("title", ColumnType::Text)
+                        .column("done", ColumnType::Boolean)
+                        .column(
+                            "tags",
+                            ColumnType::Array {
+                                element: Box::new(ColumnType::Text),
+                            },
+                        ),
+                )
+                .build();
+            let lens = Lens::new(
+                SchemaHash::compute(&old),
+                SchemaHash::compute(&new),
+                LensTransform::with_ops(vec![LensOp::AddColumn {
+                    table: "todos".to_owned(),
+                    column: "tags".to_owned(),
+                    column_type: ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                    default: Value::Array(Vec::new()),
+                }]),
+            );
+            let server = JazzServer::start().await;
+            push_catalogue_in_memory(
+                server.server_state(),
+                server.app_id(),
+                "dev",
+                &[old.clone(), new.clone()],
+                &[lens],
+            )
+            .await
+            .expect("publish array migration");
+            publish_allow_all_permissions(
+                &server.base_url(),
+                server.app_id(),
+                server.admin_secret(),
+                &new,
+            )
+            .await;
+            let alice = jazz_testkit::connect(
+                server.make_client_context_for_user(old, test_user_id("cold-array-alice")),
+            )
+            .await
+            .expect("connect old-schema Alice");
+            let bob = jazz_testkit::connect(
+                server.make_client_context_for_user(new, test_user_id("cold-array-bob")),
+            )
+            .await
+            .expect("connect new-schema Bob");
+            let (row_id, _, tx) = bob
+                .insert(
+                    "todos",
+                    row_input!(
+                        "title" => "written through new schema", "done" => true,
+                        "tags" => Value::Array(vec![Value::Text("migration".to_owned())])
+                    ),
+                )
+                .expect("insert new-schema row");
+            support::wait_for_edge_txs(&bob, &[tx.expect("insert transaction")]).await;
+            let rows = tokio::time::timeout(
+                Duration::from_secs(10),
+                alice.query_with_read_tier(
+                    Query::from("todos").filter(jazz::query::eq(
+                        jazz::query::col("id"),
+                        jazz::query::lit(*row_id.uuid()),
+                    )),
+                    jazz::tools::ReadTier::Remote,
+                ),
+            )
+            .await
+            .expect("old-schema ID query settles")
+            .expect("old-schema ID query succeeds");
+            assert_eq!(
+                rows,
+                vec![(
+                    row_id,
+                    vec![
+                        Value::Text("written through new schema".to_owned()),
+                        Value::Boolean(true)
+                    ]
+                )]
+            );
+            alice.shutdown().await.expect("shutdown Alice");
+            bob.shutdown().await.expect("shutdown Bob");
+            server.shutdown().await;
+        })
+        .await;
+}
+
 fn schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(

@@ -3315,11 +3315,15 @@ where
         }
     }
 
-    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
-        table,
-        &metadata,
-        branch_witness_field.is_some(),
-    );
+    // The current graph below carries storage cells, not materialized public
+    // values. In particular JSON has a distinct internal cell descriptor.
+    // Bind the prepared layout to that same source contract; materialization
+    // belongs at the public read boundary, not in terminal-layout repair.
+    let descriptor = if branch_witness_field.is_none() {
+        current_row_descriptor_with_hidden_source_fields_for_current_storage(table, &metadata)
+    } else {
+        current_row_descriptor_with_hidden_source_fields_for_branch(table, &metadata, true)
+    };
     let (base, routing_fields) = match authorization {
         SourceAuthorizationRequest::System => {
             let graph = if let Some(selected_base) = selected_base.clone() {

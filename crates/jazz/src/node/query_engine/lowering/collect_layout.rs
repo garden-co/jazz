@@ -44,7 +44,7 @@ pub(super) fn collect_layout(
                 },
                 value_type: field.value_type.clone(),
                 output_value_type: if explicit_root_projection {
-                    collect_logical_output_type(root_source, name, &field.value_type)
+                    collect_unwrapped_output_type(root_source, name, &field.value_type)
                 } else {
                     field.value_type.clone()
                 },
@@ -115,7 +115,7 @@ pub(super) fn collect_layout(
     })
 }
 
-fn collect_logical_output_type(
+fn collect_unwrapped_output_type(
     source: &ResolvedSource,
     source_field: &str,
     fallback: &ValueType,
@@ -129,7 +129,13 @@ fn collect_logical_output_type(
         .columns
         .iter()
         .find(|column| column.name == logical)
-        .map(|column| column.column_type.clone())
+        // The collector unwraps the current-row presence cell, not the
+        // column's storage representation. Keep JSON cells and catalogue-bound
+        // enums as emitted by the source; public-value hydration happens later.
+        .map(|_| match fallback {
+            ValueType::Nullable(inner) => inner.as_ref().clone(),
+            value_type => value_type.clone(),
+        })
         .unwrap_or_else(|| fallback.clone())
 }
 
@@ -192,7 +198,7 @@ fn collect_slot_layouts(
                     })?;
                     let is_row_id = source_field == source.row_shape.row_uuid_field;
                     let output_value_type =
-                        collect_logical_output_type(source, &source_field, &source_value_type);
+                        collect_unwrapped_output_type(source, &source_field, &source_value_type);
                     let value_type = if !is_row_id
                         && !matches!(source_value_type, ValueType::Nullable(_))
                     {
