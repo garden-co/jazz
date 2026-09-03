@@ -7,7 +7,7 @@ import {
   BrowserPhysicalDatabaseBusyError,
   type BrowserPhysicalDatabaseEpoch,
 } from "../runtime/browser-physical-database-epoch.js";
-import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
+import { installWasmTelemetry, normalizeOtlpEndpoint } from "../runtime/sync-telemetry.js";
 import {
   BrowserWorkerTransportPump,
   transferableFrames,
@@ -903,6 +903,9 @@ async function connectTab(
         `IndexedDB database ${message.options.dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
       );
     }
+    if (context && !workerTelemetryCompatible(context.options, message.options)) {
+      throw new Error("incompatible persistent browser telemetry configuration");
+    }
     if (context && context.fingerprint !== message.fingerprint) {
       throw new Error("incompatible persistent browser configuration");
     }
@@ -985,7 +988,6 @@ async function initialize(context: RuntimeContext): Promise<void> {
     context.disposeTelemetry = installWasmTelemetry({
       wasmModule,
       collectorUrl: options.telemetryCollectorUrl,
-      appId: options.appId,
       runtimeThread: "worker",
     });
     const node = context.pageStore.replicaNode;
@@ -2051,6 +2053,26 @@ function completeLocalFlush(peer: TabPeer): void {
   peer.flushRequestId = null;
   peer.flushedLocal = true;
   result(peer, requestId);
+}
+
+function workerTelemetryCompatible(
+  current: BrowserWorkerInitOptions,
+  next: BrowserWorkerInitOptions,
+): boolean {
+  const currentCollector = current.telemetryCollectorUrl?.trim() || undefined;
+  const nextCollector = next.telemetryCollectorUrl?.trim() || undefined;
+  if (!currentCollector !== !nextCollector) return false;
+  if (currentCollector && nextCollector) {
+    if (
+      normalizeOtlpEndpoint(currentCollector, "traces") !==
+        normalizeOtlpEndpoint(nextCollector, "traces") ||
+      normalizeOtlpEndpoint(currentCollector, "logs") !==
+        normalizeOtlpEndpoint(nextCollector, "logs")
+    ) {
+      return false;
+    }
+  }
+  return (current.logLevel ?? DEFAULT_WASM_LOG_LEVEL) === (next.logLevel ?? DEFAULT_WASM_LOG_LEVEL);
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {

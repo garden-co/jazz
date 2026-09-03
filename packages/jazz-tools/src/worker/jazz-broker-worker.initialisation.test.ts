@@ -173,6 +173,8 @@ vi.mock("../runtime/browser-physical-database-epoch.js", async (importOriginal) 
 
 vi.mock("../runtime/sync-telemetry.js", () => ({
   installWasmTelemetry: mocks.installWasmTelemetry,
+  normalizeOtlpEndpoint: (url: string, signal: "traces" | "logs") =>
+    `${url.replace(/\/+$/, "").replace(/\/v1\/(?:traces|logs)$/, "")}/v1/${signal}`,
 }));
 
 vi.mock("../runtime/native-runtime/native-codec.js", () => ({
@@ -1804,6 +1806,78 @@ describe("broker worker context initialization", () => {
     });
     expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
     expect(mocks.installWasmTelemetry).toHaveBeenCalledTimes(2);
+  });
+  it("rejects telemetry endpoint reuse mismatch before attaching a tab", async () => {
+    expect(
+      (
+        await connect(
+          { ...enabledTelemetryOptions("telemetry-endpoint-reuse"), logLevel: "debug" },
+          "first-tab",
+        )
+      ).outcome,
+    ).toEqual({ type: "runtime-ready" });
+    mocks.installWasmTelemetry.mockClear();
+
+    const mismatch = await connect(
+      {
+        ...enabledTelemetryOptions("telemetry-endpoint-reuse"),
+        telemetryCollectorUrl: "http://localhost:4319/v1/logs",
+        logLevel: "debug",
+      },
+      "mismatch-tab",
+    );
+    expect(mismatch.outcome).toEqual({
+      type: "runtime-error",
+      message: "incompatible persistent browser telemetry configuration",
+    });
+    expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
+    expect(mismatch.port.close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects enabled-versus-absent telemetry reuse mismatch before attaching a tab", async () => {
+    expect(
+      (
+        await connect(
+          { ...enabledTelemetryOptions("telemetry-enabled-reuse"), logLevel: "debug" },
+          "first-tab",
+        )
+      ).outcome,
+    ).toEqual({ type: "runtime-ready" });
+    mocks.installWasmTelemetry.mockClear();
+
+    const mismatch = await connect(
+      { ...options("telemetry-enabled-reuse"), logLevel: "debug" },
+      "mismatch-tab",
+    );
+    expect(mismatch.outcome).toEqual({
+      type: "runtime-error",
+      message: "incompatible persistent browser telemetry configuration",
+    });
+    expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
+    expect(mismatch.port.close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects effective log-level reuse mismatch before attaching a tab", async () => {
+    expect(
+      (
+        await connect(
+          { ...enabledTelemetryOptions("telemetry-level-reuse"), logLevel: "debug" },
+          "first-tab",
+        )
+      ).outcome,
+    ).toEqual({ type: "runtime-ready" });
+    mocks.installWasmTelemetry.mockClear();
+
+    const mismatch = await connect(
+      { ...enabledTelemetryOptions("telemetry-level-reuse"), logLevel: "trace" },
+      "mismatch-tab",
+    );
+    expect(mismatch.outcome).toEqual({
+      type: "runtime-error",
+      message: "incompatible persistent browser telemetry configuration",
+    });
+    expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
+    expect(mismatch.port.close).toHaveBeenCalledOnce();
   });
 
   it("rejects a conflicting page-store owner before WASM, telemetry, native open, or peer admission", async () => {

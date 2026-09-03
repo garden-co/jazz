@@ -11,6 +11,8 @@ import {
   versionRuntimeAssetUrl,
 } from "./runtime-config.js";
 
+import { normalizeOtlpEndpoint } from "./sync-telemetry.js";
+
 const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v1";
 // Coupled to IndexedDbPageStore's durable epoch. Keeping it in the database
 // scope prevents an old worker from opening incompatible root metadata.
@@ -119,6 +121,7 @@ export function createBrowserWorkerFingerprint(
   dbName: string,
   schemaHash: string,
 ): string {
+  const collectorUrl = config.telemetryCollectorUrl?.trim() || undefined;
   return JSON.stringify({
     protocolVersion: SHARED_RUNTIME_PROTOCOL_VERSION,
     storageFormatVersion: BROWSER_STORAGE_FORMAT_VERSION,
@@ -129,6 +132,13 @@ export function createBrowserWorkerFingerprint(
     authClass: resolveAuthClass(config),
     workerUrl: resolveBrowserWorkerUrl(config.runtimeSources),
     workerAssetScope: createBrowserWorkerAssetScope(config.runtimeSources),
+    telemetryCollector: collectorUrl
+      ? {
+          traceUrl: normalizeOtlpEndpoint(collectorUrl, "traces"),
+          logUrl: normalizeOtlpEndpoint(collectorUrl, "logs"),
+        }
+      : undefined,
+    wasmLogLevel: config.logLevel ?? "warn",
   });
 }
 

@@ -40,13 +40,7 @@ type WasmTelemetryModule = {
   subscribeTraceEntries(callback: () => void): () => void;
 };
 
-// A broker worker can host several runtime contexts while all of them share one
-// loaded WASM module. Collection is a module-wide switch, so a context owns a
-// lease rather than the switch itself. In particular, tearing down a failed
-// second context must not turn off telemetry for an already-live first context.
-const wasmTelemetryCollectionOwners = new WeakMap<WasmTelemetryModule, number>();
-
-interface WasmTelemetryExporterState {
+type WasmTelemetryExporterState = {
   tracer: Tracer;
   logger: {
     emit(record: {
@@ -57,7 +51,31 @@ interface WasmTelemetryExporterState {
       attributes?: Record<string, TelemetryAttributeValue>;
     }): void;
   };
-}
+  shutdown(): Promise<unknown> | unknown;
+};
+
+type WasmTelemetryCollectorIdentity = {
+  traceUrl: string;
+  logUrl: string;
+};
+
+type WasmTelemetryCollectorState = {
+  identity: WasmTelemetryCollectorIdentity;
+  runtimeThread: RuntimeThread;
+  leases: Set<number>;
+  nextLeaseId: number;
+  closing: boolean;
+  unsubscribe: (() => void) | null;
+  exporter: Promise<WasmTelemetryExporterState> | null;
+  exportTail: Promise<void>;
+  shutdownScheduled: boolean;
+  drainMicrotaskPending: boolean;
+};
+
+// The generated jazz-wasm namespace is the module-global identity. A broker
+// worker can host several contexts in one realm, but the Rust queue and
+// subscriber are still singleton resources for that namespace.
+const wasmTelemetryCollectors = new WeakMap<WasmTelemetryModule, WasmTelemetryCollectorState>();
 
 const MAX_WASM_TELEMETRY_EXPORT_BATCH_SIZE = 256;
 const MAX_PENDING_WASM_TELEMETRY_RECORDS = 5_000;
@@ -94,111 +112,186 @@ export function normalizeOtlpEndpoint(collectorUrl: string, signal: TelemetrySig
 export function installWasmTelemetry(options: {
   wasmModule: unknown;
   collectorUrl?: string;
-  appId: string;
   runtimeThread: RuntimeThread;
 }): () => void {
   if (!options.collectorUrl) return () => undefined;
 
-  const traceUrl = normalizeOtlpEndpoint(options.collectorUrl, "traces");
-  const logUrl = normalizeOtlpEndpoint(options.collectorUrl, "logs");
-  const { appId, runtimeThread, wasmModule } = options;
+  const identity = {
+    traceUrl: normalizeOtlpEndpoint(options.collectorUrl, "traces"),
+    logUrl: normalizeOtlpEndpoint(options.collectorUrl, "logs"),
+  };
+  const { runtimeThread, wasmModule } = options;
 
   if (!hasWasmTelemetryHooks(wasmModule)) {
     console.warn("[jazz] WASM telemetry unavailable: trace entry hooks are missing.");
     return () => undefined;
   }
 
-  let cachedExporter: Promise<WasmTelemetryExporterState> | null = null;
-  let warnedOnExportFailure = false;
-  const warnOnce = (error: unknown) => {
-    if (warnedOnExportFailure) return;
-    warnedOnExportFailure = true;
-    console.warn("[jazz] WASM telemetry export failed:", error);
-  };
-
-  const exportEntries = async (entries: WasmTraceEntry[]): Promise<void> => {
-    if (!cachedExporter) cachedExporter = createWasmTelemetryExporter(traceUrl, logUrl, appId);
-    let exporter: WasmTelemetryExporterState;
-    try {
-      exporter = await cachedExporter;
-    } catch (error) {
-      cachedExporter = null;
-      warnOnce(error);
-      return;
+  let state = wasmTelemetryCollectors.get(wasmModule);
+  if (state) {
+    if (state.closing) {
+      throw new Error("WASM telemetry collector is closing");
     }
-    for (const entry of entries) {
-      try {
-        recordWasmTelemetryEntry(exporter, runtimeThread, entry);
-      } catch (error) {
-        warnOnce(error);
-      }
+    if (state.runtimeThread !== runtimeThread) {
+      throw new Error("incompatible WASM telemetry runtime thread");
     }
+    if (
+      state.identity.traceUrl !== identity.traceUrl ||
+      state.identity.logUrl !== identity.logUrl
+    ) {
+      throw new Error("incompatible WASM telemetry collector");
+    }
+    return acquireCollectorLease(wasmModule, state);
+  }
+  state = {
+    identity,
+    runtimeThread,
+    leases: new Set(),
+    nextLeaseId: 0,
+    closing: false,
+    unsubscribe: null,
+    exporter: null,
+    exportTail: Promise.resolve(),
+    shutdownScheduled: false,
+    drainMicrotaskPending: false,
   };
-
-  let disposed = false;
-  let drainMicrotaskPending = false;
+  // Publish the rollback-capable state before invoking foreign hooks. A hook
+  // failure must not leave a partially visible collector epoch behind.
+  wasmTelemetryCollectors.set(wasmModule, state);
 
   const drain = () => {
     const entries = wasmModule.drainTraceEntries();
     if (!Array.isArray(entries) || entries.length === 0) return;
-    void exportEntries(entries);
+    enqueueWasmTelemetryExport(state!, entries);
   };
-
   const scheduleDrain = () => {
-    if (disposed || drainMicrotaskPending) return;
-    drainMicrotaskPending = true;
+    if (state!.closing || state!.drainMicrotaskPending) return;
+    state!.drainMicrotaskPending = true;
     queueMicrotask(() => {
-      drainMicrotaskPending = false;
-      if (disposed) return;
+      state!.drainMicrotaskPending = false;
+      if (state!.closing) return;
       drain();
     });
   };
 
-  const unsubscribeTraceEntries = wasmModule.subscribeTraceEntries(scheduleDrain);
-  let releaseCollection: (() => void) | null = null;
+  let collectionEnableAttempted = false;
   try {
-    releaseCollection = retainWasmTelemetryCollection(wasmModule);
+    state.unsubscribe = wasmModule.subscribeTraceEntries(scheduleDrain);
+    collectionEnableAttempted = true;
+    wasmModule.setTraceEntryCollectionEnabled(true);
+    return acquireCollectorLease(wasmModule, state);
   } catch (error) {
+    if (collectionEnableAttempted) {
+      try {
+        wasmModule.setTraceEntryCollectionEnabled(false);
+      } catch {
+        // Preserve the failure that prevented telemetry installation.
+      }
+    }
     try {
-      unsubscribeTraceEntries();
+      state.unsubscribe?.();
     } catch {
       // Preserve the failure that prevented telemetry installation.
     }
+    state.unsubscribe = null;
+    if (wasmTelemetryCollectors.get(wasmModule) === state) {
+      wasmTelemetryCollectors.delete(wasmModule);
+    }
     throw error;
   }
-
-  return () => {
-    if (disposed) return;
-    disposed = true;
-    try {
-      unsubscribeTraceEntries();
-    } finally {
-      try {
-        drain();
-      } finally {
-        releaseCollection?.();
-      }
-    }
-  };
 }
 
-function retainWasmTelemetryCollection(wasmModule: WasmTelemetryModule): () => void {
-  const owners = wasmTelemetryCollectionOwners.get(wasmModule) ?? 0;
-  if (owners === 0) wasmModule.setTraceEntryCollectionEnabled(true);
-  wasmTelemetryCollectionOwners.set(wasmModule, owners + 1);
-
+function acquireCollectorLease(
+  wasmModule: WasmTelemetryModule,
+  state: WasmTelemetryCollectorState,
+): () => void {
+  const leaseId = state.nextLeaseId++;
+  state.leases.add(leaseId);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    const remainingOwners = (wasmTelemetryCollectionOwners.get(wasmModule) ?? 1) - 1;
-    if (remainingOwners === 0) {
-      wasmTelemetryCollectionOwners.delete(wasmModule);
-      wasmModule.setTraceEntryCollectionEnabled(false);
-    } else {
-      wasmTelemetryCollectionOwners.set(wasmModule, remainingOwners);
+    state.leases.delete(leaseId);
+    if (state.leases.size > 0 || state.closing) return;
+
+    state.closing = true;
+    let teardownError: unknown;
+    try {
+      state.unsubscribe?.();
+    } catch (error) {
+      teardownError = error;
+    } finally {
+      try {
+        // This is deliberately synchronous: entries accepted before closing
+        // belong to this epoch even though export delivery remains async.
+        const entries = wasmModule.drainTraceEntries();
+        if (Array.isArray(entries) && entries.length > 0) {
+          enqueueWasmTelemetryExport(state, entries);
+        }
+      } catch (error) {
+        teardownError ??= error;
+      } finally {
+        try {
+          wasmModule.setTraceEntryCollectionEnabled(false);
+        } catch (error) {
+          teardownError ??= error;
+        } finally {
+          state.unsubscribe = null;
+          scheduleExporterShutdown(state);
+          if (!teardownError && wasmTelemetryCollectors.get(wasmModule) === state) {
+            wasmTelemetryCollectors.delete(wasmModule);
+          }
+        }
+      }
     }
+    if (teardownError) throw teardownError;
   };
+}
+
+function enqueueWasmTelemetryExport(
+  state: WasmTelemetryCollectorState,
+  entries: WasmTraceEntry[],
+): void {
+  state.exportTail = state.exportTail
+    .catch(() => undefined)
+    .then(async () => {
+      if (!state.exporter) {
+        state.exporter = createWasmTelemetryExporter(
+          state.identity.traceUrl,
+          state.identity.logUrl,
+        );
+      }
+      try {
+        const exporter = await state.exporter;
+        for (const entry of entries) {
+          try {
+            recordWasmTelemetryEntry(exporter, state.runtimeThread, entry);
+          } catch (error) {
+            console.warn("[jazz] WASM telemetry export failed:", error);
+          }
+        }
+      } catch (error) {
+        state.exporter = null;
+        console.warn("[jazz] WASM telemetry export failed:", error);
+      }
+    });
+}
+
+function scheduleExporterShutdown(state: WasmTelemetryCollectorState): void {
+  if (state.shutdownScheduled) return;
+  state.shutdownScheduled = true;
+  // Always attach the shutdown continuation. Exporter creation is lazy and
+  // can begin only after this release has already started.
+  void state.exportTail
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        const exporter = state.exporter ? await state.exporter : undefined;
+        await exporter?.shutdown();
+      } catch (error) {
+        console.warn("[jazz] WASM telemetry shutdown failed:", error);
+      }
+    });
 }
 
 function hasWasmTelemetryHooks(wasmModule: unknown): wasmModule is WasmTelemetryModule {
@@ -268,7 +361,6 @@ function recordWasmTelemetryEntry(
 async function createWasmTelemetryExporter(
   traceUrl: string,
   logUrl: string,
-  appId: string,
 ): Promise<WasmTelemetryExporterState> {
   const [
     { OTLPTraceExporter },
@@ -286,7 +378,6 @@ async function createWasmTelemetryExporter(
   const resource = resourceFromAttributes({
     "service.name": "jazz-browser",
     "telemetry.sdk.language": "webjs",
-    "jazz.app_id": appId,
   });
   const batchOptions = {
     maxExportBatchSize: MAX_WASM_TELEMETRY_EXPORT_BATCH_SIZE,
@@ -307,6 +398,12 @@ async function createWasmTelemetryExporter(
   return {
     tracer: traceProvider.getTracer("jazz-wasm.tracing"),
     logger: loggerProvider.getLogger("jazz-wasm.tracing"),
+    shutdown: async () => {
+      await Promise.all([
+        typeof traceProvider.shutdown === "function" ? traceProvider.shutdown() : undefined,
+        typeof loggerProvider.shutdown === "function" ? loggerProvider.shutdown() : undefined,
+      ]);
+    },
   };
 }
 
