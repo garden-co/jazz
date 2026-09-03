@@ -211,6 +211,69 @@ fn merge_heads_match_history_for_edge_accepted_units() {
 }
 
 #[test]
+fn edge_creates_edge_durable_merge_for_concurrent_inserts_and_edits() {
+    for edit_existing in [false, true] {
+        let schema = two_column_schema();
+        let (_left_dir, mut left) = open_node_with_schema(node(0xc1), schema.clone());
+        let (_right_dir, mut right) = open_node_with_schema(node(0xc2), schema.clone());
+        let (_edge_dir, mut edge) = open_node_with_schema(node(0xc9), schema);
+        let shared_row = row(0xca);
+        let admit = |edge: &mut NodeState<RocksDbStorage>, unit| {
+            let SyncMessage::CommitUnit { tx, versions } = unit else {
+                panic!("expected commit unit");
+            };
+            let tx_id = tx.tx_id;
+            let outcome = crate::db::block_on(edge.ingest_edge_authority_mergeable_commit_unit(
+                tx, versions, u64::MAX - SKEW_TOLERANCE_MS,
+            )).unwrap();
+            let receipts = settle_outcome(edge, outcome).unwrap();
+            assert!(receipts.iter().any(|receipt| matches!(receipt,
+                SyncMessage::FateUpdate {
+                    tx_id: accepted_tx, fate: Fate::Accepted,
+                    global_time: None, durability: Some(DurabilityTier::Edge),
+                } if *accepted_tx == tx_id
+            )), "edge admission must remain Edge-only: {receipts:?}");
+        };
+        let parents = if edit_existing {
+            let (seed_tx, seed) = left.commit_mergeable_unit_settled(
+                MergeableCommit::new("todos", shared_row, 10)
+                    .cells(BTreeMap::from([("title".to_owned(), v("seed")), ("body".to_owned(), v("seed"))])),
+            ).unwrap();
+            right.apply_sync_message_settled(seed.clone()).unwrap();
+            admit(&mut edge, seed);
+            vec![seed_tx]
+        } else { Vec::new() };
+        let (left_tx, left_unit) = left.commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", shared_row, 20).parents(parents.clone())
+                .cells(BTreeMap::from([("title".to_owned(), v("left"))])),
+        ).unwrap();
+        let (right_tx, right_unit) = right.commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", shared_row, 20).parents(parents)
+                .cells(BTreeMap::from([("body".to_owned(), v("right"))])),
+        ).unwrap();
+        admit(&mut edge, left_unit.clone());
+        admit(&mut edge, right_unit.clone());
+
+        let frontier = edge.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+        assert_eq!(frontier.len(), 1);
+        let heads = merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap();
+        assert_eq!(heads.len(), 1, "edge must merge both heads before forwarding (edit={edit_existing})");
+        let merge_tx = *heads.iter().next().unwrap();
+        assert_eq!(merge_tx.node, node(0xc9));
+        assert_eq!(edge.transaction_state_settled(merge_tx), Some((Fate::Accepted, None, DurabilityTier::Edge)));
+        let SyncMessage::CommitUnit { versions, .. } = edge.commit_unit_for(merge_tx).unwrap() else {
+            panic!("expected merge unit");
+        };
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].parents(), &[left_tx, right_tx]);
+        admit(&mut edge, left_unit);
+        admit(&mut edge, right_unit);
+        let replayed = edge.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+        assert_eq!(merge_heads_from_value(replayed[0].record().get_idx(3).unwrap()).unwrap(), heads);
+    }
+}
+
+#[test]
 fn merge_heads_match_history_for_relay_pending_then_edge_fate() {
     let schema = two_column_schema();
     let (_writer_a_dir, mut writer_a) = open_node_with_schema(node(0xf1), schema.clone());

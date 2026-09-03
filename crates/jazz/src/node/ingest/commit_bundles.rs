@@ -473,7 +473,7 @@ where
             global_time: Some(global_time),
             durability: Some(durability),
         }]);
-        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows).await?);
+        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Core).await?);
         Ok(outcome)
     }
 
@@ -758,7 +758,7 @@ where
             global_time: Some(global_time),
             durability: Some(durability),
         }]);
-        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows).await?);
+        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Core).await?);
         Ok(outcome)
     }
 
@@ -914,13 +914,16 @@ where
 
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Edge;
+        let merge_rows = self.merge_rows_for_versions(&versions)?;
         self.ingest_known_transaction(tx.clone(), versions, fate.clone(), None, durability).await?;
-        Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
+        let mut outcome = PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
             global_time: None,
             durability: Some(durability),
-        }]))
+        }]);
+        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Edge).await?);
+        Ok(outcome)
     }
 
     pub(super) async fn ingest_known_transaction(
