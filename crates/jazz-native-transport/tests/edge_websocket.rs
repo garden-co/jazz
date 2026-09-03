@@ -85,7 +85,7 @@ async fn serve_stalled_http_upgrade() -> (
 async fn stalled_http_upgrade_reports_handshake_timeout() {
     let app_id = AppId::from_name("adapter-stalled-http-upgrade");
     let (url, task, accepted) = serve_stalled_http_upgrade().await;
-    let connection = tokio::spawn(async move {
+    let mut connection = tokio::spawn(async move {
         WebSocketTransport::connect(
             url,
             app_id,
