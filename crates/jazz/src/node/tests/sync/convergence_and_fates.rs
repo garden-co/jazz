@@ -998,6 +998,7 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
 #[test]
 fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let (_temp_dir, mut receiver) = open_node();
+    register_whole_table_receiver(&mut receiver, "todos");
     let bad_tx = TxId::new(TxTime::from(10), node(8));
     let subscription = receiver.whole_table_subscription_key("todos").unwrap();
     receiver
@@ -1059,9 +1060,8 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     assert!(received.is_ok(), "a peer view must not panic the receiver");
     assert!(matches!(
         received.unwrap(),
-        Err(Error::MalformedViewUpdate(
-            "global timestamp requires Global durability"
-        ))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: global timestamp requires Global durability"
     ));
     assert!(receiver.transaction_state_settled(bad_tx).is_none());
     assert!(receiver.opening_pending_for_authority_result(&authority_result_key));
@@ -1078,7 +1078,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
+            program_fact_adds: vec![todos_source_coverage()],
             program_fact_removes: Vec::new(),
         }))
         .unwrap();

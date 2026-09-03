@@ -234,7 +234,11 @@ fn complete_parent_receiver_update(
     reset_result_set: bool,
 ) -> ViewUpdateParts {
     let tx_id = tx.tx_id;
-    let program_fact_adds = todos_source_closure(tx_id, std::slice::from_ref(&version));
+    let program_fact_adds = if reset_result_set {
+        todos_source_closure(tx_id, std::slice::from_ref(&version))
+    } else {
+        vec![todos_covered_input(tx_id, &version)]
+    };
     ViewUpdateParts {
         subscription,
         settled_through: GlobalTime(1),
@@ -459,7 +463,8 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
         panic!("expected accepted fate");
     };
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    let source_closure = todos_source_closure(tx_id, &versions);
+    // The preceding reset supplies the manifest; this live frame adds rows only.
+    let source_closure = versions.iter().map(|version| todos_covered_input(tx_id, version)).collect();
 
     reader
         .apply_view_updates_in_batch(vec![
@@ -1731,17 +1736,11 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
     };
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
-    let source_closure = std::iter::once(todos_source_coverage())
-        .chain(
-            new_versions
-                .iter()
-                .map(|version| todos_covered_input(new.tx_id, version)),
-        )
-        .chain(
-            old_versions
-                .iter()
-                .map(|version| todos_covered_input(old.tx_id, version)),
-        )
+    // Both history bodies arrive below, but current-state coverage names only
+    // the winner. The predecessor reset already supplied the source manifest.
+    let source_closure = new_versions
+        .iter()
+        .map(|version| todos_covered_input(new.tx_id, version))
         .collect();
 
     reader
@@ -1813,8 +1812,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
     let mut redacted_tx = tx.clone();
     redacted_tx.n_total_writes = 1;
-    let first_closure = todos_source_closure(tx_id, std::slice::from_ref(&first));
-    let second_closure = todos_source_closure(tx_id, std::slice::from_ref(&second));
+    let first_closure = vec![todos_covered_input(tx_id, &first)];
+    let second_closure = vec![todos_covered_input(tx_id, &second)];
     reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
 
     reader
@@ -1902,8 +1901,8 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
     let mut redacted_tx = tx.clone();
     redacted_tx.n_total_writes = 1;
-    let first_closure = todos_source_closure(tx_id, std::slice::from_ref(&first));
-    let complete_closure = todos_source_closure(tx_id, &[first.clone(), second.clone()]);
+    let first_closure = vec![todos_covered_input(tx_id, &first)];
+    let complete_closure = vec![todos_covered_input(tx_id, &first), todos_covered_input(tx_id, &second)];
     reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
     reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -1930,6 +1929,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     drop(reader);
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
     assert!(reader.query_transaction(tx_id).unwrap().unwrap().view_scoped_cardinality);
+    register_whole_table_receiver(&mut reader, "todos");
     reader.apply_view_update(todos_receiver_reset(subscription)).unwrap();
     reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {

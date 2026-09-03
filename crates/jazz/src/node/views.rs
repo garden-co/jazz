@@ -207,9 +207,9 @@ fn version_bundle_refs_for_carriers(
 fn invalid_authority_source_closure_error(subscription: SubscriptionKey, error: Error) -> Error {
     match error {
         error @ Error::InvalidAuthoritySourceClosure { .. } => error,
-        Error::MalformedViewUpdate(_) => Error::InvalidAuthoritySourceClosure {
+        Error::MalformedViewUpdate(reason) => Error::InvalidAuthoritySourceClosure {
             subscription,
-            transition: "authority source-closure payload failed validation".to_owned(),
+            transition: format!("authority source-closure payload failed validation: {reason}"),
         },
         error => error,
     }

@@ -1652,15 +1652,24 @@ fn binding_delta_validates_shape_arity_and_cleans_up_binding_usage() {
 
 #[test]
 fn binding_delta_cleanup_distinguishes_canonical_read_view() {
-    let (_temp_dir, mut node) = open_node();
+    let schema = branch_view_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x44), schema.clone());
     let shape = Query::from("todos")
         .filter(eq(col("title"), param("wanted")))
-        .validate(&schema())
+        .validate(&schema)
         .unwrap();
     let values = vec![Value::String("match".to_owned())];
-    let branch_read_view = crate::protocol::ReadViewKey {
-        id: uuid::Uuid::from_bytes([0x44; 16]),
+    let branch_opts = crate::protocol::RegisterShapeOptions {
+        read_view: crate::protocol::ReadViewSpec {
+            source: crate::protocol::ReadViewSourceSpec::BranchView {
+                head: branch_selector(0x44),
+                base: None,
+            },
+        },
+        ..Default::default()
     };
+    let branch_read_view = branch_opts.read_view_key();
+    assert_ne!(branch_read_view, ReadViewKey::default());
     let default_usage_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: BindingId(uuid::Uuid::from_bytes([0x77; 16])),
@@ -1687,6 +1696,12 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
         known_state: None,
         delegated_session: None,
     }))
+    .unwrap();
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
+        shape_id: shape.shape_id(),
+        ast: crate::protocol::ShapeAst::from_validated(&shape),
+        opts: branch_opts,
+    })
     .unwrap();
     node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),

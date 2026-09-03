@@ -325,7 +325,9 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             subscription: core.whole_table_subscription_key("todos").unwrap(),
             settled_through,
             defer_settlement: false,
-            reset_result_set: false,
+            // This is another complete snapshot, using the peer's cached bodies.
+            // It is not a live addition of the already-covered input.
+            reset_result_set: true,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
