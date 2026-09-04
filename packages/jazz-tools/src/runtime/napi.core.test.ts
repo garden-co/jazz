@@ -645,7 +645,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await runtime.waitForTransaction(await committedTxId(inserted), "local");
     const query = JSON.stringify({ table: "todos" });
     let cancelledCallbacks = 0;
-    const cancelled = runtime.subscribe(query);
+    const cancelled = runtime.createSubscription(query);
     runtime.executeSubscription(cancelled, () => {
       cancelledCallbacks += 1;
     });
@@ -653,7 +653,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const reads = await Promise.all(Array.from({ length: 12 }, () => runtime.query(query)));
     for (const rows of reads) expect(rows).toEqual([expect.objectContaining({ id: inserted.id })]);
     expect(cancelledCallbacks).toBe(0);
-    const active = runtime.subscribe(query);
+    const active = runtime.createSubscription(query);
     const opening = new Promise<unknown>((resolve) => runtime.executeSubscription(active, resolve));
     await opening;
     runtime.unsubscribe(active);

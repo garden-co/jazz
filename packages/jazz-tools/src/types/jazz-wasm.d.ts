@@ -229,12 +229,16 @@ declare module "jazz-wasm" {
       query: Uint8Array,
       author?: Uint8Array,
       claims?: Record<string, unknown>,
-    ): { poll(): WasmPreparedQuery | null; cancel(): void };
+    ): { poll(): WasmPreparedQuery | null; cancel(): void; setWake(callback: () => void): void };
     subscribeAsync(
       query: WasmPreparedQuery,
       opts?: unknown,
       author?: Uint8Array,
-    ): { poll(): ReadableStream<unknown> | null; cancel(): void };
+    ): {
+      poll(): ReadableStream<unknown> | null;
+      cancel(): void;
+      setWake(callback: () => void): void;
+    };
     all(
       query: WasmPreparedQuery,
       opts: unknown,

@@ -245,20 +245,44 @@ pub struct WasmPreparedQuery {
     inner: PreparedQuery,
 }
 
+fn pending_operation_waker(callback: js_sys::Function) -> Waker {
+    let (sender, mut receiver) = unbounded();
+    let pending = Arc::new(AtomicBool::new(false));
+    let notified = Arc::clone(&pending);
+    wasm_bindgen_futures::spawn_local(async move {
+        while receiver.next().await.is_some() {
+            notified.store(false, Ordering::Release);
+            let _ = callback.call0(&JsValue::NULL);
+        }
+    });
+    waker(Arc::new(WasmQueryRuntimeWake { sender, pending }))
+}
+
 type PendingWasmOperation<T> = RefCell<Option<Pin<Box<dyn Future<Output = Result<T, JsValue>>>>>>;
 
 #[wasm_bindgen]
 pub struct WasmPendingPreparation {
     future: PendingWasmOperation<WasmPreparedQuery>,
+    wake: RefCell<Option<Waker>>,
 }
 
 #[wasm_bindgen]
 impl WasmPendingPreparation {
+    #[wasm_bindgen(js_name = setWake)]
+    pub fn set_wake(&self, callback: js_sys::Function) {
+        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
+    }
+
     pub fn poll(&self) -> Result<Option<WasmPreparedQuery>, JsValue> {
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(to_js_error("native operation is complete or cancelled"));
         };
-        let mut context = Context::from_waker(Waker::noop());
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
         match future.as_mut().poll(&mut context) {
             Poll::Ready(result) => result.map(Some),
             Poll::Pending => {
@@ -269,21 +293,33 @@ impl WasmPendingPreparation {
     }
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
     }
 }
 
 #[wasm_bindgen]
 pub struct WasmPendingSubscription {
     future: PendingWasmOperation<JsValue>,
+    wake: RefCell<Option<Waker>>,
 }
 
 #[wasm_bindgen]
 impl WasmPendingSubscription {
+    #[wasm_bindgen(js_name = setWake)]
+    pub fn set_wake(&self, callback: js_sys::Function) {
+        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
+    }
+
     pub fn poll(&self) -> Result<Option<JsValue>, JsValue> {
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(to_js_error("native operation is complete or cancelled"));
         };
-        let mut context = Context::from_waker(Waker::noop());
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
         match future.as_mut().poll(&mut context) {
             Poll::Ready(result) => result.map(Some),
             Poll::Pending => {
@@ -294,11 +330,13 @@ impl WasmPendingSubscription {
     }
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
     }
 }
 
 #[wasm_bindgen(js_name = QueryAttachment)]
 pub struct WasmQueryAttachment {
+    wake: RefCell<Option<Waker>>,
     state: RefCell<WasmQueryAttachmentState>,
 }
 
@@ -306,6 +344,26 @@ enum WasmQueryAttachmentState {
     Pending(Pin<Box<dyn Future<Output = Result<QueryAttachment, JsValue>>>>),
     Ready(QueryAttachment),
     Detached,
+}
+
+#[wasm_bindgen]
+impl WasmQueryAttachment {
+    #[wasm_bindgen(js_name = setWake)]
+    pub fn set_wake(&self, callback: js_sys::Function) {
+        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
+    }
+    pub fn poll(&self) -> Result<Option<bool>, JsValue> {
+        if matches!(*self.state.borrow(), WasmQueryAttachmentState::Detached) {
+            return Err(to_js_error("query attachment is detached"));
+        }
+        self.ready().map(|ready| ready.map(|_| true))
+    }
+    pub fn cancel(&self) {
+        if matches!(*self.state.borrow(), WasmQueryAttachmentState::Pending(_)) {
+            self.state.replace(WasmQueryAttachmentState::Detached);
+        }
+        self.wake.borrow_mut().take();
+    }
 }
 
 impl WasmQueryAttachment {
@@ -319,7 +377,12 @@ impl WasmQueryAttachment {
             self.state.replace(state);
             return Ok(result);
         };
-        let mut context = Context::from_waker(Waker::noop());
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
         match future.as_mut().poll(&mut context) {
             Poll::Ready(result) => {
                 let inner = result?;
@@ -1934,6 +1997,7 @@ impl WasmDb {
             .map_err(|err| to_js_error(format!("decode query: {err}")))?;
         let db = self.open_inner()?;
         Ok(WasmPendingPreparation {
+            wake: RefCell::new(None),
             future: RefCell::new(Some(Box::pin(async move {
                 let inner = with_wasm_db!(&db, |db| db.prepare_query_async(&query).await)
                     .map_err(to_js_error)?;
@@ -2217,6 +2281,7 @@ impl WasmDb {
         let db = self.open_inner()?;
         let query = query.inner.clone();
         Ok(WasmPendingSubscription {
+            wake: RefCell::new(None),
             future: RefCell::new(Some(Box::pin(async move {
                 let stream = with_wasm_db!(&db, |db| match author {
                     Some(author) => db.subscribe_for_identity(&query, opts, author).await,
@@ -2253,6 +2318,7 @@ impl WasmDb {
         let db = self.open_inner()?;
         let query = query.inner.clone();
         Ok(WasmQueryAttachment {
+            wake: RefCell::new(None),
             state: RefCell::new(WasmQueryAttachmentState::Pending(Box::pin(async move {
                 let inner = with_wasm_db!(&db, |db| db
                     .attach_query_with_opts_async(&query, opts, open_tx, author)

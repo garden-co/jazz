@@ -206,6 +206,9 @@ export declare class PreparedQuery {
 }
 
 export declare class QueryAttachment {
+  setWake(callback: (...args: unknown[]) => void): void
+  poll(): boolean | null
+  cancel(): void
 
 }
 
@@ -429,10 +432,12 @@ export interface VerifyTokenResult {
 }
 
 export declare class PendingNativePreparation {
+  setWake(callback: (...args: unknown[]) => void): void
   poll(): PreparedQuery | null
   cancel(): void
 }
 export declare class PendingNativeSubscription {
+  setWake(callback: (...args: unknown[]) => void): void
   poll(): Subscription | null
   cancel(): void
 }

@@ -333,6 +333,7 @@ pub struct PreparedQuery {
 
 #[napi(js_name = "QueryAttachment")]
 pub struct QueryAttachment {
+    wake: RefCell<Option<Waker>>,
     state: Rc<RefCell<QueryAttachmentState>>,
 }
 
@@ -342,9 +343,34 @@ enum QueryAttachmentState {
     Detached,
 }
 
+#[napi]
+impl QueryAttachment {
+    #[napi(js_name = "setWake")]
+    pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
+        *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: std::sync::Arc::new(callback),
+        })));
+    }
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<bool>> {
+        if matches!(*self.state.borrow(), QueryAttachmentState::Detached) {
+            return Err(napi::Error::from_reason("query attachment is detached"));
+        }
+        self.poll_ready().map(|ready| ready.then_some(true))
+    }
+    #[napi]
+    pub fn cancel(&self) {
+        if matches!(*self.state.borrow(), QueryAttachmentState::Pending(_)) {
+            *self.state.borrow_mut() = QueryAttachmentState::Detached;
+        }
+        self.wake.borrow_mut().take();
+    }
+}
+
 impl QueryAttachment {
     fn pending(future: LocalBoxFuture<'static, napi::Result<CoreQueryAttachment>>) -> Self {
         Self {
+            wake: RefCell::new(None),
             state: Rc::new(RefCell::new(QueryAttachmentState::Pending(future))),
         }
     }
@@ -359,8 +385,12 @@ impl QueryAttachment {
             *self.state.borrow_mut() = state;
             return Ok(ready);
         };
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
         match Pin::new(&mut future).poll(&mut context) {
             Poll::Ready(result) => {
                 *self.state.borrow_mut() = QueryAttachmentState::Ready(result?);
@@ -417,10 +447,18 @@ pub struct PendingNativeRead {
 #[napi]
 pub struct PendingNativePreparation {
     future: RefCell<Option<LocalBoxFuture<'static, napi::Result<PreparedQuery>>>>,
+    wake: RefCell<Option<Waker>>,
 }
 
 #[napi]
 impl PendingNativePreparation {
+    #[napi(js_name = "setWake")]
+    pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
+        *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: std::sync::Arc::new(callback),
+        })));
+    }
+
     #[napi]
     pub fn poll(&self) -> napi::Result<Option<PreparedQuery>> {
         let Some(mut future) = self.future.borrow_mut().take() else {
@@ -428,7 +466,12 @@ impl PendingNativePreparation {
                 "query preparation is complete or cancelled",
             ));
         };
-        let mut context = Context::from_waker(Waker::noop());
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
         match future.as_mut().poll(&mut context) {
             Poll::Ready(result) => result.map(Some),
             Poll::Pending => {
@@ -441,6 +484,7 @@ impl PendingNativePreparation {
     #[napi]
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
     }
 }
 
@@ -448,10 +492,18 @@ impl PendingNativePreparation {
 #[napi]
 pub struct PendingNativeSubscription {
     future: RefCell<Option<LocalBoxFuture<'static, napi::Result<Subscription>>>>,
+    wake: RefCell<Option<Waker>>,
 }
 
 #[napi]
 impl PendingNativeSubscription {
+    #[napi(js_name = "setWake")]
+    pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
+        *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: std::sync::Arc::new(callback),
+        })));
+    }
+
     #[napi]
     pub fn poll(&self) -> napi::Result<Option<Subscription>> {
         let Some(mut future) = self.future.borrow_mut().take() else {
@@ -459,7 +511,12 @@ impl PendingNativeSubscription {
                 "subscription opening is complete or cancelled",
             ));
         };
-        let mut context = Context::from_waker(Waker::noop());
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
         match future.as_mut().poll(&mut context) {
             Poll::Ready(result) => result.map(Some),
             Poll::Pending => {
@@ -472,6 +529,7 @@ impl PendingNativeSubscription {
     #[napi]
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
     }
 }
 
@@ -2783,6 +2841,7 @@ impl NapiDb {
             ($db:expr) => {{
                 let db = Rc::clone($db);
                 Ok(PendingNativePreparation {
+                    wake: RefCell::new(None),
                     future: RefCell::new(Some(Box::pin(async move {
                         let inner = db.prepare_query_async(&query).await.map_err(napi_error)?;
                         let inner = match admission {
@@ -3142,6 +3201,7 @@ impl NapiDb {
                 let db = Rc::clone($db);
                 let query = query.inner.clone();
                 Ok(PendingNativeSubscription {
+                    wake: RefCell::new(None),
                     future: RefCell::new(Some(Box::pin(async move {
                         let stream = match author {
                             Some(author) => db.subscribe_for_identity(&query, opts, author).await,
