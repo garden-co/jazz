@@ -498,6 +498,8 @@ jobs:
             JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
             node crates/jazz-rn/scripts/verify-relay-artifacts.mjs \
               --package-root "${TEMPORARY_DIRECTORY}/package" android ios
+          mkdir -p dist
+          cp "${TARBALL}" dist/
 
       - name: Verify jazz-rn publish artifacts
         run: |
@@ -511,6 +513,7 @@ jobs:
         with:
           name: pkg-jazz-rn
           path: |
+            dist/jazz-rn-*.tgz
             crates/jazz-rn
             !crates/jazz-rn/node_modules
           include-hidden-files: true
@@ -530,21 +533,41 @@ jobs:
         with:
           rust-toolchain: ""
 
-      # Replace the workspace source directory with the assembled package that
-      # will be published. The preceding pack verification proves this tree's
-      # native payload survives npm packing; this job proves Gradle can consume
-      # that payload through the normal Expo/autolinking route.
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: pkg-jazz-rn
-          path: crates/jazz-rn
+          path: dist
 
-      - name: Generate Android host from the assembled package
-        run: pnpm --filter todo-client-localfirst-expo verify:expo:android
+      - name: Install the packed relay into an isolated Expo fixture
+        run: |
+          FIXTURE=$(mktemp -d)
+          cp -R examples/todo-client-localfirst-expo "${FIXTURE}/app"
+          TARBALL=$(find "$GITHUB_WORKSPACE/dist" -name 'jazz-rn-*.tgz' -type f -print -quit)
+          test -n "${TARBALL}"
+          FIXTURE="${FIXTURE}" TARBALL="${TARBALL}" node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const packagePath = path.join(process.env.FIXTURE, "app", "package.json");
+            const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+            pkg.dependencies["jazz-rn"] = `file:${process.env.TARBALL}`;
+            delete pkg.dependencies["jazz-tools"];
+            fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
+          '
+          pnpm --dir "${FIXTURE}/app" install --no-frozen-lockfile
+          FIXTURE="${FIXTURE}" node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const installed = fs.realpathSync(require.resolve("jazz-rn/package.json", { paths: [path.join(process.env.FIXTURE, "app")] }));
+            if (!installed.startsWith(path.join(process.env.FIXTURE, "app", "node_modules"))) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
+          '
+          echo "JAZZ_RN_CONSUMER_FIXTURE=${FIXTURE}/app" >> "$GITHUB_ENV"
 
-      - name: Link the assembled relay through an Android application
+      - name: Generate Android host from the packed package
+        run: pnpm --dir "$JAZZ_RN_CONSUMER_FIXTURE" exec expo prebuild --platform android --clean --no-install
+
+      - name: Link the packed relay through an Android application
         run: ./gradlew :app:assembleDebug --no-daemon
-        working-directory: examples/todo-client-localfirst-expo/android
+        working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/android
 
   verify-jazz-rn-ios-consumer:
     name: Verify packaged jazz-rn iOS consumer
@@ -563,16 +586,40 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: pkg-jazz-rn
-          path: crates/jazz-rn
+          path: dist
 
-      - name: Generate iOS host from the assembled package
-        run: pnpm --filter todo-client-localfirst-expo verify:expo:ios
+      - name: Install the packed relay into an isolated Expo fixture
+        run: |
+          FIXTURE=$(mktemp -d)
+          cp -R examples/todo-client-localfirst-expo "${FIXTURE}/app"
+          TARBALL=$(find "$GITHUB_WORKSPACE/dist" -name 'jazz-rn-*.tgz' -type f -print -quit)
+          test -n "${TARBALL}"
+          FIXTURE="${FIXTURE}" TARBALL="${TARBALL}" node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const packagePath = path.join(process.env.FIXTURE, "app", "package.json");
+            const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+            pkg.dependencies["jazz-rn"] = `file:${process.env.TARBALL}`;
+            delete pkg.dependencies["jazz-tools"];
+            fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
+          '
+          pnpm --dir "${FIXTURE}/app" install --no-frozen-lockfile
+          FIXTURE="${FIXTURE}" node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const installed = fs.realpathSync(require.resolve("jazz-rn/package.json", { paths: [path.join(process.env.FIXTURE, "app")] }));
+            if (!installed.startsWith(path.join(process.env.FIXTURE, "app", "node_modules"))) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
+          '
+          echo "JAZZ_RN_CONSUMER_FIXTURE=${FIXTURE}/app" >> "$GITHUB_ENV"
 
-      - name: Install the assembled native pod
+      - name: Generate iOS host from the packed package
+        run: pnpm --dir "$JAZZ_RN_CONSUMER_FIXTURE" exec expo prebuild --platform ios --clean --no-install
+
+      - name: Install the packed native pod
         run: pod install
-        working-directory: examples/todo-client-localfirst-expo/ios
+        working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/ios
 
-      - name: Link the assembled relay through an iOS simulator application
+      - name: Link the packed relay through an iOS simulator application
         run: |
           xcodebuild \
             -workspace todoclientlocalfirstexpo.xcworkspace \
@@ -581,4 +628,4 @@ jobs:
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             build
-        working-directory: examples/todo-client-localfirst-expo/ios
+        working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/ios

@@ -164,29 +164,53 @@ function staticLibraryArchitectures(file) {
     else if (machine === 3) architectures.add("x86");
     else if (machine === 62) architectures.add("x86_64");
   };
-  const addMachOArchitecture = (offset) => {
-    if (offset + 8 > bytes.length || bytes.readUInt32LE(offset) !== 0xfeedfacf) return;
+  const addMachOArchitecture = (offset, end = bytes.length, expectedCpu) => {
+    if (offset + 8 > end || bytes.readUInt32LE(offset) !== 0xfeedfacf) return false;
     const cpu = bytes.readUInt32LE(offset + 4);
+    if (expectedCpu !== undefined && cpu !== expectedCpu)
+      throw new Error(`fat Mach-O slice CPU does not match its payload in ${file}`);
     if (cpu === 0x0100000c) architectures.add("arm64");
     else if (cpu === 0x01000007) architectures.add("x86_64");
+    return true;
   };
-  const addFatMachOArchitectures = (offset) => {
-    if (offset + 8 > bytes.length || bytes.readUInt32BE(offset) !== 0xcafebabe) return;
+  const addFatMachOArchitectures = (offset, end = bytes.length) => {
+    if (offset + 8 > end || bytes.readUInt32BE(offset) !== 0xcafebabe) return false;
     const count = bytes.readUInt32BE(offset + 4);
-    if (count > Math.floor((bytes.length - offset - 8) / 20))
+    if (count > Math.floor((end - offset - 8) / 20))
       throw new Error(`malformed universal iOS static library ${file}`);
+    const tableEnd = offset + 8 + count * 20;
+    const slices = [];
     for (let index = 0; index < count; index += 1) {
       const cpu = bytes.readUInt32BE(offset + 8 + index * 20);
-      if (cpu === 0x0100000c) architectures.add("arm64");
-      else if (cpu === 0x01000007) architectures.add("x86_64");
+      const sliceOffset = bytes.readUInt32BE(offset + 16 + index * 20);
+      const sliceSize = bytes.readUInt32BE(offset + 20 + index * 20);
+      if (sliceOffset < tableEnd || sliceSize === 0 || sliceOffset + sliceSize > end)
+        throw new Error(`malformed universal iOS static library ${file}`);
+      slices.push({ cpu, offset: sliceOffset, end: sliceOffset + sliceSize });
     }
+    slices.sort((left, right) => left.offset - right.offset);
+    for (let index = 1; index < slices.length; index += 1)
+      if (slices[index - 1].end > slices[index].offset)
+        throw new Error(`overlapping universal iOS static-library slices ${file}`);
+    for (const slice of slices) {
+      if (bytes.subarray(slice.offset, slice.offset + 8).equals(Buffer.from("!<arch>\n")))
+        scanArchive(slice.offset, slice.end, slice.cpu);
+      else if (!addMachOArchitecture(slice.offset, slice.end, slice.cpu))
+        throw new Error(`fat Mach-O slice has no supported object payload in ${file}`);
+    }
+    return true;
   };
 
-  if (bytes.subarray(0, 8).equals(Buffer.from("!<arch>\n"))) {
-    let offset = 8;
-    while (offset + 60 <= bytes.length) {
+  const scanArchive = (start, end = bytes.length, expectedCpu) => {
+    if (bytes.subarray(start, start + 8).equals(Buffer.from("!<thin>\n")))
+      throw new Error(`thin static-library archives are unsupported: ${file}`);
+    if (!bytes.subarray(start, start + 8).equals(Buffer.from("!<arch>\n")))
+      throw new Error(`malformed static-library archive ${file}`);
+    let offset = start + 8;
+    const before = architectures.size;
+    while (offset + 60 <= end) {
       const size = Number(bytes.subarray(offset + 48, offset + 58).toString("ascii").trim());
-      if (!Number.isSafeInteger(size) || size < 0 || offset + 60 + size > bytes.length)
+      if (!Number.isSafeInteger(size) || size < 0 || offset + 60 + size > end)
         throw new Error(`malformed static-library archive ${file}`);
       const payload = offset + 60;
       // BSD ar archives prefix a member with a long filename (#1/<length>).
@@ -197,11 +221,19 @@ function staticLibraryArchitectures(file) {
       const object = bsdNameLength === undefined ? payload : payload + Number(bsdNameLength);
       if (object > payload + size) throw new Error(`malformed BSD static-library member ${file}`);
       addElfArchitecture(object);
-      addMachOArchitecture(object);
-      addFatMachOArchitectures(object);
+      addMachOArchitecture(object, payload + size, expectedCpu);
+      addFatMachOArchitectures(object, payload + size);
       offset = payload + size + (size % 2);
     }
-    if (offset !== bytes.length) throw new Error(`malformed static-library archive padding ${file}`);
+    if (offset !== end) throw new Error(`malformed static-library archive padding ${file}`);
+    if (expectedCpu !== undefined && architectures.size === before)
+      throw new Error(`fat Mach-O slice has no supported object payload in ${file}`);
+  };
+
+  if (bytes.subarray(0, 8).equals(Buffer.from("!<thin>\n"))) {
+    throw new Error(`thin static-library archives are unsupported: ${file}`);
+  } else if (bytes.subarray(0, 8).equals(Buffer.from("!<arch>\n"))) {
+    scanArchive(0);
   } else {
     // `lipo -create` may emit a universal archive directly rather than an ar
     // container. This is valid for the simulator library.

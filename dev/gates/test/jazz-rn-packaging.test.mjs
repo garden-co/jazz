@@ -335,6 +335,23 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     bytes.writeUInt32LE(cpu, 4);
     return bytes;
   };
+  const fatMachO = (slices, mutate = () => {}) => {
+    const tableSize = 8 + slices.length * 20;
+    const bytes = Buffer.alloc(tableSize + slices.reduce((size, slice) => size + slice.bytes.length, 0));
+    bytes.writeUInt32BE(0xcafebabe, 0);
+    bytes.writeUInt32BE(slices.length, 4);
+    let offset = tableSize;
+    for (const [index, slice] of slices.entries()) {
+      const entry = 8 + index * 20;
+      bytes.writeUInt32BE(slice.cpu, entry);
+      bytes.writeUInt32BE(offset, entry + 8);
+      bytes.writeUInt32BE(slice.bytes.length, entry + 12);
+      slice.bytes.copy(bytes, offset);
+      offset += slice.bytes.length;
+    }
+    mutate(bytes);
+    return bytes;
+  };
   const artifactBytes = (file) => {
     const androidMachine = {
       "arm64-v8a/libjazz_native_relay.a": 183,
@@ -434,6 +451,83 @@ ${
     );
 
     const simulatorDirectory = join(iosRoot, "ios-arm64_x86_64-simulator");
+    const simulatorLibrary = join(simulatorDirectory, "libjazz_native_relay.a");
+    await writeFile(
+      simulatorLibrary,
+      fatMachO([
+        { cpu: 0x0100000c, bytes: machObject(0x0100000c) },
+        { cpu: 0x01000007, bytes: machObject(0x01000007) },
+      ]),
+    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    execFileSync(
+      process.execPath,
+      [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+      { env: environment, stdio: "pipe" },
+    );
+
+    await writeFile(
+      simulatorLibrary,
+      fatMachO(
+        [
+          { cpu: 0x0100000c, bytes: machObject(0x0100000c) },
+          { cpu: 0x01000007, bytes: machObject(0x01000007) },
+        ],
+        (bytes) => bytes.writeUInt32BE(bytes.length + 1, 16),
+      ),
+    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /malformed universal iOS static library/,
+      "a fat Mach-O slice table cannot point beyond the library",
+    );
+
+    await writeFile(
+      simulatorLibrary,
+      fatMachO([
+        { cpu: 0x0100000c, bytes: machObject(0x01000007) },
+        { cpu: 0x01000007, bytes: machObject(0x01000007) },
+      ]),
+    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /fat Mach-O slice CPU does not match its payload/,
+      "a fat Mach-O table cannot claim an architecture its payload lacks",
+    );
+
+    await writeFile(join(iosRoot, "ios-arm64/libjazz_native_relay.a"), "!<thin>\n");
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /thin static-library archives are unsupported/,
+      "thin archives fail closed because their object paths are not sealed in the package",
+    );
+    await writeFile(
+      join(iosRoot, "ios-arm64/libjazz_native_relay.a"),
+      artifactBytes("ios-arm64/libjazz_native_relay.a"),
+    );
+    await writeFile(
+      simulatorLibrary,
+      artifactBytes("ios-arm64_x86_64-simulator/libjazz_native_relay.a"),
+    );
+
     await rm(join(simulatorDirectory, "libjazz_native_relay.a"));
     await writeFile(join(simulatorDirectory, "libjazz_native_relay_simulator.a"), "fixture\n");
     await writeFile(join(iosRoot, "Info.plist"), info(true, "libjazz_native_relay_simulator.a"));
