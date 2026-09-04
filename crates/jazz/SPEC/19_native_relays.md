@@ -60,6 +60,16 @@ scope terminal error and surfaced to
 foreground ticks until a later authenticated reconnect clears it; it may never
 silently degrade into an indefinitely pending foreground operation.
 
+Opening a foreground returns its in-memory client handle synchronously. If
+the persistent owner is busy, the host retains normal subscriber admission as
+a future and pumps it without blocking the UI thread. Its identity and claims
+are captured from the admitted scope before it is queued; the persistent
+subscriber is registered only after admission succeeds. Closing the foreground
+or revoking its scope cancels admission and discards its queued traffic, so
+no late subscriber can be installed. An admission failure is retained and
+surfaced by that foreground's operations and ticks while sibling foregrounds
+continue to progress.
+
 The scope key has no token material. Trusted platform code derives an opaque
 non-empty `auth_scope` only after authentication and admits the complete scope config to
 the native host: auth scope, SQLite path, schema, persistent `DbIdentity`, and

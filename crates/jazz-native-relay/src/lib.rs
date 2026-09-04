@@ -1364,9 +1364,9 @@ impl NativeRelayHost {
         }
         self.relays
             .get(&relay)
-            .ok_or(JazzNativeRelayStatus::InvalidHandle)?
-            .relay
-            .pump()
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        self.foreground_client(foreground)?
+            .pump_foreground()
             .map_err(relay_status)
     }
 
@@ -3098,6 +3098,15 @@ pub struct NativeRelayClient {
 }
 
 impl NativeRelayClient {
+    fn pump_foreground(&self) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker.pump()?;
+            worker.foreground_client(id)?;
+            Ok(())
+        })
+    }
+
     fn set_foreground_wake_callback(
         &self,
         foreground: u64,
@@ -3154,6 +3163,7 @@ impl NativeRelayClient {
                 .clients
                 .get(&id)
                 .ok_or(RelayError::UnknownClient(id))?;
+            client.check_admission()?;
             operation(&client.db)
         })
     }
@@ -4124,7 +4134,9 @@ struct ConnectedClient {
     db: Rc<Db<MemoryStorage>>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
-    served_io: RelayPeerIo,
+    served_io: Option<RelayPeerIo>,
+    admission: Option<RelayAdmissionFuture>,
+    admission_error: Option<jazz::db::Error>,
     wire: NativeRelayWire,
     prepared_queries: BTreeMap<u64, ForegroundPreparedQuery>,
     pending_subscriptions: BTreeMap<u64, ForegroundSubscriptionOpen>,
@@ -4142,7 +4154,7 @@ struct ConnectedClient {
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
     _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
-    _served: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+    _served: Option<Rc<LocalMutex<PeerConnection<SqliteStorage>>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -4156,6 +4168,48 @@ impl ConnectedClient {
         let mut context = Context::from_waker(waker);
         self.mutation_cleanups
             .retain_mut(|future| future.as_mut().poll(&mut context).is_pending());
+    }
+
+    fn check_admission(&self) -> Result<(), RelayError> {
+        self.admission_error
+            .as_ref()
+            .map_or(Ok(()), |error| Err(RelayError::Db(error.clone())))
+    }
+
+    fn poll_admission(&mut self, waker: &Waker) {
+        let Some(mut admission) = self.admission.take() else {
+            return;
+        };
+        let mut context = Context::from_waker(waker);
+        match admission.as_mut().poll(&mut context) {
+            Poll::Pending => self.admission = Some(admission),
+            Poll::Ready(Ok(served)) => {
+                self.served_io = Some(RelayPeerIo::new(
+                    served
+                        .try_lock()
+                        .expect("newly admitted peer is not borrowed")
+                        .io_pump(),
+                    NativeRelayWire {
+                        inbound: Arc::clone(&self.wire.outbound),
+                        outbound: Arc::clone(&self.wire.inbound),
+                        liveness: self.wire.liveness.clone(),
+                    },
+                ));
+                self._served = Some(served);
+            }
+            Poll::Ready(Err(error)) => {
+                self.cancel_pending_work();
+                self.admission_error = Some(error);
+                self.db.schedule_tick(TickUrgency::Immediate);
+            }
+        }
+    }
+
+    fn poll_served_io(&mut self, waker: &Waker) -> Result<(), RelayError> {
+        if let Some(io) = &mut self.served_io {
+            io.poll(waker)?;
+        }
+        Ok(())
     }
 
     fn poll_read_cleanup(&mut self, waker: &Waker) {
@@ -4176,6 +4230,17 @@ impl ConnectedClient {
     }
 
     fn cancel_pending_work(&mut self) {
+        self.admission = None;
+        if self._served.is_none() {
+            // No peer owns these frames yet. Closing or rejecting the
+            // foreground cancels its queued traffic as well as admission.
+            for queue in [&self.wire.inbound, &self.wire.outbound] {
+                *queue
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    BoundedMessageQueue::default();
+            }
+        }
         self.tick = None;
         self.pending_operations.clear();
         self.pending_subscriptions.clear();
@@ -4183,7 +4248,9 @@ impl ConnectedClient {
         self.read_cleanup = None;
         self.read_cleanups.borrow_mut().clear();
         self.upstream_io.incoming = None;
-        self.served_io.incoming = None;
+        if let Some(io) = &mut self.served_io {
+            io.incoming = None;
+        }
     }
 
     /// Abandon every foreground-owned transaction before dropping the client.
@@ -4213,6 +4280,11 @@ type ForegroundOperationFuture =
     Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
 
 type RelayTickFuture = Pin<Box<dyn Future<Output = Result<(), jazz::db::Error>>>>;
+type RelayAdmissionFuture = Pin<
+    Box<
+        dyn Future<Output = Result<Rc<LocalMutex<PeerConnection<SqliteStorage>>>, jazz::db::Error>>,
+    >,
+>;
 
 /// A peer's chunk lane must progress even while its semantic tick or a
 /// foreground read owns the node. Retain both the endpoint and any suspended
@@ -4492,18 +4564,16 @@ impl RelayWorker {
         }
         let (client_transport, relay_transport, wire) = duplex(Arc::clone(&self.liveness));
         let upstream = block_on(db.connect_upstream(client_transport));
-        let served =
-            self.persistent
-                .accept_subscriber_with_claims(relay_transport, identity.author, claims);
+        // The scope and claims are captured now, while the capability is
+        // admitted. Only the ordinary peer's owner/storage preparation may
+        // wait; opening the new memory foreground must return synchronously.
+        let persistent = Rc::clone(&self.persistent);
+        let admission: RelayAdmissionFuture = Box::pin(async move {
+            persistent
+                .accept_subscriber_with_claims_async(relay_transport, identity.author, claims)
+                .await
+        });
         let upstream_io = RelayPeerIo::new(block_on(upstream.lock()).io_pump(), wire.clone());
-        let served_io = RelayPeerIo::new(
-            block_on(served.lock()).io_pump(),
-            NativeRelayWire {
-                inbound: Arc::clone(&wire.outbound),
-                outbound: Arc::clone(&wire.inbound),
-                liveness: wire.liveness.clone(),
-            },
-        );
         let id = self.next_client_id;
         self.next_client_id = self
             .next_client_id
@@ -4516,7 +4586,9 @@ impl RelayWorker {
                 db,
                 tick: None,
                 upstream_io,
-                served_io,
+                served_io: None,
+                admission: Some(admission),
+                admission_error: None,
                 wire,
                 prepared_queries: BTreeMap::new(),
                 pending_subscriptions: BTreeMap::new(),
@@ -4529,9 +4601,15 @@ impl RelayWorker {
                 committed_transactions: BTreeMap::new(),
                 next_foreground_handle: 1,
                 _upstream: upstream,
-                _served: served,
+                _served: None,
             },
         );
+        let client = self.clients.get_mut(&id).expect("new client was inserted");
+        client.poll_admission(&Waker::from(Arc::clone(&self.wake)));
+        if let Err(error) = client.check_admission() {
+            self.clients.remove(&id);
+            return Err(error);
+        }
         Ok(id)
     }
 
@@ -4548,9 +4626,13 @@ impl RelayWorker {
         }
         for id in &client_ids {
             let client = self.clients.get_mut(id).expect("selected client exists");
+            client.poll_admission(&waker);
+            if client.admission_error.is_some() {
+                continue;
+            }
             client.upstream_io.poll(&waker)?;
             poll_relay_tick(&client.db, &mut client.tick, &waker)?;
-            client.served_io.poll(&waker)?;
+            client.poll_served_io(&waker)?;
             client.poll_read_cleanup(&waker);
             client.poll_mutation_cleanup(&waker);
         }
@@ -4558,7 +4640,10 @@ impl RelayWorker {
         poll_relay_tick(&self.persistent, &mut self.persistent_tick, &waker)?;
         for id in &client_ids {
             let client = self.clients.get_mut(id).expect("selected client exists");
-            client.served_io.poll(&waker)?;
+            if client.admission_error.is_some() {
+                continue;
+            }
+            client.poll_served_io(&waker)?;
             client.upstream_io.poll(&waker)?;
             poll_relay_tick(&client.db, &mut client.tick, &waker)?;
             client.poll_read_cleanup(&waker);
@@ -4568,15 +4653,21 @@ impl RelayWorker {
     }
 
     fn foreground_client(&self, client: u64) -> Result<&ConnectedClient, RelayError> {
-        self.clients
+        let client = self
+            .clients
             .get(&client)
-            .ok_or(RelayError::UnknownClient(client))
+            .ok_or(RelayError::UnknownClient(client))?;
+        client.check_admission()?;
+        Ok(client)
     }
 
     fn foreground_client_mut(&mut self, client: u64) -> Result<&mut ConnectedClient, RelayError> {
-        self.clients
+        let client = self
+            .clients
             .get_mut(&client)
-            .ok_or(RelayError::UnknownClient(client))
+            .ok_or(RelayError::UnknownClient(client))?;
+        client.check_admission()?;
+        Ok(client)
     }
 
     fn next_foreground_handle(client: &mut ConnectedClient) -> Result<u64, RelayError> {
@@ -8049,6 +8140,237 @@ mod tests {
                 .unwrap(),
             (0, 0)
         );
+    }
+
+    // A retained semantic owner and native capability teardown are host
+    // boundaries. Keep the contention deterministic with the existing owner
+    // suspension hook, then assert real C-ABI opens, writes, close and revoke.
+    fn hold_persistent_owner(relay: &NativeRelay) {
+        relay
+            .run(|worker| {
+                let db = Rc::clone(&worker.persistent);
+                worker.persistent_tick = Some(Box::pin(async move {
+                    db.hold_node_owner_for_test().await;
+                    unreachable!("test owner is released by dropping its future")
+                }));
+                Ok(())
+            })
+            .unwrap();
+        relay.pump().unwrap();
+    }
+
+    #[test]
+    fn foreground_admission_waits_for_owner_and_close_discards_unadmitted_traffic() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("admission.sqlite"),
+            "admission",
+            &permissive_schema(),
+            0x63,
+        );
+        let keeper = fixture.open_foreground(&capability);
+        let relay = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(keeper)
+                .unwrap()
+                .relay
+                .clone()
+        };
+        hold_persistent_owner(&relay);
+        let closed = fixture.open_foreground(&capability);
+        let closed_client = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(closed)
+                .unwrap()
+                .clone()
+        };
+        fixture.insert_todo(closed, [0x71; 16], "cancelled before peer admission");
+        fixture.tick(closed);
+        let id = closed_client.id;
+        relay
+            .run(move |worker| {
+                let client = &worker.clients[&id];
+                assert!(client.admission.is_some());
+                assert!(
+                    client._served.is_none(),
+                    "a waiting admission cannot install a peer"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            closed_client.wire.outbound.lock().unwrap().len() > 0,
+            "ordinary foreground traffic queues before admission"
+        );
+        assert_eq!(
+            fixture.execute(closed, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        assert_eq!(closed_client.wire.outbound.lock().unwrap().len(), 0);
+        assert_eq!(closed_client.wire.inbound.lock().unwrap().len(), 0);
+
+        let admitted = fixture.open_foreground(&capability);
+        let row = [0x72; 16];
+        fixture.insert_todo(admitted, row, "admitted after owner resumed");
+        fixture.tick(admitted);
+        relay
+            .run(|worker| {
+                worker.persistent_tick = None;
+                Ok(())
+            })
+            .unwrap();
+        for _ in 0..16 {
+            fixture.tick(admitted);
+        }
+        assert_exact_todo_rows(
+            &fixture.rows_after_sync(keeper),
+            RowUuid::from_bytes(row),
+            "admitted after owner resumed",
+        );
+        assert_eq!(
+            fixture.execute(admitted, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        assert_eq!(
+            fixture.execute(keeper, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+    }
+
+    #[test]
+    fn revocation_drops_waiting_subscriber_admission_and_preserves_another_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let schema = permissive_schema();
+        let a_capability = fixture.admit(
+            &directory.path().join("admission-a.sqlite"),
+            "admission-a",
+            &schema,
+            0x64,
+        );
+        let b_capability = fixture.admit(
+            &directory.path().join("admission-b.sqlite"),
+            "admission-b",
+            &schema,
+            0x65,
+        );
+        let a = fixture.open_foreground(&a_capability);
+        let b = fixture.open_foreground(&b_capability);
+        let relay = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(a)
+                .unwrap()
+                .relay
+                .clone()
+        };
+        hold_persistent_owner(&relay);
+        let waiting = fixture.open_foreground(&a_capability);
+        fixture.insert_todo(waiting, [0x73; 16], "revoked before admission");
+        fixture.tick(waiting);
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_revoke_scope_capability(
+                    fixture.host,
+                    a_capability.as_ptr(),
+                    a_capability.len(),
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert_eq!(
+            fixture.tick_status(waiting),
+            JazzNativeRelayStatus::InvalidHandle
+        );
+        assert!(matches!(relay.pump(), Err(RelayError::Closed)));
+        let row = [0x74; 16];
+        fixture.insert_todo(b, row, "independent scope survives");
+        assert_exact_todo_rows(
+            &fixture.rows_after_sync(b),
+            RowUuid::from_bytes(row),
+            "independent scope survives",
+        );
+    }
+
+    #[test]
+    fn delayed_admission_failure_is_owned_by_the_opening_foreground() {
+        // A failing admission future is injected here because this receipt
+        // owns host error delivery, not the storage/auth implementation that
+        // produces the ordinary core Error.
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("admission-error.sqlite"),
+            "admission-error",
+            &permissive_schema(),
+            0x66,
+        );
+        let keeper = fixture.open_foreground(&capability);
+        let relay = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(keeper)
+                .unwrap()
+                .relay
+                .clone()
+        };
+        hold_persistent_owner(&relay);
+        let failed = fixture.open_foreground(&capability);
+        let client = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(failed)
+                .unwrap()
+                .clone()
+        };
+        let id = client.id;
+        relay
+            .run(move |worker| {
+                worker.clients.get_mut(&id).unwrap().admission = Some(Box::pin(async {
+                    Err(jazz::db::Error {
+                        code: jazz::db::ErrorCode::Protocol,
+                        message: "admission was rejected".into(),
+                    })
+                }));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            fixture.tick_status(failed),
+            JazzNativeRelayStatus::LifecycleFailure
+        );
+        assert!(
+            matches!(client.prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap()), Err(RelayError::Db(error)) if error.message == "admission was rejected")
+        );
+        assert_eq!(
+            fixture.tick_status(failed),
+            JazzNativeRelayStatus::LifecycleFailure
+        );
+        fixture.tick(keeper);
+        assert_eq!(
+            fixture.execute(failed, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        relay
+            .run(|worker| {
+                worker.persistent_tick = None;
+                Ok(())
+            })
+            .unwrap();
+        fixture.tick(keeper);
     }
 
     #[test]

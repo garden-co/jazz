@@ -795,29 +795,21 @@ where
         Ok(())
     }
 
-    fn restore_local_subscriber(
+    async fn restore_local_subscriber(
         &self,
         author: AuthorSubject,
         downstream_fates: &PendingDownstreamFates,
     ) -> Result<(), Error> {
-        let mut node = self.node.borrow_mut();
-        let pending = node.pending_transaction_ids_for_author(author);
-        let pending = crate::db::block_on(pending)?;
-        drop(node);
+        let mut node = self.node.lock().await;
+        let pending = node.pending_transaction_ids_for_author(author).await?;
         let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
         let mut replay_units = Vec::new();
         let mut visited = BTreeSet::new();
-        {
-            let mut node = self.node.borrow_mut();
-            for tx_id in &pending {
-                crate::db::block_on(collect_local_replay_commit_units(
-                    &mut node,
-                    *tx_id,
-                    &mut visited,
-                    &mut replay_units,
-                ))?;
-            }
+        for tx_id in &pending {
+            collect_local_replay_commit_units(&mut node, *tx_id, &mut visited, &mut replay_units)
+                .await?;
         }
+        drop(node);
         for (tx_id, unit) in replay_units {
             // A reopened main-thread runtime has no transaction history. Send
             // accepted causal ancestors before each pending unit so the latter
@@ -830,10 +822,7 @@ where
         for tx_id in pending {
             register_local_fate_route(&self.local_fate_routes, tx_id, downstream_fates);
         }
-        crate::db::block_on(queue_local_acknowledgements(
-            &self.local_fate_routes,
-            &self.node,
-        ));
+        queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
         Ok(())
     }
 
@@ -2207,6 +2196,97 @@ where
         peer: PeerState,
         edge_authority: bool,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        if let Some(cursor) = &cursor {
+            assert_eq!(
+                cursor.ingest_context.identity, identity,
+                "a resume cursor may only be used by its authenticated identity"
+            );
+        }
+        let (downstream_fates, startup_error) =
+            crate::db::block_on(self.subscriber_startup(identity, trust, edge_authority));
+        self.accept_subscriber_with_peer_and_startup(
+            transport,
+            identity,
+            trust,
+            claims,
+            cursor,
+            peer,
+            edge_authority,
+            downstream_fates,
+            startup_error,
+        )
+    }
+
+    /// Admit a normal session subscriber without waiting on its semantic owner.
+    pub async fn accept_subscriber_with_claims_async(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        let (downstream_fates, startup_error) = self
+            .subscriber_startup(identity, CommitUnitTrust::Session, false)
+            .await;
+        if let Some(error) = startup_error {
+            return Err(error);
+        }
+        Ok(self.accept_subscriber_with_peer_and_startup(
+            transport,
+            identity,
+            CommitUnitTrust::Session,
+            claims,
+            None,
+            PeerState::client_link(identity),
+            false,
+            downstream_fates,
+            None,
+        ))
+    }
+
+    async fn subscriber_startup(
+        &self,
+        identity: AuthorSubject,
+        trust: CommitUnitTrust,
+        edge_authority: bool,
+    ) -> (PendingDownstreamFates, Option<Error>) {
+        let downstream_fates = Rc::new(RefCell::new(Vec::new()));
+        let scope_mismatch = self
+            .node
+            .lock()
+            .await
+            .client_relay_scope()
+            .is_some_and(|scope| {
+                trust == CommitUnitTrust::Session && !scope.admits_session(identity)
+            })
+            .then(|| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    "foreground session is outside this scope-isolated relay ownership scope",
+                )
+            });
+        let startup_error =
+            if scope_mismatch.is_none() && self.receives_commits_as_local() && !edge_authority {
+                self.restore_local_subscriber(identity, &downstream_fates)
+                    .await
+                    .err()
+            } else {
+                scope_mismatch
+            };
+        (downstream_fates, startup_error)
+    }
+
+    fn accept_subscriber_with_peer_and_startup(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        trust: CommitUnitTrust,
+        claims: BTreeMap<String, Value>,
+        cursor: Option<ResumeCursor>,
+        peer: PeerState,
+        edge_authority: bool,
+        downstream_fates: PendingDownstreamFates,
+        startup_error: Option<Error>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         let local_receiver = self.receives_commits_as_local() && !edge_authority;
         let (peer, ingest_context, session_claims, session_claim_revision) = match cursor {
             Some(cursor) => {
@@ -2238,25 +2318,6 @@ where
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
-        let downstream_fates = Rc::new(RefCell::new(Vec::new()));
-        let scope_mismatch = self
-            .node
-            .borrow()
-            .client_relay_scope()
-            .is_some_and(|scope| {
-                trust == CommitUnitTrust::Session && !scope.admits_session(identity)
-            })
-            .then(|| {
-                Error::new(
-                    ErrorCode::Protocol,
-                    "foreground session is outside this scope-isolated relay ownership scope",
-                )
-            });
-        let startup_error = scope_mismatch.or_else(|| {
-            local_receiver
-                .then(|| self.restore_local_subscriber(identity, &downstream_fates))
-                .and_then(Result::err)
-        });
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),

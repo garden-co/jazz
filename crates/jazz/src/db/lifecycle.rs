@@ -1076,6 +1076,21 @@ where
             .accept_subscriber_with_claims(transport, identity, claims)
     }
 
+    /// Admit a subscriber after its semantic owner and local replay are ready.
+    /// Hosts may retain this future without blocking their command loop. A
+    /// cancelled or failed admission does not register a peer connection.
+    #[doc(hidden)]
+    pub async fn accept_subscriber_with_claims_async(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        self.node
+            .accept_subscriber_with_claims_async(transport, identity, claims)
+            .await
+    }
+
     /// Accept a subscriber connection with explicit auth claims and upload trust mode.
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
