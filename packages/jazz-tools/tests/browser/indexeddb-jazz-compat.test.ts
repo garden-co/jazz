@@ -14,12 +14,7 @@ import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?ra
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
-import {
-  createDb,
-  resolveDefaultPersistentDbName,
-  type Db,
-  type DbConfig,
-} from "../../src/runtime/db.js";
+import { createDb, type Db, type DbConfig } from "../../src/runtime/db.js";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,
@@ -100,8 +95,15 @@ describe("browser Jazz storage compatibility corpus", () => {
     const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
     const config = persistentConfig(dbName, secret, server);
     expect(server.appId).toBe("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
-    const physicalDbName = resolveDefaultPersistentDbName(config);
-    databaseNames.add(physicalDbName);
+    // `secret` is resolved to a local-first session during public Db creation,
+    // so the pre-auth config's physical-name helper points at the anonymous
+    // root. Provision once through the public path to identify the actual
+    // principal-scoped root before installing the historical receipt.
+    const bootstrap = await openPersistentDb(config);
+    const physicalDbName = await trackPhysicalDatabase(dbName);
+    await bootstrap.shutdown();
+    openDbs.splice(openDbs.indexOf(bootstrap), 1);
+    await sleep(100);
     const rawBeforeReadOnlyInspection = JSON.parse(historicalCorpus) as Record<string, string>;
     await installRawRecords(physicalDbName, rawBeforeReadOnlyInspection);
     expect(await rawRecords(physicalDbName)).toEqual(rawBeforeReadOnlyInspection);
