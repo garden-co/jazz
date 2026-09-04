@@ -24,7 +24,69 @@ use super::{
 };
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
-type JoinBucket = HashMap<Bytes, i64>;
+#[derive(Clone, Debug, Default)]
+struct JoinBucket {
+    base: Rc<HashMap<Bytes, i64>>,
+    overlay: Rc<HashMap<Bytes, Option<i64>>>,
+}
+
+impl JoinBucket {
+    fn get(&self, record: &Bytes) -> Option<&i64> {
+        self.overlay
+            .get(record)
+            .and_then(Option::as_ref)
+            .or_else(|| {
+                (!self.overlay.contains_key(record))
+                    .then(|| self.base.get(record))
+                    .flatten()
+            })
+    }
+
+    fn set(&mut self, record: Bytes, weight: i64) {
+        Rc::make_mut(&mut self.overlay).insert(record, (weight != 0).then_some(weight));
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&Bytes, &i64)> {
+        self.base
+            .iter()
+            .filter_map(|(record, weight)| {
+                (!self.overlay.contains_key(record)).then_some((record, weight))
+            })
+            .chain(
+                self.overlay
+                    .iter()
+                    .filter_map(|(record, weight)| weight.as_ref().map(|weight| (record, weight))),
+            )
+    }
+
+    fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+
+    fn commit_overlay(&mut self) {
+        if self.overlay.is_empty() {
+            return;
+        }
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
+        let base = Rc::make_mut(&mut self.base);
+        for (record, weight) in overlay {
+            if let Some(weight) = weight {
+                base.insert(record, weight);
+            } else {
+                base.remove(&record);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn from_records(records: HashMap<Bytes, i64>) -> Self {
+        Self {
+            base: Rc::new(records),
+            overlay: Rc::default(),
+        }
+    }
+}
 type JoinIndex = HashMap<JoinKey, JoinBucket>;
 
 pub(super) fn touched_join_keys(
@@ -50,7 +112,7 @@ pub(super) struct AntiJoinState {
     // matters when one atomic input batch reaches two consumers of an
     // arrangement: the second consumer must not retract a row the first
     // merely arranged but this operator never published.
-    published: JoinIndex,
+    published: ArrangementState,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -58,14 +120,33 @@ pub(super) struct SemiJoinState {
     // Semi-join arrangements are shared by input/key/scope and another
     // consumer may advance one before this node runs. Keep publication state
     // per semi-join node so threshold deltas never depend on arrangement order.
-    published: JoinIndex,
+    published: ArrangementState,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct ArrangementState {
-    /// key -> record multiset. Records are kept as encoded bytes so probing can
-    /// build output records without rehydrating whole tables.
+    /// Immutable base buckets are shared between evaluator snapshots. Updates
+    /// retain only touched buckets in the overlay, rather than cloning the
+    /// complete join index.
     index: Rc<JoinIndex>,
+    overlay: Rc<HashMap<JoinKey, Option<JoinBucket>>>,
+}
+
+enum JoinLookup<'a> {
+    Arrangement(&'a ArrangementState),
+    Index(&'a JoinIndex),
+}
+
+impl JoinLookup<'_> {
+    fn bucket(&self, key: &JoinKey) -> Option<&JoinBucket> {
+        match self {
+            Self::Arrangement(arrangement) => match arrangement.overlay.get(key) {
+                Some(bucket) => bucket.as_ref(),
+                None => arrangement.index.get(key),
+            },
+            Self::Index(index) => index.get(key),
+        }
+    }
 }
 
 impl JoinState {
@@ -185,7 +266,7 @@ impl JoinState {
                 &mut output,
                 &context,
                 &keyed_left_delta,
-                &right_arrangement.value().index,
+                &JoinLookup::Arrangement(right_arrangement.value()),
                 JoinProbeSide::LeftDelta,
                 1,
             )?;
@@ -206,7 +287,7 @@ impl JoinState {
             &mut output,
             &context,
             &keyed_left_delta,
-            &right_arrangement.value().index,
+            &JoinLookup::Arrangement(right_arrangement.value()),
             JoinProbeSide::LeftDelta,
             1,
         )?;
@@ -214,7 +295,7 @@ impl JoinState {
             &mut output,
             &context,
             &keyed_right_delta,
-            &left_arrangement.value().index,
+            &JoinLookup::Arrangement(left_arrangement.value()),
             JoinProbeSide::RightDelta,
             1,
         )?;
@@ -226,7 +307,7 @@ impl JoinState {
             &mut output,
             &context,
             &keyed_right_delta,
-            &left_delta_index,
+            &JoinLookup::Index(&left_delta_index),
             JoinProbeSide::RightDelta,
             -1,
         )?;
@@ -246,6 +327,10 @@ impl JoinState {
 }
 
 impl SemiJoinState {
+    pub(super) fn commit_published_overlay(&mut self) {
+        self.published.commit_overlay();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply(
         &mut self,
@@ -296,15 +381,15 @@ impl SemiJoinState {
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
                 for key in affected_keys {
-                    let old_visible = self.published.get(&key);
+                    let old_visible = self.published.bucket(&key);
                     let new_visible = (right_arrangement.value().key_count(&key) > 0)
                         .then(|| left_arrangement.value().bucket(&key))
                         .flatten();
                     append_bucket_diff(&mut deltas, new_visible, old_visible);
                     if let Some(bucket) = new_visible {
-                        self.published.insert(key, bucket.clone());
+                        self.published.replace_bucket(key, Some(bucket.clone()));
                     } else {
-                        self.published.remove(&key);
+                        self.published.replace_bucket(key, None);
                     }
                 }
             }
@@ -318,7 +403,8 @@ impl SemiJoinState {
                         && let Some(bucket) = left_arrangement.value().bucket(key)
                     {
                         append_bucket(&mut deltas, Some(bucket), 1);
-                        self.published.insert(key.clone(), bucket.clone());
+                        self.published
+                            .replace_bucket(key.clone(), Some(bucket.clone()));
                     }
                 }
             }
@@ -329,6 +415,10 @@ impl SemiJoinState {
 }
 
 impl AntiJoinState {
+    pub(super) fn commit_published_overlay(&mut self) {
+        self.published.commit_overlay();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply(
         &mut self,
@@ -378,7 +468,7 @@ impl AntiJoinState {
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
                 for key in affected_keys {
-                    let old_visible = self.published.get(&key);
+                    let old_visible = self.published.bucket(&key);
                     let new_visible = if right_arrangement.value().key_count(&key) == 0 {
                         left_arrangement.value().bucket(&key)
                     } else {
@@ -386,9 +476,9 @@ impl AntiJoinState {
                     };
                     append_bucket_diff(&mut deltas, new_visible, old_visible);
                     if let Some(bucket) = new_visible {
-                        self.published.insert(key, bucket.clone());
+                        self.published.replace_bucket(key, Some(bucket.clone()));
                     } else {
-                        self.published.remove(&key);
+                        self.published.replace_bucket(key, None);
                     }
                 }
             }
@@ -402,7 +492,8 @@ impl AntiJoinState {
                         && let Some(bucket) = left_arrangement.value().bucket(key)
                     {
                         append_bucket(&mut deltas, Some(bucket), 1);
-                        self.published.insert(key.clone(), bucket.clone());
+                        self.published
+                            .replace_bucket(key.clone(), Some(bucket.clone()));
                     }
                 }
             }
@@ -413,47 +504,84 @@ impl AntiJoinState {
 }
 
 impl ArrangementState {
+    /// Fold only the touched buckets into the shared base at tick commit.
+    /// Callers drop the previous live arrangement before invoking this method,
+    /// making both COW maps uniquely owned in the common path.
+    pub(super) fn commit_overlay(&mut self) {
+        if self.overlay.is_empty() {
+            return;
+        }
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
+        let index = Rc::make_mut(&mut self.index);
+        for (key, bucket) in overlay {
+            match bucket {
+                Some(bucket) => {
+                    index.insert(key, bucket);
+                }
+                None => {
+                    index.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn replace_bucket(&mut self, key: JoinKey, bucket: Option<JoinBucket>) {
+        Rc::make_mut(&mut self.overlay).insert(key, bucket);
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     pub(super) fn clone_keys<'a>(&self, keys: impl IntoIterator<Item = &'a Vec<u8>>) -> Self {
         let mut index = HashMap::default();
         for key in keys {
             let key = JoinKey::from_slice(key);
-            if let Some(bucket) = self.index.get(&key) {
+            if let Some(bucket) = self.bucket(&key) {
                 index.insert(key, bucket.clone());
             }
         }
         Self {
             index: Rc::new(index),
+            overlay: Rc::default(),
         }
     }
 
     pub(super) fn replace_keys<'a>(
         &mut self,
         keys: impl IntoIterator<Item = &'a Vec<u8>>,
-        mut replacement: Self,
+        replacement: Self,
     ) {
+        let overlay = Rc::make_mut(&mut self.overlay);
         for key in keys {
             let key = JoinKey::from_slice(key);
-            if let Some(bucket) = Rc::make_mut(&mut replacement.index).remove(&key) {
-                Rc::make_mut(&mut self.index).insert(key, bucket);
-            } else {
-                Rc::make_mut(&mut self.index).remove(&key);
-            }
+            overlay.insert(key.clone(), replacement.bucket(&key).cloned());
         }
     }
 
     pub(super) fn row_count(&self) -> usize {
-        self.index
-            .values()
-            .map(|bucket| bucket.values().filter(|weight| **weight != 0).count())
+        let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
+        keys.extend(self.overlay.keys().cloned());
+        keys.into_iter()
+            .filter_map(|key| self.bucket(&key))
+            .map(|bucket| bucket.iter().filter(|(_, weight)| **weight != 0).count())
             .sum()
     }
 
     pub(super) fn encoded_bytes(&self) -> usize {
-        self.index
-            .iter()
-            .map(|(key, bucket)| {
-                key.len() + bucket.keys().map(|record| record.len()).sum::<usize>()
+        let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
+        keys.extend(self.overlay.keys().cloned());
+        keys.into_iter()
+            .filter_map(|key| {
+                self.bucket(&key).map(|bucket| {
+                    (
+                        key.len(),
+                        bucket.iter().map(|(record, _)| record.len()).sum::<usize>(),
+                    )
+                })
             })
+            .map(|(key_len, record_bytes)| key_len + record_bytes)
             .sum()
     }
 
@@ -464,23 +592,39 @@ impl ArrangementState {
     ) {
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
-                apply_join_delta_to_index(Rc::make_mut(&mut self.index), deltas);
+                let mut buckets = HashMap::<JoinKey, JoinBucket>::default();
+                for delta in deltas {
+                    let bucket = buckets
+                        .entry(delta.key.clone())
+                        .or_insert_with(|| self.bucket(&delta.key).cloned().unwrap_or_default());
+                    let next_weight = bucket.get(&delta.delta.record).copied().unwrap_or_default()
+                        + delta.delta.weight;
+                    bucket.set(delta.delta.record.clone(), next_weight);
+                }
+                let overlay = Rc::make_mut(&mut self.overlay);
+                for (key, bucket) in buckets {
+                    overlay.insert(key, (!bucket.is_empty()).then_some(bucket));
+                }
             }
             ArrangementUpdateMode::Replace => {
                 self.index = Rc::new(build_join_delta_index(deltas));
+                self.overlay = Rc::default();
             }
         }
     }
 
     fn key_count(&self, key: &[u8]) -> i64 {
-        self.index
-            .get(key)
-            .map(|bucket| bucket.values().sum())
+        self.bucket(key)
+            .map(|bucket| bucket.iter().map(|(_, weight)| weight).sum())
             .unwrap_or_default()
     }
 
     fn bucket(&self, key: &[u8]) -> Option<&JoinBucket> {
-        self.index.get(key)
+        let key = JoinKey::from_slice(key);
+        match self.overlay.get(&key) {
+            Some(bucket) => bucket.as_ref(),
+            None => self.index.get(&key),
+        }
     }
 
     pub(super) fn apply_record_deltas(
@@ -496,8 +640,7 @@ impl ArrangementState {
     }
 
     pub(super) fn records_for_key(&self, key: &[u8]) -> Vec<(Bytes, i64)> {
-        self.index
-            .get(key)
+        self.bucket(key)
             .into_iter()
             .flat_map(|bucket| bucket.iter())
             .filter_map(|(record, weight)| (*weight > 0).then_some((record.clone(), *weight)))
@@ -562,16 +705,11 @@ struct JoinChangeContext<'a> {
 struct JoinOutputBuffer {
     /// All encoded joined rows, stored one after another.
     bytes: BytesMut,
+    deltas: Vec<(Range<usize>, i64)>,
     /// Where each row is inside `bytes`, together with its weight.
     ///
     /// For example, `(0..20, 1)` means “the row in bytes `0..20` has weight
     /// `+1`.”
-    deltas: Vec<(Range<usize>, i64)>,
-    /// Temporary work area for fields such as strings, bytes, and arrays.
-    ///
-    /// Each item stores which input row owns the field (`0` for left, `1` for
-    /// right) and where the field's bytes are in that row. The encoder clears
-    /// and reuses this vector for every joined row.
     variable_scratch: Vec<(usize, Range<usize>)>,
 }
 
@@ -589,7 +727,7 @@ fn append_join_deltas(
     output: &mut JoinOutputBuffer,
     context: &JoinChangeContext<'_>,
     delta_records: &[KeyedRecordDelta<'_>],
-    stored: &JoinIndex,
+    stored: &JoinLookup<'_>,
     side: JoinProbeSide,
     sign: i64,
 ) -> Result<(), IvmRuntimeError> {
@@ -597,10 +735,10 @@ fn append_join_deltas(
         if delta.delta.weight == 0 {
             continue;
         }
-        let Some(bucket) = stored.get(&delta.key) else {
+        let Some(bucket) = stored.bucket(&delta.key) else {
             continue;
         };
-        for (stored_record, right_weight) in bucket {
+        for (stored_record, right_weight) in bucket.iter() {
             if *right_weight == 0 {
                 continue;
             }
@@ -633,12 +771,12 @@ fn apply_join_delta_to_index(index: &mut JoinIndex, deltas: &[KeyedRecordDelta<'
         let next_weight =
             bucket.get(&delta.delta.record).copied().unwrap_or_default() + delta.delta.weight;
         if next_weight == 0 {
-            bucket.remove(&delta.delta.record);
+            bucket.set(delta.delta.record.clone(), 0);
             if bucket.is_empty() {
                 index.remove(&delta.key);
             }
         } else {
-            bucket.insert(delta.delta.record.clone(), next_weight);
+            bucket.set(delta.delta.record.clone(), next_weight);
         }
     }
 }
@@ -646,6 +784,9 @@ fn apply_join_delta_to_index(index: &mut JoinIndex, deltas: &[KeyedRecordDelta<'
 fn build_join_delta_index(deltas: &[KeyedRecordDelta<'_>]) -> JoinIndex {
     let mut index = HashMap::default();
     apply_join_delta_to_index(&mut index, deltas);
+    for bucket in index.values_mut() {
+        bucket.commit_overlay();
+    }
     index
 }
 
@@ -708,7 +849,7 @@ fn append_bucket(deltas: &mut Vec<RecordDelta>, bucket: Option<&JoinBucket>, sig
     let Some(bucket) = bucket else {
         return;
     };
-    for (record, weight) in bucket {
+    for (record, weight) in bucket.iter() {
         let weight = sign * *weight;
         if weight == 0 {
             continue;
@@ -1237,9 +1378,13 @@ mod tests {
         let mut bucket = HashMap::default();
         bucket.insert(Bytes::from_static(b"row-one"), 1);
         let mut index = HashMap::default();
-        index.insert(JoinKey::from_slice(b"one"), bucket);
+        index.insert(
+            JoinKey::from_slice(b"one"),
+            JoinBucket::from_records(bucket),
+        );
         let original = ArrangementState {
             index: Rc::new(index),
+            overlay: Rc::default(),
         };
 
         let mut prepared = original.clone();
@@ -1250,9 +1395,30 @@ mod tests {
 
         let mut second_bucket = HashMap::default();
         second_bucket.insert(Bytes::from_static(b"row-two"), 1);
-        Rc::make_mut(&mut prepared.index).insert(JoinKey::from_slice(b"two"), second_bucket);
-        assert!(!Rc::ptr_eq(&original.index, &prepared.index));
+        Rc::make_mut(&mut prepared.overlay).insert(
+            JoinKey::from_slice(b"two"),
+            Some(JoinBucket::from_records(second_bucket)),
+        );
+        assert!(Rc::ptr_eq(&original.index, &prepared.index));
+        assert!(!Rc::ptr_eq(&original.overlay, &prepared.overlay));
         assert_eq!(original.row_count(), 1);
         assert_eq!(prepared.row_count(), 2);
+    }
+
+    #[test]
+    fn arrangement_bucket_snapshot_stages_one_record_without_copying_base() {
+        let record = Bytes::from_static(b"row-one");
+        let added = Bytes::from_static(b"row-two");
+        let mut records = HashMap::default();
+        records.insert(record.clone(), 1);
+        let live = JoinBucket::from_records(records);
+        let mut staged = live.clone();
+        staged.set(added.clone(), 1);
+        assert!(Rc::ptr_eq(&live.base, &staged.base));
+        assert_eq!(live.get(&added), None);
+        drop(live);
+        staged.commit_overlay();
+        assert_eq!(staged.get(&record), Some(&1));
+        assert_eq!(staged.get(&added), Some(&1));
     }
 }

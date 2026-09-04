@@ -1308,3 +1308,111 @@ async fn recursive_graphs_fail_when_frontier_exceeds_max_iters() {
         Error::IvmRuntime(IvmRuntimeError::RecursiveIterationLimit { max_iters: 1, .. })
     ));
 }
+
+/// A scoped recursive failure on the resident Database path must not install
+/// the partially evaluated closure. A fresh subscription must rebuild from
+/// the persisted rows without inheriting that failed state.
+#[futures_test::test]
+async fn resident_recursive_limit_discards_staged_closure() {
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+
+    let mut seed = database.open_batch();
+    insert_edge(&mut seed, 1, 1, 2);
+    database.commit_batch(seed).await.unwrap();
+
+    let failed = database
+        .subscribe_one_sink(reachability_graph(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        failed.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+    let healthy = database
+        .subscribe_one_sink(GraphBuilder::table("edges").project(["src", "dst"]))
+        .await
+        .expect("an independent recursive subscription opens");
+    assert_eq!(
+        healthy.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+
+    let before_stats = database.runtime_stats();
+    let mut update = database.open_batch();
+    insert_edge(&mut update, 2, 2, 3);
+    insert_edge(&mut update, 3, 3, 4);
+    database.commit_batch(update).await.unwrap();
+    let mut healthy_delta = healthy
+        .try_recv()
+        .expect("the independent subscription receives its commit delta")
+        .to_values()
+        .unwrap();
+    healthy_delta.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        healthy_delta,
+        [
+            (vec![Value::U64(2), Value::U64(3)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ],
+        "a failed recursive owner must not suppress an independent owner's publication"
+    );
+    let after_stats = database.runtime_stats();
+    assert_eq!(
+        after_stats.graph_nodes, before_stats.graph_nodes,
+        "a failed subscription must not alter the installed graph"
+    );
+    assert_eq!(
+        after_stats.active_subscriptions, before_stats.active_subscriptions,
+        "the failed subscription remains observable through its failure channel"
+    );
+    assert_eq!(
+        after_stats.recursive_state_count, 0,
+        "failed subscription teardown must remove recursive operator state"
+    );
+    assert_eq!(
+        after_stats.recursive_accumulated_rows, 0,
+        "failed recursion must not retain a partial closure"
+    );
+    assert_eq!(
+        after_stats.recursive_accumulated_encoded_bytes, 0,
+        "failed recursion must not retain encoded partial closure state"
+    );
+    assert!(
+        after_stats.arrangement_count >= before_stats.arrangement_count
+            && after_stats.arrangement_rows >= before_stats.arrangement_rows
+            && after_stats.arrangement_encoded_bytes >= before_stats.arrangement_encoded_bytes,
+        "only the healthy owner's arrangement work may be published"
+    );
+    assert!(
+        after_stats.eval_memo_entries <= before_stats.eval_memo_entries,
+        "failed recursion must not install partial evaluator memo entries"
+    );
+    assert!(
+        after_stats.eval_memo_bytes <= before_stats.eval_memo_bytes,
+        "failed recursion must not install partial evaluator memo bytes"
+    );
+    assert!(
+        failed.recv().is_err(),
+        "the scoped failure must fail its subscription"
+    );
+
+    let mut rollback = database.open_batch();
+    rollback.delete("edges", PrimaryKeyValue::U64(2));
+    database.commit_batch(rollback).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(reachability_graph(1))
+        .await
+        .unwrap();
+    let mut reopened = subscription.recv().unwrap().to_values().unwrap();
+    reopened.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        reopened,
+        [
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ],
+        "a fresh resident subscription rebuilds from committed base rows, not the failed closure"
+    );
+}

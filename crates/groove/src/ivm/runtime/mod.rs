@@ -14,6 +14,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::{
     Arc, Weak,
     atomic::{AtomicU64, Ordering},
@@ -177,6 +178,10 @@ pub struct IvmRuntime {
     deferred_notifications: HashMap<PublicationId, Vec<(SubscriptionId, QueuedMultisinkDeltas)>>,
     durable_notification_publications: HashSet<PublicationId>,
     completed_deferred_publications: HashSet<PublicationId>,
+    /// A direct durable flush was cancelled after submission or received an
+    /// acknowledgement that may have followed commit. This runtime must not
+    /// evaluate against its pre-flush state again.
+    persistence_indeterminate: Rc<Cell<bool>>,
     /// Persistent operator state keyed by scope and node. This survives ticks;
     /// see [`EvalMemoKey`] for per-evaluation caching.
     operator_states: HashMap<OperatorStateKey, OperatorState>,
@@ -276,6 +281,7 @@ impl IvmRuntime {
             deferred_notifications: HashMap::default(),
             durable_notification_publications: HashSet::default(),
             completed_deferred_publications: HashSet::default(),
+            persistence_indeterminate: Rc::new(Cell::new(false)),
         };
         runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;
@@ -401,6 +407,8 @@ use windows::*;
 
 #[derive(Debug, Error)]
 pub enum IvmRuntimeError {
+    #[error("runtime persistence outcome is indeterminate; reopen before continuing")]
+    PersistenceOutcomeIndeterminate,
     #[error("aggregate result exceeds its declared numeric width")]
     AggregateOverflow,
     #[error("graph field not found: {0}")]
