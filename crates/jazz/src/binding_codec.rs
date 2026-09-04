@@ -4,13 +4,15 @@
 //! envelope here makes row batching, relation snapshots, and occurrence-key
 //! sidecars one production contract rather than two lookalike serializers.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::{RemovedRow, SubscriptionOutputRow};
 use crate::ids::RowUuid;
 use crate::node::{CurrentRow, CurrentRowBindingField, RelationSnapshot};
 use crate::tools::ResultKey;
+use crate::wire::decode_postcard_exact;
 use groove::ivm::TerminalOperation;
+use groove::records::RecordDescriptor;
 
 /// Rust-owned frozen v1 binding corpus. Test harnesses may expose this through
 /// a generated host artifact, but consumers must still decode its payloads
@@ -24,42 +26,47 @@ pub const BINDING_CODEC_GOLDEN_FIXTURE: &str =
 /// inferred from a field name. A collector descriptor may mix Jazz's physical
 /// `user_{column}` fields with logical fields that legitimately use the same
 /// spelling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RowDescriptorFieldName<'a> {
     /// A persisted CurrentRow field using Jazz's private physical name.
-    PhysicalColumn(&'a str),
+    PhysicalColumn(#[serde(borrow)] &'a str),
     /// A query, relation, or collector field using its public logical name.
-    LogicalField(&'a str),
+    LogicalField(#[serde(borrow)] &'a str),
 }
 
 /// One native binding descriptor entry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowDescriptorField<'a> {
     /// Explicit field provenance and exact descriptor name.
+    #[serde(borrow)]
     pub name: RowDescriptorFieldName<'a>,
     /// Exact Groove type used to decode this record slot.
     pub value_type: groove::records::ValueType,
 }
 
 /// A contiguous run of rows with one table and record descriptor.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RowBatch<'a> {
     /// Logical table name.
+    #[serde(borrow)]
     pub table: &'a str,
     /// Exact tagged descriptor required to decode `rows.raw`.
+    #[serde(borrow)]
     pub descriptor: Vec<RowDescriptorField<'a>>,
     /// Rows in producer order.
+    #[serde(borrow)]
     pub rows: Vec<Row<'a>>,
 }
 
 /// One packed row inside a [`RowBatch`].
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Row<'a> {
     /// Stable source row identity.
     pub row_id: RowUuid,
     /// Whether the row is an opt-in deleted historical row.
     pub deleted: bool,
     /// Packed record bytes described by the enclosing batch.
+    #[serde(borrow)]
     pub raw: &'a [u8],
 }
 
@@ -111,6 +118,11 @@ pub fn encode_rows(rows: &[CurrentRow]) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&row_batches(rows))
 }
 
+/// Decode one canonical flat row sequence produced by [`encode_rows`].
+pub fn decode_rows(bytes: &[u8]) -> Result<Vec<RowBatch<'_>>, postcard::Error> {
+    decode_postcard_exact(bytes)
+}
+
 /// Encode a relation snapshot.
 pub fn encode_relation_snapshot(snapshot: &RelationSnapshot) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&RelationSnapshotPayload {
@@ -160,6 +172,23 @@ pub fn encode_subscription_delta(
         updated_indices: updated.iter().map(|row| row.index as u64).collect(),
         removed_indices: removed.iter().map(|row| row.index as u64).collect(),
     })
+}
+
+/// Materialize a Groove descriptor from the shared binding descriptor.
+///
+/// The explicit physical/logical provenance tags remain in `descriptor`; this
+/// helper exists only for consumers that need Groove's typed record reader for
+/// the corresponding raw row bytes.
+pub fn descriptor_record(descriptor: &[RowDescriptorField<'_>]) -> RecordDescriptor {
+    RecordDescriptor::new(descriptor.iter().map(|field| {
+        (
+            match field.name {
+                RowDescriptorFieldName::PhysicalColumn(name)
+                | RowDescriptorFieldName::LogicalField(name) => name.to_owned(),
+            },
+            field.value_type.clone(),
+        )
+    }))
 }
 
 /// Group only adjacent rows with equal table and tagged descriptor.
@@ -314,5 +343,49 @@ mod tests {
             batches[0].descriptor[1].name,
             RowDescriptorFieldName::LogicalField("title")
         ));
+    }
+
+    #[test]
+    fn decode_rows_round_trips_the_shared_tagged_descriptor_and_raw_record() {
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid".to_owned(), ValueType::Uuid),
+            (
+                "user_title".to_owned(),
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
+        ]);
+        let row_id = uuid::Uuid::from_bytes([0x6a; 16]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(row_id),
+                Value::Nullable(Some(Box::new(Value::String("roundtrip".to_owned())))),
+            ])
+            .expect("encode shared row");
+        let row = CurrentRow::new_with_explicit_binding_fields(
+            "todos",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                CurrentRowBindingField::PhysicalColumn,
+                CurrentRowBindingField::PhysicalColumn,
+            ],
+        );
+
+        let encoded = encode_rows(&[row]).expect("encode rows");
+        let decoded = decode_rows(&encoded).expect("decode rows");
+
+        assert_eq!(decoded.len(), 1);
+        assert!(matches!(
+            decoded[0].descriptor[1].name,
+            RowDescriptorFieldName::PhysicalColumn(name) if name == "user_title"
+        ));
+        let descriptor = descriptor_record(&decoded[0].descriptor);
+        let values = groove::records::BorrowedRecord::new(&decoded[0].rows[0].raw, &descriptor)
+            .to_values()
+            .expect("decode raw record");
+        assert_eq!(values[0], Value::Uuid(row_id));
+        assert_eq!(
+            values[1],
+            Value::Nullable(Some(Box::new(Value::String("roundtrip".to_owned()))))
+        );
     }
 }

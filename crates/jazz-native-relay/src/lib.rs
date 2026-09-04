@@ -4871,23 +4871,13 @@ mod tests {
         postcard::to_allocvec(&(descriptor, raw)).expect("fixture cells encode")
     }
 
-    #[derive(serde::Deserialize)]
-    struct DecodedForegroundRowBatch {
-        table: String,
-        descriptor: RecordDescriptor,
-        rows: Vec<DecodedForegroundRow>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct DecodedForegroundRow {
-        row_id: RowUuid,
-        deleted: bool,
-        raw: Vec<u8>,
+    fn decode_foreground_rows(rows: &[u8]) -> Vec<jazz::binding_codec::RowBatch<'_>> {
+        jazz::binding_codec::decode_rows(rows)
+            .expect("foreground row bytes use the shared binding row-batch codec")
     }
 
     fn assert_exact_todo_rows(rows: &[u8], row_id: RowUuid, title: &str) {
-        let batches = postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(rows)
-            .expect("foreground row bytes use the shared binding row-batch codec");
+        let batches = decode_foreground_rows(rows);
         assert_eq!(
             batches.len(),
             1,
@@ -4906,7 +4896,8 @@ mod tests {
             "the exact row identity survives relay delivery"
         );
         assert!(!row.deleted, "the persisted row remains live");
-        let record = BorrowedRecord::new(&row.raw, &batch.descriptor);
+        let descriptor = jazz::binding_codec::descriptor_record(&batch.descriptor);
+        let record = BorrowedRecord::new(&row.raw, &descriptor);
         let values = record
             .to_values()
             .expect("the row decodes through its binding descriptor");
@@ -5260,10 +5251,7 @@ mod tests {
     ) {
         for _ in 0..120 {
             let rows = fixture.rows_after_sync(foreground);
-            if !postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
-                .expect("foreground row bytes decode")
-                .is_empty()
-            {
+            if !decode_foreground_rows(&rows).is_empty() {
                 assert_exact_todo_rows(&rows, RowUuid::from_bytes(row_id), title);
                 return;
             }
