@@ -14,7 +14,8 @@ import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?ra
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
-import { createDb, type Db, type DbConfig } from "../../src/runtime/db.js";
+import { createDb } from "../../src/runtime/default-create-db.js";
+import { type Db, type DbConfig } from "../../src/runtime/db.js";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,

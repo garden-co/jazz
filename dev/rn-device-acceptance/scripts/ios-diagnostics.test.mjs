@@ -1,0 +1,68 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  boundedDiagnostic,
+  parseLaunchProcessId,
+  relevantAppLogs,
+  safeDeviceDiagnostic,
+  sanitizedCommandFailure,
+} from "./ios-diagnostics.mjs";
+
+test("bounded diagnostics retain the newest stage when callers request a tail", () => {
+  const lines = Array.from({ length: 130 }, (_, index) => `stage-${index}`).join("\n");
+  const output = boundedDiagnostic(lines, { tail: true });
+  assert.doesNotMatch(output, /stage-0/);
+  assert.match(output, /stage-129/);
+});
+
+test("iOS diagnostics exclude unrelated logs and cap oversized app output", () => {
+  const output = [
+    "2026 unrelated-process sensitive-looking-token=do-not-report",
+    ...Array.from(
+      { length: 200 },
+      (_, index) => `JazzRNdeviceacceptance line ${index} ${"x".repeat(256)}`,
+    ),
+  ].join("\n");
+  const diagnostic = relevantAppLogs(output, "JazzRNdeviceacceptance");
+  assert.doesNotMatch(diagnostic, /sensitive-looking-token/);
+  assert.doesNotMatch(diagnostic, /JazzRNdeviceacceptance line 0/);
+  assert.match(diagnostic, /JazzRNdeviceacceptance line 199/);
+  assert.ok(diagnostic.split("\n").length <= 120);
+  assert.ok(Buffer.byteLength(boundedDiagnostic("x".repeat(20_000))) <= 16 * 1024 + 32);
+});
+
+test("iOS diagnostics do not echo raw command errors", () => {
+  const diagnostic = sanitizedCommandFailure({ status: 70, message: "secret simulator output" });
+  assert.equal(diagnostic, "command failed (exit 70)");
+  assert.doesNotMatch(diagnostic, /secret/);
+});
+
+test("device diagnostic printing is an allowlist, not bounded arbitrary text", () => {
+  assert.equal(safeDeviceDiagnostic("native-admission-failed\n"), "native-admission-failed");
+  const plantedSecret = "capability=secret-device-token";
+  const printed = safeDeviceDiagnostic(plantedSecret);
+  assert.equal(printed, "[no recognized device diagnostic]");
+  assert.doesNotMatch(printed, /secret-device-token/);
+});
+
+test("iOS launch parser accepts only the expected bundle and positive sole PID", () => {
+  assert.equal(parseLaunchProcessId("dev.jazz.rndeviceacceptance: 4999"), 4999);
+  assert.equal(parseLaunchProcessId("dev.jazz.rndeviceacceptance: 4999\n"), 4999);
+  assert.equal(parseLaunchProcessId("dev.jazz.rndeviceacceptance: 4999\r\n"), 4999);
+  for (const malformed of [
+    "other.bundle: 4999",
+    "devXjazzYrndeviceacceptance: 4999",
+    "dev-jazz-rndeviceacceptance: 4999",
+    " dev.jazz.rndeviceacceptance: 4999",
+    "dev.jazz.rndeviceacceptance: 4999 ",
+    "dev.jazz.rndeviceacceptance: 0",
+    "dev.jazz.rndeviceacceptance: -1",
+    "dev.jazz.rndeviceacceptance: 9007199254740992",
+    "dev.jazz.rndeviceacceptance: 4999\n\n",
+    "dev.jazz.rndeviceacceptance: 4999\r",
+    "dev.jazz.rndeviceacceptance: 4999\nunexpected text",
+    "4999",
+  ]) {
+    assert.throws(() => parseLaunchProcessId(malformed), /unexpected bundle\/process id/);
+  }
+});

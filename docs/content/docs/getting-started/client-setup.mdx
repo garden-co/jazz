@@ -14,7 +14,7 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -50,14 +50,6 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
     `useLocalFirstAuth()` from `jazz-tools/solid` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/auth-snippets.tsx#auth-localfirst-expo
-    </include>
-
-    `ExpoAuthSecretStore` persists the secret in the device's secure storage. Or use `useLocalFirstAuth()` from `jazz-tools/expo` for a hook-based API.
-
-  </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
@@ -65,7 +57,7 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
   </Tab>
 </Tabs>
 
-The secret is generated on first load, persisted locally (`localStorage` in the browser, secure storage on Expo), and reused on every subsequent run — the same device keeps the same Jazz identity.
+The secret is generated on first load, persisted locally, and reused on every subsequent run — the same device keeps the same Jazz identity.
 
 <Callout type="info">
   Using Jazz completely offline? Leave out `serverUrl` and everything above still works — writes
@@ -89,8 +81,6 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 ## Client config options
 
 <CreateJazzClientReference />
-
-For React Native and Expo clients, make sure `serverUrl` points to a host your runtime can reach. For example, the Android emulator often needs `10.0.2.2` instead of `localhost`.
 
 Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active. You must choose between `cookieSession` and `secret`/`jwtToken`. Call `db.updateCookieSession(nextSession)` for cookie-backed session changes or recreate `JazzProvider` / `Db` on sign-in and sign-out.
 
@@ -132,7 +122,7 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
 
 <Tabs
   groupId="jazz-framework"
-  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "Solid (Vite)", "SvelteKit", "Next.js", "Expo"]}
+  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "Solid (Vite)", "SvelteKit", "Next.js"]}
   persist
   updateAnchor
 >
@@ -216,33 +206,6 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     Injects `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`. Only runs in the Next.js dev phase; production builds are untouched.
 
   </Tab>
-  <Tab value="Expo">
-    ```js title="metro.config.mjs"
-    import path from "node:path";
-    import { createRequire } from "node:module";
-    import { fileURLToPath } from "node:url";
-    import { withJazz } from "jazz-tools/dev/expo";
-
-    const require = createRequire(import.meta.url);
-    const { getDefaultConfig } = require("expo/metro-config");
-    const projectRoot = path.dirname(fileURLToPath(import.meta.url));
-
-    const config = await withJazz(getDefaultConfig(projectRoot), {
-      schemaDir: projectRoot,
-    });
-
-    export default config;
-    ```
-
-    Makes `EXPO_PUBLIC_JAZZ_APP_ID` and `EXPO_PUBLIC_JAZZ_SERVER_URL` available for Metro to inline,
-    and returns them as `extra.jazzAppId` and `extra.jazzServerUrl`. Skipped automatically when
-    `NODE_ENV=production`.
-
-    Expo and React Native apps still need the runtime polyfills from the quickstart. Import
-    `jazz-tools/expo/polyfills` as the first line of your app entry point before any other Jazz
-    import.
-
-  </Tab>
 </Tabs>
 
 On first run the plugin generates an app ID, persists it to `.env`, and starts a local Jazz server under `node_modules/.cache/jazz-dev-server/`. Every subsequent run reuses both.
@@ -256,7 +219,6 @@ Each plugin writes the same two values (`appId`, `serverUrl`) under the prefix i
 | Vite      | `VITE_JAZZ_APP_ID`        | `VITE_JAZZ_SERVER_URL`        |
 | Next.js   | `NEXT_PUBLIC_JAZZ_APP_ID` | `NEXT_PUBLIC_JAZZ_SERVER_URL` |
 | SvelteKit | `PUBLIC_JAZZ_APP_ID`      | `PUBLIC_JAZZ_SERVER_URL`      |
-| Expo      | `EXPO_PUBLIC_JAZZ_APP_ID` | `EXPO_PUBLIC_JAZZ_SERVER_URL` |
 
 Jazz Cloud sync URL: `https://v2.sync.jazz.tools/`. For self-hosted deployments, point the server URL at your own host.
 

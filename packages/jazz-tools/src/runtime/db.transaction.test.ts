@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { ExclusiveWriteHandle } from "./client.js";
-import { createDb, type Db } from "./db.js";
+import { type Db } from "./db.js";
+import { createDb } from "./default-create-db.js";
 
 const todoSchema = {
   todos: s.table({

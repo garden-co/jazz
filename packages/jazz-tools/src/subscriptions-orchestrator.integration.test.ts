@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "./drivers/types.js";
+import { createDb } from "./runtime/default-create-db.js";
 import {
-  createDb,
   getDbSubscriptionSource,
   type Db,
   type QueryBuilder,

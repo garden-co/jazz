@@ -27,5 +27,6 @@
     "target": "ESNext",
     "types": ["jest"],
     "verbatimModuleSyntax": true
-  }
+  },
+  "exclude": ["example", "lib"]
 }

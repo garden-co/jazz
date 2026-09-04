@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "Jazz RN device acceptance",
+    "slug": "jazz-rn-device-acceptance",
+    "version": "1.0.0",
+    "jsEngine": "hermes",
+    "newArchEnabled": true,
+    "plugins": ["expo-dev-client", "jazz-rn", "./plugins/with-jazz-device-fixture.cjs"],
+    "android": { "package": "dev.jazz.rndeviceacceptance" },
+    "ios": { "bundleIdentifier": "dev.jazz.rndeviceacceptance" }
+  }
+}

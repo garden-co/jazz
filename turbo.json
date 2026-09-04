@@ -188,6 +188,14 @@
         "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
         "JAZZ_CORRECTNESS_CONSUMER_TOKEN"
       ]
+    },
+    "rn-device-acceptance#test": {
+      "dependsOn": [],
+      "cache": false
+    },
+    "rn-device-acceptance#build": {
+      "dependsOn": [],
+      "cache": false
     }
   }
 }
