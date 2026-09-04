@@ -4439,7 +4439,9 @@ mod tests {
     use jazz::time::TxTime;
     use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
     use jazz::tx::TxId;
+    use jazz_server::{EdgeUpstreamHealth, JazzServer, TestJwtIssuer};
     use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
 
     #[derive(Default)]
     struct TestWireTransport {
@@ -4743,6 +4745,72 @@ mod tests {
             bytes
         }
 
+        /// Exercise the private platform session handoff used by Android and
+        /// iOS. Unlike `admit`, neither the endpoint nor the bearer crosses
+        /// the generic relay command ABI.
+        fn begin_private_session(
+            &self,
+            server_url: &str,
+            app_id: &str,
+            bearer: &str,
+            storage_root: &std::path::Path,
+            schema: &JazzSchema,
+        ) -> [u8; 32] {
+            let request = serde_json::json!({
+                "server_url": server_url,
+                "app_id": app_id,
+                "jwt": bearer,
+                "storage_root": storage_root.display().to_string(),
+            });
+            let request = serde_json::to_vec(&request).expect("private session JSON encodes");
+            let mut setup = JazzNativeRelayBytes::EMPTY;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_begin_private_session_json(
+                        self.host,
+                        request.as_ptr(),
+                        request.len(),
+                        &mut setup,
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "private endpoint and ephemeral bearer are accepted only at the native boundary"
+            );
+            let setup = take_capability(&mut setup);
+            let schema =
+                serde_json::to_string(schema.public_schema()).expect("schema JSON encodes");
+            let mut admitted = JazzNativeRelayBytes::EMPTY;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_attach_canonical_schema_json(
+                        self.host,
+                        setup.as_ptr(),
+                        setup.len(),
+                        schema.as_ptr(),
+                        schema.len(),
+                        &mut admitted,
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "credential-free canonical schema attachment admits the private session"
+            );
+            take_capability(&mut admitted)
+        }
+
+        fn revoke_private_session(&self, capability: &[u8; 32]) {
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_revoke_scope_capability(
+                        self.host,
+                        capability.as_ptr(),
+                        capability.len(),
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "trusted revocation stops the native relay and its socket worker"
+            );
+        }
+
         fn open_foreground(&self, capability: &[u8; 32]) -> u64 {
             let (status, foreground) = self.try_open_foreground(capability);
             assert_eq!(
@@ -4877,6 +4945,171 @@ mod tests {
             }
             panic!("foreground read did not settle after bounded native relay ticks");
         }
+    }
+
+    fn take_capability(output: &mut JazzNativeRelayBytes) -> [u8; 32] {
+        let bytes = unsafe { std::slice::from_raw_parts(output.data, output.len) };
+        assert_eq!(
+            bytes.len(),
+            32,
+            "native private admission returns one opaque capability"
+        );
+        let mut capability = [0; 32];
+        capability.copy_from_slice(bytes);
+        unsafe { jazz_native_relay_bytes_free(output) };
+        capability
+    }
+
+    async fn wait_for_persisted_todo(
+        fixture: &NativeHostAbiFixture,
+        foreground: u64,
+        row_id: [u8; 16],
+        title: &str,
+        stage: &str,
+    ) {
+        for _ in 0..120 {
+            let rows = fixture.rows_after_sync(foreground);
+            if !postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
+                .expect("foreground row bytes decode")
+                .is_empty()
+            {
+                assert_exact_todo_rows(&rows, RowUuid::from_bytes(row_id), title);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for {stage} to materialize from the persistent native relay");
+    }
+
+    /// A real Core and Edge authenticate a native private-session bearer while
+    /// Alice writes through a foreground relay. Revoking that admission stops
+    /// its socket/relay; a fresh worker then reopens the same SQLite partition
+    /// and reads Alice's row back through the ordinary foreground protocol.
+    ///
+    /// ```text
+    /// alice foreground ──peer──► native SQLite relay ──JWT WebSocket──► Edge ──upstream──► Core
+    ///       │                         │
+    ///       └──write, close/revoke────┴──new worker/relay──readback──► persisted row
+    /// ```
+    ///
+    /// This host-only receipt is deliberately continuously driven from a
+    /// multithread Tokio harness. It proves topology and lifecycle readiness;
+    /// an Android emulator/device run remains a separate installed-artifact
+    /// acceptance receipt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn private_session_edge_core_write_survives_worker_and_relay_restart() {
+        let issuer = TestJwtIssuer::start().await;
+        let schema = schema();
+        let public_schema = schema.public_schema().clone();
+        let core = JazzServer::builder()
+            .with_schema(public_schema.clone())
+            .with_jwks_url(issuer.endpoint())
+            .with_native_transport_connector(jazz_testkit::native_connector())
+            .start()
+            .await;
+        let edge = JazzServer::builder()
+            .with_app_id(core.app_id())
+            .with_schema(public_schema)
+            .with_jwks_url(issuer.endpoint())
+            .with_admin_secret(core.admin_secret().to_owned())
+            .with_upstream_url(core.base_url())
+            .with_native_transport_connector(jazz_testkit::native_connector())
+            .start()
+            .await;
+
+        jazz_testkit::wait_for(
+            Duration::from_secs(15),
+            "local Edge attaches its ordinary upstream Core wire",
+            || {
+                let connected =
+                    edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected;
+                async move { connected.then_some(()) }
+            },
+        )
+        .await;
+
+        // Mint this bearer at runtime from the local issuer. No bearer or
+        // signing material is checked into the relay/device fixture.
+        let bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
+        let storage = tempfile::tempdir().expect("private relay storage root");
+        let fixture = NativeHostAbiFixture::new();
+        let admitted = fixture.begin_private_session(
+            &edge.base_url(),
+            &core.app_id().to_string(),
+            &bearer,
+            storage.path(),
+            &schema,
+        );
+        let foreground = fixture.open_foreground(&admitted);
+
+        jazz_testkit::wait_for(
+            Duration::from_secs(15),
+            "native relay's normal bearer-authenticated Edge websocket",
+            || {
+                let connected = edge.server_state().shutdown.active_websockets() > 0;
+                async move { connected.then_some(()) }
+            },
+        )
+        .await;
+
+        let row_id = [0x3a; 16];
+        fixture.insert_todo(foreground, row_id, "survives native worker restart");
+        wait_for_persisted_todo(
+            &fixture,
+            foreground,
+            row_id,
+            "survives native worker restart",
+            "the initial private foreground write",
+        )
+        .await;
+
+        assert_eq!(
+            fixture.execute(foreground, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true },
+            "the first foreground cleanly hands off before trusted relay revocation"
+        );
+        fixture.revoke_private_session(&admitted);
+        assert_eq!(
+            fixture.try_open_foreground(&admitted).0,
+            JazzNativeRelayStatus::InvalidHandle,
+            "revoked private-session capability cannot restart the old worker"
+        );
+
+        let reopened = fixture.begin_private_session(
+            &edge.base_url(),
+            &core.app_id().to_string(),
+            &bearer,
+            storage.path(),
+            &schema,
+        );
+        let reopened_foreground = fixture.open_foreground(&reopened);
+        jazz_testkit::wait_for(
+            Duration::from_secs(15),
+            "replacement native worker reconnects through normal Edge auth",
+            || {
+                let connected = edge.server_state().shutdown.active_websockets() > 0;
+                async move { connected.then_some(()) }
+            },
+        )
+        .await;
+        wait_for_persisted_todo(
+            &fixture,
+            reopened_foreground,
+            row_id,
+            "survives native worker restart",
+            "the replacement worker/relay readback",
+        )
+        .await;
+
+        fixture.revoke_private_session(&reopened);
+        assert_eq!(
+            edge.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
+        assert_eq!(
+            core.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
     }
 
     impl Drop for NativeHostAbiFixture {
