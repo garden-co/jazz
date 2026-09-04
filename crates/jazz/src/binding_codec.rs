@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::db::{RemovedRow, SubscriptionOutputRow};
 use crate::ids::RowUuid;
-use crate::node::{CurrentRow, RelationSnapshot};
+use crate::node::{CurrentRow, CurrentRowBindingKind, RelationSnapshot};
 use crate::tools::ResultKey;
 use groove::ivm::TerminalOperation;
 use groove::records::RecordDescriptor;
@@ -19,9 +19,25 @@ use groove::records::RecordDescriptor;
 pub const BINDING_CODEC_GOLDEN_FIXTURE: &str =
     include_str!("../fixtures/binding_codec_golden.json");
 
-/// A contiguous run of rows with one table and physical record descriptor.
+/// The binding-level source of a row batch.
+///
+/// This is deliberately part of the native-host envelope, rather than inferred
+/// from a descriptor field name. Current-row records use the physical
+/// `user_{column}` namespace; query-result records may legitimately expose a
+/// logical field with the same spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RowBatchKind {
+    /// A direct current-row record with physical Jazz column names.
+    CurrentRow,
+    /// A logical query, relation, or collector result.
+    QueryResult,
+}
+
+/// A contiguous run of rows with one table and record descriptor.
 #[derive(Clone, Debug, Serialize)]
 pub struct RowBatch<'a> {
+    /// Whether `descriptor` is physical current-row or logical result shape.
+    pub kind: RowBatchKind,
     /// Logical table name.
     pub table: &'a str,
     /// Exact descriptor required to decode `rows.raw`.
@@ -144,9 +160,17 @@ pub fn encode_subscription_delta(
 pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
+        let kind = match row.binding_kind() {
+            CurrentRowBindingKind::PhysicalCurrentRow => RowBatchKind::CurrentRow,
+            CurrentRowBindingKind::LogicalQueryResult => RowBatchKind::QueryResult,
+        };
         let (descriptor, raw) = row.encoded_record();
         match batches.last_mut() {
-            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
+            Some(batch)
+                if batch.kind == kind
+                    && batch.table == row.table()
+                    && batch.descriptor == *descriptor =>
+            {
                 batch.rows.push(Row {
                     row_id: row.row_uuid(),
                     deleted: row.is_deleted(),
@@ -154,6 +178,7 @@ pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
                 });
             }
             _ => batches.push(RowBatch {
+                kind,
                 table: row.table(),
                 descriptor: descriptor.clone(),
                 rows: vec![Row {

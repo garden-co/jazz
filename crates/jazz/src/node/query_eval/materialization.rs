@@ -1225,7 +1225,7 @@ where
                                 "collector terminal key cannot identify its root occurrence",
                             )
                         })?,
-                        CurrentRow::new(local.result_table.clone(), record),
+                        CurrentRow::new_logical(local.result_table.clone(), record),
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;

@@ -39,10 +39,10 @@ pub use crate::node::CommitUnitTrust;
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
-    LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
-    PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
+    CommitUnitIngestContext, CurrentRow, CurrentRowBindingKind, EdgeCacheBudget,
+    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
+    NodeState, PreparedQueryPlanHandle, PublicationOutcome, PublishedTransaction, QueryReadProfile,
+    RelationEdge, RelationSnapshot, RowProvenance, TransactionBranchRowState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -4114,7 +4114,7 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
                 format!("invalid scalar projection from Groove terminal: {error}"),
             )
         })?;
-        let row = CurrentRow::new(table, OwnedRecord::new(raw, scalar_descriptor));
+        let row = CurrentRow::new_logical(table, OwnedRecord::new(raw, scalar_descriptor));
         let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
         Ok(ResultNode {
             occurrence,
@@ -5475,7 +5475,11 @@ fn materialize_subscription_terminal_record(
                 "retained terminal root position is outside snapshot",
             )
         })?;
-        *root = CurrentRow::new(root.table().to_owned(), record.record()?);
+        *root = CurrentRow::new_with_binding_kind(
+            root.table().to_owned(),
+            record.record()?,
+            root.binding_kind(),
+        );
     }
     Ok(())
 }
@@ -5575,9 +5579,13 @@ fn terminal_subscription_output_row(
 
     Ok(SubscriptionOutputRow {
         occurrence_id,
-        row: CurrentRow::new(
+        row: CurrentRow::new_with_binding_kind(
             table.to_owned(),
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
+            match layout.carrier {
+                TerminalRootCarrier::CurrentRow => CurrentRowBindingKind::PhysicalCurrentRow,
+                TerminalRootCarrier::Logical => CurrentRowBindingKind::LogicalQueryResult,
+            },
         ),
         previous_index,
         index,

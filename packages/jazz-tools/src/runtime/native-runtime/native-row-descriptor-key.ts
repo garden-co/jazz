@@ -20,9 +20,10 @@ export function valueTypeCacheKey(type: ValueType): string {
 
 /** A wire-exact cache key for the descriptor that controls row decoding. */
 export function nativeRowFieldPlanCacheKey(
-  batch: Pick<NativeRowBatch, "table" | "descriptor">,
+  batch: Pick<NativeRowBatch, "kind" | "table" | "descriptor">,
 ): string {
   const writer = new PostcardWriter();
+  writer.u64(batch.kind === "current-row" ? 0 : 1);
   writer.string(batch.table);
   writeDescriptor(writer, [...batch.descriptor]);
   return bytesToHex(writer.finish());

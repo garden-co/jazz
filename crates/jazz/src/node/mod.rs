@@ -1382,6 +1382,21 @@ pub struct CurrentRow {
     table: groove::Intern<String>,
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
+    binding_kind: CurrentRowBindingKind,
+}
+
+/// The native-host interpretation of a materialized record descriptor.
+///
+/// Current-row records use Jazz's private physical `user_{column}` namespace.
+/// Query materializers can instead create public logical records, whose field
+/// names must reach a binding unchanged. This stays internal to Jazz's native
+/// binding codec; it is neither storage nor sync-wire state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurrentRowBindingKind {
+    /// A direct persisted CurrentRow descriptor using physical Jazz names.
+    PhysicalCurrentRow,
+    /// A collector or projection descriptor using logical public field names.
+    LogicalQueryResult,
 }
 
 /// Work performed by the durable local-write replay lookup.
@@ -1437,10 +1452,24 @@ pub struct RelationSnapshot {
 impl CurrentRow {
     /// Construct a current row from an encoded projection record.
     pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
+        Self::new_with_binding_kind(table, record, CurrentRowBindingKind::PhysicalCurrentRow)
+    }
+
+    /// Construct a row whose descriptor has public logical query-result names.
+    pub(crate) fn new_logical(table: impl Into<String>, record: OwnedRecord) -> Self {
+        Self::new_with_binding_kind(table, record, CurrentRowBindingKind::LogicalQueryResult)
+    }
+
+    pub(crate) fn new_with_binding_kind(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        binding_kind: CurrentRowBindingKind,
+    ) -> Self {
         Self {
             table: groove::Intern::new(table.into()),
             record: std::sync::Arc::new(record),
             deleted: false,
+            binding_kind,
         }
     }
 
@@ -1452,6 +1481,12 @@ impl CurrentRow {
     /// Whether this row was returned as a current deleted row by an opt-in read.
     pub fn is_deleted(&self) -> bool {
         self.deleted
+    }
+
+    /// The explicit native-binding provenance of the encoded descriptor.
+    #[doc(hidden)]
+    pub fn binding_kind(&self) -> CurrentRowBindingKind {
+        self.binding_kind
     }
 
     /// Logical table name.

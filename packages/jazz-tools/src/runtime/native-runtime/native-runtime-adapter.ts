@@ -6054,15 +6054,20 @@ function nativeRowFieldPlans(
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
     const fieldName = batch.descriptor[index]?.name;
-    if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
+    if (
+      !fieldName ||
+      isInternalField(fieldName) ||
+      (batch.kind === "current-row" && isCurrentRowPhysicalField(fieldName))
+    ) {
+      continue;
+    }
 
-    // `user_` is the physical CurrentRow namespace only when it names a
-    // declared application column. Structured collector fields are logical
-    // public names and may themselves begin with `user_` (for example the
-    // relation produced by `user_check_id`). Stripping that prefix would make
-    // the receiver publish `check` while the query asks for `user_check`.
-    const physicalName = publicFieldName(fieldName);
-    const name = columnsByName.has(physicalName) ? physicalName : fieldName;
+    // `user_` belongs to the private physical CurrentRow descriptor namespace
+    // only. Logical query/collector output preserves its public field names,
+    // even if a name happens to begin with `user_`. Provenance comes from the
+    // native batch envelope; never infer it from schema membership, since a
+    // schema may validly contain both `check` and a logical `user_check`.
+    const name = batch.kind === "current-row" ? publicFieldName(fieldName) : fieldName;
     const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
     plans.push({
       name,

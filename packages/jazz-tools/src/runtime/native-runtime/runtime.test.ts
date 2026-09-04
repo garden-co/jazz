@@ -4935,6 +4935,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ];
     const writer = new PostcardWriter();
     writer.vec((batch) => {
+      batch.u64(0); // current-row
       batch.string("todos");
       writeDescriptor(batch, descriptor);
       batch.vec((row) => {
@@ -7463,6 +7464,7 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(1);
   writer.vec((batch) => {
+    batch.u64(0); // current-row
     batch.string("users");
     writeDescriptor(batch, descriptor);
     batch.vec((row) => {
@@ -7474,7 +7476,11 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   return writer.finish();
 }
 
-function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
+function writeRowBatches(
+  writer: PostcardWriter,
+  rows: EncodedTestRow[],
+  kind: "current-row" | "query-result" = "current-row",
+): void {
   const rowsByTable = new Map<string, EncodedTestRow[]>();
   for (const row of rows) {
     const tableRows = rowsByTable.get(row.table) ?? [];
@@ -7497,6 +7503,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
         : []),
       ...(hasTxTime ? [{ name: "tx_time", valueType: { tag: 3 } }] : []),
     ];
+    batch.u64(kind === "current-row" ? 0 : 1);
     batch.string(table);
     writeDescriptor(batch, descriptor);
     batch.vec((row, index) => {
@@ -7778,6 +7785,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
   ];
   const delta = new PostcardWriter();
   delta.vec((batch) => {
+    batch.u64(0); // current-row
     batch.string(row.table);
     writeDescriptor(batch, descriptor);
     batch.vec((encodedRow) => {
@@ -7849,6 +7857,7 @@ function writeTeamGatherBatches(
 ): void {
   writer.vec(
     (batch) => {
+      batch.u64(0); // current-row
       batch.string("teams");
       writeDescriptor(batch, descriptor);
       batch.vec((row, index) => {
@@ -7907,6 +7916,7 @@ function encodeArrayRows(): Uint8Array {
   ];
   const writer = new PostcardWriter();
   writer.vec((batch) => {
+    batch.u64(0); // current-row
     batch.string("arrays");
     writeDescriptor(batch, descriptor);
     batch.vec((row) => {

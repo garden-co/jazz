@@ -28,7 +28,20 @@ export type EnumSchema = {
   cases?: { name: string; payload: DescriptorField[] }[];
 };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
-export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
+/**
+ * The Rust-to-JavaScript binding provenance for a row batch.
+ *
+ * `current-row` descriptors use Jazz's private physical `user_` namespace;
+ * `query-result` descriptors are public logical output and preserve names
+ * verbatim. This is a host ABI discriminator, not a storage or sync wire tag.
+ */
+export type NativeRowBatchKind = "current-row" | "query-result";
+export type NativeRowBatch = {
+  kind: NativeRowBatchKind;
+  table: string;
+  descriptor: DescriptorField[];
+  rows: NativeRow[];
+};
 export type NativeRemovedRow = { table: string; rowId: Uint8Array };
 export type NativeSubscriptionDelta = {
   added: NativeRowBatch[];
@@ -69,7 +82,11 @@ type PostcardWriterLike = {
 };
 
 export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
+  const kindTag = reader.u64();
+  const kind: NativeRowBatchKind =
+    kindTag === 0 ? "current-row" : kindTag === 1 ? "query-result" : invalidRowBatchKind(kindTag);
   return {
+    kind,
     table: reader.string(),
     descriptor: readDescriptor(reader),
     rows: reader.readVec((rowReader) => ({
@@ -78,6 +95,10 @@ export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
       raw: rowReader.bytes(),
     })),
   };
+}
+
+function invalidRowBatchKind(kindTag: number): never {
+  throw new Error(`unknown native row batch kind ${kindTag}`);
 }
 
 export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeSubscriptionDelta {

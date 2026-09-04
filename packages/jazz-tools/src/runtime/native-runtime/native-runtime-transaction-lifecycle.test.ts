@@ -45,6 +45,7 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
   writer.vec((batch, batchIndex) => {
     const [table, tableRows] = Array.from(byTable.entries())[batchIndex]!;
     const descriptor = [{ name: "title", valueType: { tag: 8 } }];
+    batch.u64(0); // current-row
     batch.string(table);
     writeDescriptor(batch, descriptor);
     batch.vec((row, index) => {

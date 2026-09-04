@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
-    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
+    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, RowBatchKind,
+    SubscriptionDeltaPayload,
 };
 use jazz::ids::{
     AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, MigrationLensId, NodeUuid,
@@ -1568,6 +1569,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         root_count: 4,
         rows: vec![
             RowBatch {
+                kind: RowBatchKind::QueryResult,
                 table: "todos",
                 descriptor: current_descriptor,
                 rows: vec![
@@ -1584,6 +1586,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                 ],
             },
             RowBatch {
+                kind: RowBatchKind::QueryResult,
                 table: "notes",
                 descriptor: logical_descriptor,
                 rows: vec![Row {
@@ -1595,6 +1598,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             // Batching is contiguous only: returning to `todos` after `notes`
             // must create a new batch, even though its descriptor is identical.
             RowBatch {
+                kind: RowBatchKind::QueryResult,
                 table: "todos",
                 descriptor: current_descriptor,
                 rows: vec![Row {
@@ -1614,6 +1618,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     .expect("typed golden occurrence is valid");
     let delta = SubscriptionDeltaPayload {
         added: vec![RowBatch {
+            kind: RowBatchKind::QueryResult,
             table: "todos",
             descriptor: current_descriptor,
             rows: vec![Row {
@@ -1623,6 +1628,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             }],
         }],
         updated: vec![RowBatch {
+            kind: RowBatchKind::QueryResult,
             table: "notes",
             descriptor: logical_descriptor,
             rows: vec![Row {

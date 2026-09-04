@@ -16,14 +16,15 @@ describe("formatUuid", () => {
 });
 
 describe("native row descriptor cache keys", () => {
-  it("keeps logical terminal fields whose public names begin with user_", () => {
+  it("uses explicit batch provenance when a physical column collides with a logical user_ field", () => {
     const schema = {
       notes: {
-        columns: [{ name: "body", column_type: { type: "Text" }, nullable: false }],
+        columns: [{ name: "check", column_type: { type: "Text" }, nullable: false }],
       },
     } satisfies WasmSchema;
     const descriptor = [{ name: "user_check", valueType: { tag: 8 } as const }];
-    const batch = {
+    const physicalBatch = {
+      kind: "current-row" as const,
       table: "notes",
       descriptor,
       rows: [
@@ -36,20 +37,29 @@ describe("native row descriptor cache keys", () => {
         },
       ],
     };
+    const logicalBatch = { ...physicalBatch, kind: "query-result" as const };
 
-    const row = rowsFromBatches([batch], schema)[0] as {
+    const physical = rowsFromBatches([physicalBatch], schema)[0] as {
       valuesByColumn?: Map<string, unknown>;
     };
-    expect(row?.valuesByColumn?.get("user_check")).toMatchObject({ type: "Bytea" });
-    expect(row?.valuesByColumn?.has("check")).toBe(false);
+    const logical = rowsFromBatches([logicalBatch], schema)[0] as {
+      valuesByColumn?: Map<string, unknown>;
+    };
+    expect(physical?.valuesByColumn?.get("check")).toMatchObject({ type: "Text" });
+    expect(physical?.valuesByColumn?.has("user_check")).toBe(false);
+    expect(logical?.valuesByColumn?.get("user_check")).toMatchObject({ type: "Bytea" });
+    expect(logical?.valuesByColumn?.has("check")).toBe(false);
+    expect(nativeRowFieldPlanCacheKey(physicalBatch)).not.toBe(
+      nativeRowFieldPlanCacheKey(logicalBatch),
+    );
   });
 
   it("includes the table identity", () => {
     const descriptor = [{ name: "value", valueType: { tag: 8 } }];
 
-    expect(nativeRowFieldPlanCacheKey({ table: "first", descriptor })).not.toBe(
-      nativeRowFieldPlanCacheKey({ table: "second", descriptor }),
-    );
+    expect(
+      nativeRowFieldPlanCacheKey({ kind: "current-row", table: "first", descriptor }),
+    ).not.toBe(nativeRowFieldPlanCacheKey({ kind: "current-row", table: "second", descriptor }));
   });
 
   it("includes payload enum registry identity when cases match", () => {
@@ -135,11 +145,13 @@ describe("native row descriptor cache keys", () => {
     expect(valueTypeCacheKey(payloadEnum)).not.toBe(valueTypeCacheKey(changedPayloadEnumCase));
     expect(
       nativeRowFieldPlanCacheKey({
+        kind: "current-row",
         table: "events",
         descriptor: [{ name: "event", valueType: payloadEnum }],
       }),
     ).not.toBe(
       nativeRowFieldPlanCacheKey({
+        kind: "current-row",
         table: "events",
         descriptor: [{ name: "event", valueType: changedPayloadEnum }],
       }),
@@ -178,6 +190,7 @@ describe("native row descriptor cache keys", () => {
     ];
     const childId = "00000000-0000-0000-0000-0000000000c1";
     const firstBatch = {
+      kind: "current-row" as const,
       table: "parents",
       descriptor: firstDescriptor,
       rows: [
@@ -194,6 +207,7 @@ describe("native row descriptor cache keys", () => {
       ],
     };
     const secondBatch = {
+      kind: "current-row" as const,
       table: "parents",
       descriptor: secondDescriptor,
       rows: [
