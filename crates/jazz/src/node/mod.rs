@@ -1681,6 +1681,16 @@ impl CurrentRow {
     }
 
     pub(crate) fn project(&self, table: &TableSchema, columns: &[String]) -> Result<Self, Error> {
+        let projected_public_name = |column_name: &str| -> String {
+            if self.application_column_index_by_name(column_name).is_some() {
+                column_name.to_owned()
+            } else {
+                self::query_engine::aggregate_output_logical_name(column_name)
+                    .filter(|logical| self.application_column_index_by_name(logical).is_some())
+                    .unwrap_or(column_name)
+                    .to_owned()
+            }
+        };
         let selected = columns.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let projected_columns = table
             .columns
@@ -1692,13 +1702,12 @@ impl CurrentRow {
             records::ValueType::Uuid,
         )];
         descriptor_fields.extend(projected_columns.iter().map(|column| {
-            let public_name = self::query_engine::aggregate_output_logical_name(&column.name)
-                .unwrap_or(&column.name);
+            let public_name = projected_public_name(&column.name);
             records::DescriptorField::new(
                 user_column_field(&column.name),
                 records::ValueType::Nullable(Box::new(column.column_type.clone())),
             )
-            .with_identity(records::FieldIdentity::Name(public_name.to_owned()))
+            .with_identity(records::FieldIdentity::Name(public_name))
         }));
         descriptor_fields.extend([
             records::DescriptorField::new("$createdBy", records::ValueType::String),
@@ -1719,10 +1728,9 @@ impl CurrentRow {
         let mut binding_fields = vec![row_uuid_field];
         let mut binding_field_names = vec![None];
         for column in projected_columns {
-            let public_name = self::query_engine::aggregate_output_logical_name(&column.name)
-                .unwrap_or(&column.name);
+            let public_name = projected_public_name(&column.name);
             let cell = self
-                .application_column_index_by_name(public_name)
+                .application_column_index_by_name(&public_name)
                 .and_then(|idx| self.record.borrowed().get_idx(idx).ok())
                 .and_then(|value| match value {
                     Value::Nullable(None) => None,
@@ -1742,11 +1750,11 @@ impl CurrentRow {
             };
             values.push(projected);
             let binding = self
-                .application_column_index_by_name(public_name)
+                .application_column_index_by_name(&public_name)
                 .and_then(|index| self.binding_fields.get(index).copied())
                 .unwrap_or(CurrentRowBindingField::LogicalField);
             binding_fields.push(binding);
-            binding_field_names.push(Some(public_name.to_owned()));
+            binding_field_names.push(Some(public_name));
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));

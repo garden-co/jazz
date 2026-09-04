@@ -879,6 +879,12 @@ impl VersionRecord {
         let malformed = || VersionBundleRunError::MalformedVersionRecord {
             table: self.table().to_owned(),
         };
+        let is_user_cell_field = |field: &groove::records::DescriptorField| {
+            field
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("user_"))
+        };
         let fields = self.record.descriptor().fields();
         let fixed_names = [
             "row_uuid",
@@ -894,12 +900,9 @@ impl VersionRecord {
                 .iter()
                 .zip(fixed_names)
                 .any(|(field, expected)| field.name.as_deref() != Some(expected))
-            || fields[WireRowRecord::USER_CELLS..].iter().any(|field| {
-                !field
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| name.starts_with("user_"))
-            })
+            || fields[WireRowRecord::USER_CELLS..]
+                .iter()
+                .any(|field| !is_user_cell_field(field))
         {
             return Err(malformed());
         }

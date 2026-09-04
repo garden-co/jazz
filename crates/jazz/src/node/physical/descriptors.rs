@@ -1172,24 +1172,23 @@ fn physical_descriptor_with_enum_registries(
     physical_names: Vec<String>,
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
+    fn physical_user_slot(name: &str) -> Option<PhysicalColumnId> {
+        name.strip_prefix("user_")
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(PhysicalColumnId)
+    }
+
     Ok(records::RecordDescriptor::new_with_fields(
         physical_names
             .into_iter()
             .zip(logical.fields())
             .map(|(name, field)| {
-                let identity = if let Some(id) = name
-                    .strip_prefix("user_")
-                    .and_then(|id| id.parse::<u64>().ok())
-                {
-                    Some(records::FieldIdentity::Slot(id))
+                let identity = if let Some(id) = physical_user_slot(&name) {
+                    Some(records::FieldIdentity::Slot(id.0))
                 } else {
                     field.identity.clone()
                 };
-                let value_type = if let Some(id) = name
-                    .strip_prefix("user_")
-                    .and_then(|id| id.parse::<u64>().ok())
-                {
-                    let id = PhysicalColumnId(id);
+                let value_type = if let Some(id) = physical_user_slot(&name) {
                     if let Some(cases) = mapping.scalar_enum_cases.get(&id) {
                         physical_scalar_enum_schema(id, cases)
                             .map(|schema| records::ValueType::EnumTag(schema).nullable())?

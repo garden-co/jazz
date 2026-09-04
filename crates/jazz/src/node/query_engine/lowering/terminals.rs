@@ -916,6 +916,7 @@ pub(super) struct CollectFlatField {
     pub(super) value_type: ValueType,
     pub(super) output_value_type: ValueType,
     pub(super) source_field: Option<String>,
+    pub(super) source_public_name: Option<String>,
     pub(super) is_row_id: bool,
     pub(super) is_presence: bool,
     pub(super) is_output: bool,
@@ -1420,6 +1421,7 @@ fn retain_collect_slot_value(
         value_type,
         output_value_type: source_value_type,
         source_field: Some(source_field),
+        source_public_name: None,
         is_row_id: false,
         is_presence: false,
         is_output: false,
@@ -1437,10 +1439,7 @@ fn collect_root_input_for_value(
             .iter()
             .find(|candidate| {
                 candidate.source_field.as_deref() == Some(field)
-                    || candidate
-                        .source_field
-                        .as_deref()
-                        .is_some_and(|source| logical_user_column(source) == field)
+                    || candidate.source_public_name.as_deref() == Some(field)
             })
             .map(|candidate| candidate.input.clone()),
         None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => layout
@@ -1467,10 +1466,7 @@ fn collect_slot_input_for_value(
             .iter()
             .find(|candidate| {
                 candidate.source_field.as_deref() == Some(field)
-                    || candidate
-                        .source_field
-                        .as_deref()
-                        .is_some_and(|source| logical_user_column(source) == field)
+                    || candidate.source_public_name.as_deref() == Some(field)
             })
             .map(|candidate| candidate.input.clone()),
         None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => {

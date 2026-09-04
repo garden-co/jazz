@@ -37,6 +37,66 @@ fn project_preserves_logical_binding_fields() {
 }
 
 #[test]
+fn project_keeps_literal_aggregate_shaped_column_names() {
+    let table = TableSchema::new(
+        "items",
+        [ColumnSchema::new("__jazz_aggregate_foo", ColumnType::U64)],
+    );
+    let descriptor = records::RecordDescriptor::new_with_fields(vec![
+        records::DescriptorField::new("row_uuid", records::ValueType::Uuid),
+        records::DescriptorField::new(
+            "user___jazz_aggregate_foo",
+            records::ValueType::U64,
+        )
+        .with_identity(records::FieldIdentity::Name(
+            "__jazz_aggregate_foo".to_owned(),
+        )),
+        records::DescriptorField::new("$createdBy", records::ValueType::String),
+        records::DescriptorField::new("$createdAt", records::ValueType::U64),
+        records::DescriptorField::new("$updatedBy", records::ValueType::String),
+        records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x70).0),
+            Value::U64(9),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(10),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let projected = CurrentRow::new_with_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingField::PhysicalColumn,
+    )
+    .project(&table, &["__jazz_aggregate_foo".to_owned()])
+    .expect("project aggregate-shaped literal column");
+
+    assert_eq!(
+        projected.cell(&table, "__jazz_aggregate_foo"),
+        Some(Value::U64(9))
+    );
+    assert_eq!(
+        projected.binding_field_names()[1].as_deref(),
+        Some("__jazz_aggregate_foo")
+    );
+    let cells = projected.test_cells_by_descriptor();
+    assert_eq!(cells["__jazz_aggregate_foo"], Value::U64(9));
+    assert_eq!(
+        cells["$createdBy"],
+        Value::String(AuthorSubject::SYSTEM.canonical().to_owned())
+    );
+    assert_eq!(cells["$createdAt"], Value::U64(10));
+    assert_eq!(
+        cells["$updatedBy"],
+        Value::String(AuthorSubject::SYSTEM.canonical().to_owned())
+    );
+    assert_eq!(cells["$updatedAt"], Value::U64(20));
+}
+
+#[test]
 fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff() {
     // A terminal can reuse `user_title` as its private carrier for the public
     // application field `title`, while also exposing a genuine logical output
@@ -89,7 +149,7 @@ fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff()
             Value::String("genuine logical user_title".to_owned()),
         ])
         .unwrap();
-    let physical_then_logical = CurrentRow::new_with_explicit_binding_fields(
+    let physical_then_logical = CurrentRow::new_with_explicit_binding_fields_and_names(
         "items",
         OwnedRecord::new(physical_raw, physical_descriptor),
         vec![
@@ -97,6 +157,7 @@ fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff()
             CurrentRowBindingField::PhysicalColumn,
             CurrentRowBindingField::LogicalField,
         ],
+        vec![None, Some("title".to_owned()), None],
     );
     assert!(
         terminal.subscription_equivalent(&physical_then_logical),
@@ -362,6 +423,53 @@ fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
 
     assert!(aggregate_layout.subscription_equivalent(&public_layout));
     assert!(!foo.subscription_equivalent(&bar));
+}
+
+#[test]
+fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
+    let descriptor = records::RecordDescriptor::new_with_fields(vec![
+        records::DescriptorField::new("row_uuid", records::ValueType::Uuid),
+        records::DescriptorField::new(
+            "user___jazz_aggregate_foo",
+            records::ValueType::U64,
+        )
+        .with_identity(records::FieldIdentity::Name("foo".to_owned())),
+        records::DescriptorField::new(
+            "user___jazz_aggregate_foo",
+            records::ValueType::U64,
+        ),
+        records::DescriptorField::new("$createdBy", records::ValueType::String),
+        records::DescriptorField::new("$createdAt", records::ValueType::U64),
+        records::DescriptorField::new("$updatedBy", records::ValueType::String),
+        records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x71).0),
+            Value::U64(2),
+            Value::U64(7),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(10),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let row = CurrentRow::new("scores", OwnedRecord::new(raw, descriptor));
+
+    assert_eq!(
+        row.test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("foo".to_owned(), Value::U64(2)),
+            (
+                "user___jazz_aggregate_foo".to_owned(),
+                Value::U64(7),
+            ),
+            ("$createdBy".to_owned(), Value::String(AuthorSubject::SYSTEM.canonical().to_owned())),
+            ("$createdAt".to_owned(), Value::U64(10)),
+            ("$updatedBy".to_owned(), Value::String(AuthorSubject::SYSTEM.canonical().to_owned())),
+            ("$updatedAt".to_owned(), Value::U64(20)),
+        ])
+    );
 }
 
 #[test]

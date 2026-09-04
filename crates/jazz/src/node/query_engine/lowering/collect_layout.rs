@@ -68,6 +68,8 @@ pub(super) fn collect_layout(
                     field.value_type.clone()
                 },
                 source_field: Some(name.clone()),
+                source_public_name: crate::node::query_engine::descriptor_public_name(field)
+                    .map(str::to_owned),
                 is_row_id: name == &root_source.row_shape.row_uuid_field,
                 is_presence: false,
                 is_output: selected_root.contains(name),
@@ -85,6 +87,7 @@ pub(super) fn collect_layout(
                 value_type: value_type.clone(),
                 output_value_type: value_type,
                 source_field: Some(name),
+                source_public_name: None,
                 is_row_id: false,
                 is_presence: false,
                 is_output: false,
@@ -116,6 +119,7 @@ pub(super) fn collect_layout(
             value_type: value_type.clone(),
             output_value_type: value_type,
             source_field: Some(route_field.clone()),
+            source_public_name: Some(route_field.clone()),
             is_row_id: false,
             is_presence: false,
             is_output: true,
@@ -235,6 +239,9 @@ fn collect_slot_layouts(
                         },
                         value_type,
                         output_value_type,
+                        source_public_name: (!is_row_id)
+                            .then(|| resolved_source_public_name(source, &source_field))
+                            .flatten(),
                         source_field: Some(source_field),
                         is_row_id,
                         is_presence: false,
