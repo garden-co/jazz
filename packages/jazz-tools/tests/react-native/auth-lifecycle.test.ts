@@ -137,3 +137,18 @@ it("rejects operations once shutdown starts even before a runtime was materializ
     await db.shutdown();
   });
 });
+
+// A typed native liveness receipt cannot be requested through a public data
+// query: this boundary check uses the real host lease, never a mocked runtime.
+it("distinguishes a live native foreground from a revoked native handle", async () => {
+  await withNativeRelayFixture(app, async (fixture) => {
+    const runtime = fixture.nativeHost.openAttached(fixture.capability);
+    try {
+      expect(runtime.isClosed?.()).toBe(false);
+      fixture.nativeHost.revoke(fixture.capability);
+      expect(runtime.isClosed?.()).toBe(true);
+    } finally {
+      runtime.close();
+    }
+  });
+});

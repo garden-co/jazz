@@ -22,6 +22,7 @@ interface TestBinding {
   __testRnHostRevoke(host: NativeHandle, capability: Uint8Array): void;
   __testRnForegroundExecute(foreground: NativeHandle, command: Uint8Array): Uint8Array;
   __testRnForegroundTick(foreground: NativeHandle): void;
+  __testRnForegroundIsClosed(foreground: NativeHandle): boolean;
   __testRnForegroundSetTickScheduler(
     foreground: NativeHandle,
     callback: (urgency: string) => void,
@@ -56,6 +57,7 @@ export function createPlatformHost() {
       return {
         execute: (command) => binding.__testRnForegroundExecute(foreground, command),
         tick: () => binding.__testRnForegroundTick(foreground),
+        isClosed: () => binding.__testRnForegroundIsClosed(foreground),
         setTickScheduler: (callback) =>
           binding.__testRnForegroundSetTickScheduler(foreground, callback),
         close: () => binding.__testRnForegroundClose(foreground),

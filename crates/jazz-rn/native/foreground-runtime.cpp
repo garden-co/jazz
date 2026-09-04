@@ -409,6 +409,24 @@ class ForegroundHandle final : public HostObject {
 
   Value get(Runtime &runtime, const PropNameID &name) override {
     const auto property = name.utf8(runtime);
+    if (property == "isClosed") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "isClosed"), 0,
+          [this](Runtime &runtime, const Value &, const Value *, size_t) {
+            if (closed_) return Value(true);
+            auto lease_lock = lease_->lockIfActive();
+            if (!lease_lock.owns_lock()) return Value(true);
+            // Probe is the canonical V1 unit command, discriminant zero.
+            const uint8_t probe = 0;
+            jazz_native_relay_bytes response{};
+            const auto status = jazz_native_relay_host_lease_execute_foreground(
+                lease_->nativeLease(), handle_, &probe, 1, &response);
+            jazz_native_relay_bytes_free(&response);
+            if (status == JAZZ_NATIVE_RELAY_INVALID_HANDLE) return Value(true);
+            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "isClosed");
+            return Value(false);
+          });
+    }
     if (property == "tick") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "tick"), 0,
@@ -491,8 +509,9 @@ class ForegroundHandle final : public HostObject {
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(4);
+    names.reserve(5);
     names.emplace_back(PropNameID::forAscii(runtime, "tick"));
+    names.emplace_back(PropNameID::forAscii(runtime, "isClosed"));
     names.emplace_back(PropNameID::forAscii(runtime, "close"));
     names.emplace_back(PropNameID::forAscii(runtime, "execute"));
     names.emplace_back(PropNameID::forAscii(runtime, "setTickScheduler"));

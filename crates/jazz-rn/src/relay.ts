@@ -50,6 +50,8 @@ export type NativeForegroundRuntimeFactory = {
 export type NativeForegroundRuntime = {
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
+  /** Native typed liveness; unexpected native failures still throw. */
+  isClosed?(): boolean;
   /**
    * Private wake registration used by jazz-tools' normal NativeRuntimeAdapter.
    * The native HostObject coalesces owner-thread wakes onto the current JSI
@@ -226,6 +228,7 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
         throw foregroundRuntimeInstallationError();
       }
       return {
+        isClosed: typeof foreground.isClosed === 'function' ? () => foreground.isClosed!() : undefined,
         execute(command: Uint8Array): Uint8Array {
           if (!(command instanceof Uint8Array)) {
             throw new Error(

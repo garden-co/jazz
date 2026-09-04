@@ -188,6 +188,35 @@ impl RnTestForeground {
         })
     }
 
+    pub fn is_closed(&self) -> Result<bool> {
+        if self.closed {
+            return Ok(true);
+        }
+        let host = self.host()?;
+        // Canonical V1 Probe. Liveness is a typed C ABI status, not an
+        // interpretation of an exception message or a metadata decoder error.
+        let request = [0_u8];
+        let mut response = JazzNativeRelayBytes {
+            data: std::ptr::null_mut(),
+            len: 0,
+        };
+        let status = unsafe {
+            jazz_native_relay_host_lease_execute_foreground(
+                host.lease,
+                self.handle,
+                request.as_ptr(),
+                request.len(),
+                &mut response,
+            )
+        };
+        unsafe { jazz_native_relay_bytes_free(&mut response) };
+        if status == JazzNativeRelayStatus::InvalidHandle {
+            return Ok(true);
+        }
+        check(status)?;
+        Ok(false)
+    }
+
     pub fn tick(&self) -> Result<()> {
         let host = self.host()?;
         check(unsafe {
@@ -345,4 +374,9 @@ pub fn foreground_response_corpus() -> Result<String> {
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| Error::from_reason(error.to_string()))?;
     serde_json::to_string(&bytes).map_err(|error| Error::from_reason(error.to_string()))
+}
+
+#[napi(js_name = "__testRnForegroundIsClosed", skip_typescript)]
+pub fn foreground_is_closed(foreground: &External<RnTestForeground>) -> Result<bool> {
+    foreground.is_closed()
 }

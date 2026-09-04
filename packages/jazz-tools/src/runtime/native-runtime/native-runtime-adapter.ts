@@ -3404,7 +3404,12 @@ export class NativeRuntimeAdapter implements Runtime {
         // Native revocation can retire a foreground after its wake crossed
         // into the JS queue. Native liveness distinguishes that stale wake
         // from a still-live scope with an actual transport/core failure.
-        if (this.db.isNativeForegroundClosed?.()) return;
+        try {
+          if (this.db.isNativeForegroundClosed?.()) return;
+        } catch (livenessError) {
+          reportAsyncRuntimeError(livenessError);
+          return;
+        }
         reportAsyncRuntimeError(error);
       });
     });

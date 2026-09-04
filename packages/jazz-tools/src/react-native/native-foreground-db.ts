@@ -108,6 +108,7 @@ type ForegroundResponse =
 export type NativeForegroundRuntime = {
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
+  isClosed?(): boolean;
   setTickScheduler?(callback: (urgency: string) => void): void;
   close(): boolean;
 };
@@ -286,15 +287,9 @@ export class NativeForegroundDb {
   }
 
   isNativeForegroundClosed(): boolean {
-    if (this.closed) return true;
-    try {
-      // This command checks native capability liveness without pumping the
-      // socket. A transient upstream error does not make this probe fail.
-      this.nativeSessionMetadata();
-      return false;
-    } catch {
-      return true;
-    }
+    // Only a typed native closed/revoked receipt suppresses a stale wake.
+    // Missing support or any unexpected native/probe failure is not closure.
+    return this.closed || this.runtime.isClosed?.() === true;
   }
 
   nativeSessionMetadata(): { issuer: string; userId: string } {
