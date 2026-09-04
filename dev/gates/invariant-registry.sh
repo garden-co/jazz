@@ -7,8 +7,10 @@
 set +e
 set -u -o pipefail
 
-readonly JAZZ_REGISTRY="${JAZZ_INVARIANT_REGISTRY:-crates/jazz/SPEC/INVARIANTS.md}"
-readonly GROOVE_REGISTRY="${GROOVE_INVARIANT_REGISTRY:-crates/groove/SPEC/INVARIANTS.md}"
+readonly JAZZ_REGISTRY="${JAZZ_INVARIANT_REGISTRY:-crates/jazz/SPEC/invariants}"
+readonly GROOVE_REGISTRY="${GROOVE_INVARIANT_REGISTRY:-crates/groove/SPEC/invariants}"
+readonly JAZZ_MIN_MIGRATED_RECORDS="${JAZZ_MIN_MIGRATED_RECORDS:-316}"
+readonly GROOVE_MIN_MIGRATED_RECORDS="${GROOVE_MIN_MIGRATED_RECORDS:-138}"
 
 failures=0
 rows=0
@@ -30,90 +32,53 @@ require_command() {
     return 0
 }
 
-# Emits six unit-separator-delimited fields for each structurally valid registry
-# row. A literal Markdown pipe must be written as \|; the parser retains it in
-# the field rather than treating it as a table boundary.
+# Emits six unit-separator-delimited fields for each structurally valid
+# record. One file per invariant is the authoritative merge surface; its file
+# name and heading are both the stable id. Paragraph text is normalized only
+# for this gate's line-oriented citation checks, not as an encoding contract.
 parse_registry() {
     local registry=$1 parsed_status
     PARSED_ROWS="$(perl - "$registry" <<'PERL'
 use strict;
 use warnings;
+use File::Basename qw(basename);
 
 my ($path) = @ARGV;
-open my $fh, '<', $path or die "cannot read $path: $!\n";
-my ($line_no, $state, $bad) = (0, 'before-header', 0);
-
-sub trim {
-    my ($value) = @_;
-    $value =~ s/^\s+|\s+$//g;
-    return $value;
-}
-
-sub split_row {
-    my ($line) = @_;
-    return unless $line =~ /^\|.*\|$/;
-    my ($cell, @fields) = ('');
-    my $inside = substr($line, 1, -1);
-    for (my $i = 0; $i < length $inside; $i++) {
-        my $char = substr($inside, $i, 1);
-        if ($char eq '\\' && $i + 1 < length($inside) && substr($inside, $i + 1, 1) eq '|') {
-            $cell .= '\\|';
-            $i++;
-        } elsif ($char eq '|') {
-            push @fields, trim($cell);
-            $cell = '';
-        } else {
-            $cell .= $char;
-        }
-    }
-    push @fields, trim($cell);
-    return @fields;
-}
-
-while (my $line = <$fh>) {
-    chomp $line;
-    $line_no++;
-    if ($state eq 'before-header') {
-        if ($line =~ /^\|\s*id\s*\|/) {
-            my @fields = split_row($line);
-            if (@fields != 6 || $fields[0] ne 'id' || $fields[1] ne 'invariant' || $fields[2] ne 'enforced by (test)' || $fields[3] ne 'impl' || $fields[4] ne 'status' || $fields[5] ne 'coverage') {
-                warn "$path:$line_no: malformed invariant-registry header\n";
-                $bad++;
-                last;
-            }
-            $state = 'separator';
-        } elsif ($line =~ /^\|/) {
-            warn "$path:$line_no: table row before invariant-registry header\n";
-            $bad++;
-        }
-    } elsif ($state eq 'separator') {
-        my @fields = split_row($line);
-        if (@fields != 6 || grep { !/^:?-{3,}:?$/ } @fields) {
-            warn "$path:$line_no: malformed table separator\n";
-            $bad++;
-        }
-        $state = 'rows';
-    } elsif ($state eq 'rows') {
-        if ($line !~ /^\|/) {
-            $state = 'after-table';
-            next;
-        }
-        my @fields = split_row($line);
-        if (@fields != 6) {
-            warn "$path:$line_no: malformed row (expected six columns; escape literal pipes as \\|)\n";
-            $bad++;
-            next;
-        }
-        print join("\x1f", @fields), "\n";
-    } elsif ($state eq 'after-table' && $line =~ /^\|/) {
-        warn "$path:$line_no: unexpected table row after invariant registry\n";
+opendir my $dir, $path or die "cannot read $path: $!\n";
+my @all_files = sort grep { !/^\./ && -f "$path/$_" } readdir $dir;
+closedir $dir;
+my $bad = 0;
+my @files;
+for my $file (@all_files) {
+    if ($file !~ /^((?:G-)?INV-[A-Za-z0-9-]+)\.md\z/) {
+        warn "$path/$file: invariant record files must be named INV-*.md\n";
         $bad++;
+        next;
     }
+    push @files, $file;
 }
-
-if ($state eq 'before-header' || $state eq 'separator') {
-    warn "$path: invariant registry table is missing or incomplete\n";
-    $bad++;
+for my $file (@files) {
+    my $full_path = "$path/$file";
+    open my $fh, '<', $full_path or die "cannot read $full_path: $!\n";
+    local $/;
+    my $text = <$fh>;
+    close $fh;
+    my ($id, $status, $coverage, $invariant, $tests, $impl) = $text =~
+        /\A# ((?:G-)?INV-[A-Za-z0-9-]+)\n\n- Status: ([^\n]+)\n- Coverage: ([^\n]+)\n\n## Invariant\n\n(.*?)\n\n## Enforced by \(tests\)\n\n(.*?)\n\n## Implementation(?:\n\n(.*?))?\n?\z/s;
+    if (!defined $id) {
+        warn "$full_path: malformed invariant record\n";
+        $bad++;
+        next;
+    }
+    my $file_id = basename($file, '.md');
+    if ($id ne $file_id) {
+        warn "$full_path: heading id $id does not match file name $file_id\n";
+        $bad++;
+        next;
+    }
+    $impl //= '';
+    for ($invariant, $tests, $impl) { s/\s+/ /g; s/^\s+|\s+$//g; }
+    print join("\x1f", $id, $invariant, $tests, $impl, $status, $coverage), "\n";
 }
 exit($bad ? 1 : 0);
 PERL
@@ -230,7 +195,7 @@ check_test_citations() {
 }
 
 check_registry() {
-    local registry=$1 record id invariant tests impl status coverage registry_rows=0
+    local registry=$1 minimum_rows=$2 record id invariant tests impl status coverage registry_rows=0
     local -A seen_ids=()
     parse_registry "$registry"
     while IFS=$'\x1f' read -r id invariant tests impl status coverage; do
@@ -262,14 +227,17 @@ check_registry() {
         registry_rows=$((registry_rows + 1))
         rows=$((rows + 1))
     done <<< "$PARSED_ROWS"
+    if (( registry_rows < minimum_rows )); then
+        fail "$registry: expected at least $minimum_rows migrated records, found $registry_rows"
+    fi
     printf 'invariant-registry: checked %s (%d rows)\n' "$registry" "$registry_rows"
 }
 
 require_command git || exit 1
 require_command perl || exit 1
 index_test_functions
-check_registry "$JAZZ_REGISTRY"
-check_registry "$GROOVE_REGISTRY"
+check_registry "$JAZZ_REGISTRY" "$JAZZ_MIN_MIGRATED_RECORDS"
+check_registry "$GROOVE_REGISTRY" "$GROOVE_MIN_MIGRATED_RECORDS"
 printf 'invariant-registry: summary: %d rows, %d missing test citations, %d covered rows without a test, %d now + untested (not failing)\n' \
     "$rows" "$missing_tests" "$uncited_covered" "$now_untested"
 
