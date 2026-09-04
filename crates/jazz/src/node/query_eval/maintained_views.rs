@@ -713,7 +713,12 @@ where
                         "incremental covered input names no compiled source occurrence",
                     ))?;
             let Some(record) = self
-                .covered_input_runtime_record(input, runtime_source, result_schema_version)
+                .covered_input_runtime_record(
+                    input,
+                    runtime_source,
+                    result_schema_version,
+                    &receiver.read_view,
+                )
                 .await?
             else {
                 continue;
@@ -855,9 +860,6 @@ where
                 closure_generation,
             );
         }
-        let schema_alias = self
-            .ensure_schema_version_alias(result_schema_version)
-            .await?;
         let mut records = receiver
             .sources
             .keys()
@@ -874,49 +876,17 @@ where
                     "authority covered input names no compiled source occurrence",
                 ));
             };
-            // `version_table` is the authored physical table of the witness,
-            // while `source.table` names the compiled receiver occurrence in
-            // its read schema. A lens may legitimately rename either side,
-            // so validate their compatibility by projecting the immutable
-            // witness through that schema below; comparing names here would
-            // reject a sound exact closure before the descriptor boundary.
-            let source_table =
-                self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
-            let version = self
-                .covered_input_version(&input, result_schema_version)
-                .await?
-                .ok_or(Error::MissingTransaction(input.version.tx))?;
-            // Deletion evidence retracts a content tuple; it never becomes a
-            // row accepted by this source's content descriptor.
-            if version.layer() == VersionLayer::Deletion {
-                continue;
-            }
-            let row = self
-                .projected_current_row_from_materialized_version_in_read_schema(
+            let Some(record) = self
+                .covered_input_runtime_record(
+                    &input,
+                    runtime_source,
                     result_schema_version,
-                    &version,
-                )?
-                .ok_or(Error::InvalidStoredValue(
-                    "authority covered content version cannot materialize a current row",
-                ))?;
-            let row = self.project_covered_input_row_in_read_view(
-                &source_table,
-                result_schema_version,
-                &receiver.read_view,
-                &version,
-                row,
-            )?;
-            if row.table() != source_table.name {
-                return Err(Error::InvalidStoredValue(
-                    "authority covered input does not project into its compiled source schema",
-                ));
-            }
-            let record = super::read_sources::covered_input_record(
-                &source_table,
-                &runtime_source.descriptor,
-                &row,
-                schema_alias,
-            )?;
+                    &receiver.read_view,
+                )
+                .await?
+            else {
+                continue;
+            };
             records
                 .get_mut(&input.source)
                 .expect("source presence was checked above")
@@ -970,6 +940,7 @@ where
         input: &CoveredInputEntry,
         runtime_source: &CoveredInputSource,
         result_schema_version: SchemaVersionId,
+        read_view: &ReadViewSpec,
     ) -> Result<Option<Vec<u8>>, Error> {
         let source_table =
             self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
@@ -988,6 +959,17 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "authority covered content version cannot materialize a current row",
             ))?;
+        // Initial resets and incremental edits share the same logical branch
+        // projection, while the encoded witness below retains the physical
+        // supplying branch. A base row shown through a head is still a base
+        // version; neither projection nor a relay hop can relabel its identity.
+        let row = self.project_covered_input_row_in_read_view(
+            &source_table,
+            result_schema_version,
+            read_view,
+            &version,
+            row,
+        )?;
         if row.table() != source_table.name {
             return Err(Error::InvalidStoredValue(
                 "authority covered input does not project into its compiled source schema",
@@ -1001,6 +983,7 @@ where
             &runtime_source.descriptor,
             &row,
             schema_alias,
+            &version.branch_key(),
         )?))
     }
 

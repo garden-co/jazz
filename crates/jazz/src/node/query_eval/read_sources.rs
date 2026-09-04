@@ -141,7 +141,7 @@ where
                 .node
                 .table_in_schema(&request.source.table, self.read_view.read_schema)
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            let metadata = inline_source_metadata(&request.requirements, None);
+            let metadata = covered_input_source_metadata(&request.requirements, &table);
             let descriptor = covered_input_descriptor
                 .clone()
                 .expect("checked alongside compiler-owned covered input source");
@@ -4527,6 +4527,18 @@ fn inline_current_record_with_source_metadata(
     )
 }
 
+/// Preserve the supplying physical branch in covered version witnesses, even
+/// when the query projects that version into a different logical branch.
+pub(super) fn covered_input_source_metadata(
+    requirements: &SourceRequirements,
+    table: &TableSchema,
+) -> BTreeMap<SourceMetadataRequirement, SourceMetadataFields> {
+    inline_source_metadata(
+        requirements,
+        (!table.branch_by.is_empty()).then_some("supplying_branch_key"),
+    )
+}
+
 /// Encode one already-authorized current row for a receiver-owned covered
 /// input. The descriptor comes from the exact compiled source occurrence;
 /// callers must never synthesize it from a table or result collector.
@@ -4535,6 +4547,7 @@ pub(super) fn covered_input_record(
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
     schema_version_alias: SchemaVersionAlias,
+    source_branch: &BranchKey,
 ) -> Result<Vec<u8>, Error> {
     inline_current_record_with_source_metadata(
         table,
@@ -4542,7 +4555,9 @@ pub(super) fn covered_input_record(
         row,
         schema_version_alias,
         "authority-covered-input",
-        None,
+        descriptor
+            .field_index("supplying_branch_key")
+            .map(|_| ("supplying_branch_key", source_branch)),
     )
 }
 
@@ -4557,9 +4572,15 @@ fn inline_current_record_with_source_metadata_and_deletion(
 ) -> Result<Vec<u8>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
-    for column in &table.columns {
+    for (column_index, column) in table.columns.iter().enumerate() {
         let value = row.cell(table, &column.name);
-        if branch_witness.is_some() && table.branch_by.contains(&column.name) {
+        if branch_witness.is_some()
+            && table.branch_by.contains(&column.name)
+            && !matches!(
+                &descriptor.fields()[column_index + 1].value_type,
+                ValueType::Nullable(_)
+            )
+        {
             values.push(value.ok_or(Error::InvalidStoredValue(
                 "frozen branch row is missing a branch column value",
             ))?);

@@ -484,9 +484,8 @@ where
                 })
             }
             SyncMessage::CommitUnit { tx, versions }
-                if tx.kind == TxKind::Mergeable
-                    && (matches!(peer.role(), PeerRole::ClientLink { .. })
-                        || peer.role() == PeerRole::Relay) =>
+                if matches!(peer.role(), PeerRole::ClientLink { .. })
+                    || peer.role() == PeerRole::Relay =>
             {
                 // Terminal authorization belongs to the immutable session
                 // selected at request admission, never to the relay's
@@ -494,6 +493,9 @@ where
                 // already been checked against its server-issued one-binding
                 // capability; a multiplexed relay has passed the corresponding
                 // transport admission check for this request.
+                // Both transaction kinds need this proof. Exclusive writes
+                // also validate their read sets at terminal ingest, but that
+                // cannot replace authorization under the delegated session.
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
                     CommitUnitTrust::Relay => session_claim_binding.0,
@@ -5752,7 +5754,8 @@ where
                     .await?;
             }
             Err(error @ crate::node::Error::InvalidAuthoritySourceClosure { .. }) => {
-                route_invalid_authority_source_closure(subscriptions, &error);
+                let public_rejections =
+                    route_invalid_authority_source_closure(subscriptions, &error);
                 let crate::node::Error::InvalidAuthoritySourceClosure {
                     subscription,
                     transition,
@@ -5760,7 +5763,10 @@ where
                 else {
                     unreachable!()
                 };
-                if queue_relay_subscription_rejection(
+                let one_shot_owner = query_coverage_registrations
+                    .borrow()
+                    .contains_key(subscription);
+                let relay_rejections_queued = queue_relay_subscription_rejection(
                     relay_owners,
                     relay_rejections,
                     upstream,
@@ -5768,10 +5774,17 @@ where
                     &SubscribeRejectReason::InvalidAuthoritySourceClosure {
                         transition: transition.clone(),
                     },
-                ) > 0
-                {
+                );
+                if relay_rejections_queued > 0 {
                     subscriber_dirty_epoch.set(subscriber_dirty_epoch.get().wrapping_add(1));
                     schedule_tick_in(scheduler, TickUrgency::Immediate);
+                }
+                // One-shot attachments have no public stream sender. If no
+                // downstream owner receives the scoped rejection either,
+                // surface the original protocol error through the owner tick;
+                // silently succeeding here leaves the read waiting forever.
+                if one_shot_owner || (public_rejections == 0 && relay_rejections_queued == 0) {
+                    return Err(error.into());
                 }
                 return Ok(());
             }

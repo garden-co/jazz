@@ -380,6 +380,32 @@ describe("resolveJwtSession — reserved issuer admission", () => {
     ).toBeNull();
   });
 
+  it("does not expose reserved self-signed proof keys as policy claims", () => {
+    for (const [authMode, issuer] of [
+      ["anonymous", ANONYMOUS_JWT_ISSUER],
+      ["local-first", LOCAL_FIRST_JWT_ISSUER],
+    ] as const) {
+      for (const proofKey of ["first-proof-key", "second-proof-key"]) {
+        const payload = { sub: "user", iss: issuer, jazz_pub_key: proofKey };
+        expect(sessionFromVerifiedReservedJwtPayload(payload, authMode)).toEqual({
+          user: JSON.stringify([issuer, "user"]),
+          claims: { iss: issuer, sub: "user" },
+          authMode,
+        });
+        expect(internalSessionFromVerifiedReservedJwtPayload(payload, authMode)?.claims).toEqual(
+          {},
+        );
+      }
+    }
+    // An external provider may legitimately use this spelling as a custom
+    // policy claim; only Jazz's dedicated proof format reserves the field.
+    expect(
+      resolveJwtSession(
+        jwt({ iss: "https://auth.example.com", sub: "user", jazz_pub_key: "custom" }),
+      )?.claims.jazz_pub_key,
+    ).toBe("custom");
+  });
+
   it("external issuer resolves as authMode 'external'", () => {
     const session = resolveJwtSession(jwt({ sub: "u1", iss: "https://auth.example.com" }))!;
     expect(session.authMode).toBe("external");

@@ -699,6 +699,8 @@ pub struct PeerIoPump {
     local_chunks: groove::chunks::LocalChunkReader,
     connection: u64,
     role: PeerIoPumpRole,
+    wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
+    wire_outbound_frame: Option<Rc<RefCell<crate::wire::WireFrame>>>,
 }
 
 /// One encoded auxiliary frame whose source obligation remains owned by this
@@ -740,14 +742,34 @@ impl PeerIoPump {
         local_chunks: groove::chunks::LocalChunkReader,
         connection: u64,
         role: PeerIoPumpRole,
+        wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
     ) -> Self {
         resolver.register_connection(connection, matches!(role, PeerIoPumpRole::Upstream));
+        let wire_outbound_frame = wire_inbound_context.as_ref().map(|context| {
+            let mut envelope = crate::wire::WireEnvelope::new(
+                context.expected_protocol_version(),
+                crate::wire::FEATURE_NONE,
+                Vec::new(),
+            );
+            if let Some(session) = context.expected_session().cloned() {
+                envelope = envelope.with_session(session);
+            }
+            Rc::new(RefCell::new(crate::wire::WireFrame::Message(envelope)))
+        });
         Self {
             resolver,
             local_chunks,
             connection,
             role,
+            wire_inbound_context,
+            wire_outbound_frame,
         }
+    }
+
+    fn wire_inbound_context(&self) -> Result<&crate::wire::WireInboundContext, String> {
+        self.wire_inbound_context.as_deref().ok_or_else(|| {
+            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
+        })
     }
 
     /// Route an auxiliary message received by the binding. Returns `false` for
@@ -891,17 +913,17 @@ impl PeerIoPump {
     pub async fn route_incoming_wire_frame(
         &self,
         frame: Vec<u8>,
-        negotiated_features: crate::wire::WireFeatures,
     ) -> Result<Option<Vec<u8>>, String> {
         let decoded = crate::wire::decode_frame(&frame)
             .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
         let crate::wire::WireFrame::Message(envelope) = decoded else {
             return Ok(Some(frame));
         };
-        let payload = crate::wire::decompress_sync_payload(&envelope.payload, envelope.features)
-            .map_err(|error| format!("malformed auxiliary wire payload: {error}"))?;
-        let message = crate::wire::decode_sync_message_for_features(&payload, negotiated_features)
-            .map_err(|error| format!("malformed auxiliary sync payload: {error:?}"))?;
+        let context = self.wire_inbound_context()?;
+        let mut decoder = crate::wire::WireStreamDecoder::new(context.negotiated_features())
+            .map_err(|error| format!("invalid auxiliary wire context: {error}"))?;
+        let message = crate::wire::admit_complete_envelope(context, &mut decoder, envelope)
+            .map_err(|error| format!("malformed auxiliary wire envelope: {error:?}"))?;
         match self.route_incoming(message).await {
             Ok(()) => Ok(None),
             Err(_) => Ok(Some(frame)),
@@ -911,15 +933,8 @@ impl PeerIoPump {
     /// Encode one bounded auxiliary batch as an ordinary complete wire frame.
     /// Bindings request one chunk per frame, keeping the maximum 256 KiB node
     /// response below the non-fragmented wire-frame bound.
-    pub fn take_outbound_wire_frame(
-        &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let Some(mut reservation) =
-            self.reserve_outbound_wire_frame(protocol_version, negotiated_features, session)?
-        else {
+    pub fn take_outbound_wire_frame(&self) -> Result<Option<Vec<u8>>, String> {
+        let Some(mut reservation) = self.reserve_outbound_wire_frame()? else {
             return Ok(None);
         };
         let frame = reservation.take_frame();
@@ -932,19 +947,12 @@ impl PeerIoPump {
     /// it after a rejected send; dropping it also restores the original batch.
     pub(crate) fn reserve_outbound_wire_frame(
         &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
     ) -> Result<Option<ReservedOutboundWireFrame>, String> {
+        let context = self.wire_inbound_context()?;
         let Some(message) = self.take_outbound(1) else {
             return Ok(None);
         };
-        let frame = match Self::encode_outbound_wire_frame(
-            message.clone(),
-            protocol_version,
-            negotiated_features,
-            session,
-        ) {
+        let frame = match self.encode_outbound_wire_frame(message.clone(), context) {
             Ok(frame) => frame,
             Err(error) => {
                 self.restore_outbound(message);
@@ -964,27 +972,20 @@ impl PeerIoPump {
     /// transport chooses a smaller batch boundary.
     pub fn take_outbound_wire_frames(
         &self,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
         max_frames: usize,
         max_bytes: usize,
     ) -> Result<Vec<Vec<u8>>, String> {
         if max_frames == 0 || max_bytes == 0 {
             return Ok(Vec::new());
         }
+        let context = self.wire_inbound_context()?;
         let mut frames = Vec::new();
         let mut total_bytes: usize = 0;
         while frames.len() < max_frames {
             let Some(message) = self.take_outbound(1) else {
                 break;
             };
-            let frame = Self::encode_outbound_wire_frame(
-                message.clone(),
-                protocol_version,
-                negotiated_features,
-                session.clone(),
-            );
+            let frame = self.encode_outbound_wire_frame(message.clone(), context);
             let frame = match frame {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -1014,22 +1015,34 @@ impl PeerIoPump {
     }
 
     fn encode_outbound_wire_frame(
+        &self,
         message: SyncMessage,
-        protocol_version: u16,
-        negotiated_features: crate::wire::WireFeatures,
-        session: Option<crate::wire::WireSession>,
+        context: &crate::wire::WireInboundContext,
     ) -> Result<Vec<u8>, String> {
+        let negotiated_features = context.negotiated_features();
         let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
             .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
         let active_features = negotiated_features
             & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD);
-        let mut envelope =
-            crate::wire::WireEnvelope::new(protocol_version, active_features, payload);
-        if let Some(session) = session {
-            envelope = envelope.with_session(session);
+        let wire_outbound_frame = self.wire_outbound_frame.as_ref().ok_or_else(|| {
+            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
+        })?;
+        let mut frame = wire_outbound_frame.borrow_mut();
+        {
+            let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
+                unreachable!("auxiliary outbound template is always a message frame");
+            };
+            envelope.protocol_version = context.expected_protocol_version();
+            envelope.features = active_features;
+            envelope.payload = payload;
         }
-        crate::wire::encode_frame(&crate::wire::WireFrame::Message(envelope))
-            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"))
+        let encoded = crate::wire::encode_frame(&frame)
+            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"));
+        let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
+            unreachable!("auxiliary outbound template is always a message frame");
+        };
+        envelope.payload = Vec::new();
+        encoded
     }
 
     /// Drain one bounded auxiliary batch for immediate transmission.
@@ -1618,6 +1631,7 @@ type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
 struct PendingLocalPublication {
     published: Rc<PublishedTransaction>,
     upload_unit: Option<SyncMessage>,
+    settlement: Pin<Box<dyn Future<Output = Result<TxId, Error>> + 'static>>,
 }
 
 type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;

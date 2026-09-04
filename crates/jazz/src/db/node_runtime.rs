@@ -99,7 +99,6 @@ where
     pub(super) pending_transaction_abandonments: TransactionAbandonmentTombstones,
     transaction_abandonments_closed: Cell<bool>,
     transaction_abandonment_shutdown_pending: Cell<bool>,
-    pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
     subscription_finalizations_closed: Cell<bool>,
@@ -233,7 +232,6 @@ where
             pending_transaction_abandonments: Rc::new(RefCell::new(BTreeSet::new())),
             transaction_abandonments_closed: Cell::new(false),
             transaction_abandonment_shutdown_pending: Cell::new(false),
-            local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
             subscription_finalizations_closed: Cell::new(false),
@@ -668,11 +666,24 @@ where
         published: PublishedTransaction,
         upload_unit: Option<SyncMessage>,
     ) {
+        let published = Rc::new(published);
+        let settlement_publication = Rc::clone(&published);
+        let settlement_node = Rc::clone(&self.node);
+        let settlement = Box::pin(async move {
+            let tx_id = settlement_publication.tx_id();
+            let persistence = settlement_publication.persist().await;
+            settlement_node
+                .lock()
+                .await
+                .settle_published_transaction(tx_id, persistence)?;
+            Ok(tx_id)
+        });
         self.pending_local_publications
             .borrow_mut()
             .push_back(PendingLocalPublication {
-                published: Rc::new(published),
+                published,
                 upload_unit,
+                settlement,
             });
         self.schedule_tick(TickUrgency::Immediate);
     }
@@ -685,31 +696,50 @@ where
         !self.pending_local_publications.borrow().is_empty()
     }
 
-    pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
-        let _settler = self.local_publication_settler.lock().await;
+    fn poll_local_publication_settlement(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        use std::task::Poll;
+
         loop {
-            let Some((published, upload_unit)) = self
-                .pending_local_publications
-                .borrow()
-                .front()
-                .map(|pending| (Rc::clone(&pending.published), pending.upload_unit.clone()))
-            else {
-                return Ok(());
+            let Some(mut pending) = self.pending_local_publications.borrow_mut().pop_front() else {
+                return Poll::Ready(Ok(()));
             };
-            let tx_id = published.tx_id();
-            let persistence = published.persist().await;
-            self.node
-                .lock()
-                .await
-                .settle_published_transaction(tx_id, persistence)?;
-            let settled = self
-                .pending_local_publications
-                .borrow_mut()
-                .pop_front()
-                .expect("settled local publication remains at queue front");
-            debug_assert_eq!(settled.published.tx_id(), tx_id);
-            self.queue_pending_upload(tx_id, upload_unit);
+            match pending.settlement.as_mut().poll(cx) {
+                Poll::Pending => {
+                    self.pending_local_publications
+                        .borrow_mut()
+                        .push_front(pending);
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(tx_id)) => {
+                    debug_assert_eq!(pending.published.tx_id(), tx_id);
+                    self.queue_pending_upload(tx_id, pending.upload_unit);
+                }
+            }
         }
+    }
+
+    /// Advance ordered local durability without keeping the host tick pending.
+    /// A retained mutation may own the node lock needed to finish settlement;
+    /// the tick must still poll that mutation. The runtime-owned waker requests
+    /// another owner turn when this retained settlement can make progress.
+    pub(super) fn poll_local_publication_settlement_once(&self) -> Result<bool, Error> {
+        use std::task::{Context, Poll, Waker};
+
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        match self.poll_local_publication_settlement(&mut context) {
+            Poll::Pending => Ok(true),
+            Poll::Ready(result) => result.map(|()| false),
+        }
+    }
+
+    pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
+        futures::future::poll_fn(|cx| self.poll_local_publication_settlement(cx)).await
     }
 
     /// Restore locally originated, unsettled durable writes into the
@@ -1684,6 +1714,7 @@ where
         let confirmation_floor = node.committed_global_time();
         drop(node);
         let session_context = transport.connection_session_context();
+        let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
         let upstream_upload_destination =
             session_context.map(|context| UpstreamUploadDestination {
                 remote_node: *context.remote.node.as_bytes(),
@@ -1945,6 +1976,7 @@ where
                 self.local_chunk_reader.clone(),
                 connection_epoch,
                 PeerIoPumpRole::Upstream,
+                wire_inbound_context,
             ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
@@ -2200,6 +2232,7 @@ where
             .connection_session_context()
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+        let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
         let downstream_fates = Rc::new(RefCell::new(Vec::new()));
         let scope_mismatch = self
             .node
@@ -2283,6 +2316,7 @@ where
                 self.local_chunk_reader.clone(),
                 connection_epoch,
                 PeerIoPumpRole::Subscriber,
+                wire_inbound_context,
             ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
@@ -3210,8 +3244,12 @@ where
             // A propagation receipt is not a replacement input frontier for
             // local-first. Its ordinary local graph observes synced storage
             // changes, and must keep draining even when remote scope changes.
-            let authority_scoped = authorization_mode != QueryAuthorizationMode::ClientLocal
-                || read_tier >= DurabilityTier::Edge;
+            // Observation tier, not the caller's authorization host, decides
+            // whether the remote closure is this stream's input frontier. A
+            // trusted backend may still request Local: it evaluates its own
+            // storage-backed graph and merely propagates upstream, exactly
+            // like any other Local reader.
+            let authority_scoped = read_tier >= DurabilityTier::Edge;
             let authoritative_reset_pending =
                 authority_scoped && authoritative_reset_result.is_some();
             // Optimistic local writes are represented as eligible local input
@@ -4005,6 +4043,12 @@ pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+
+    /// Return the immutable wire admission context paired with this transport.
+    #[doc(hidden)]
+    fn wire_inbound_context(&self) -> Option<crate::wire::WireInboundContext> {
+        None
+    }
 
     /// Immutable endpoint facts accepted by authenticated session admission.
     /// Semantic messages never self-assert this context.

@@ -69,6 +69,13 @@ one complete replacement context, and every continuation uses that retained
 context; reconciliation MUST NOT substitute the default read view or reconstruct
 selectors from the opaque `ReadViewKey`.
 
+Late-usage cloning and ordinary incremental publication MUST use the same
+canonical runtime recovery path. If catalogue activation invalidates a
+maintained handle, reopening restores the retained read and policy context
+before either path drains it. Existing usages receive the recovered complete
+source closure before the new usage receives its reset; a missing handle is
+not an indefinitely pending clone.
+
 `groove/SPEC/INVARIANTS.md::INV-INC-1` is the mechanism law for this chapter:
 maintained-view ingestion, application, publication, snapshot assembly, diffing,
 and subscriber delivery are bounded by the size of the change and affected keys,
@@ -137,6 +144,15 @@ relation fact whose referenced row version has not been admitted as part of the
 same exact authority closure is incomplete and cannot advance settlement or
 enter the graph.
 
+A client relay preserves each version witness's physical supplying branch,
+even when the read view projects that version into another logical branch.
+For a strict authority-backed closure, it forwards the selected upstream
+receipt's settlement cut, not its own local committed clock. A newly attached
+usage receives a complete source-manifest reset: a cached cursor or known
+payload inventory does not establish a predecessor input closure for that
+usage. Known payloads may still avoid retransmitting bytes; they cannot remove
+the manifest or turn its opening into an incremental update.
+
 Compiled source-occurrence identities MUST be identical on native and WASM
 hosts. They must not incorporate pointer widths or machine-sized sentinel
 values. Implicit root references use a `reference:<column>` alias, separate
@@ -180,7 +196,10 @@ answer may be published; it does not select another evaluator:
 
 - `local-first` evaluates locally known current data plus pending local
   changes, online or offline. Installing a remote closure does not retire its
-  cached inputs. Remote scope withdrawal is not a stored client-side revocation;
+  cached inputs. This is determined by observation tier, not by whether the
+  local node is a trusted backend: a trusted backend may make the same Local
+  read while merely propagating upstream. Remote scope withdrawal is not a
+  stored client-side revocation;
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
@@ -300,6 +319,14 @@ for ordered shapes, relation edge additions/removals where the query includes
 relations, settled/tier metadata, and a `reset` flag. There is no separate
 snapshot event type. The first delivery for a fresh subscription is a reset
 delta from the empty result set; reducing that delta yields the initial view.
+
+The maintained stream owns both this opening and all subsequent changes.
+Bindings must not manufacture an empty opening or supplement the stream with
+an independent one-shot cache read: such a read has no ordering relationship
+with delivered deltas and may overwrite newer results or fail independently.
+An empty opening is a valid result, not a reason to launch a second read.
+Explicit server-rendered hydration snapshots remain a separate initial-display
+facility; they do not replace the live stream's opening contract.
 
 Consumers own the materialized result set. The contract is that applying the
 delta reducer to events in stream order produces the same result as a one-shot
@@ -625,8 +652,9 @@ aligned with the settled typed result-member model.
 
 Local-first pagination is literal over local knowledge. An offset into an
 authority page is not necessarily the same offset into the receiver's cached
-inputs. The draft interpretation and its pagination UX implications remain
-flagged for review in [#2502](https://github.com/garden-co/jazz/issues/2502).
+inputs. Pagination follows the same tier-selected input semantics as filtering,
+ordering, and projection; it has no retained-page exception. This contract was
+settled in [#2502](https://github.com/garden-co/jazz/issues/2502).
 
 The same compiler-owned window stage is used by authority closure publication
 and by the receiver's application collector. A closure for a bounded root or

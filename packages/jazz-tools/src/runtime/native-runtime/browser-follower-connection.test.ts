@@ -36,6 +36,59 @@ class TestPort {
 }
 
 describe("MessagePortBrowserFollowerConnection", () => {
+  it.each([false, true])(
+    "preserves an asynchronous peer installation across early frames (closed=%s)",
+    async (closeBeforeConnected) => {
+      const port = new TestPort();
+      const transport = {
+        recvWireFrames: () => [],
+        sendWireFrame: vi.fn(),
+        tick: () => 0,
+      };
+      let finishConnecting!: (value: typeof transport) => void;
+      const pendingTransport = new Promise<typeof transport>((resolve) => {
+        finishConnecting = resolve;
+      });
+      const runtime = {
+        connectUpstreamPeer: vi.fn(() => pendingTransport),
+        onPeerTransportWork: vi.fn(() => () => undefined),
+        progressPeerTransport: vi.fn(async () => undefined),
+        retirePeerTransport: vi.fn(async () => undefined),
+        reportRemoteServerTransportError: vi.fn(),
+      };
+      const connection = new MessagePortBrowserFollowerConnection(
+        runtime as never,
+        port as unknown as MessagePort,
+        {},
+        null,
+        { onAuthFailure: vi.fn(), onAuthRestored: vi.fn(), onFailure: vi.fn() },
+      );
+      const init = port.sent[0];
+      if (!init || init.type !== "init") throw new Error("follower did not initialize");
+      port.emit({ type: "result", id: init.id });
+      port.emit({ type: "frames", frames: [Uint8Array.of(1)] });
+      port.emit({ type: "frames", frames: [Uint8Array.of(2)] });
+      expect(transport.sendWireFrame).not.toHaveBeenCalled();
+
+      if (closeBeforeConnected) connection.detachForReconnect();
+      finishConnecting(transport);
+      if (closeBeforeConnected) {
+        await expect(connection.ready()).rejects.toThrow("closed");
+        expect(runtime.retirePeerTransport).toHaveBeenCalledExactlyOnceWith(transport);
+        expect(runtime.onPeerTransportWork).not.toHaveBeenCalled();
+        expect(transport.sendWireFrame).not.toHaveBeenCalled();
+      } else {
+        await connection.ready();
+        await vi.waitFor(() => expect(transport.sendWireFrame).toHaveBeenCalledTimes(2));
+        expect(transport.sendWireFrame.mock.calls).toEqual([
+          [Uint8Array.of(1)],
+          [Uint8Array.of(2)],
+        ]);
+        connection.detachForReconnect();
+      }
+    },
+  );
+
   it("clears a remote peer failure after the worker confirms reconnect", async () => {
     const port = new TestPort();
     const transport = {

@@ -1139,16 +1139,14 @@ pub async fn extract_session(
                 identity::ANONYMOUS_ISSUER => jazz::tools::AuthMode::Anonymous,
                 _ => jazz::tools::AuthMode::LocalFirst,
             };
-            // Preserve the verified JWT's supported provider-claim vocabulary.
-            // The browser derives its immutable policy binding from the same
-            // token, so dropping `jazz_pub_key` here would make the server's
-            // admitted binding differ from the client's delegated binding.
-            let jazz_pub_key =
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verified.public_key_bytes);
             return Ok(Some(Session {
                 issuer: verified.issuer.to_owned(),
                 user_id: verified.user_id,
-                claims: serde_json::json!({ "jazz_pub_key": jazz_pub_key }),
+                // The verified key proves the issuer-scoped subject above; it
+                // is transport proof material, not an application policy
+                // claim. In particular, fresh anonymous proofs intentionally
+                // share the same empty policy binding.
+                claims: serde_json::Value::Object(serde_json::Map::new()),
                 auth_mode,
             }));
         }
@@ -1722,7 +1720,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_first_session_preserves_verified_public_key_policy_claim() {
+    async fn local_first_session_excludes_verified_public_key_from_policy_claims() {
         let app_id = AppId::from_name("test-app");
         let seed = [7u8; 32];
         let token = jazz::tools::identity::mint_jazz_self_signed_token(
@@ -1751,12 +1749,9 @@ mod tests {
                 !map.contains_key("auth_mode"),
                 "claims must not carry auth_mode anymore"
             );
-            let expected_public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(jazz::tools::identity::derive_verifying_key(&seed).as_bytes());
-            assert_eq!(
-                map.get("jazz_pub_key").and_then(serde_json::Value::as_str),
-                Some(expected_public_key.as_str()),
-                "the server and client must derive the same immutable policy binding"
+            assert!(
+                !map.contains_key("jazz_pub_key"),
+                "verified transport proof material must not become a policy claim"
             );
         } else {
             panic!("expected object claims");
@@ -1914,5 +1909,6 @@ mod tests {
             .expect("session");
 
         assert_eq!(session.auth_mode, jazz::tools::AuthMode::Anonymous);
+        assert_eq!(session.claims, serde_json::json!({}));
     }
 }

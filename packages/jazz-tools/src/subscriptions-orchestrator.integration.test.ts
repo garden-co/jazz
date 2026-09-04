@@ -251,6 +251,9 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
         },
       });
 
+      // Wait for the actual native opening before testing listener removal;
+      // wrappers no longer fabricate a synchronous empty snapshot.
+      await entry.promise;
       offA();
       await db.insert(todosTable, { title: "remaining-1", done: false });
       await db.insert(todosTable, { title: "remaining-2", done: true });

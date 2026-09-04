@@ -1113,12 +1113,11 @@ where
     }
 
     async fn tick_inner(&self) -> Result<(), Error> {
-        // A later queued mutation may be cold while holding its retained
-        // preparation continuation.  Persist resident publications before
-        // polling that queue so unrelated cold preparation cannot starve an
-        // earlier local durability boundary or its outbox release.
+        // Advance both retained queues: a later cold mutation can own the
+        // node lock needed to settle an earlier publication. Do not wait for
+        // settlement before giving that lock owner its next poll.
         if self.node.has_pending_local_publications() {
-            self.node.settle_local_publications().await?;
+            self.node.poll_local_publication_settlement_once()?;
         }
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
@@ -1155,7 +1154,7 @@ where
         // See `tick`: previously admitted resident publications must keep
         // progressing even when the next FIFO preparation is cold.
         if self.node.has_pending_local_publications() {
-            self.node.settle_local_publications().await?;
+            self.node.poll_local_publication_settlement_once()?;
         }
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
