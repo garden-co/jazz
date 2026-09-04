@@ -930,6 +930,12 @@ fn collect_correlated_covered_source_members(
 /// resulting stream is deliberately source-row based: no target id is later
 /// dereferenced to reconstruct a child payload.
 #[derive(Clone, Debug)]
+pub(super) enum CollectFieldOrigin {
+    SourceRow,
+    Derived,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct CollectFlatField {
     pub(super) input: String,
     pub(super) output: String,
@@ -937,6 +943,7 @@ pub(super) struct CollectFlatField {
     pub(super) output_value_type: ValueType,
     pub(super) source_field: Option<String>,
     pub(super) source_public_name: Option<String>,
+    pub(super) origin: CollectFieldOrigin,
     pub(super) is_row_id: bool,
     pub(super) is_presence: bool,
     pub(super) is_output: bool,
@@ -1417,6 +1424,7 @@ fn retain_collect_root_value(
         output_value_type: source_value_type,
         source_public_name: resolved_source_public_name(source, &source_field),
         source_field: Some(source_field),
+        origin: CollectFieldOrigin::SourceRow,
         is_row_id: false,
         is_presence: false,
         is_output: false,
@@ -1473,6 +1481,7 @@ fn retain_collect_slot_value(
         output_value_type: source_value_type,
         source_public_name: resolved_source_public_name(source, &source_field),
         source_field: Some(source_field),
+        origin: CollectFieldOrigin::SourceRow,
         is_row_id: false,
         is_presence: false,
         is_output: false,
