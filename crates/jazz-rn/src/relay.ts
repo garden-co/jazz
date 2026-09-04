@@ -572,12 +572,16 @@ function decodeForegroundU64(bytes: Uint8Array, label: string): number {
   for (let index = 0; index < bytes.length && index < 10; index += 1) {
     const byte = bytes[index]!;
     value += (byte & 0x7f) * multiplier;
-    if (
-      (byte & 0x80) === 0 &&
-      index + 1 === bytes.length &&
-      Number.isSafeInteger(value)
-    )
-      return value;
+    if ((byte & 0x80) === 0) {
+      // A handle occupies the whole response payload. Postcard varints must
+      // stop at their first terminator and use the shortest representation.
+      if (
+        index + 1 === bytes.length &&
+        (index === 0 || (byte & 0x7f) !== 0) &&
+        Number.isSafeInteger(value)
+      ) return value;
+      break;
+    }
     multiplier *= 128;
   }
   throw new Error(`Jazz native foreground returned malformed ${label}`);

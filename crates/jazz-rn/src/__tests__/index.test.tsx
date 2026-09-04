@@ -397,3 +397,42 @@ it('uses a compact versioned byte vocabulary for the initial foreground NativeDb
     relay.decodeNativeForegroundResponse(Uint8Array.of(1, 0))
   ).toThrow('unknown or malformed command response');
 });
+
+it('decodes canonical foreground handles through the JavaScript safe integer limit', () => {
+  const relay = loadRelay(null);
+  const corpus = [
+    [0, [0]],
+    [127, [127]],
+    [128, [128, 1]],
+    [16384, [128, 128, 1]],
+    [Number.MAX_SAFE_INTEGER, [255, 255, 255, 255, 255, 255, 255, 15]],
+  ] as const;
+  for (const [value, bytes] of corpus) {
+    expect(relay.decodeNativeForegroundResponse(Uint8Array.from([2, ...bytes]))).toEqual({ type: 'preparedQuery', query: value });
+    expect(relay.decodeNativeForegroundResponse(Uint8Array.from([4, ...bytes]))).toEqual({ type: 'subscribed', subscription: value });
+    expect(relay.decodeNativeForegroundResponse(Uint8Array.from([8, ...bytes]))).toEqual({ type: 'pending', operation: value });
+    expect(relay.decodeNativeForegroundResponse(Uint8Array.from([11, ...bytes]))).toEqual({ type: 'transactionOpened', transaction: value });
+  }
+});
+
+it('rejects trailing, nonminimal, truncated, and out-of-range foreground handles', () => {
+  const relay = loadRelay(null);
+  const corpus = [
+    [],
+    [10, 0],
+    [0, 0],
+    [128, 0],
+    [129, 0],
+    [255, 0],
+    [128],
+    [128, 128, 128, 128, 128, 128, 128, 16], // 2^53 exceeds JS safe integers.
+    [255, 255, 255, 255, 255, 255, 255, 255, 255, 1], // u64::MAX cannot be represented safely.
+    [128, 128, 128, 128, 128, 128, 128, 128, 128, 2], // u64 overflow.
+    [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 0],
+  ];
+  for (const bytes of corpus) {
+    for (const tag of [2, 4, 8, 11]) {
+      expect(() => relay.decodeNativeForegroundResponse(Uint8Array.from([tag, ...bytes]))).toThrow(/malformed/);
+    }
+  }
+});

@@ -435,7 +435,10 @@ is the existing `binding_codec::encode_rows` payload and subscription deltas
 are the existing `binding_codec::encode_subscription_delta` payload. Query and
 subscription identifiers are owner-thread-local opaque u64 handles allocated
 once across every foreground attached to that relay, so a value copied from a
-sibling foreground cannot alias a same-number local resource.
+sibling foreground cannot alias a same-number local resource. JavaScript handle
+responses require one complete, minimally encoded postcard u64 and reject
+trailing bytes or values above `Number.MAX_SAFE_INTEGER`; they never round or
+truncate an opaque native handle.
 `All` and `DrainSubscription` first poll their foreground-owned operation and
 return its ordinary rows/events only when ready. If physical large-value
 hydration needs chunk or peer I/O, they instead return an opaque pending
