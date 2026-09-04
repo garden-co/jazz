@@ -33,6 +33,78 @@ fn project_preserves_logical_binding_fields() {
 }
 
 #[test]
+fn projection_prefers_tagged_physical_column_over_reverse_order_logical_collision() {
+    // A hybrid collector may expose a logical `user_check` beside the physical
+    // storage field `user_check`. Descriptor position is not provenance: the
+    // logical field deliberately comes first here, and projecting schema
+    // column `check` must still select the physical true value.
+    let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_check".to_owned(), records::ValueType::Bool),
+        ("user_check".to_owned(), records::ValueType::Bool),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6e).0),
+            Value::Bool(false),
+            Value::Bool(true),
+        ])
+        .unwrap();
+    let hybrid = CurrentRow::new_with_explicit_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        vec![
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::PhysicalColumn,
+        ],
+    );
+
+    assert_eq!(hybrid.cell(&table, "check"), Some(Value::Bool(true)));
+    let projected = hybrid
+        .project(&table, &["check".to_owned()])
+        .expect("project hybrid result");
+    assert_eq!(projected.cell(&table, "check"), Some(Value::Bool(true)));
+    assert_eq!(
+        projected.binding_fields()[1],
+        CurrentRowBindingField::PhysicalColumn
+    );
+}
+
+#[test]
+fn subscription_equivalence_keeps_hybrid_physical_and_logical_user_names_distinct() {
+    // Before descriptor provenance was consulted here, both fields were
+    // normalized to `check`. Swapping their values then made two observably
+    // different public rows compare equal and suppressed an update.
+    fn hybrid_row(physical_check: bool, logical_user_check: bool) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new([
+            ("row_uuid".to_owned(), records::ValueType::Uuid),
+            ("user_check".to_owned(), records::ValueType::Bool),
+            ("user_check".to_owned(), records::ValueType::Bool),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(row(0x6f).0),
+                Value::Bool(logical_user_check),
+                Value::Bool(physical_check),
+            ])
+            .unwrap();
+        CurrentRow::new_with_explicit_binding_fields(
+            "items",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                CurrentRowBindingField::LogicalField,
+                CurrentRowBindingField::LogicalField,
+                CurrentRowBindingField::PhysicalColumn,
+            ],
+        )
+    }
+
+    assert!(!hybrid_row(true, false).subscription_equivalent(&hybrid_row(false, true)));
+}
+
+#[test]
 fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
     fn current_row(
         physical: bool,

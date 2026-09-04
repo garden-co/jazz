@@ -1543,15 +1543,7 @@ impl CurrentRow {
 
     /// Cell value by application column name using the table schema to resolve position.
     pub fn cell(&self, table: &TableSchema, column: &str) -> Option<Value> {
-        let _ = table
-            .columns
-            .iter()
-            .find(|candidate| candidate.name == column)?;
-        let user_name = user_column_field(column);
-        let idx = self.record.descriptor().fields().iter().position(|field| {
-            field.name.as_deref() == Some(user_name.as_str())
-                || field.name.as_deref() == Some(column)
-        })?;
+        let idx = self.application_column_index(table, column)?;
         match self.record.borrowed().get_idx(idx).ok()? {
             Value::Nullable(None) => None,
             Value::Nullable(Some(value)) => Some(*value),
@@ -1559,20 +1551,43 @@ impl CurrentRow {
         }
     }
 
+    /// Resolve an application-schema column through explicit descriptor-field
+    /// provenance. A logical field may legitimately be named `user_{column}`;
+    /// it must never shadow the physical current-row column of that name.
+    fn application_column_index(&self, table: &TableSchema, column: &str) -> Option<usize> {
+        let _ = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)?;
+        let physical_name = user_column_field(column);
+        let fields = self.record.descriptor().fields();
+        fields
+            .iter()
+            .zip(self.binding_fields.iter())
+            .position(|(field, binding)| {
+                *binding == CurrentRowBindingField::PhysicalColumn
+                    && field.name.as_deref() == Some(physical_name.as_str())
+            })
+            // Logical records sometimes retain application fields under their
+            // public schema name. That fallback intentionally never accepts a
+            // logical `user_{column}` spelling, which is a distinct output.
+            .or_else(|| {
+                fields
+                    .iter()
+                    .zip(self.binding_fields.iter())
+                    .position(|(field, binding)| {
+                        *binding == CurrentRowBindingField::LogicalField
+                            && field.name.as_deref() == Some(column)
+                    })
+            })
+    }
+
     fn binding_field_for_column(
         &self,
         table: &TableSchema,
         column: &str,
     ) -> Option<CurrentRowBindingField> {
-        let _ = table
-            .columns
-            .iter()
-            .find(|candidate| candidate.name == column)?;
-        let user_name = user_column_field(column);
-        let index = self.record.descriptor().fields().iter().position(|field| {
-            field.name.as_deref() == Some(user_name.as_str())
-                || field.name.as_deref() == Some(column)
-        })?;
+        let index = self.application_column_index(table, column)?;
         self.binding_fields.get(index).copied()
     }
 
@@ -1805,22 +1820,28 @@ impl CurrentRow {
     fn subscription_cells(&self) -> impl Iterator<Item = (&str, Option<Value>)> + '_ {
         let descriptor = self.record.descriptor();
         let borrowed = self.record.borrowed();
-        let physical_current = descriptor.field_index("schema_version").is_some()
-            && descriptor.field_index("created_by").is_some()
-            && descriptor.field_index("updated_by").is_some();
         descriptor
             .fields()
             .iter()
+            .zip(self.binding_fields.iter())
             .enumerate()
-            .filter_map(move |(idx, field)| {
-                let name = field.name.as_ref()?.as_str();
-                let name = if name.starts_with("user_") {
-                    let name = self::query_engine::logical_user_column(name);
+            .filter_map(move |(idx, (field, binding))| {
+                let raw_name = field.name.as_ref()?.as_str();
+                // Descriptor provenance is part of the public field identity:
+                // a physical `user_check` denotes application column `check`,
+                // while a logical output legitimately named `user_check` must
+                // remain visible under that exact name.
+                let name = if *binding == CurrentRowBindingField::PhysicalColumn
+                    && raw_name.starts_with("user_")
+                {
+                    let name = self::query_engine::logical_user_column(raw_name);
                     self::query_engine::aggregate_output_logical_name(name).unwrap_or(name)
-                } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
+                } else if let Some(name) =
+                    self::query_engine::aggregate_output_logical_name(raw_name)
+                {
                     name
                 } else if matches!(
-                    name,
+                    raw_name,
                     "$createdBy"
                         | "$createdAt"
                         | "$updatedBy"
@@ -1834,16 +1855,16 @@ impl CurrentRow {
                         | "authored_columns"
                         | "global_time"
                         | "settle_position"
-                ) || name.starts_with("__jazz_")
-                    || (physical_current
+                ) || raw_name.starts_with("__jazz_")
+                    || (*binding == CurrentRowBindingField::PhysicalColumn
                         && matches!(
-                            name,
+                            raw_name,
                             "created_by" | "created_at" | "updated_by" | "updated_at"
                         ))
                 {
                     return None;
                 } else {
-                    name
+                    raw_name
                 };
                 let value = match borrowed.get_idx(idx).ok()? {
                     Value::Nullable(value) => value.map(|value| *value),

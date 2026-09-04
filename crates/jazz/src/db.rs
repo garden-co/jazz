@@ -5589,7 +5589,15 @@ fn terminal_subscription_output_row(
     })
 }
 
-fn terminal_root_binding_fields(layout: &TerminalRootLayout) -> Vec<CurrentRowBindingField> {
+/// Derive the explicit producer provenance for every terminal descriptor slot.
+///
+/// Both terminal-delta decoding and local maintained-view reset snapshots use
+/// this exact mapping; treating a hybrid collector record as wholly logical
+/// loses the distinction between a physical `user_{column}` and a logical
+/// field with that same name.
+pub(crate) fn terminal_root_binding_fields(
+    layout: &TerminalRootLayout,
+) -> Vec<CurrentRowBindingField> {
     let binding_for_carrier = |carrier| match carrier {
         TerminalRootCarrier::CurrentRow => CurrentRowBindingField::PhysicalColumn,
         TerminalRootCarrier::Logical => CurrentRowBindingField::LogicalField,

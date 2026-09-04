@@ -29,7 +29,10 @@ export type EnumSchema = {
 };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
 /** Explicit Rust-to-JavaScript provenance for one descriptor field. */
-export type NativeRowDescriptorField = DescriptorField & {
+export type NativeRowDescriptorField = {
+  /** Exact producer-side field identity; unlike generic record fields it is required. */
+  name: string;
+  valueType: ValueType;
   kind: "physical-column" | "logical-field";
 };
 export type NativeRowBatch = {
@@ -90,12 +93,12 @@ export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
 
 export function writeNativeRowDescriptor(
   writer: PostcardWriterLike,
-  descriptor: readonly (NativeRowDescriptorField | DescriptorField)[],
+  descriptor: readonly NativeRowDescriptorField[],
 ): void {
   writer.vec((fieldWriter, index) => {
     const field = descriptor[index]!;
-    fieldWriter.u64("kind" in field && field.kind === "logical-field" ? 1 : 0);
-    fieldWriter.string(field.name ?? "");
+    fieldWriter.u64(field.kind === "logical-field" ? 1 : 0);
+    fieldWriter.string(field.name);
     writeValueType(fieldWriter, field.valueType);
   }, descriptor.length);
 }
