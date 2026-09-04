@@ -353,6 +353,15 @@ impl<'a> Planner<'a> {
         match table_ref {
             TableRef::Named { name, alias } => {
                 let table_name = single_name(&name.0)?;
+                if table_name == BINDING_QUALIFIER
+                    || alias
+                        .as_ref()
+                        .is_some_and(|alias| alias.name == BINDING_QUALIFIER)
+                {
+                    return Err(PlannerError::UnsupportedQuery(
+                        "relation name is reserved for prepared-query bindings",
+                    ));
+                }
                 if let Some(cte) = self.ctes.get(table_name) {
                     let (qualifier, columns) = match alias {
                         Some(alias) => (alias.name.as_str(), alias.columns.as_slice()),
@@ -1090,7 +1099,15 @@ fn append_missing_binding_fields(
         }
     };
     for field in binding_fields {
-        if let Some(existing) = fields.iter().find(|candidate| candidate.name == field.name) {
+        let mut existing_name = false;
+        for existing in fields
+            .iter()
+            .filter(|candidate| candidate.name == field.name)
+        {
+            existing_name = true;
+            if existing.qualifier == field.qualifier {
+                continue;
+            }
             let Some((_, source)) = binding_source_fields
                 .iter()
                 .find(|(parameter, _)| parameter == &field.name)
@@ -1104,7 +1121,8 @@ fn append_missing_binding_fields(
                     "projected output names must not collide with parameter names",
                 ));
             }
-        } else {
+        }
+        if !existing_name {
             fields.push(field);
         }
     }
@@ -1243,21 +1261,29 @@ fn apply_relation_alias(
     column_aliases: &[String],
 ) -> Result<LogicalPlan, PlannerError> {
     let source_fields = plan.fields();
-    if column_aliases.len() > source_fields.len() {
+    let public_field_count = source_fields
+        .iter()
+        .filter(|field| field.qualifier.as_deref() != Some(BINDING_QUALIFIER))
+        .count();
+    if column_aliases.len() > public_field_count {
         return Err(PlannerError::UnsupportedQuery(
             "column alias list has more entries than source columns",
         ));
     }
 
+    let mut public_index = 0;
     let fields = source_fields
         .iter()
-        .enumerate()
-        .map(|(index, source)| {
+        .map(|source| {
+            if source.qualifier.as_deref() == Some(BINDING_QUALIFIER) {
+                return source.clone();
+            }
             let mut field = source.clone();
             field.qualifier = Some(qualifier.to_owned());
-            if let Some(alias) = column_aliases.get(index) {
+            if let Some(alias) = column_aliases.get(public_index) {
                 field.name = alias.clone();
             }
+            public_index += 1;
             field
         })
         .collect();
