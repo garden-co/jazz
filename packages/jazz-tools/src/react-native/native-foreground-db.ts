@@ -196,6 +196,7 @@ export class NativeForegroundDb {
       transaction,
     });
     if (response.type === "rows") return response.rows;
+    if (response.type === "operationError") throw new Error(response.reason);
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("all", response.type);
   }
@@ -225,6 +226,7 @@ export class NativeForegroundDb {
       transaction,
     });
     if (response.type === "rows") return response.rows;
+    if (response.type === "operationError") throw new Error(response.reason);
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("allRelationSnapshot", response.type);
   }
@@ -233,6 +235,7 @@ export class NativeForegroundDb {
   // registration or hydration, to merge staged patches synchronously.
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array {
     const response = this.execute({ type: "localCurrentRow", table, rowId });
+    if (response.type === "operationError") throw new Error(response.reason);
     if (response.type !== "rows") return unexpected("localCurrentRow", response.type);
     return response.rows;
   }
