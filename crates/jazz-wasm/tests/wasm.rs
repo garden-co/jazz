@@ -314,7 +314,7 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
     let cells = empty_cells();
 
     let text_upload = db
-        .begin_streaming_mutation_encoded(
+        .begin_streaming_mutation(
             "values".to_owned(),
             row.clone(),
             cells.clone(),
@@ -330,7 +330,7 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
     await_promise(text_upload.finish()).await;
 
     let bytes_upload = db
-        .begin_streaming_mutation_encoded(
+        .begin_streaming_mutation(
             "values".to_owned(),
             row.clone(),
             cells.clone(),
@@ -346,7 +346,7 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
     await_promise(bytes_upload.finish()).await;
 
     let json_upload = db
-        .begin_streaming_mutation_encoded(
+        .begin_streaming_mutation(
             "values".to_owned(),
             row,
             cells,

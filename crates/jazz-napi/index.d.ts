@@ -20,22 +20,22 @@ export declare class NapiDb {
    * native artifact cannot decode.
    */
   wireFeatures(): number
-  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array): string | PendingNativePermissionAdvice
+  requestInsertPermissionAdvice(table: string, cells: Uint8Array): string | PendingNativePermissionAdvice
   requestReadPermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
-  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
   requestDeletePermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
-  insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
+  insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   /**
    * Binding-only entrypoint for typed partial-value updates. The public
    * TypeScript API validates column-kind-specific descriptors before they
    * reach this encoded boundary.
    */
-  updateLargeValuesEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
-  deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
-  restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
-  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  updateLargeValues(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
+  delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
+  restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
+  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
@@ -222,11 +222,11 @@ export declare class Transport {
 }
 
 export declare class Tx {
-  insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
-  deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
-  restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
+  insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
+  delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
+  restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
   commit(): Write
   rollback(): void
   /**

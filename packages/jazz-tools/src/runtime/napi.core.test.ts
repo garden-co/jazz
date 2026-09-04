@@ -406,14 +406,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       // exercises the raw native JavaScript boundary, not only the Rust parser.
       (
         db as unknown as {
-          upsertEncoded(
-            table: string,
-            rowId: Uint8Array,
-            cells: Uint8Array,
-            options: object,
-          ): unknown;
+          upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options: object): unknown;
         }
-      ).upsertEncoded("todos", new Uint8Array(16), new Uint8Array(), options);
+      ).upsert("todos", new Uint8Array(16), new Uint8Array(), options);
 
     const removed = /option `branch` is not supported; use `head`/;
     expect(() => upsert({ branch: undefined })).toThrow(removed);
@@ -1665,9 +1660,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const { NapiDb } = await loadNapiModule();
     expect(Object.getOwnPropertyNames(NapiDb.prototype)).toEqual(
       expect.arrayContaining([
-        "requestInsertPermissionAdviceEncoded",
+        "requestInsertPermissionAdvice",
         "requestReadPermissionAdvice",
-        "requestUpdatePermissionAdviceEncoded",
+        "requestUpdatePermissionAdvice",
         "requestDeletePermissionAdvice",
       ]),
     );

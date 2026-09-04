@@ -250,27 +250,17 @@ type NativeDb = {
     queryJson: string,
     opts: unknown,
   ): ReadableStream<unknown> | Subscription;
-  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
-  updateEncoded(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    options?: NativeUpdateOptions,
-  ): Write;
-  upsertEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: NativeUpsertOptions,
-  ): Write;
-  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
-  restoreEncoded(
+  insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: NativeUpdateOptions): Write;
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: NativeUpsertOptions): Write;
+  delete(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
+  restore(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: NativeRestoreOptions,
   ): Write;
-  beginStreamingMutationEncoded?(
+  beginStreamingMutation?(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
@@ -282,12 +272,9 @@ type NativeDb = {
     head?: unknown,
     base?: unknown,
   ): NativeStreamingMutation;
-  requestInsertPermissionAdviceEncoded?(
-    table: string,
-    cells: Uint8Array,
-  ): NativePermissionAdviceResult;
+  requestInsertPermissionAdvice?(table: string, cells: Uint8Array): NativePermissionAdviceResult;
   requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
-  requestUpdatePermissionAdviceEncoded?(
+  requestUpdatePermissionAdvice?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
@@ -345,7 +332,7 @@ type NativeDb = {
     deleteLength: number,
     insert: Uint8Array,
   ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
-  updateLargeValuesEncoded?(
+  updateLargeValues?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
@@ -411,21 +398,11 @@ type Tx = {
   rollback(): void;
   /** Release the native transaction view after its owner batch has completed. */
   close?(): boolean;
-  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
-  updateEncoded(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    options?: NativeUpdateOptions,
-  ): void;
-  upsertEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: NativeUpsertOptions,
-  ): void;
-  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): void;
-  restoreEncoded(
+  insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: NativeUpdateOptions): void;
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: NativeUpsertOptions): void;
+  delete(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): void;
+  restore(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
@@ -1309,7 +1286,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      const rowId = nativeTx.insertEncoded(table, cells, {
+      const rowId = nativeTx.insert(table, cells, {
         rowId: suppliedRowId,
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1324,7 +1301,7 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     const write = writeOrNormalizeRejection("Insert", () =>
-      this.db.insertEncoded(table, cells, {
+      this.db.insert(table, cells, {
         rowId: suppliedRowId,
         author: attribution ? undefined : writeIdentity,
         attribution,
@@ -1344,7 +1321,7 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
-    const begin = this.db.beginStreamingMutationEncoded;
+    const begin = this.db.beginStreamingMutation;
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     this.assertMutationAdmission(operation);
@@ -1466,7 +1443,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.restoreEncoded(table, rowId, cells, {
+      nativeTx.restore(table, rowId, cells, {
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
       });
@@ -1480,7 +1457,7 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
-      this.db.restoreEncoded(table, rowId, cells, {
+      this.db.restore(table, rowId, cells, {
         author: attribution ? undefined : writeIdentity,
         attribution,
         branch: branchView?.head,
@@ -1510,7 +1487,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.updateEncoded(table, rowId, patch, {
+      nativeTx.update(table, rowId, patch, {
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1523,7 +1500,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
-      this.db.updateEncoded(table, rowId, patch, {
+      this.db.update(table, rowId, patch, {
         author: attribution ? undefined : writeIdentity,
         attribution,
         head: branchView?.head,
@@ -1559,7 +1536,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
       throw new Error("Typed large-value updates do not yet support an attributed identity.");
     }
-    const updateLargeValues = this.db.updateLargeValuesEncoded;
+    const updateLargeValues = this.db.updateLargeValues;
     if (!updateLargeValues) {
       throw new Error("Native runtime does not support typed partial-value updates.");
     }
@@ -1602,16 +1579,11 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, attribution ? undefined : writeIdentity).upsertEncoded(
-        table,
-        rowId,
-        cells,
-        {
-          head: branchView?.head,
-          base: branchView?.base,
-          updatedAtMs: updatedAtMs ?? undefined,
-        },
-      );
+      this.txForWrite(tx, attribution ? undefined : writeIdentity).upsert(table, rowId, cells, {
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({
         table,
         rowId,
@@ -1622,7 +1594,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
-      this.db.upsertEncoded(table, rowId, cells, {
+      this.db.upsert(table, rowId, cells, {
         author: attribution ? undefined : writeIdentity,
         attribution,
         head: branchView?.head,
@@ -1648,7 +1620,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (tx) this.assertTransactionAttribution(tx, attribution);
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.deleteEncoded(table, rowId, {
+      nativeTx.delete(table, rowId, {
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1657,7 +1629,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
-      this.db.deleteEncoded(table, rowId, {
+      this.db.delete(table, rowId, {
         author: attribution ? undefined : writeIdentity,
         attribution,
         head: branchView?.head,
@@ -1707,7 +1679,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     _session?: Session,
   ): Promise<PermissionAdvice> {
-    const request = this.db.requestInsertPermissionAdviceEncoded;
+    const request = this.db.requestInsertPermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     const cells = encodeCellsForRow(this.table(table), values, table);
     return this.withPermissionAdviceTimeout(() => request.call(this.db, table, cells));
@@ -1731,7 +1703,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: Record<string, Value>,
     _session?: Session,
   ): Promise<PermissionAdvice> {
-    const request = this.db.requestUpdatePermissionAdviceEncoded;
+    const request = this.db.requestUpdatePermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     const patch = encodeCellsForPatch(this.table(table), values);
     return this.withPermissionAdviceTimeout(() =>

@@ -1265,8 +1265,8 @@ where
 
 #[napi]
 impl Tx {
-    #[napi(js_name = "insertEncoded")]
-    pub fn insert_encoded_with_options(
+    #[napi(js_name = "insert")]
+    pub fn insert_with_options(
         &mut self,
         table: String,
         cells: Uint8Array,
@@ -1301,8 +1301,8 @@ impl Tx {
         Ok(Uint8Array::new(row_id.to_bytes()))
     }
 
-    #[napi(js_name = "updateEncoded")]
-    pub fn update_encoded_with_options(
+    #[napi(js_name = "update")]
+    pub fn update_with_options(
         &mut self,
         table: String,
         row_id: Uint8Array,
@@ -1334,8 +1334,8 @@ impl Tx {
         Ok(())
     }
 
-    #[napi(js_name = "upsertEncoded")]
-    pub fn upsert_encoded_with_options(
+    #[napi(js_name = "upsert")]
+    pub fn upsert_with_options(
         &mut self,
         table: String,
         row_id: Uint8Array,
@@ -1366,8 +1366,8 @@ impl Tx {
         Ok(())
     }
 
-    #[napi(js_name = "deleteEncoded")]
-    pub fn delete_encoded_with_options(
+    #[napi(js_name = "delete")]
+    pub fn delete_with_options(
         &mut self,
         table: String,
         row_id: Uint8Array,
@@ -1397,8 +1397,8 @@ impl Tx {
         Ok(())
     }
 
-    #[napi(js_name = "restoreEncoded")]
-    pub fn restore_encoded_with_options(
+    #[napi(js_name = "restore")]
+    pub fn restore_with_options(
         &mut self,
         table: String,
         row_id: Uint8Array,
@@ -1690,8 +1690,8 @@ impl NapiDb {
         }))
     }
 
-    #[napi(js_name = "requestInsertPermissionAdviceEncoded")]
-    pub fn request_insert_permission_advice_encoded(
+    #[napi(js_name = "requestInsertPermissionAdvice")]
+    pub fn request_insert_permission_advice(
         &self,
         table: String,
         cells: Uint8Array,
@@ -1714,8 +1714,8 @@ impl NapiDb {
         })
     }
 
-    #[napi(js_name = "requestUpdatePermissionAdviceEncoded")]
-    pub fn request_update_permission_advice_encoded(
+    #[napi(js_name = "requestUpdatePermissionAdvice")]
+    pub fn request_update_permission_advice(
         &self,
         table: String,
         row_id: Uint8Array,
@@ -1745,8 +1745,8 @@ impl NapiDb {
             napi::Error::from_reason("backend attribution requires an explicit backend runtime")
         })
     }
-    #[napi(js_name = "insertEncoded")]
-    pub fn insert_encoded_with_options(
+    #[napi(js_name = "insert")]
+    pub fn insert_with_options(
         &self,
         table: String,
         cells: Uint8Array,
@@ -1776,8 +1776,8 @@ impl NapiDb {
         }
     }
 
-    #[napi(js_name = "updateEncoded")]
-    pub fn update_encoded_with_options(
+    #[napi(js_name = "update")]
+    pub fn update_with_options(
         &self,
         table: String,
         row_id: Uint8Array,
@@ -1812,8 +1812,8 @@ impl NapiDb {
     /// Binding-only entrypoint for typed partial-value updates. The public
     /// TypeScript API validates column-kind-specific descriptors before they
     /// reach this encoded boundary.
-    #[napi(js_name = "updateLargeValuesEncoded")]
-    pub fn update_large_values_encoded(
+    #[napi(js_name = "updateLargeValues")]
+    pub fn update_large_values(
         &self,
         table: String,
         row_id: Uint8Array,
@@ -1857,8 +1857,8 @@ impl NapiDb {
         }
     }
 
-    #[napi(js_name = "upsertEncoded")]
-    pub fn upsert_encoded_with_options(
+    #[napi(js_name = "upsert")]
+    pub fn upsert_with_options(
         &self,
         table: String,
         row_id: Uint8Array,
@@ -1893,8 +1893,8 @@ impl NapiDb {
         }
     }
 
-    #[napi(js_name = "deleteEncoded")]
-    pub fn delete_encoded_with_options(
+    #[napi(js_name = "delete")]
+    pub fn delete_with_options(
         &self,
         table: String,
         row_id: Uint8Array,
@@ -1924,8 +1924,8 @@ impl NapiDb {
         }
     }
 
-    #[napi(js_name = "restoreEncoded")]
-    pub fn restore_encoded_with_options(
+    #[napi(js_name = "restore")]
+    pub fn restore_with_options(
         &self,
         table: String,
         row_id: Uint8Array,
@@ -1957,9 +1957,9 @@ impl NapiDb {
         }
     }
 
-    #[napi(js_name = "beginStreamingMutationEncoded")]
+    #[napi(js_name = "beginStreamingMutation")]
     #[allow(clippy::too_many_arguments)] // Flat arguments are the generated NAPI ABI.
-    pub fn begin_streaming_mutation_encoded(
+    pub fn begin_streaming_mutation(
         &self,
         table: String,
         row_id: Uint8Array,
@@ -5526,21 +5526,18 @@ mod tests {
             )
         };
 
-        let insert_error = match db.insert_encoded_with_options(
-            "missing_table".to_owned(),
-            label_cells("before"),
-            None,
-        ) {
-            Ok(_) => panic!("ordinary insert must surface its first-turn failure"),
-            Err(error) => error,
-        };
+        let insert_error =
+            match db.insert_with_options("missing_table".to_owned(), label_cells("before"), None) {
+                Ok(_) => panic!("ordinary insert must surface its first-turn failure"),
+                Err(error) => error,
+            };
         assert!(
             insert_error.reason.contains("missing_table"),
             "ordinary insert retains its core failure diagnostic: {}",
             insert_error.reason
         );
 
-        let large_update_error = match db.update_large_values_encoded(
+        let large_update_error = match db.update_large_values(
             "missing_table".to_owned(),
             Uint8Array::from(vec![0xc5; 16]),
             label_cells("after"),
@@ -6013,7 +6010,7 @@ mod tests {
         )
         .unwrap();
         let write = backend
-            .insert_encoded_with_options(
+            .insert_with_options(
                 "items".to_owned(),
                 Uint8Array::from(cells.clone()),
                 Some(InsertOptions {
@@ -6029,7 +6026,7 @@ mod tests {
 
         let ordinary =
             NapiDb::open_memory(Uint8Array::from(schema), Uint8Array::from(config)).unwrap();
-        let err = match ordinary.insert_encoded_with_options(
+        let err = match ordinary.insert_with_options(
             "items".to_owned(),
             Uint8Array::from(cells),
             Some(InsertOptions {
@@ -6057,7 +6054,7 @@ mod tests {
         let mut tx = backend
             .attach_mergeable_tx(attributed_batch.clone())
             .unwrap();
-        let err = match tx.insert_encoded_with_options(
+        let err = match tx.insert_with_options(
             "items".to_owned(),
             Uint8Array::from(Vec::new()),
             Some(InsertOptions {
@@ -6086,7 +6083,7 @@ mod tests {
             .expect_err("ordinary transactions cannot claim backend attribution");
         assert!(err.reason.contains("explicit backend runtime"));
 
-        let err = match backend.begin_streaming_mutation_encoded(
+        let err = match backend.begin_streaming_mutation(
             "items".to_owned(),
             Uint8Array::from(vec![0xb5; 16]),
             Uint8Array::from(Vec::new()),
@@ -6106,7 +6103,7 @@ mod tests {
                 .contains("cannot contain both author and attribution")
         );
 
-        let err = match backend.begin_streaming_mutation_encoded(
+        let err = match backend.begin_streaming_mutation(
             "items".to_owned(),
             Uint8Array::from(vec![0xb6; 16]),
             Uint8Array::from(Vec::new()),

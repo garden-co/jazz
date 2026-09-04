@@ -75,26 +75,11 @@ declare module "jazz-wasm" {
   };
 
   export class WasmTx {
-    insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
-    updateEncoded(
-      table: string,
-      rowId: Uint8Array,
-      patch: Uint8Array,
-      options?: UpdateOptions,
-    ): void;
-    upsertEncoded(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      options?: UpsertOptions,
-    ): void;
-    deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions): void;
-    restoreEncoded(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      options?: RestoreOptions,
-    ): void;
+    insert(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
+    update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions): void;
+    upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions): void;
+    delete(table: string, rowId: Uint8Array, options?: DeleteOptions): void;
+    restore(table: string, rowId: Uint8Array, cells: Uint8Array, options?: RestoreOptions): void;
     commit(): WasmWrite;
     rollback(): void;
   }
@@ -132,7 +117,7 @@ declare module "jazz-wasm" {
       maxAgeMs?: number | null,
     ): void;
     evictExpiredStagedLargeValues(): Promise<number>;
-    beginStreamingMutationEncoded(
+    beginStreamingMutation(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
@@ -232,40 +217,27 @@ declare module "jazz-wasm" {
       opts: unknown,
     ): ReadableStream<unknown>;
 
-    insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite;
-    canInsertEncoded(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
-    requestInsertPermissionAdviceEncoded(
-      table: string,
-      cells: Uint8Array,
-    ): WasmPermissionAdviceRequest;
+    insert(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite;
+    canInsert(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
+    requestInsertPermissionAdvice(table: string, cells: Uint8Array): WasmPermissionAdviceRequest;
     requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    updateEncoded(
-      table: string,
-      rowId: Uint8Array,
-      patch: Uint8Array,
-      options?: UpdateOptions,
-    ): WasmWrite;
-    updateLargeValuesEncoded(
+    update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions): WasmWrite;
+    updateLargeValues(
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
       descriptors: unknown,
       updatedAtMs?: number | null,
     ): WasmWrite;
-    requestUpdatePermissionAdviceEncoded(
+    requestUpdatePermissionAdvice(
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
     ): WasmPermissionAdviceRequest;
     requestDeletePermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    upsertEncoded(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      options?: UpsertOptions,
-    ): WasmWrite;
-    deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite;
-    restoreEncoded(
+    upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions): WasmWrite;
+    delete(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite;
+    restore(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,

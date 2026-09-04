@@ -85,7 +85,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     };
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ insertEncoded: () => write, tick: () => undefined }),
+        openMemory: () => fakeDb({ insert: () => write, tick: () => undefined }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -111,7 +111,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertEncoded: () => {
+            insert: () => {
               throw nativeError;
             },
             tick: () => undefined,
@@ -149,7 +149,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     };
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ insertEncoded: () => write, tick: () => undefined }),
+        openMemory: () => fakeDb({ insert: () => write, tick: () => undefined }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -439,7 +439,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertEncoded: () => write,
+            insert: () => write,
             connectUpstream: () => transport,
             tick: () => undefined,
           }),
@@ -515,7 +515,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertEncoded: () => write,
+            insert: () => write,
             prepareQuery: () => ({}),
             subscribe: () => subscriptions.shift()!,
             onMutationError: (callback: (event: unknown) => void) => {
@@ -624,7 +624,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertEncoded: () => write,
+            insert: () => write,
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -692,7 +692,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertEncoded: () => write,
+            insert: () => write,
             connectUpstream: () => transport,
             tick: () => undefined,
           }),
@@ -1336,11 +1336,11 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
   return {
     commit: () => fakeWrite(),
     rollback: () => undefined,
-    insertEncoded: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
-    restoreEncoded: () => undefined,
-    updateEncoded: () => undefined,
-    upsertEncoded: () => undefined,
-    deleteEncoded: () => undefined,
+    insert: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
+    restore: () => undefined,
+    update: () => undefined,
+    upsert: () => undefined,
+    delete: () => undefined,
     ...overrides,
   };
 }
@@ -1358,9 +1358,9 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
-  insertEncoded(table: string, cells: Uint8Array, options?: { rowId?: Uint8Array }): Uint8Array;
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: unknown): void;
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: unknown): void;
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: unknown): void;
-  deleteEncoded(table: string, rowId: Uint8Array, options?: unknown): void;
+  insert(table: string, cells: Uint8Array, options?: { rowId?: Uint8Array }): Uint8Array;
+  restore(table: string, rowId: Uint8Array, cells: Uint8Array, options?: unknown): void;
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: unknown): void;
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: unknown): void;
+  delete(table: string, rowId: Uint8Array, options?: unknown): void;
 };

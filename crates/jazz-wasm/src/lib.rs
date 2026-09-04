@@ -1209,8 +1209,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = insertEncoded)]
-    pub fn insert_encoded_with_options(
+    #[wasm_bindgen(js_name = insert)]
+    pub fn insert_with_options(
         &self,
         table: String,
         cells: Vec<u8>,
@@ -1237,8 +1237,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = updateEncoded)]
-    pub fn update_encoded_with_options(
+    #[wasm_bindgen(js_name = update)]
+    pub fn update_with_options(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1267,8 +1267,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = updateLargeValuesEncoded)]
-    pub fn update_large_values_encoded(
+    #[wasm_bindgen(js_name = updateLargeValues)]
+    pub fn update_large_values(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1304,8 +1304,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = upsertEncoded)]
-    pub fn upsert_encoded_with_options(
+    #[wasm_bindgen(js_name = upsert)]
+    pub fn upsert_with_options(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1334,8 +1334,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = deleteEncoded)]
-    pub fn delete_encoded_with_options(
+    #[wasm_bindgen(js_name = delete)]
+    pub fn delete_with_options(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1362,8 +1362,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = restoreEncoded)]
-    pub fn restore_encoded_with_options(
+    #[wasm_bindgen(js_name = restore)]
+    pub fn restore_with_options(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1976,8 +1976,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = canInsertEncoded)]
-    pub fn can_insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<String, JsValue> {
+    #[wasm_bindgen(js_name = canInsert)]
+    pub fn can_insert(&self, table: String, cells: Vec<u8>) -> Result<String, JsValue> {
         let cells = decode_cells(&cells)?;
         let inner = self.open_inner()?;
         match &inner {
@@ -1994,8 +1994,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = requestInsertPermissionAdviceEncoded)]
-    pub fn request_insert_permission_advice_encoded(
+    #[wasm_bindgen(js_name = requestInsertPermissionAdvice)]
+    pub fn request_insert_permission_advice(
         &self,
         table: String,
         cells: Vec<u8>,
@@ -2020,8 +2020,8 @@ impl WasmDb {
             })
     }
 
-    #[wasm_bindgen(js_name = requestUpdatePermissionAdviceEncoded)]
-    pub fn request_update_permission_advice_encoded(
+    #[wasm_bindgen(js_name = requestUpdatePermissionAdvice)]
+    pub fn request_update_permission_advice(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -2112,9 +2112,9 @@ impl WasmDb {
         })
     }
 
-    #[wasm_bindgen(js_name = beginStreamingMutationEncoded)]
+    #[wasm_bindgen(js_name = beginStreamingMutation)]
     #[allow(clippy::too_many_arguments)]
-    pub fn begin_streaming_mutation_encoded(
+    pub fn begin_streaming_mutation(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -2861,8 +2861,8 @@ impl WasmTransport {
 
 #[wasm_bindgen]
 impl WasmTx {
-    #[wasm_bindgen(js_name = insertEncoded)]
-    pub fn insert_encoded_with_options(
+    #[wasm_bindgen(js_name = insert)]
+    pub fn insert_with_options(
         &mut self,
         table: String,
         cells: Vec<u8>,
@@ -2885,8 +2885,8 @@ impl WasmTx {
         Ok(row.to_bytes())
     }
 
-    #[wasm_bindgen(js_name = updateEncoded)]
-    pub fn update_encoded_with_options(
+    #[wasm_bindgen(js_name = update)]
+    pub fn update_with_options(
         &mut self,
         table: String,
         row_id: Vec<u8>,
@@ -2912,8 +2912,8 @@ impl WasmTx {
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = upsertEncoded)]
-    pub fn upsert_encoded_with_options(
+    #[wasm_bindgen(js_name = upsert)]
+    pub fn upsert_with_options(
         &mut self,
         table: String,
         row_id: Vec<u8>,
@@ -2939,8 +2939,8 @@ impl WasmTx {
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = deleteEncoded)]
-    pub fn delete_encoded_with_options(
+    #[wasm_bindgen(js_name = delete)]
+    pub fn delete_with_options(
         &mut self,
         table: String,
         row_id: Vec<u8>,
@@ -2963,8 +2963,8 @@ impl WasmTx {
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = restoreEncoded)]
-    pub fn restore_encoded_with_options(
+    #[wasm_bindgen(js_name = restore)]
+    pub fn restore_with_options(
         &mut self,
         table: String,
         row_id: Vec<u8>,

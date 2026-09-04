@@ -1065,11 +1065,11 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => Uint8Array.from([0]),
             prepareQuery: () => ({}),
-            updateEncoded: (table: string, rowId: Uint8Array, patch: Uint8Array) => {
+            update: (table: string, rowId: Uint8Array, patch: Uint8Array) => {
               calls.push(["update", table, rowId, patch]);
               return write;
             },
-            deleteEncoded: (table: string, rowId: Uint8Array) => {
+            delete: (table: string, rowId: Uint8Array) => {
               calls.push(["delete", table, rowId]);
               return write;
             },
@@ -1112,7 +1112,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => Uint8Array.from([0]),
             prepareQuery: () => ({}),
-            updateLargeValuesEncoded: (...args: unknown[]) => {
+            updateLargeValues: (...args: unknown[]) => {
               calls.push(args);
               return fakeWrite();
             },
@@ -1239,11 +1239,7 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]),
             prepareQuery: () => ({}),
-            insertEncoded: (
-              _table: string,
-              _cells: Uint8Array,
-              options?: { rowId?: Uint8Array },
-            ) => {
+            insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
               insertedRowIds.push(options?.rowId ?? new Uint8Array(16));
               return write;
             },
@@ -1292,15 +1288,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertEncoded: (...args: unknown[]) => {
+            insert: (...args: unknown[]) => {
               calls.push(["insert", ...args]);
               return fakeWrite();
             },
-            updateEncoded: (...args: unknown[]) => {
+            update: (...args: unknown[]) => {
               calls.push(["update", ...args]);
               return fakeWrite();
             },
-            upsertEncoded: (...args: unknown[]) => {
+            upsert: (...args: unknown[]) => {
               calls.push(["upsert", ...args]);
               return fakeWrite();
             },
@@ -1385,7 +1381,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               ];
             },
           }),
-          insertEncoded: () => {
+          insert: () => {
             schedulerCallback?.("deferred");
             return fakeWrite();
           },
@@ -1614,7 +1610,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            requestInsertPermissionAdviceEncoded: () => "permit" as never,
+            requestInsertPermissionAdvice: () => "permit" as never,
             requestReadPermissionAdvice: () => ({
               poll: () => "permit",
               cancel: () => {},
@@ -6198,7 +6194,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   it("infers the physical kind and applies backpressure to async chunks", async () => {
     const pushed: Uint8Array[] = [];
     let finished = false;
-    const beginStreamingMutationEncoded = vi.fn(
+    const beginStreamingMutation = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -6230,7 +6226,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     } satisfies WasmSchema;
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6255,23 +6251,23 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    expect(beginStreamingMutationEncoded).toHaveBeenCalledOnce();
-    expect(beginStreamingMutationEncoded.mock.calls[0]?.[3]).toBe("title");
-    expect(beginStreamingMutationEncoded.mock.calls[0]?.[4]).toBe("insert");
+    expect(beginStreamingMutation).toHaveBeenCalledOnce();
+    expect(beginStreamingMutation.mock.calls[0]?.[3]).toBe("title");
+    expect(beginStreamingMutation.mock.calls[0]?.[4]).toBe("insert");
     expect(pushed.map((chunk) => new TextDecoder().decode(chunk))).toEqual(["hello ", "world"]);
     expect(finished).toBe(true);
     expect(result.id).toBe("00000000-0000-0000-0000-000000000123");
   });
 
   it("forwards update identity, branch view, and custom timestamp to native finish", async () => {
-    const beginStreamingMutationEncoded = vi.fn(() => ({
+    const beginStreamingMutation = vi.fn(() => ({
       push: () => undefined,
       finish: () => fakeWrite(),
       abort: vi.fn(),
     }));
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6306,7 +6302,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const call = beginStreamingMutationEncoded.mock.calls[0] as unknown[];
+    const call = beginStreamingMutation.mock.calls[0] as unknown[];
     expect(call[4]).toBe("update");
     expect(call[5]).toBeInstanceOf(Uint8Array);
     expect(call[6]).toBeUndefined();
@@ -6333,7 +6329,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     },
   ])("strictly parses write-context canonical author attribution: $name", async (testCase) => {
     const ownerAuthor = JSON.stringify(["urn:jazz:test", "owner"]);
-    const beginStreamingMutationEncoded = vi.fn(
+    const beginStreamingMutation = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -6352,7 +6348,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6377,14 +6373,14 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const author = beginStreamingMutationEncoded.mock.calls[0]?.[5];
+    const author = beginStreamingMutation.mock.calls[0]?.[5];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       testCase.expectedAuthor ?? ownerAuthor,
     );
   });
 
   it("passes provenance separately from admission through the unified binding ABI", async () => {
-    const insertEncoded = vi.fn(
+    const insert = vi.fn(
       (
         _table: string,
         _cells: Uint8Array,
@@ -6392,7 +6388,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       ) => fakeWrite(),
     );
     const beginTransaction = vi.fn();
-    const beginStreamingMutationEncoded = vi.fn(
+    const beginStreamingMutation = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -6408,9 +6404,9 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       }),
     );
     const nativeDb = fakeDb({
-      insertEncoded,
+      insert,
       beginTransaction,
-      beginStreamingMutationEncoded,
+      beginStreamingMutation,
     });
     const runtime = new NativeRuntimeAdapter(
       {
@@ -6438,7 +6434,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       context,
       "00000000-0000-0000-0000-000000000123",
     );
-    const insertCall = insertEncoded.mock.calls[0];
+    const insertCall = insert.mock.calls[0];
     expect(insertCall?.[0]).toBe("todos");
     expect(insertCall?.[2].author).toBeUndefined();
     expect(new TextDecoder().decode(insertCall?.[2].attribution!)).toBe(attribution);
@@ -6466,7 +6462,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       context,
       "00000000-0000-0000-0000-000000000125",
     );
-    const streamingCall = beginStreamingMutationEncoded.mock.calls[0];
+    const streamingCall = beginStreamingMutation.mock.calls[0];
     expect(streamingCall?.[0]).toBe("todos");
     expect(new TextDecoder().decode(streamingCall?.[6])).toBe(attribution);
 
@@ -6479,17 +6475,17 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "00000000-0000-0000-0000-000000000124",
       ),
     ).toThrow("do not support branch views");
-    expect(insertEncoded).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalledTimes(1);
   });
 
   it("rejects malformed backend attribution instead of falling back to SYSTEM", () => {
-    const insertEncoded = vi.fn(() => fakeWrite());
+    const insert = vi.fn(() => fakeWrite());
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () => {
           throw new Error("not used");
         },
-        openMemoryAsBackend: () => fakeDb({ insertEncoded }),
+        openMemoryAsBackend: () => fakeDb({ insert }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6509,7 +6505,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "00000000-0000-0000-0000-000000000123",
       ),
     ).toThrow("backend attribution must be a canonical author subject string");
-    expect(insertEncoded).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
   });
 
   it("does not mix per-write provenance into a transaction opened without it", () => {
@@ -6550,14 +6546,14 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   });
 
   it("rejects reserved public write-context sessions and attributions", async () => {
-    const beginStreamingMutationEncoded = vi.fn(() => ({
+    const beginStreamingMutation = vi.fn(() => ({
       push: () => undefined,
       finish: () => fakeWrite(),
       abort: vi.fn(),
     }));
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6618,11 +6614,11 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       ),
     ).rejects.toThrow("reserved issuer");
 
-    expect(beginStreamingMutationEncoded).not.toHaveBeenCalled();
+    expect(beginStreamingMutation).not.toHaveBeenCalled();
   });
 
   it("admits verified reserved write-context sessions carrying the runtime capability", async () => {
-    const beginStreamingMutationEncoded = vi.fn(
+    const beginStreamingMutation = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -6645,7 +6641,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     )!;
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6675,7 +6671,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const author = beginStreamingMutationEncoded.mock.calls[0]?.[5];
+    const author = beginStreamingMutation.mock.calls[0]?.[5];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       '["urn:jazz:local-first","verified-writer"]',
     );
@@ -6687,7 +6683,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       {
         openMemory: () =>
           fakeDb({
-            beginStreamingMutationEncoded: () => ({
+            beginStreamingMutation: () => ({
               push: () => undefined,
               finish: () => fakeWrite(),
               abort,
@@ -7953,11 +7949,11 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
   return {
     commit: () => fakeWrite(),
     rollback: () => undefined,
-    insertEncoded: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
-    restoreEncoded: () => undefined,
-    updateEncoded: () => undefined,
-    upsertEncoded: () => undefined,
-    deleteEncoded: () => undefined,
+    insert: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
+    restore: () => undefined,
+    update: () => undefined,
+    upsert: () => undefined,
+    delete: () => undefined,
     ...overrides,
   };
 }
@@ -7974,30 +7970,30 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
-  insertEncoded(
+  insert(
     table: string,
     cells: Uint8Array,
     options?: { rowId?: Uint8Array; branch?: unknown; updatedAtMs?: number },
   ): Uint8Array;
-  restoreEncoded(
+  restore(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: { branch?: unknown; updatedAtMs?: number },
   ): void;
-  updateEncoded(
+  update(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
     options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
   ): void;
-  upsertEncoded(
+  upsert(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: { branch?: unknown; updatedAtMs?: number },
   ): void;
-  deleteEncoded(
+  delete(
     table: string,
     rowId: Uint8Array,
     options?: { head?: unknown; base?: unknown; updatedAtMs?: number },

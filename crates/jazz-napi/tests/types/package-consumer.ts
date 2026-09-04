@@ -9,7 +9,7 @@ const branch: JsonValue = {
 declare const db: NapiDb;
 declare const encodedRow: Uint8Array;
 
-db.insertEncoded("documents", encodedRow, { branch });
+db.insert("documents", encodedRow, { branch });
 const canonicalBranchUpsert: UpsertOptions = { head: branch };
 const removedBranchUpsert: UpsertOptions = {
   // @ts-expect-error `branch` is not an upsert selector; use `head`.
