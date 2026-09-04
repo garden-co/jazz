@@ -2612,12 +2612,18 @@ fn native_binding_encodes_plain_projected_and_aggregate_public_reads() {
     ));
     let alice = AuthorSubject::for_test_bytes([0xea; 16]);
     let db = open_db(0xea, alice, &schema);
-    db.insert(
-        "binding_todos",
-        BTreeMap::from([("title".to_owned(), Value::String("hello".to_owned()))]),
-        Default::default(),
-    )
-    .unwrap();
+    let inserted = db
+        .insert(
+            "binding_todos",
+            BTreeMap::from([("title".to_owned(), Value::String("hello".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap();
+    let local_row = block_on(db.local_current_row("binding_todos", inserted.row_uuid()))
+        .unwrap()
+        .expect("inserted row is locally current");
+    crate::binding_codec::encode_rows(&[local_row])
+        .expect("point current-row read retains native field provenance");
     for query in [
         Query::from("binding_todos"),
         Query::from("binding_todos").select(["title"]),

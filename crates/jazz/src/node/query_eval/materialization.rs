@@ -1038,7 +1038,7 @@ where
     /// Complete metadata for physical current rows at the schema-aware producer
     /// boundary. Exact catalogue column slots identify stored cells; all other
     /// slots retain their result names. Already explicit terminal bindings survive.
-    fn bind_current_row_columns_in_schema(
+    pub(in crate::node) fn bind_current_row_columns_in_schema(
         &self,
         schema_version: SchemaVersionId,
         row: &mut CurrentRow,

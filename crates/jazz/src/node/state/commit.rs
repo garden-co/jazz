@@ -1489,7 +1489,11 @@ where
             return Ok(None);
         }
         content
-            .map(|(row, _)| self.materialize_current_row(&table_schema, row))
+            .map(|(row, _)| {
+                let mut row = self.materialize_current_row(&table_schema, row)?;
+                self.bind_current_row_columns_in_schema(schema_version, &mut row)?;
+                Ok(row)
+            })
             .transpose()
     }
 
