@@ -45,9 +45,8 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [features]
-default = ["console_error_panic_hook", "transport-compression-ruzstd", "sync-autopsy"]
+default = ["console_error_panic_hook", "transport-compression-ruzstd"]
 bench-probes = []
-sync-autopsy = ["jazz/sync-autopsy"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]

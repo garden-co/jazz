@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -68,21 +68,6 @@ pub fn native_artifact_fingerprint() -> String {
     option_env!("JAZZ_NATIVE_ARTIFACT_FINGERPRINT")
         .unwrap_or("missing-build-fingerprint")
         .to_owned()
-}
-
-/// Test-only access to the bounded core sync trace. This is compiled only by
-/// temporary artifact builds used to locate transport/publication divergence.
-#[wasm_bindgen(js_name = __testSyncAutopsyEnable)]
-pub fn test_sync_autopsy_enable() {
-    jazz::db::sync_autopsy::clear();
-    jazz::db::sync_autopsy::enable();
-}
-
-/// Test-only bounded core sync trace dump; never exposed through application
-/// runtime APIs.
-#[wasm_bindgen(js_name = __testSyncAutopsyDump)]
-pub fn test_sync_autopsy_dump() -> String {
-    jazz::db::sync_autopsy::dump()
 }
 
 /// Test-only bridge for executing the Rust-owned v1 binding corpus through the
@@ -631,25 +616,11 @@ impl WasmTransportInner {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct WasmWireQueues {
-    id: u64,
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_scheduler: Rc<RefCell<Option<js_sys::Function>>>,
-}
-
-static NEXT_WASM_WIRE_QUEUE_ID: AtomicU64 = AtomicU64::new(1);
-
-impl Default for WasmWireQueues {
-    fn default() -> Self {
-        Self {
-            id: NEXT_WASM_WIRE_QUEUE_ID.fetch_add(1, Ordering::Relaxed),
-            inbound: Rc::new(RefCell::new(VecDeque::new())),
-            outbound: Rc::new(RefCell::new(VecDeque::new())),
-            outbound_scheduler: Rc::new(RefCell::new(None)),
-        }
-    }
 }
 
 struct WasmWireTransport {
@@ -709,12 +680,6 @@ impl WireTransport for WasmWireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
         self.queues.outbound.borrow_mut().push_back(frame);
         let scheduler = self.queues.outbound_scheduler.borrow().clone();
-        #[cfg(feature = "sync-autopsy")]
-        jazz::db::sync_autopsy::record(format!(
-            "wasm transport queued outbound queue={} scheduled={}",
-            self.queues.id,
-            scheduler.is_some(),
-        ));
         if let Some(scheduler) = scheduler {
             let _ = scheduler.call0(&JsValue::NULL);
         }
@@ -3334,14 +3299,6 @@ impl WasmTransport {
         let mut outbound = self.queues.outbound.borrow_mut();
         while let Some(frame) = outbound.pop_front() {
             frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());
-        }
-        #[cfg(feature = "sync-autopsy")]
-        if frames.length() > 0 {
-            jazz::db::sync_autopsy::record(format!(
-                "wasm transport drained outbound queue={} frames={}",
-                self.queues.id,
-                frames.length(),
-            ));
         }
         frames
     }

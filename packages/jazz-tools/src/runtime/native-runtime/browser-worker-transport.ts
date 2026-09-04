@@ -48,7 +48,6 @@ export class BrowserWorkerTransportPump {
     private readonly sendFrames: (frames: Uint8Array[]) => void,
     private readonly onError: (error: unknown) => void,
     private readonly onAuxiliaryTrace?: (entries: AuxiliaryRelayTrace[]) => void,
-    private readonly onPumpTrace?: (phase: "scheduled" | "drained", frameCount: number) => void,
   ) {
     // The evaluator notifies every peer after a pass. This pump drains its
     // transport immediately after the pass it requested, so that notification
@@ -109,7 +108,6 @@ export class BrowserWorkerTransportPump {
   drainOutboundFrames(): boolean {
     if (this.closed) return false;
     const frames = normalizeTransportFrames(this.transport.recvWireFrames());
-    this.onPumpTrace?.("drained", frames.length);
     if (frames.length > 0) this.sendFrames(frames);
     const auxiliary = this.transport.recvAuxiliaryWireFrames;
     if (!auxiliary) return false;
@@ -128,7 +126,6 @@ export class BrowserWorkerTransportPump {
   private scheduleOutboundDrain(): void {
     if (this.closed || this.outboundDrainScheduled) return;
     this.outboundDrainScheduled = true;
-    this.onPumpTrace?.("scheduled", 0);
     queueMicrotask(() => {
       this.outboundDrainScheduled = false;
       if (!this.closed) this.drainOutboundFrames();

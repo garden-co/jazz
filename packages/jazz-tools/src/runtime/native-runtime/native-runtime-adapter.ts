@@ -6056,7 +6056,13 @@ function nativeRowFieldPlans(
     const fieldName = batch.descriptor[index]?.name;
     if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
 
-    const name = publicFieldName(fieldName);
+    // `user_` is the physical CurrentRow namespace only when it names a
+    // declared application column. Structured collector fields are logical
+    // public names and may themselves begin with `user_` (for example the
+    // relation produced by `user_check_id`). Stripping that prefix would make
+    // the receiver publish `check` while the query asks for `user_check`.
+    const physicalName = publicFieldName(fieldName);
+    const name = columnsByName.has(physicalName) ? physicalName : fieldName;
     const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
     plans.push({
       name,

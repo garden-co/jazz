@@ -16,6 +16,34 @@ describe("formatUuid", () => {
 });
 
 describe("native row descriptor cache keys", () => {
+  it("keeps logical terminal fields whose public names begin with user_", () => {
+    const schema = {
+      notes: {
+        columns: [{ name: "body", column_type: { type: "Text" }, nullable: false }],
+      },
+    } satisfies WasmSchema;
+    const descriptor = [{ name: "user_check", valueType: { tag: 8 } as const }];
+    const batch = {
+      table: "notes",
+      descriptor,
+      rows: [
+        {
+          rowId: uuidBytes("00000000-0000-0000-0000-0000000000a0"),
+          deleted: false,
+          raw: createRecord(descriptor, [
+            Uint8Array.from([2, ...new TextEncoder().encode("included")]),
+          ]),
+        },
+      ],
+    };
+
+    const row = rowsFromBatches([batch], schema)[0] as {
+      valuesByColumn?: Map<string, unknown>;
+    };
+    expect(row?.valuesByColumn?.get("user_check")).toMatchObject({ type: "Bytea" });
+    expect(row?.valuesByColumn?.has("check")).toBe(false);
+  });
+
   it("includes the table identity", () => {
     const descriptor = [{ name: "value", valueType: { tag: 8 } }];
 

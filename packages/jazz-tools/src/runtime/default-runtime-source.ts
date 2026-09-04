@@ -185,17 +185,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
   override async load(config: DbConfig): Promise<void> {
     this.module ??= await loadWasmModule(config.runtimeSources);
-    // Temporary browser autopsy hook. The worker has an inspector path, while
-    // the foreground module lives in the test page; retain its bounded trace
-    // there so the failing browser test can compare both hops.
-    const autopsy = this.module as WasmModule & {
-      __testSyncAutopsyEnable?: () => void;
-      __testSyncAutopsyDump?: () => string;
-    };
-    autopsy.__testSyncAutopsyEnable?.();
-    (
-      globalThis as typeof globalThis & { __jazzTestSyncAutopsy?: typeof autopsy }
-    ).__jazzTestSyncAutopsy = autopsy;
   }
 
   override createClient({

@@ -5059,26 +5059,6 @@ where
                         let pending_initial =
                             std::mem::take(&mut group.pending_initial_subscribers);
                         let serving_initial = !pending_initial.is_empty();
-                        #[cfg(feature = "sync-autopsy")]
-                        sync_autopsy::record(format!(
-                            "subscriber serve group={} pending={} initialized={} awaiting={} settled={} maintained={}",
-                            summarize_subscription_key(group_subscription),
-                            pending_initial.len(),
-                            group.initialized,
-                            group.awaiting_upstream_settlement,
-                            upstream_authority_is_settled,
-                            peer.has_maintained_subscription(group_subscription),
-                        ));
-                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                            eprintln!(
-                                "JAZZ_COVERED_INPUT_TRACE stage=serve_group connection={connection_epoch} group={group_subscription:?} pending={} initialized={} awaiting={} settled={} maintained={}",
-                                pending_initial.len(),
-                                group.initialized,
-                                group.awaiting_upstream_settlement,
-                                upstream_authority_is_settled,
-                                peer.has_maintained_subscription(group_subscription),
-                            );
-                        }
                         if serving_initial {
                             let mut established_subscribers = group
                                 .subscribers
@@ -5261,17 +5241,6 @@ where
                             let mut update = match update_result {
                                 Ok(Some(update)) => update,
                                 Ok(None) => {
-                                    #[cfg(feature = "sync-autopsy")]
-                                    sync_autopsy::record(format!(
-                                        "subscriber initial pending group={} subscriber={}",
-                                        summarize_subscription_key(group_subscription),
-                                        summarize_subscription_key(subscription),
-                                    ));
-                                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                                        eprintln!(
-                                            "JAZZ_COVERED_INPUT_TRACE stage=serve_initial_pending connection={connection_epoch} group={group_subscription:?} subscription={subscription:?}",
-                                        );
-                                    }
                                     group.pending_initial_subscribers.insert(subscription);
                                     serve_again = true;
                                     continue;
@@ -5417,16 +5386,6 @@ where
                         let update = match update_result {
                             Ok(Some(update)) => update,
                             Ok(None) => {
-                                #[cfg(feature = "sync-autopsy")]
-                                sync_autopsy::record(format!(
-                                    "subscriber group pending group={}",
-                                    summarize_subscription_key(group_subscription),
-                                ));
-                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                                    eprintln!(
-                                        "JAZZ_COVERED_INPUT_TRACE stage=serve_group_pending connection={connection_epoch} group={group_subscription:?}",
-                                    );
-                                }
                                 serve_again = true;
                                 continue;
                             }
@@ -5557,16 +5516,6 @@ where
         let epoch = self.subscriber_dirty_epoch.get();
         if self.observed_subscriber_dirty_epoch.get() == epoch {
             return;
-        }
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-            eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=subscriber_dirty_observed connection={} epoch={epoch} link={}",
-                self.connection_epoch,
-                match self.link {
-                    ConnectionLink::Upstream(_) => "upstream",
-                    ConnectionLink::Subscriber(_) => "subscriber",
-                },
-            );
         }
         self.observed_subscriber_dirty_epoch.set(epoch);
         if let ConnectionLink::Subscriber(SubscriberConnectionState { serve_dirty, .. }) =
@@ -5849,12 +5798,6 @@ where
         // resident authority membership without unrelated upstream traffic.
         let next = subscriber_dirty_epoch.get().wrapping_add(1);
         subscriber_dirty_epoch.set(next);
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-            eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=relay_authority_batch_committed connection={connection_epoch} updates={} subscriber_dirty={next}",
-                publishing_subscriptions.len(),
-            );
-        }
         schedule_tick_in(scheduler, TickUrgency::Immediate);
     }
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()

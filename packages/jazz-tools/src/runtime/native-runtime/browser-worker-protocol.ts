@@ -425,8 +425,6 @@ export type BrowserWorkerLifecycleTrace = {
     | "lease-admitted"
     | "peer-attached"
     | "peer-frames"
-    | "peer-frame-output"
-    | "peer-frame-drain"
     | "query-attach"
     | "query-covered"
     | "owner-release-start"
@@ -460,7 +458,6 @@ export type BrowserRelayTrace = {
 export type BrowserInspectorControlRequest =
   | { type: "list-contexts"; id: number }
   | { type: "lifecycle-trace"; id: number }
-  | { type: "sync-autopsy"; id: number }
   | { type: "terminate-worker"; id: number }
   | {
       type: "attach-context";
@@ -474,7 +471,6 @@ export type BrowserInspectorControlRequest =
 export type BrowserInspectorControlEvent =
   | { type: "contexts"; id: number; contexts: BrowserInspectorContext[] }
   | { type: "lifecycle-trace"; id: number; entries: BrowserWorkerLifecycleTrace[] }
-  | { type: "sync-autopsy"; id: number; dump: string }
   | {
       type: "result";
       id: number;
