@@ -238,6 +238,9 @@ check_registry() {
         registry_rows=$((registry_rows + 1))
         rows=$((rows + 1))
     done <<< "$PARSED_ROWS"
+    if (( registry_rows == 0 )); then
+        fail "$registry: registry must contain at least one invariant record"
+    fi
     printf 'invariant-registry: checked %s (%d rows)\n' "$registry" "$registry_rows"
 }
 
