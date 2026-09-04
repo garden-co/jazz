@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -57,7 +57,7 @@ function parseEnv(content: string): Record<string, string> {
 
 describe("runHostedInit", () => {
   describe("success path", () => {
-    it("writes all four keys and prints credentials + banner", async () => {
+    it("writes all four keys and redacts credentials while preserving guidance", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
         appId: "app-alice",
         adminSecret: "admin-secret-alice",
@@ -79,20 +79,37 @@ describe("runHostedInit", () => {
       expect(values["BACKEND_SECRET"]).toBe("backend-secret-alice");
       expect(content).not.toContain("TODO");
 
-      const logCalls = logSpy.mock.calls.map((c: unknown[]) => c.join(" "));
-      expect(logCalls.some((l: string) => l.includes("app-alice"))).toBe(true);
-      expect(logCalls.some((l: string) => l.includes("https://v2.dashboard.jazz.tools"))).toBe(
-        true,
-      );
-      expect(logCalls.some((l: string) => l.includes("NEXT_PUBLIC_JAZZ_APP_ID=app-alice"))).toBe(
-        true,
-      );
-      expect(logCalls.some((l: string) => l.includes("JAZZ_ADMIN_SECRET=admin-secret-alice"))).toBe(
-        true,
-      );
-      expect(logCalls.some((l: string) => l.includes("BACKEND_SECRET=backend-secret-alice"))).toBe(
-        true,
-      );
+      const output = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+      expect(output).toContain("app-alice");
+      expect(output).toContain(CLOUD_SYNC_URL);
+      expect(output).toContain("https://v2.dashboard.jazz.tools");
+      expect(output).not.toContain("admin-secret-alice");
+      expect(output).not.toContain("backend-secret-alice");
+    });
+
+    it("redacts credentials from the deferred onLog adapter", async () => {
+      vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
+        appId: "app-deferred",
+        adminSecret: "admin-secret-deferred",
+        backendSecret: "backend-secret-deferred",
+      });
+
+      const logs: { kind: string; message: string }[] = [];
+      await runHostedInit({
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+        onLog: (kind, message) => logs.push({ kind, message }),
+      });
+
+      const output = logs.map(({ message }) => message).join("\n");
+      expect(output).toContain("app-deferred");
+      expect(output).toContain(CLOUD_SYNC_URL);
+      expect(output).toContain("https://v2.dashboard.jazz.tools");
+      expect(output).not.toContain("admin-secret-deferred");
+      expect(output).not.toContain("backend-secret-deferred");
+      expect(logSpy).not.toHaveBeenCalled();
     });
 
     it("works with SvelteKit PUBLIC_* keys", async () => {
@@ -136,7 +153,7 @@ describe("runHostedInit", () => {
       expect(values["BACKEND_SECRET"]).toBe("");
     });
 
-    it("names the error class on stderr", async () => {
+    it("keeps the HTTP failure diagnostic actionable without serializing the error", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockRejectedValue(
         new cloudProvision.ProvisionHttpError(API_URL, 503),
       );
@@ -149,7 +166,7 @@ describe("runHostedInit", () => {
       });
 
       const warnArgs = warnSpy.mock.calls.map((c: unknown[]) => c.join(" "));
-      expect(warnArgs.some((w: string) => w.includes("ProvisionHttpError"))).toBe(true);
+      expect(warnArgs.some((w: string) => w.includes("HTTP 503 provisioning error"))).toBe(true);
     });
   });
 
@@ -170,9 +187,16 @@ describe("runHostedInit", () => {
       expect(values["JAZZ_ADMIN_SECRET"]).toBe("");
     });
 
-    it("names the error class on stderr", async () => {
+    it("does not leak credentials embedded in a network error", async () => {
+      const adminSecret = "admin-secret-from-network-error";
+      const backendSecret = "backend-secret-from-network-error";
       vi.spyOn(cloudProvision, "provisionHostedApp").mockRejectedValue(
-        new cloudProvision.ProvisionNetworkError(API_URL, new TypeError("Failed to fetch")),
+        new cloudProvision.ProvisionNetworkError(
+          API_URL,
+          new TypeError(
+            `Failed to fetch: adminSecret=${adminSecret}, backendSecret=${backendSecret}`,
+          ),
+        ),
       );
 
       await runHostedInit({
@@ -183,12 +207,15 @@ describe("runHostedInit", () => {
       });
 
       const warnArgs = warnSpy.mock.calls.map((c: unknown[]) => c.join(" "));
-      expect(warnArgs.some((w: string) => w.includes("ProvisionNetworkError"))).toBe(true);
+      const output = warnArgs.join("\n");
+      expect(output).toContain("network provisioning error");
+      expect(output).not.toContain(adminSecret);
+      expect(output).not.toContain(backendSecret);
     });
   });
 
   describe("idempotency", () => {
-    it("short-circuits when appId key already has a value", async () => {
+    it("does not short-circuit when only appId is present", async () => {
       const provisionSpy = vi
         .spyOn(cloudProvision, "provisionHostedApp")
         .mockResolvedValue({ appId: "should-not-be-used", adminSecret: "x", backendSecret: "y" });
@@ -202,17 +229,28 @@ describe("runHostedInit", () => {
         apiUrl: API_URL,
       });
 
-      expect(provisionSpy).not.toHaveBeenCalled();
-      const content = readEnv(dir);
-      expect(content).toBe("NEXT_PUBLIC_JAZZ_APP_ID=existing-app-id\n");
+      expect(provisionSpy).toHaveBeenCalledOnce();
+      expect(parseEnv(readEnv(dir))).toMatchObject({
+        NEXT_PUBLIC_JAZZ_APP_ID: "existing-app-id",
+        NEXT_PUBLIC_JAZZ_SERVER_URL: CLOUD_SYNC_URL,
+        JAZZ_ADMIN_SECRET: "x",
+        BACKEND_SECRET: "y",
+      });
     });
 
-    it("short-circuits when any hosted key has a non-empty value", async () => {
+    it("short-circuits only when every hosted key has a non-empty value", async () => {
       const provisionSpy = vi
         .spyOn(cloudProvision, "provisionHostedApp")
         .mockResolvedValue({ appId: "should-not-be-used", adminSecret: "x", backendSecret: "y" });
 
-      writeFileSync(join(dir, ".env"), "JAZZ_ADMIN_SECRET=some-secret\n", "utf8");
+      const envPath = join(dir, ".env");
+      const existing =
+        "NEXT_PUBLIC_JAZZ_APP_ID=existing-app\n" +
+        "NEXT_PUBLIC_JAZZ_SERVER_URL=https://existing.example.com\n" +
+        "JAZZ_ADMIN_SECRET=some-secret\n" +
+        "BACKEND_SECRET=some-backend-secret\n";
+      writeFileSync(envPath, existing, "utf8");
+      if (process.platform !== "win32") chmodSync(envPath, 0o644);
 
       await runHostedInit({
         dir,
@@ -222,6 +260,12 @@ describe("runHostedInit", () => {
       });
 
       expect(provisionSpy).not.toHaveBeenCalled();
+      expect(readEnv(dir)).toBe(existing);
+      // Windows uses ACLs rather than POSIX mode bits, so this assertion is
+      // intentionally limited to platforms where chmod is the security model.
+      if (process.platform !== "win32") {
+        expect(statSync(envPath).mode & 0o777).toBe(0o600);
+      }
     });
 
     it("does not short-circuit when all hosted keys are empty placeholders", async () => {
@@ -245,6 +289,92 @@ describe("runHostedInit", () => {
       });
 
       expect(cloudProvision.provisionHostedApp).toHaveBeenCalledOnce();
+    });
+    it("replaces an empty placeholder after a failed attempt succeeds on retry", async () => {
+      const provisionSpy = vi
+        .spyOn(cloudProvision, "provisionHostedApp")
+        .mockRejectedValueOnce(new cloudProvision.ProvisionHttpError(API_URL, 503))
+        .mockResolvedValueOnce({
+          appId: "retry-app",
+          adminSecret: "retry-admin",
+          backendSecret: "retry-backend",
+        });
+
+      const options = {
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+      };
+      await runHostedInit(options);
+      await runHostedInit(options);
+
+      expect(provisionSpy).toHaveBeenCalledTimes(2);
+      const values = parseEnv(readEnv(dir));
+      expect(values["NEXT_PUBLIC_JAZZ_APP_ID"]).toBe("retry-app");
+      expect(values["NEXT_PUBLIC_JAZZ_SERVER_URL"]).toBe(CLOUD_SYNC_URL);
+      expect(values["JAZZ_ADMIN_SECRET"]).toBe("retry-admin");
+      expect(values["BACKEND_SECRET"]).toBe("retry-backend");
+    });
+
+    it("retries a partial write, preserves its explicit values, and fills missing credentials", async () => {
+      const abandonedAdminSecret = "admin-secret-in-interrupted-write";
+      const abandonedBackendSecret = "backend-secret-in-interrupted-write";
+      const retryAdminSecret = "admin-secret-after-retry";
+      const retryBackendSecret = "backend-secret-after-retry";
+      const provisionSpy = vi
+        .spyOn(cloudProvision, "provisionHostedApp")
+        .mockResolvedValueOnce({
+          appId: "app-written-before-interruption",
+          adminSecret: abandonedAdminSecret,
+          backendSecret: abandonedBackendSecret,
+        })
+        .mockResolvedValueOnce({
+          appId: "app-from-retry",
+          adminSecret: retryAdminSecret,
+          backendSecret: retryBackendSecret,
+        });
+      vi.spyOn(cloudEnv, "writeHostedEnv").mockImplementationOnce(() => {
+        // Plant the pre-atomic failure mode: content reaches .env, then the
+        // write fails before the credential lines are present.
+        writeFileSync(
+          join(dir, ".env"),
+          "NEXT_PUBLIC_JAZZ_APP_ID=user-kept-app\n" +
+            "NEXT_PUBLIC_JAZZ_SERVER_URL=https://user-kept.example.com\n",
+        );
+        throw new Error(`interrupted while writing BACKEND_SECRET=${abandonedBackendSecret}`);
+      });
+      const logs: string[] = [];
+      const options = {
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+        onLog: (_kind: "info" | "warn", message: string) => logs.push(message),
+      };
+
+      await runHostedInit(options);
+      expect(parseEnv(readEnv(dir))).toMatchObject({
+        NEXT_PUBLIC_JAZZ_APP_ID: "user-kept-app",
+        NEXT_PUBLIC_JAZZ_SERVER_URL: "https://user-kept.example.com",
+        JAZZ_ADMIN_SECRET: "",
+        BACKEND_SECRET: "",
+      });
+
+      await runHostedInit(options);
+
+      expect(provisionSpy).toHaveBeenCalledTimes(2);
+      expect(parseEnv(readEnv(dir))).toMatchObject({
+        NEXT_PUBLIC_JAZZ_APP_ID: "user-kept-app",
+        NEXT_PUBLIC_JAZZ_SERVER_URL: "https://user-kept.example.com",
+        JAZZ_ADMIN_SECRET: retryAdminSecret,
+        BACKEND_SECRET: retryBackendSecret,
+      });
+      const output = logs.join("\n");
+      expect(output).not.toContain(abandonedAdminSecret);
+      expect(output).not.toContain(abandonedBackendSecret);
+      expect(output).not.toContain(retryAdminSecret);
+      expect(output).not.toContain(retryBackendSecret);
     });
   });
 
@@ -272,7 +402,7 @@ describe("runHostedInit", () => {
       expect(events[firstStepIdx]).toMatch(/provision/i);
     });
 
-    it("routes success output through onLog and does not call console.log", async () => {
+    it("routes redacted success output through onLog and does not call console.log", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
         appId: "app-frank",
         adminSecret: "admin-frank",
@@ -297,8 +427,10 @@ describe("runHostedInit", () => {
         .join("\n");
       expect(allInfo).toContain("app-frank");
       expect(allInfo).toContain("NEXT_PUBLIC_JAZZ_APP_ID=app-frank");
-      expect(allInfo).toContain("BACKEND_SECRET=backend-frank");
+      expect(allInfo).toContain(CLOUD_SYNC_URL);
       expect(allInfo).toContain("https://v2.dashboard.jazz.tools");
+      expect(allInfo).not.toContain("admin-frank");
+      expect(allInfo).not.toContain("backend-frank");
     });
 
     it("routes failure warnings through onLog and does not call console.warn", async () => {
@@ -319,11 +451,36 @@ describe("runHostedInit", () => {
       expect(warnSpy).not.toHaveBeenCalled();
 
       const warnMessages = logs.filter((l) => l.kind === "warn").map((l) => l.message);
-      expect(warnMessages.some((m) => m.includes("ProvisionHttpError"))).toBe(true);
+      expect(warnMessages.some((m) => m.includes("HTTP 503 provisioning error"))).toBe(true);
     });
   });
 
   describe("writeHostedEnv throws (outer catch)", () => {
+    it("does not serialize a write error containing a credential", async () => {
+      const backendSecret = "backend-secret-from-write-error";
+      vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
+        appId: "app-safe-error",
+        adminSecret: "admin-safe-error",
+        backendSecret,
+      });
+      vi.spyOn(cloudEnv, "writeHostedEnv")
+        .mockImplementationOnce(() => {
+          throw new Error(`could not save BACKEND_SECRET=${backendSecret}`);
+        })
+        .mockImplementationOnce(() => {});
+
+      await runHostedInit({
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+      });
+
+      const output = warnSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+      expect(output).toContain("init-env failed unexpectedly");
+      expect(output).not.toContain(backendSecret);
+    });
+
     it("best-effort writes empty placeholder and returns successfully without throwing", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
         appId: "app-carol",
