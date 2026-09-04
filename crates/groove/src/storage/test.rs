@@ -9,7 +9,7 @@ use std::task::{Poll, Waker};
 use super::{
     Error, KeyValue, MemoryStorage, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
     ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageFuture,
-    StorageScan, Value,
+    StorageScan, Value, WriteManyOutcome,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,6 +179,8 @@ struct ControlState {
     point_read_count: usize,
     waiters: Vec<Waker>,
     failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
+    definitely_uncommitted_failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
+    lost_write_many_acknowledgements: usize,
 }
 
 impl Default for ControlState {
@@ -193,6 +195,8 @@ impl Default for ControlState {
             point_read_count: 0,
             waiters: Vec::new(),
             failures: BTreeMap::new(),
+            definitely_uncommitted_failures: BTreeMap::new(),
+            lost_write_many_acknowledgements: 0,
         }
     }
 }
@@ -215,6 +219,24 @@ impl TestStorageControl {
                 backend: "test",
                 message: format!("injected {operation:?} failure"),
             });
+    }
+
+    /// Fail a batch before its atomic write begins, proving no commit occurred.
+    pub fn fail_next_uncommitted(&self, operation: TestStorageOperation) {
+        self.state
+            .borrow_mut()
+            .definitely_uncommitted_failures
+            .entry(operation)
+            .or_default()
+            .push_back(Error::Backend {
+                backend: "test",
+                message: format!("injected definitely-uncommitted {operation:?} failure"),
+            });
+    }
+
+    /// Let the next batch commit, then lose its acknowledgement.
+    pub fn lose_next_write_many_acknowledgement(&self) {
+        self.state.borrow_mut().lost_write_many_acknowledgements += 1;
     }
 
     /// Make subsequent storage progress require explicit permits.
@@ -286,6 +308,27 @@ impl TestStorageControl {
 
     fn record_point_read(&self) {
         self.state.borrow_mut().point_read_count += 1;
+    }
+
+    fn take_definitely_uncommitted_failure(
+        &self,
+        operation: TestStorageOperation,
+    ) -> Option<Error> {
+        self.state
+            .borrow_mut()
+            .definitely_uncommitted_failures
+            .get_mut(&operation)
+            .and_then(VecDeque::pop_front)
+    }
+
+    fn take_lost_write_many_acknowledgement(&self) -> bool {
+        let mut state = self.state.borrow_mut();
+        if state.lost_write_many_acknowledgements == 0 {
+            false
+        } else {
+            state.lost_write_many_acknowledgements -= 1;
+            true
+        }
     }
 
     /// Number of times an operation's controlled suspension point was polled.
@@ -618,6 +661,51 @@ where
                 }
             }
             Ok(())
+        })
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        Box::pin(async move {
+            if let Err(error) = self.control.before(TestStorageOperation::WriteMany).await {
+                return WriteManyOutcome::PossiblyCommitted(error);
+            }
+            if let Some(error) = self
+                .control
+                .take_definitely_uncommitted_failure(TestStorageOperation::WriteMany)
+            {
+                return WriteManyOutcome::Uncommitted(error);
+            }
+            match self.inner.write_many_outcome(operations.clone()).await {
+                WriteManyOutcome::Committed => {
+                    let mut resident = self.resident.borrow_mut();
+                    for operation in operations {
+                        match operation {
+                            OwnedWriteOperation::Set { cf, key, value } => {
+                                resident.install_point(cf, key, Some(value));
+                            }
+                            OwnedWriteOperation::Delete { cf, key } => {
+                                resident.install_point(cf, key, None);
+                            }
+                        }
+                    }
+                    if self.control.take_lost_write_many_acknowledgement() {
+                        WriteManyOutcome::PossiblyCommitted(Error::Backend {
+                            backend: "test",
+                            message: "injected acknowledgement loss after write_many commit"
+                                .to_owned(),
+                        })
+                    } else {
+                        WriteManyOutcome::Committed
+                    }
+                }
+                WriteManyOutcome::Uncommitted(error) => WriteManyOutcome::Uncommitted(error),
+                WriteManyOutcome::PossiblyCommitted(error) => {
+                    WriteManyOutcome::PossiblyCommitted(error)
+                }
+            }
         })
     }
 

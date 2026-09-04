@@ -525,9 +525,7 @@ impl JazzServer {
         let client = reqwest::Client::new();
         let health_url = format!("{}/health", self.base_url());
         for _ in 0..80 {
-            if let Ok(response) = client.get(&health_url).send().await
-                && response.status().is_success()
-            {
+            if client.get(&health_url).send().await.is_ok() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
