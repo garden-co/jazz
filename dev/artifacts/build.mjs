@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename, join, relative, resolve } from "node:path";
-import { nativeArtifactFingerprint, verifyManifest, writeManifest } from "./provenance.mjs";
+import { artifactFeatures, nativeArtifactFingerprint, verifyManifest, writeManifest } from "./provenance.mjs";
 import {
   acquireArtifactBuildLock,
   artifactLockPath,
@@ -488,6 +488,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const napiPath = expectedNapiBinding && join(napiStage, expectedNapiBinding);
   const args = [
     ...selectedArgs,
+    ...(artifactFeatures(kind) === "default,rn-test-bridge" ? ["--features", "rn-test-bridge"] : []),
     ...extraArgs,
     ...(wasmStage ? ["--out-dir", wasmStage.outDir] : []),
     ...(napiStage ? ["--output-dir", napiStage] : []),

@@ -2211,6 +2211,7 @@ dependencies = [
  "futures",
  "groove",
  "jazz",
+ "jazz-native-relay",
  "jazz-native-transport",
  "jazz-otel",
  "jazz-server",
