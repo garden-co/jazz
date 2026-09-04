@@ -809,7 +809,7 @@ pub(super) fn physical_version_storage_tables(
         let columns = system_columns
             .into_iter()
             .chain(physical_columns.iter().map(|(column_id, column_type)| {
-                GrooveColumnSchema::new(physical_user_column_field(*column_id), column_type.clone())
+                GrooveColumnSchema::new(physical_app_column_field(*column_id), column_type.clone())
             }))
             .chain(trailing_history_columns);
         let mut physical = GrooveTableSchema::new_with_bound_registries(
@@ -840,7 +840,7 @@ pub(super) fn physical_version_storage_tables(
                 .cloned()
                 .chain(physical_columns.iter().map(|(column_id, column_type)| {
                     GrooveColumnSchema::new(
-                        physical_user_column_field(*column_id),
+                        physical_app_column_field(*column_id),
                         column_type.clone(),
                     )
                 }))
@@ -863,7 +863,7 @@ pub(super) fn physical_version_storage_tables(
         for &column_id in &indexed_columns {
             physical_global = physical_global.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
-                vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
+                vec!["branch_key".to_owned(), physical_app_column_field(column_id)],
             ));
         }
         let mut register_global = logical_global_tables[1].clone();
@@ -879,7 +879,7 @@ pub(super) fn physical_version_storage_tables(
         for column_id in indexed_columns {
             physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
-                vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
+                vec!["branch_key".to_owned(), physical_app_column_field(column_id)],
             ));
         }
         let mut register_ahead = logical_ahead_tables[1].clone();
@@ -893,7 +893,7 @@ pub(super) fn physical_version_storage_tables(
             .cloned();
         let rejected_columns = rejected_system_columns.chain(physical_columns.iter().map(
             |(column_id, column_type)| {
-                GrooveColumnSchema::new(physical_user_column_field(*column_id), column_type.clone())
+                GrooveColumnSchema::new(physical_app_column_field(*column_id), column_type.clone())
             },
         ));
         let mut rejected = GrooveTableSchema::new_with_bound_registries(
@@ -1178,7 +1178,7 @@ fn physical_descriptor_with_enum_registries(
             .zip(logical.fields())
             .map(|(name, field)| {
                 let value_type = if let Some(id) = name
-                    .strip_prefix("user_")
+                    .strip_prefix("_app_")
                     .and_then(|id| id.parse::<u64>().ok())
                 {
                     let id = PhysicalColumnId(id);
@@ -1257,7 +1257,7 @@ fn physical_history_field_names_for_case(
                 .ok_or(Error::InvalidStoredValue(
                     "physical history column mapping missing",
                 ))?;
-        fields.push(physical_user_column_field(column_id));
+        fields.push(physical_app_column_field(column_id));
     }
     fields.extend(
         logical_descriptor
@@ -1309,7 +1309,7 @@ fn physical_current_field_names_for_case(
                 .ok_or(Error::InvalidStoredValue(
                     "physical current column mapping missing",
                 ))?;
-        fields.push(physical_user_column_field(column_id));
+        fields.push(physical_app_column_field(column_id));
     }
     fields.extend(
         logical_descriptor
@@ -1361,7 +1361,7 @@ fn physical_rejected_version_field_names_for_case(
                 .ok_or(Error::InvalidStoredValue(
                     "physical rejected-version column mapping missing",
                 ))?;
-        fields.push(physical_user_column_field(column_id));
+        fields.push(physical_app_column_field(column_id));
     }
     Ok(fields)
 }

@@ -33,16 +33,16 @@ use crate::authorization_scope::{
     AuthorizationScopeInstall, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
     AuthorizationScopeReadiness, AuthorizationScopeRegistry, MAX_AUTHORIZATION_SCOPES,
 };
-use crate::ids::{AuthorSubject, NodeUuid, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, NodeUuid, PhysicalColumnId, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 #[cfg(feature = "testing")]
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
-use crate::node::query_engine::QueryAuthorizationMode;
+use crate::node::query_engine::{AppRowFieldBinding, QueryAuthorizationMode};
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
-    LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
-    PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
+    CommitUnitIngestContext, CurrentRow, CurrentRowBindingField, EdgeCacheBudget,
+    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
+    NodeState, PreparedQueryPlanHandle, PublicationOutcome, PublishedTransaction, QueryReadProfile,
+    RelationEdge, RelationSnapshot, RowProvenance, TransactionBranchRowState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -4295,6 +4295,8 @@ pub struct TerminalRootPublicField {
     pub slot: usize,
     /// Encoded representation of this individual slot.
     pub carrier: TerminalRootCarrier,
+    /// Exact stored-column versus result-field identity for this slot.
+    pub(crate) binding: AppRowFieldBinding,
 }
 
 /// The producer representation applied around declared public column types.
@@ -5477,7 +5479,17 @@ fn materialize_subscription_terminal_record(
                 "retained terminal root position is outside snapshot",
             )
         })?;
-        *root = CurrentRow::new(root.table().to_owned(), record.record()?);
+        let table = root.table().to_owned();
+        let binding_fields = root.binding_fields().to_vec();
+        let binding_field_names = root.binding_field_names().to_vec();
+        let binding_field_column_ids = root.binding_field_column_ids().to_vec();
+        *root = CurrentRow::new_with_explicit_binding_fields_and_names_and_ids(
+            table,
+            record.record()?,
+            binding_fields,
+            binding_field_names,
+            binding_field_column_ids,
+        );
     }
     Ok(())
 }
@@ -5577,13 +5589,71 @@ fn terminal_subscription_output_row(
 
     Ok(SubscriptionOutputRow {
         occurrence_id,
-        row: CurrentRow::new(
+        row: CurrentRow::new_with_explicit_binding_fields_and_names_and_ids(
             table.to_owned(),
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
+            terminal_root_binding_fields(layout),
+            terminal_root_binding_field_names(layout),
+            terminal_root_binding_field_column_ids(layout),
         ),
         previous_index,
         index,
     })
+}
+
+/// Derive the explicit producer provenance for every terminal descriptor slot.
+///
+/// Both terminal-delta decoding and local maintained-view reset snapshots use
+/// this exact mapping; treating a hybrid collector record as wholly logical
+/// loses the distinction between a stored `_app_{column}` field and a logical
+/// field with that same name.
+pub(crate) fn terminal_root_binding_fields(
+    layout: &TerminalRootLayout,
+) -> Vec<CurrentRowBindingField> {
+    let binding_for_carrier = |carrier| match carrier {
+        TerminalRootCarrier::CurrentRow => CurrentRowBindingField::StoredColumn,
+        TerminalRootCarrier::Logical => CurrentRowBindingField::ResultField,
+    };
+    let mut fields =
+        vec![binding_for_carrier(layout.carrier); layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        fields[field.slot] = match field.binding {
+            AppRowFieldBinding::StoredColumn { .. } => CurrentRowBindingField::StoredColumn,
+            AppRowFieldBinding::ResultField { .. } => CurrentRowBindingField::ResultField,
+        };
+    }
+    fields
+}
+
+/// Public logical names for the same terminal descriptor slots.  A terminal
+/// projection can retain its source's `_app_{column}` carrier name while its
+/// public output is simply `{column}`.  Native hosts must receive the latter
+/// without guessing from a prefix, while truly logical `_app_*` fields remain
+/// untouched.
+pub(crate) fn terminal_root_binding_field_names(
+    layout: &TerminalRootLayout,
+) -> Vec<Option<String>> {
+    let mut names = vec![None; layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        names[field.slot] = Some(match &field.binding {
+            AppRowFieldBinding::StoredColumn { output_name, .. } => output_name.clone(),
+            AppRowFieldBinding::ResultField { name } => name.clone(),
+        });
+    }
+    names
+}
+
+pub(crate) fn terminal_root_binding_field_column_ids(
+    layout: &TerminalRootLayout,
+) -> Vec<Option<PhysicalColumnId>> {
+    let mut ids = vec![None; layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        ids[field.slot] = match field.binding {
+            AppRowFieldBinding::StoredColumn { id, .. } => Some(id),
+            AppRowFieldBinding::ResultField { .. } => None,
+        };
+    }
+    ids
 }
 
 /// Decode the Groove ordered key used to address one root output occurrence.

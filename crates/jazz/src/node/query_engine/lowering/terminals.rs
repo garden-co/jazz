@@ -346,6 +346,7 @@ pub(super) fn lowered_terminals(
             carrier,
             field_carriers,
             public_field_names,
+            field_bindings,
             terminal,
         ) = match app_rows.projection.clone() {
             _ if !app_rows.public_terminal => (
@@ -353,6 +354,7 @@ pub(super) fn lowered_terminals(
                 source.row_shape.descriptor.clone(),
                 hidden_source_fields(&source.row_shape),
                 AppRowCarrier::CurrentRow,
+                BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
                 AppRowTerminal::Direct,
@@ -375,6 +377,7 @@ pub(super) fn lowered_terminals(
                     collected.carrier,
                     collected.field_carriers,
                     collected.public_field_names,
+                    collected.field_bindings,
                     collected.terminal,
                 )
             }
@@ -415,8 +418,26 @@ pub(super) fn lowered_terminals(
                     .map(|field| {
                         (
                             field.name.clone(),
-                            logical_user_column(&field.name).to_owned(),
+                            logical_app_column(&field.name).to_owned(),
                         )
+                    })
+                    .collect();
+                let field_bindings = public_fields
+                    .iter()
+                    .map(|field| {
+                        let output_name = logical_app_column(&field.name).to_owned();
+                        let binding = output_source
+                            .stored_column_ids
+                            .get(output_name.as_str())
+                            .copied()
+                            .map(|id| AppRowFieldBinding::StoredColumn {
+                                id,
+                                output_name: output_name.clone(),
+                            })
+                            .unwrap_or_else(|| AppRowFieldBinding::ResultField {
+                                name: output_name.clone(),
+                            });
+                        (field.name.clone(), binding)
                     })
                     .collect();
                 (
@@ -426,6 +447,7 @@ pub(super) fn lowered_terminals(
                     AppRowCarrier::Logical,
                     BTreeMap::new(),
                     public_field_names,
+                    field_bindings,
                     AppRowTerminal::Direct,
                 )
             }
@@ -450,6 +472,7 @@ pub(super) fn lowered_terminals(
                     collected.carrier,
                     collected.field_carriers,
                     collected.public_field_names,
+                    collected.field_bindings,
                     collected.terminal,
                 )
             }
@@ -468,6 +491,7 @@ pub(super) fn lowered_terminals(
                 carrier,
                 field_carriers,
                 public_field_names,
+                field_bindings,
                 terminal,
             }),
         });
@@ -948,6 +972,7 @@ struct LoweredCollectByAppRows {
     pub(super) carrier: AppRowCarrier,
     pub(super) field_carriers: BTreeMap<String, AppRowCarrier>,
     pub(super) public_field_names: BTreeMap<String, String>,
+    pub(super) field_bindings: BTreeMap<String, AppRowFieldBinding>,
     pub(super) terminal: AppRowTerminal,
 }
 
@@ -1017,6 +1042,17 @@ fn lower_collect_by_app_rows(
                 )
             })
             .collect();
+        let field_bindings = layout
+            .root_fields
+            .iter()
+            .filter(|field| field.is_output && !field.is_row_id)
+            .map(|field| {
+                (
+                    field.output.clone(),
+                    app_row_field_binding(root_source, field),
+                )
+            })
+            .collect();
         let anchor = collect_anchor_graph(visible_root, &layout)?;
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
             steps
@@ -1075,6 +1111,7 @@ fn lower_collect_by_app_rows(
             carrier,
             field_carriers,
             public_field_names,
+            field_bindings,
             terminal: AppRowTerminal::RootCollector,
         });
     }
@@ -1116,6 +1153,25 @@ fn lower_collect_by_app_rows(
         // carried verbatim into the terminal descriptor, so no prefix-based
         // recovery is needed at this boundary.
         (slot.collection_field.clone(), slot.collection_field.clone())
+    }));
+    let mut field_bindings = layout
+        .root_fields
+        .iter()
+        .filter(|field| field.is_output && !field.is_row_id)
+        .map(|field| {
+            (
+                field.output.clone(),
+                app_row_field_binding(root_source, field),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    field_bindings.extend(layout.slots.iter().map(|slot| {
+        (
+            slot.collection_field.clone(),
+            AppRowFieldBinding::ResultField {
+                name: slot.collection_field.clone(),
+            },
+        )
     }));
     let mut association_graphs = Vec::new();
     for slot in &layout.slots {
@@ -1185,6 +1241,7 @@ fn lower_collect_by_app_rows(
         carrier: AppRowCarrier::Logical,
         field_carriers,
         public_field_names,
+        field_bindings,
         terminal: AppRowTerminal::RootCollector,
     })
 }
@@ -1377,7 +1434,7 @@ fn retain_collect_slot_value(
     {
         requested_field.to_owned()
     } else {
-        user_column_field(requested_field)
+        app_column_field(requested_field)
     };
     if slot
         .fields
@@ -1434,7 +1491,7 @@ fn collect_root_input_for_value(
                     || candidate
                         .source_field
                         .as_deref()
-                        .is_some_and(|source| logical_user_column(source) == field)
+                        .is_some_and(|source| logical_app_column(source) == field)
             })
             .map(|candidate| candidate.input.clone()),
         None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => layout
@@ -1464,7 +1521,7 @@ fn collect_slot_input_for_value(
                     || candidate
                         .source_field
                         .as_deref()
-                        .is_some_and(|source| logical_user_column(source) == field)
+                        .is_some_and(|source| logical_app_column(source) == field)
             })
             .map(|candidate| candidate.input.clone()),
         None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => {
@@ -1664,6 +1721,7 @@ fn lowered_aggregate_terminals(
                 carrier: AppRowCarrier::Logical,
                 field_carriers: BTreeMap::new(),
                 public_field_names: BTreeMap::new(),
+                field_bindings: aggregate_app_row_field_bindings(plan, source)?,
                 terminal: AppRowTerminal::Aggregate(aggregate_schema),
             }),
         });
@@ -2943,6 +3001,48 @@ fn aggregate_app_row_descriptor(
     Ok(RecordDescriptor::new(fields))
 }
 
+fn aggregate_app_row_field_bindings(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+) -> CapabilityResult<BTreeMap<String, AppRowFieldBinding>> {
+    let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(
+                "aggregate field bindings requested for non-aggregate plan".to_owned(),
+            )],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    let mut bindings = BTreeMap::new();
+    for value in group_by {
+        let field = aggregate_source_field_name(value, source)?;
+        let output_name = logical_app_column(field.as_str()).to_owned();
+        let id = source
+            .stored_column_ids
+            .get(output_name.as_str())
+            .copied()
+            .ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "aggregate grouped source field {field:?} has no stored column id"
+                    ))],
+                    explain: ExplainPlan::default(),
+                })
+            })?;
+        bindings.insert(field, AppRowFieldBinding::StoredColumn { id, output_name });
+    }
+    for output in outputs {
+        let field = aggregate_output_field(&output.output.name);
+        bindings.insert(
+            field,
+            AppRowFieldBinding::ResultField {
+                name: output.output.name.clone(),
+            },
+        );
+    }
+    Ok(bindings)
+}
+
 fn aggregate_result_schema(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
@@ -3113,7 +3213,7 @@ fn aggregate_source_field_name(
             source: value_source,
             field,
         } if value_source == &source.row_shape.source => {
-            require_source_field(source, &user_column_field(field)).map_err(|gap| {
+            require_source_field(source, &app_column_field(field)).map_err(|gap| {
                 Box::new(CapabilityReport {
                     gaps: vec![gap],
                     explain: ExplainPlan::default(),
@@ -3189,8 +3289,8 @@ fn prefixed_version_witness_fields_for_tagged_rows(
         // wrapper or add exactly one, so receiver decoding never depends on
         // which source realization supplied this witness.
         ProjectField::nullable_flat(
-            format!("{prefix}{}", user_column_field(&column.name)),
-            table_user_column_field(&source.table_schema.name, &column.name),
+            format!("{prefix}{}", app_column_field(&column.name)),
+            table_app_column_field(&source.table_schema.name, &column.name),
         )
     }));
     if let Some(branch_or_prefix) =
@@ -3234,8 +3334,8 @@ fn inline_version_witness_fields_for_tagged_rows(
         // in whether a missing authored cell has already been wrapped. Keep
         // the witness contract identical to the physical-history path above.
         ProjectField::nullable_flat(
-            user_column_field(&column.name),
-            table_user_column_field(&source.table_schema.name, &column.name),
+            app_column_field(&column.name),
+            table_app_column_field(&source.table_schema.name, &column.name),
         )
     }));
     if let Some(branch_or_prefix) = version.branch_or_prefix_field {
@@ -3273,7 +3373,7 @@ fn deletion_witness_fields_for_tagged_rows(
     ];
     fields.extend(source.table_schema.columns.iter().map(|column| {
         ProjectField::null_typed(
-            table_user_column_field(&source.table_schema.name, &column.name),
+            table_app_column_field(&source.table_schema.name, &column.name),
             ValueType::Nullable(Box::new(column.column_type.clone())),
         )
     }));
@@ -3492,7 +3592,7 @@ fn version_witness_schema(
             .map(|column| {
                 (
                     column.name.clone(),
-                    table_user_column_field(&source.table_schema.name, &column.name),
+                    table_app_column_field(&source.table_schema.name, &column.name),
                 )
             })
             .collect(),

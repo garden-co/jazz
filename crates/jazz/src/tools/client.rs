@@ -2787,8 +2787,8 @@ fn aggregate_public_values(
     };
     // Aggregate collector records are normalized to the same `CurrentRow`
     // representation as incremental aggregate updates before they reach this
-    // boundary.  Aggregate aliases remain in their compiler-reserved logical
-    // namespace, nested inside the ordinary physical `user_` cell namespace.
+    // boundary. Aggregate aliases remain in their compiler-reserved logical
+    // namespace, nested inside the ordinary physical `_app_` cell namespace.
     let mut columns: Vec<(String, String, Option<ColumnType>)> = Vec::new();
     if let Some(group_by) = &aggregate.group_by {
         let idx = table_schema.columns.column_index(group_by).ok_or_else(|| {
@@ -2799,7 +2799,7 @@ fn aggregate_public_values(
         })?;
         columns.push((
             group_by.clone(),
-            crate::node::query_engine::user_column_field(group_by),
+            crate::node::query_engine::app_column_field(group_by),
             Some(table_schema.columns.columns[idx].column_type.clone()),
         ));
     }
@@ -3065,7 +3065,7 @@ impl PublicQueryDecoder {
                                     "unknown column {column} on table {table}"
                                 ))
                             })?;
-                        let physical_column = crate::node::query_engine::user_column_field(column);
+                        let physical_column = crate::node::query_engine::app_column_field(column);
                         let value = row
                             .raw_field(&physical_column)
                             .or_else(|| row.raw_field(column))

@@ -5,7 +5,7 @@
 //! [`super::ingest`] and [`super::policy`], and query execution in
 //! [`super::query_eval`]. It is the node layer's boundary to groove storage.
 
-use super::query_engine::{left_field, user_column_field};
+use super::query_engine::{app_column_field, left_field};
 use super::*;
 use crate::protocol::{
     CompleteTxPayloadCoverageEntry, ContributingMembersEntry, CoveredInputEntry,
@@ -2071,7 +2071,7 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
                 assert_user_field(
                     &descriptor,
                     HistoryRowRecord::USER_CELLS + idx,
-                    &user_column_field(&column.name),
+                    &app_column_field(&column.name),
                 );
             }
 
@@ -2088,7 +2088,7 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
                         assert_user_field(
                             &descriptor,
                             GlobalCurrentRowRecord::USER_CELLS + idx,
-                            &user_column_field(&column.name),
+                            &app_column_field(&column.name),
                         );
                     }
                 }
@@ -2100,7 +2100,7 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
                 assert_user_field(
                     &wire_descriptor,
                     WireRowRecord::USER_CELLS + idx,
-                    &user_column_field(&column.name),
+                    &app_column_field(&column.name),
                 );
             }
         }
@@ -5659,7 +5659,7 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
     let user_fields = table
         .columns
         .iter()
-        .map(|column| user_column_field(&column.name))
+        .map(|column| app_column_field(&column.name))
         .collect::<Vec<_>>();
     let mut content_fields = vec!["row_uuid".to_owned()];
     content_fields.extend(user_fields.iter().cloned());
@@ -5985,7 +5985,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
         std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
                 (
-                    user_column_field(&column.name),
+                    app_column_field(&column.name),
                     records::ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }))
@@ -6022,9 +6022,13 @@ pub(super) fn current_row_from_positional_cells(
         ));
     }
     let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
+    // This app-facing positional projection uses logical schema names, not
+    // private `_app_{column}` storage carriers. Preserve that distinction for
+    // any later source re-encoding.
+    Ok(CurrentRow::new_with_binding_fields(
         table.name.clone(),
         OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingField::ResultField,
     ))
 }
 

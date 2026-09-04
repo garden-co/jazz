@@ -1,7 +1,7 @@
 use super::ClaimPath;
 use crate::schema::TableSchema;
 
-pub(crate) const USER_COLUMN_PREFIX: &str = "user_";
+pub(crate) const APP_COLUMN_PREFIX: &str = "_app_";
 /// Physical namespace for aggregate result values.
 ///
 /// Aggregate aliases are public-facing names and can legally collide with a
@@ -15,8 +15,8 @@ pub(crate) const CLOSURE_REQUIRED_ELEMENT: &str = "__closure_required_element";
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
 
-pub(crate) fn user_column_field(column: &str) -> String {
-    format!("{USER_COLUMN_PREFIX}{column}")
+pub(crate) fn app_column_field(column: &str) -> String {
+    format!("{APP_COLUMN_PREFIX}{column}")
 }
 
 /// Canonical physical `CurrentRow` field order. Query readers and public
@@ -29,7 +29,7 @@ pub(crate) fn current_row_field_names(table: &TableSchema) -> Vec<String> {
         table
             .columns
             .iter()
-            .map(|column| user_column_field(&column.name)),
+            .map(|column| app_column_field(&column.name)),
     );
     fields.extend([
         "$createdBy".to_owned(),
@@ -42,8 +42,8 @@ pub(crate) fn current_row_field_names(table: &TableSchema) -> Vec<String> {
     fields
 }
 
-pub(crate) fn logical_user_column(field: &str) -> &str {
-    field.strip_prefix(USER_COLUMN_PREFIX).unwrap_or(field)
+pub(crate) fn logical_app_column(field: &str) -> &str {
+    field.strip_prefix(APP_COLUMN_PREFIX).unwrap_or(field)
 }
 
 pub(crate) fn aggregate_output_field(output: &str) -> String {
@@ -55,7 +55,7 @@ pub(crate) fn aggregate_output_field(output: &str) -> String {
 /// graph record name only; it must be normalized before it crosses the
 /// app-row boundary.
 pub(crate) fn aggregate_output_app_field(output: &str) -> String {
-    user_column_field(&aggregate_output_field(output))
+    app_column_field(&aggregate_output_field(output))
 }
 
 pub(crate) fn aggregate_output_column(output: &str) -> String {
@@ -134,8 +134,8 @@ pub(crate) fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
     Some(ClaimPath(segments))
 }
 
-pub(crate) fn table_user_column_field(table: &str, column: &str) -> String {
-    format!("user__{table}__{column}")
+pub(crate) fn table_app_column_field(table: &str, column: &str) -> String {
+    format!("_app__{table}__{column}")
 }
 
 #[cfg(test)]

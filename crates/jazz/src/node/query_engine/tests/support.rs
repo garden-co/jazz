@@ -1,6 +1,7 @@
 //! Shared compiler requests, resolvers, projections, and graph assertions.
 
 use super::*;
+use crate::node::PhysicalColumnId;
 use std::{future::Future, pin::Pin};
 
 pub(super) fn schema(byte: u8) -> SchemaVersionId {
@@ -675,6 +676,7 @@ impl SourceGraphPreparer for FakeSourceResolver {
                     request.source.table.clone(),
                     [ColumnSchema::new("title", ColumnType::String)],
                 ),
+                stored_column_ids: BTreeMap::from([("title".to_owned(), PhysicalColumnId(1))]),
                 graph: {
                     let graph = GraphBuilder::table(format!("resolved_{}", request.source.table));
                     if self.current_rows_use_arg_by {
@@ -917,6 +919,10 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                         ColumnSchema::new("todo", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
                     ],
                 ),
+                stored_column_ids: BTreeMap::from([
+                    ("title".to_owned(), PhysicalColumnId(1)),
+                    ("todo".to_owned(), PhysicalColumnId(2)),
+                ]),
                 graph: GraphBuilder::inline_records(descriptor.clone(), rows),
                 row_shape: SourceRowShape {
                     source: request.source.clone(),

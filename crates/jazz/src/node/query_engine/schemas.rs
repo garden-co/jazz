@@ -1,4 +1,5 @@
 use super::*;
+use crate::node::PhysicalColumnId;
 
 /// Typed output schemas emitted by one lowered graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,9 +31,11 @@ pub(crate) struct AppRowSchema {
     /// Explicit physical descriptor field -> public output name mapping.
     ///
     /// This is distinct from the carrier: a logical include can legally begin
-    /// with `user_`, which is otherwise the physical CurrentRow source-cell
+    /// with `_app_`, which is otherwise the internal application-column
     /// namespace.
     pub(crate) public_field_names: BTreeMap<String, String>,
+    /// Exact stored-column versus result-field identity for each output field.
+    pub(crate) field_bindings: BTreeMap<String, AppRowFieldBinding>,
     /// The compiler-owned subscription boundary for this app-row terminal.
     ///
     /// A public root collector owns both the initial materialized root state
@@ -62,6 +65,17 @@ pub(crate) enum AppRowCarrier {
     CurrentRow,
     /// Collector/projection cells use their declared logical value types.
     Logical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AppRowFieldBinding {
+    StoredColumn {
+        id: PhysicalColumnId,
+        output_name: String,
+    },
+    ResultField {
+        name: String,
+    },
 }
 
 /// Typed fact row schema plus the fact identity that requested it.

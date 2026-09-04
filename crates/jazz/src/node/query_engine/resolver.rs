@@ -1,4 +1,5 @@
 use super::*;
+use crate::node::PhysicalColumnId;
 use std::{future::Future, pin::Pin};
 
 /// Logical source request made by query, policy, or fact lowering.
@@ -129,6 +130,8 @@ pub(crate) trait SourceGraphPreparer {
 pub(crate) struct ResolvedSource {
     /// Logical table schema after schema/lens resolution.
     pub(crate) table_schema: TableSchema,
+    /// Exact stored column ids for logical table columns in this read schema.
+    pub(crate) stored_column_ids: BTreeMap<String, PhysicalColumnId>,
     /// Concrete groove graph source.
     pub(crate) graph: GraphBuilder,
     /// Canonical row shape emitted by the source graph.

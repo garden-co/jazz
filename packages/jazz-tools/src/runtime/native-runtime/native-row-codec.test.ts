@@ -11,6 +11,7 @@ import {
   decodeRecordValue,
   encodeNativeRowValues,
   assertTerminalRootDescriptorCompatible,
+  fieldIndex,
   readDescriptor,
   storageColumnValueType,
   writeDescriptor,
@@ -108,8 +109,8 @@ describe("native row codec", () => {
     ];
     const currentRow = [
       { name: "row_uuid", valueType: { tag: 11 } },
-      { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
-      { name: "user_done", valueType: { tag: 15, inner: { tag: 7 } } },
+      { name: "_app_title", valueType: { tag: 15, inner: { tag: 8 } } },
+      { name: "_app_done", valueType: { tag: 15, inner: { tag: 7 } } },
       { name: "$createdBy", valueType: { tag: 8 } },
     ];
     const nullableLogicalNames = [
@@ -125,6 +126,19 @@ describe("native row codec", () => {
     );
     expect(() => assertTerminalRootDescriptorCompatible(reorderedCarriers, columns)).toThrow(
       "terminal root descriptor does not match the public projection",
+    );
+  });
+
+  it("does not infer _app_ aliases when resolving raw record field positions", () => {
+    const descriptor = [
+      { name: "_app_title", valueType: { tag: 8 } },
+      { name: "title", valueType: { tag: 8 } },
+    ];
+
+    expect(fieldIndex(descriptor, "_app_title")).toBe(0);
+    expect(fieldIndex(descriptor, "title")).toBe(1);
+    expect(() => fieldIndex([{ name: "_app_title", valueType: { tag: 8 } }], "title")).toThrow(
+      "missing title field",
     );
   });
 

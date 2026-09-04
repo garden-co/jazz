@@ -16,10 +16,10 @@ use super::codec::{
     settled_result_value_storage_bytes, tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
-    AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
-    ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
+    AggregateResultSchema, AppRowCarrier, AppRowFieldBinding, AppRowSchema, OutputTerminalSchema,
+    ProgramFactKey, ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
     ResultMembershipSchema, ResultMembershipVersionSchema, TypedOutputField, VersionWitnessSchema,
-    VersionedRowRefSchema, logical_user_column,
+    VersionedRowRefSchema, logical_app_column,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias};
@@ -1807,7 +1807,7 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
         .field_index("row_uuid")
         .expect("structured app-row terminal has a row_uuid slot");
     // Bind every public descriptor slot, including collector-owned trailing
-    // arrays/records. A collector root may contain both physical `user_*`
+    // arrays/records. A collector root may contain both stored `_app_*`
     // source cells and logical nested fields, so the presence of one family
     // must not hide the other.
     let public_fields = rows
@@ -1823,13 +1823,21 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
                     .get(name)
                     .copied()
                     .unwrap_or(rows.carrier);
+                let binding = rows.field_bindings.get(name).cloned().unwrap_or_else(|| {
+                    let public_name = rows
+                        .public_field_names
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| name.to_owned());
+                    AppRowFieldBinding::ResultField { name: public_name }
+                });
                 TerminalRootPublicField {
                     // The compiler binds this identity before terminal
                     // publication. Carrier describes encoding, not naming:
-                    // a logical include may legitimately begin with `user_`.
+                    // a logical include may legitimately begin with `_app_`.
                     name: rows.public_field_names.get(name).cloned().unwrap_or_else(
                         || match carrier {
-                            AppRowCarrier::CurrentRow => logical_user_column(name).to_owned(),
+                            AppRowCarrier::CurrentRow => logical_app_column(name).to_owned(),
                             AppRowCarrier::Logical => name.to_owned(),
                         },
                     ),
@@ -1839,6 +1847,7 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
                         AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
                         AppRowCarrier::Logical => TerminalRootCarrier::Logical,
                     },
+                    binding,
                 }
             })
         })
@@ -3325,11 +3334,11 @@ mod tests {
         let descriptor = RecordDescriptor::new([
             ("row_uuid", ValueType::Uuid),
             (
-                "user_title",
+                "_app_title",
                 ValueType::Nullable(Box::new(ValueType::String)),
             ),
             (
-                "user___jazz_include_project",
+                "_app___jazz_include_project",
                 ValueType::Nullable(Box::new(ValueType::String)),
             ),
             (
@@ -3348,20 +3357,41 @@ mod tests {
             hidden_fields: BTreeSet::from(["__route_org".to_owned()]),
             carrier: AppRowCarrier::Logical,
             field_carriers: BTreeMap::from([
-                ("user_title".to_owned(), AppRowCarrier::CurrentRow),
+                ("_app_title".to_owned(), AppRowCarrier::CurrentRow),
                 (
-                    "user___jazz_include_project".to_owned(),
+                    "_app___jazz_include_project".to_owned(),
                     AppRowCarrier::CurrentRow,
                 ),
                 ("__jazz_include_project".to_owned(), AppRowCarrier::Logical),
             ]),
             public_field_names: BTreeMap::from([
-                ("user_title".to_owned(), "title".to_owned()),
+                ("_app_title".to_owned(), "title".to_owned()),
                 (
-                    "user___jazz_include_project".to_owned(),
+                    "_app___jazz_include_project".to_owned(),
                     "__jazz_include_project".to_owned(),
                 ),
                 ("__jazz_include_project".to_owned(), "project".to_owned()),
+            ]),
+            field_bindings: BTreeMap::from([
+                (
+                    "_app_title".to_owned(),
+                    AppRowFieldBinding::StoredColumn {
+                        id: PhysicalColumnId(1),
+                        output_name: "title".to_owned(),
+                    },
+                ),
+                (
+                    "_app___jazz_include_project".to_owned(),
+                    AppRowFieldBinding::ResultField {
+                        name: "__jazz_include_project".to_owned(),
+                    },
+                ),
+                (
+                    "__jazz_include_project".to_owned(),
+                    AppRowFieldBinding::ResultField {
+                        name: "project".to_owned(),
+                    },
+                ),
             ]),
             terminal: crate::node::query_engine::AppRowTerminal::RootCollector,
         };
@@ -3371,21 +3401,31 @@ mod tests {
             vec![
                 TerminalRootPublicField {
                     name: "title".to_owned(),
-                    descriptor_field_name: "user_title".to_owned(),
+                    descriptor_field_name: "_app_title".to_owned(),
                     slot: 1,
                     carrier: TerminalRootCarrier::CurrentRow,
+                    binding: AppRowFieldBinding::StoredColumn {
+                        id: PhysicalColumnId(1),
+                        output_name: "title".to_owned(),
+                    },
                 },
                 TerminalRootPublicField {
                     name: "__jazz_include_project".to_owned(),
-                    descriptor_field_name: "user___jazz_include_project".to_owned(),
+                    descriptor_field_name: "_app___jazz_include_project".to_owned(),
                     slot: 2,
                     carrier: TerminalRootCarrier::CurrentRow,
+                    binding: AppRowFieldBinding::ResultField {
+                        name: "__jazz_include_project".to_owned(),
+                    },
                 },
                 TerminalRootPublicField {
                     name: "project".to_owned(),
                     descriptor_field_name: "__jazz_include_project".to_owned(),
                     slot: 3,
                     carrier: TerminalRootCarrier::Logical,
+                    binding: AppRowFieldBinding::ResultField {
+                        name: "project".to_owned(),
+                    },
                 },
             ]
         );
@@ -3508,11 +3548,11 @@ mod tests {
     fn terminal_operation_rebinds_tightened_root_field_to_prepared_nullable_layout() {
         let source = RecordDescriptor::new([
             ("row_uuid", ValueType::Uuid),
-            ("user_child", ValueType::Uuid),
+            ("_app_child", ValueType::Uuid),
         ]);
         let target = RecordDescriptor::new([
             ("row_uuid", ValueType::Uuid),
-            ("user_child", ValueType::Nullable(Box::new(ValueType::Uuid))),
+            ("_app_child", ValueType::Nullable(Box::new(ValueType::Uuid))),
         ]);
         let row_uuid = row(0x71);
         let raw = source
@@ -3604,11 +3644,11 @@ mod tests {
     fn terminal_operation_rebind_rejects_unrelated_prepared_field() {
         let source = RecordDescriptor::new([
             ("row_uuid", ValueType::Uuid),
-            ("user_child", ValueType::Uuid),
+            ("_app_child", ValueType::Uuid),
         ]);
         let target = RecordDescriptor::new([
             ("row_uuid", ValueType::Uuid),
-            ("user_other", ValueType::Nullable(Box::new(ValueType::Uuid))),
+            ("_app_other", ValueType::Nullable(Box::new(ValueType::Uuid))),
         ]);
         let row_uuid = row(0x71);
         let operation = TerminalOperation {

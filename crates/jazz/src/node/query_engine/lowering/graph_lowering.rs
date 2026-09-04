@@ -950,7 +950,7 @@ fn source_nullable_field_depths(source: &ResolvedSource) -> BTreeMap<String, usi
             let depth = source_field_nullable_depth(source, &name);
             (depth > 0).then_some((name, depth))
         } {
-            if let Some(logical) = field.strip_prefix(USER_COLUMN_PREFIX) {
+            if let Some(logical) = field.strip_prefix(APP_COLUMN_PREFIX) {
                 depths.insert(logical.to_owned(), depth);
             }
             depths.insert(field, depth);
@@ -2421,7 +2421,7 @@ fn accumulated_join_field(
     fields: &BTreeMap<(SourceId, String), (String, usize)>,
 ) -> Option<(String, usize)> {
     let (source, field) = match value {
-        NormalizedValueRef::SourceField { source, field } => (source, user_column_field(field)),
+        NormalizedValueRef::SourceField { source, field } => (source, app_column_field(field)),
         NormalizedValueRef::RowId(RowIdRef::Source(source)) => (source, "row_uuid".to_owned()),
         _ => return None,
     };
@@ -2577,7 +2577,7 @@ fn lower_relation_projection_ref(
                             source: value_source,
                             field,
                         } if value_source == source_id => {
-                            return Ok(Some(user_column_field(field)));
+                            return Ok(Some(app_column_field(field)));
                         }
                         NormalizedValueRef::RowId(RowIdRef::Source(value_source))
                             if value_source == source_id =>
@@ -2784,7 +2784,7 @@ fn source_join_field(
             source: value_source,
             field,
         } if value_source == source_id => {
-            let resolved = require_source_field(source, &user_column_field(field))
+            let resolved = require_source_field(source, &app_column_field(field))
                 .or_else(|_| require_source_field(source, field));
             resolved?
         }
@@ -2839,7 +2839,7 @@ fn lower_join_key_ref(
         && value_source == source_id
         && field == "id"
     {
-        let declared_id = user_column_field(field);
+        let declared_id = app_column_field(field);
         if source
             .row_shape
             .descriptor
@@ -2869,7 +2869,7 @@ fn source_field_nullable_depth(source: &ResolvedSource, field: &str) -> usize {
     {
         depth += 1;
     }
-    let logical_field = field.strip_prefix(USER_COLUMN_PREFIX).unwrap_or(field);
+    let logical_field = field.strip_prefix(APP_COLUMN_PREFIX).unwrap_or(field);
     if source.table_schema.columns.iter().any(|column| {
         column.name == logical_field && matches!(column.column_type, ColumnType::Nullable(_))
     }) {
@@ -2887,7 +2887,7 @@ pub(super) fn source_field_type<'a>(
         .descriptor
         .field_index(field)
         .or_else(|| {
-            let user_field = user_column_field(field);
+            let user_field = app_column_field(field);
             source.row_shape.descriptor.field_index(&user_field)
         })
         .and_then(|index| source.row_shape.descriptor.fields().get(index))
@@ -3562,7 +3562,7 @@ fn lower_value_ref(
             source: value_source,
             field,
         } if value_source == source_id => {
-            let user_field = user_column_field(field);
+            let user_field = app_column_field(field);
             let field = if source
                 .row_shape
                 .descriptor

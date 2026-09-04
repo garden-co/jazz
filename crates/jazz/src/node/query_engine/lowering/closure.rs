@@ -144,12 +144,12 @@ pub(super) fn reachable_contribution_membership_graph(
 ///
 /// `ReachableVia` names the application-level `id` column even when a table
 /// uses Jazz's implicit row id. In that case normalization lowers the root
-/// join through `row_uuid`, rather than a nonexistent `user_id` field. The
+/// join through `row_uuid`, rather than a nonexistent `_app_id` field. The
 /// contributor terminal must use the same physical coordinate; otherwise a
 /// plain gather query is rejected before it can publish any receiver inputs.
-/// Declared ids and ordinary application columns remain `user_*` fields.
+/// Declared ids and ordinary application columns remain `_app_*` fields.
 fn reachable_root_reference_field(source: &ResolvedSource, field: &str) -> String {
-    let user_field = user_column_field(field);
+    let user_field = app_column_field(field);
     if source
         .row_shape
         .descriptor
@@ -585,7 +585,7 @@ fn required_closure_parent_graph_from_segment(
         resolved_sources,
         &no_route_fields,
     )?;
-    let source_key = user_column_field(&segment.source_field);
+    let source_key = app_column_field(&segment.source_field);
     let Some(source_key_type) = source_field_type(parent_source, &source_key) else {
         return Err(Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Operator(format!(
@@ -744,7 +744,7 @@ fn closure_membership_graph_for_path(
                 explain: ExplainPlan::default(),
             })
         })?;
-        let source_key = user_column_field(&segment.source_field);
+        let source_key = app_column_field(&segment.source_field);
         let Some(source_key_type) = source_field_type(&current_source, &source_key) else {
             return Err(Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Operator(format!(

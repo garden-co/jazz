@@ -688,7 +688,7 @@ where
             let target_columns_by_physical_field = target_mapping
                 .columns
                 .iter()
-                .map(|(column, id)| (physical_user_column_field(*id), column.clone()))
+                .map(|(column, id)| (physical_app_column_field(*id), column.clone()))
                 .collect::<BTreeMap<_, _>>();
             let cases = if source_mapping.variant_cases.is_empty() {
                 vec![(groove_variant_tag(source_alias)?, None)]
@@ -793,7 +793,7 @@ where
                     .columns
                     .get(&column.name)
                     .and_then(|column_id| {
-                        let name = physical_user_column_field(*column_id);
+                        let name = physical_app_column_field(*column_id);
                         available
                             .contains(&name)
                             .then_some(CurrentWinnerCellProjection::Field {
@@ -1169,7 +1169,7 @@ where
                 )?;
                 Ok((
                     column.name.clone(),
-                    CellProjection::Field(physical_user_column_field(column_id)),
+                    CellProjection::Field(physical_app_column_field(column_id)),
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
@@ -1278,7 +1278,7 @@ where
             })
             .collect::<Vec<_>>();
         for column in &target_table.columns {
-            let output = user_column_field(&column.name);
+            let output = app_column_field(&column.name);
             let projection = match cells.remove(&column.name) {
                 Some(projection) => projection,
                 None if present.is_some() => CellProjection::Missing,
@@ -1350,7 +1350,7 @@ where
                             }
                         };
                         let target = projection_output
-                            .field_index(&user_column_field(&column.name))
+                            .field_index(&app_column_field(&column.name))
                             .and_then(|index| projection_output.fields().get(index))
                             .ok_or(Error::InvalidStoredValue(
                                 "target enum projection output field missing",

@@ -64,7 +64,7 @@ fn authored_history_projection_descriptor(table: &TableSchema) -> records::Recor
                 let value_type = table
                     .columns
                     .iter()
-                    .find(|column| user_column_field(&column.name) == name)
+                    .find(|column| app_column_field(&column.name) == name)
                     .map(|column| {
                         records::ValueType::Nullable(Box::new(column.column_type.clone()))
                     })

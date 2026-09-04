@@ -561,7 +561,7 @@ where
             let physical_type = physical_table
                 .columns
                 .iter()
-                .find(|physical| physical.name == physical_user_column_field(column_id))
+                .find(|physical| physical.name == physical_app_column_field(column_id))
                 .map(|physical| &physical.column_type)
                 .ok_or(Error::InvalidStoredValue(
                     "physical enum write column missing",
@@ -744,7 +744,7 @@ where
             let physical_type = plan.physical_table
                 .columns
                 .iter()
-                .find(|physical| physical.name == physical_user_column_field(column_id))
+                .find(|physical| physical.name == physical_app_column_field(column_id))
                 .map(|physical| &physical.column_type)
                 .ok_or(Error::InvalidStoredValue(
                     "physical enum write column missing",

@@ -8,7 +8,7 @@ use groove::schema::ColumnType;
 use super::{
     Aggregate, AggregateFunction, ColumnSchema, CurrentRow, Error, ResultMemberEntry, RowUuid,
     SyntheticReplacementToken, TableSchema, Value, aggregate_output_app_field,
-    aggregate_output_column, aggregate_result_member_row_uuid, nullable_value, user_column_field,
+    aggregate_output_column, aggregate_result_member_row_uuid, app_column_field, nullable_value,
 };
 
 pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Ordering {
@@ -31,7 +31,7 @@ pub(super) fn aggregate_row_cell(
         .and_then(|aggregate| aggregate.group_by.as_deref())
         == Some(column)
     {
-        user_column_field(column)
+        app_column_field(column)
     } else if query.aggregate.as_ref().is_some_and(|aggregate| {
         aggregate
             .aggregates
@@ -40,7 +40,7 @@ pub(super) fn aggregate_row_cell(
     }) {
         aggregate_output_app_field(column)
     } else {
-        user_column_field(column)
+        app_column_field(column)
     };
     let idx = row.record.descriptor().field_index(&field)?;
     nullable_value(row.record.borrowed().get_idx(idx).ok()?).ok()?
@@ -112,7 +112,7 @@ pub(super) fn aggregate_query_row_uuid(
     ))?;
     let (row_value, row_type) = match &aggregate.group_by {
         Some(group_by) => {
-            let field = user_column_field(group_by);
+            let field = app_column_field(group_by);
             let index = record
                 .descriptor()
                 .field_index(&field)

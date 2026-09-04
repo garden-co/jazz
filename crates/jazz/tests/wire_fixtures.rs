@@ -3,11 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
-    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
+    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, RowDescriptorField,
+    RowDescriptorFieldName, SubscriptionDeltaPayload,
 };
 use jazz::ids::{
     AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, MigrationLensId, NodeUuid,
-    RowUuid, SchemaVersionId,
+    PhysicalColumnId, RowUuid, SchemaVersionId,
 };
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CoveredInputEntry, CurrentWriteSchema,
@@ -1525,12 +1526,35 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let current_descriptor = RecordDescriptor::new([
         ("row_uuid", ValueType::Uuid),
         (
-            "user_title",
+            "_app_title",
             ValueType::Nullable(Box::new(ValueType::String)),
         ),
     ]);
     let logical_descriptor =
         RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+    let current_binding_descriptor = vec![
+        RowDescriptorField {
+            name: RowDescriptorFieldName::ResultField { name: "row_uuid" },
+            value_type: ValueType::Uuid,
+        },
+        RowDescriptorField {
+            name: RowDescriptorFieldName::StoredColumn {
+                id: PhysicalColumnId(1),
+                output_name: "title",
+            },
+            value_type: ValueType::Nullable(Box::new(ValueType::String)),
+        },
+    ];
+    let logical_binding_descriptor = vec![
+        RowDescriptorField {
+            name: RowDescriptorFieldName::ResultField { name: "row_uuid" },
+            value_type: ValueType::Uuid,
+        },
+        RowDescriptorField {
+            name: RowDescriptorFieldName::ResultField { name: "title" },
+            value_type: ValueType::String,
+        },
+    ];
     let todo_one_id = RowUuid::from_bytes([0x11; 16]);
     let todo_two_id = RowUuid::from_bytes([0x12; 16]);
     let note_id = RowUuid::from_bytes([0x21; 16]);
@@ -1569,7 +1593,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         rows: vec![
             RowBatch {
                 table: "todos",
-                descriptor: current_descriptor,
+                descriptor: current_binding_descriptor.clone(),
                 rows: vec![
                     Row {
                         row_id: todo_one_id,
@@ -1585,7 +1609,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             },
             RowBatch {
                 table: "notes",
-                descriptor: logical_descriptor,
+                descriptor: logical_binding_descriptor.clone(),
                 rows: vec![Row {
                     row_id: note_id,
                     deleted: false,
@@ -1596,7 +1620,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             // must create a new batch, even though its descriptor is identical.
             RowBatch {
                 table: "todos",
-                descriptor: current_descriptor,
+                descriptor: current_binding_descriptor.clone(),
                 rows: vec![Row {
                     row_id: deleted_todo_id,
                     deleted: true,
@@ -1615,7 +1639,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let delta = SubscriptionDeltaPayload {
         added: vec![RowBatch {
             table: "todos",
-            descriptor: current_descriptor,
+            descriptor: current_binding_descriptor,
             rows: vec![Row {
                 row_id: todo_one_id,
                 deleted: false,
@@ -1624,7 +1648,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         }],
         updated: vec![RowBatch {
             table: "notes",
-            descriptor: logical_descriptor,
+            descriptor: logical_binding_descriptor,
             rows: vec![Row {
                 row_id: note_id,
                 deleted: false,

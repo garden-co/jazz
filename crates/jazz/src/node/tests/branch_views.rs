@@ -1111,7 +1111,7 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         })
         .expect("head rejection must replace the root terminal payload");
     assert_eq!(restored.get("row_uuid"), Ok(Value::Uuid(row_uuid.0)));
-    let title = restored.get("user_title").expect("decode restored title");
+    let title = restored.get("_app_title").expect("decode restored title");
     assert!(
         title == Value::String("frozen base".to_owned())
             || title == Value::Nullable(Some(Box::new(Value::String("frozen base".to_owned())))),
@@ -1164,7 +1164,7 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
             _ => None,
         })
         .expect("replacement head must replace the root terminal payload");
-    let title = replacement.get("user_title").expect("decode replacement title");
+    let title = replacement.get("_app_title").expect("decode replacement title");
     assert!(
         title == Value::String("replacement head".to_owned())
             || title
@@ -1571,7 +1571,7 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
         let v1_index = physical_current_index_name(mapping.columns[indexed_column]);
         assert_eq!(
             v1_index,
-            format!("by_physical_user_v1_{}", mapping.columns[indexed_column].0),
+            format!("by_physical_app_v1_{}", mapping.columns[indexed_column].0),
             "the branch-prefixed current-index identity is frozen at V1"
         );
         for storage_table in [
@@ -1646,7 +1646,7 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
     let title_index = physical_current_index_name(mapping.columns["title"]);
     let expected_index_columns = vec![
         "branch_key".to_owned(),
-        physical_user_column_field(mapping.columns["title"]),
+        physical_app_column_field(mapping.columns["title"]),
     ];
     for storage_table in [
         physical_ahead_current_table_name(table_id),

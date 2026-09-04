@@ -153,7 +153,7 @@ pub(crate) struct ClosurePathSegment {
     pub(crate) parent: SourceId,
     /// Target occurrence reached by the reference column.
     pub(crate) target: SourceId,
-    /// Public source column name, without the internal `user_` prefix.
+    /// Public source column name, without the internal `_app_` prefix.
     pub(crate) source_field: String,
 }
 

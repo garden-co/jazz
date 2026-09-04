@@ -21,19 +21,32 @@ use closure::{
 const FIXPOINT_MAX_ITERS: usize = 128;
 fn public_root_field_name(source: &ResolvedSource, field: &CollectFlatField) -> String {
     let source_field = field.source_field.as_deref().unwrap_or(&field.output);
-    let logical = logical_user_column(source_field);
+    let logical = logical_app_column(source_field);
     if source
         .table_schema
         .columns
         .iter()
         .any(|column| column.name == logical)
     {
-        logical_user_column(&field.output).to_owned()
+        logical_app_column(&field.output).to_owned()
     } else {
         // Collector slots already carry their public path field as their
         // physical descriptor name. Do not infer from a reserved-looking
         // prefix here: table columns may legitimately use any such name.
         field.output.clone()
+    }
+}
+
+fn app_row_field_binding(source: &ResolvedSource, field: &CollectFlatField) -> AppRowFieldBinding {
+    let output_name = public_root_field_name(source, field);
+    let source_field = field.source_field.as_deref().unwrap_or(&field.output);
+    match source
+        .stored_column_ids
+        .get(logical_app_column(source_field))
+        .copied()
+    {
+        Some(id) => AppRowFieldBinding::StoredColumn { id, output_name },
+        None => AppRowFieldBinding::ResultField { name: output_name },
     }
 }
 

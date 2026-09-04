@@ -11,7 +11,9 @@ import {
   PostcardWriter,
   queryWithPredicates,
   readNativeSubscriptionDelta,
-  writeDescriptor,
+  writeNativeRowDescriptor,
+  type DescriptorField,
+  type NativeRowDescriptorField,
 } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
@@ -59,6 +61,21 @@ const RESERVED_TEST_ISSUERS = [
   STATIC_BEARER_SESSION_ISSUER,
   ANONYMOUS_JWT_ISSUER,
 ];
+
+/** Test fixtures must state the same producer provenance as Rust bindings. */
+function physicalNativeDescriptor(
+  descriptor: readonly DescriptorField[],
+): NativeRowDescriptorField[] {
+  return descriptor.map((field, index) => {
+    if (field.name === undefined) throw new Error("test native descriptor field requires a name");
+    return {
+      id: index + 1,
+      outputName: field.name.startsWith("_app_") ? field.name.slice("_app_".length) : field.name,
+      valueType: field.valueType,
+      kind: "stored-column",
+    };
+  });
+}
 
 function decodeSchemaSource(bytes: Uint8Array) {
   return JSON.parse(new TextDecoder().decode(bytes)) as {
@@ -4959,7 +4976,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const writer = new PostcardWriter();
     writer.vec((batch) => {
       batch.string("todos");
-      writeDescriptor(batch, descriptor);
+      writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
       batch.vec((row) => {
         row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
         row.bool(false);
@@ -7487,7 +7504,7 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   writer.u64(1);
   writer.vec((batch) => {
     batch.string("users");
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
     batch.vec((row) => {
       row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
       row.bool(false);
@@ -7497,7 +7514,11 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   return writer.finish();
 }
 
-function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
+function writeRowBatches(
+  writer: PostcardWriter,
+  rows: EncodedTestRow[],
+  fieldKind: "stored-column" | "result-field" = "stored-column",
+): void {
   const rowsByTable = new Map<string, EncodedTestRow[]>();
   for (const row of rows) {
     const tableRows = rowsByTable.get(row.table) ?? [];
@@ -7521,7 +7542,23 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
       ...(hasTxTime ? [{ name: "tx_time", valueType: { tag: 3 } }] : []),
     ];
     batch.string(table);
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(
+      batch,
+      descriptor.map((field, index) =>
+        fieldKind === "stored-column"
+          ? {
+              id: index + 1,
+              outputName: field.name,
+              valueType: field.valueType,
+              kind: fieldKind,
+            }
+          : {
+              name: field.name,
+              valueType: field.valueType,
+              kind: fieldKind,
+            },
+      ),
+    );
     batch.vec((row, index) => {
       const source = tableRows[index]!;
       row.bytes(source.rowId);
@@ -7794,15 +7831,15 @@ function encodeUserWrappedSubscriptionDelta(row: {
 }): Uint8Array {
   const descriptor = [
     { name: "row_uuid", valueType: { tag: 11 } },
-    { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
-    { name: "user_note", valueType: { tag: 15, inner: { tag: 15, inner: { tag: 8 } } } },
+    { name: "_app_title", valueType: { tag: 15, inner: { tag: 8 } } },
+    { name: "_app_note", valueType: { tag: 15, inner: { tag: 15, inner: { tag: 8 } } } },
     { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
   delta.vec((batch) => {
     batch.string(row.table);
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
     batch.vec((encodedRow) => {
       encodedRow.bytes(row.rowId);
       encodedRow.bool(false);
@@ -7837,9 +7874,9 @@ function encodeTeamGatherSubscriptionDelta(delta: {
 }): Uint8Array {
   const descriptor = [
     { name: "row_uuid", valueType: { tag: 11 } },
-    { name: "user_name", valueType: { tag: 15, inner: { tag: 8 } } },
-    { name: "user_org_id", valueType: { tag: 15, inner: { tag: 11 } } },
-    { name: "user_parent_id", valueType: { tag: 15, inner: { tag: 11 } } },
+    { name: "_app_name", valueType: { tag: 15, inner: { tag: 8 } } },
+    { name: "_app_org_id", valueType: { tag: 15, inner: { tag: 11 } } },
+    { name: "_app_parent_id", valueType: { tag: 15, inner: { tag: 11 } } },
     { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
     { name: "$updatedBy", valueType: { tag: 8 } },
@@ -7873,7 +7910,7 @@ function writeTeamGatherBatches(
   writer.vec(
     (batch) => {
       batch.string("teams");
-      writeDescriptor(batch, descriptor);
+      writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
       batch.vec((row, index) => {
         const source = rows[index]!;
         row.bytes(source.rowId);
@@ -7931,7 +7968,7 @@ function encodeArrayRows(): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((batch) => {
     batch.string("arrays");
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
     batch.vec((row) => {
       row.bytes(uuidBytes("00000000-0000-0000-0000-000000000010"));
       row.bool(false);

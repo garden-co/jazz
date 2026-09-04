@@ -61,6 +61,35 @@ impl<S> JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn stored_column_ids_for_read_table(
+        &self,
+        request: &SourceRequest,
+        table: &TableSchema,
+    ) -> Result<BTreeMap<String, PhysicalColumnId>, SourceResolutionError> {
+        let mapping = self
+            .node
+            .catalogue
+            .physical_mappings
+            .get(&self.read_view.read_schema)
+            .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let table_mapping = mapping
+            .tables
+            .get(&table.name)
+            .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        table
+            .columns
+            .iter()
+            .map(|column| {
+                table_mapping
+                    .columns
+                    .get(&column.name)
+                    .copied()
+                    .map(|id| (column.name.clone(), id))
+                    .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))
+            })
+            .collect()
+    }
+
     /// The complete source-family dispatcher. Keep uncommon historical and
     /// branch paths out of the ordinary inline policy-evaluation frame.
     async fn prepare_source_graph_dispatch(
@@ -146,7 +175,8 @@ where
                 .clone()
                 .expect("checked alongside compiler-owned covered input source");
             return Ok(ResolvedSource {
-                table_schema: table,
+                table_schema: table.clone(),
+                stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 graph: GraphBuilder::input_source(input_source, descriptor.clone()),
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
@@ -281,7 +311,8 @@ where
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
-                table_schema: table,
+                table_schema: table.clone(),
+                stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 graph,
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
@@ -410,6 +441,7 @@ where
                 };
                 return Ok(ResolvedSource {
                     table_schema: table.clone(),
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     graph,
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
@@ -563,6 +595,7 @@ where
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
                 return Ok(ResolvedSource {
                     table_schema: table.clone(),
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     graph,
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
@@ -780,6 +813,7 @@ where
                 };
                 return Ok(ResolvedSource {
                     table_schema: table.clone(),
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     graph,
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
@@ -1584,7 +1618,8 @@ where
             graph
         };
         Ok(ResolvedSource {
-            table_schema: table,
+            table_schema: table.clone(),
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             graph,
             row_shape: SourceRowShape {
                 source: request.source.clone(),
@@ -1683,7 +1718,8 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
-            table_schema: table,
+            table_schema: table.clone(),
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             graph,
             row_shape: SourceRowShape {
                 source: request.source.clone(),
@@ -1842,7 +1878,8 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
-            table_schema: table,
+            table_schema: table.clone(),
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             graph,
             row_shape: SourceRowShape {
                 source: request.source.clone(),
@@ -1921,7 +1958,8 @@ where
         )
         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(ResolvedSource {
-            table_schema: table,
+            table_schema: table.clone(),
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             graph,
             row_shape: SourceRowShape {
                 source: request.source.clone(),
@@ -3061,7 +3099,7 @@ fn selected_visible_current_primary_key_graph(
     let user_fields = table
         .columns
         .iter()
-        .map(|column| user_column_field(&column.name))
+        .map(|column| app_column_field(&column.name))
         .collect::<Vec<_>>();
     let mut content_fields = vec![
         "row_uuid".to_owned(),
@@ -3600,7 +3638,7 @@ fn canonical_current_source_fields(
             table
                 .columns
                 .iter()
-                .map(|column| ProjectField::named(user_column_field(&column.name))),
+                .map(|column| ProjectField::named(app_column_field(&column.name))),
         )
         .chain([
             ProjectField::named("$createdBy"),
@@ -3640,7 +3678,7 @@ fn storage_to_canonical_current_source_fields(
             table
                 .columns
                 .iter()
-                .map(|column| ProjectField::named(user_column_field(&column.name))),
+                .map(|column| ProjectField::named(app_column_field(&column.name))),
         )
         .chain([
             ProjectField::renamed("created_by", "$createdBy"),
@@ -3687,12 +3725,9 @@ fn branch_view_storage_source_fields(
                 .map_err(|_| {
                     Error::InvalidBranchKey("invalid head branch value encoding".to_owned())
                 })?;
-            fields.push(ProjectField::literal(
-                user_column_field(&column.name),
-                value,
-            ));
+            fields.push(ProjectField::literal(app_column_field(&column.name), value));
         } else {
-            fields.push(ProjectField::named(user_column_field(&column.name)));
+            fields.push(ProjectField::named(app_column_field(&column.name)));
         }
     }
     fields.extend([
@@ -3729,11 +3764,11 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
         .columns
         .iter()
         .filter_map(|column| {
-            let storage_name = format!("user_{}", column.name);
+            let storage_name = format!("_app_{}", column.name);
             current
                 .field_index(&storage_name)
                 .and_then(|index| current.fields().get(index))
-                .map(|field| (user_column_field(&column.name), field.value_type.clone()))
+                .map(|field| (app_column_field(&column.name), field.value_type.clone()))
         })
         .collect::<BTreeMap<_, _>>();
     RecordDescriptor::new(logical.fields().iter().map(|field| {
@@ -3778,7 +3813,7 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             } else {
                 ValueType::Nullable(Box::new(column.column_type.clone()))
             };
-            (user_column_field(&column.name), value_type)
+            (app_column_field(&column.name), value_type)
         }))
         .chain([
             ("$createdBy".to_owned(), ValueType::String),
@@ -4413,7 +4448,7 @@ pub(super) fn global_current_storage_fields(
         table
             .columns
             .iter()
-            .map(|column| user_column_field(&column.name)),
+            .map(|column| app_column_field(&column.name)),
     );
     fields.push("created_by".to_owned());
     fields.push("created_at".to_owned());
@@ -4432,7 +4467,7 @@ fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
                 (
-                    user_column_field(&column.name),
+                    app_column_field(&column.name),
                     ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }))
@@ -4870,7 +4905,7 @@ pub(super) fn historical_current_graph_full_scan(
                 table
                     .columns
                     .iter()
-                    .map(|column| user_column_field(&column.name)),
+                    .map(|column| app_column_field(&column.name)),
             )
             .map(|field| ProjectField::renamed(left_field(&field), field))
             .chain([
@@ -4922,7 +4957,7 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
                 (
-                    user_column_field(&column.name),
+                    app_column_field(&column.name),
                     ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }))
@@ -4992,7 +5027,7 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     let user_fields = table
         .columns
         .iter()
-        .map(|column| user_column_field(&column.name))
+        .map(|column| app_column_field(&column.name))
         .collect::<Vec<_>>();
     let mut content_storage_fields = vec![
         "row_uuid".to_owned(),
@@ -5162,7 +5197,7 @@ pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -
         table
             .columns
             .iter()
-            .map(|column| user_column_field(&column.name)),
+            .map(|column| app_column_field(&column.name)),
     );
     fields.push("authored_columns".to_owned());
     fields

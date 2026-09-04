@@ -47,9 +47,10 @@ use super::query_engine::{
     SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
     VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
-    aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
-    claim_param_field, claim_path_from_param_field, left_field, prepare_and_lower_query_program,
-    query_program_source_requests, right_field, route_param_field, user_column_field,
+    aggregate_output_column, aggregate_output_field, app_column_field,
+    authorized_deletion_preimage_source_request, claim_param_field, claim_path_from_param_field,
+    left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
+    route_param_field,
 };
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
@@ -3952,7 +3953,7 @@ fn aggregate_current_row_from_record(
     ))?;
 
     if let Some(group_by) = &aggregate.group_by {
-        let logical = user_column_field(group_by);
+        let logical = app_column_field(group_by);
         let index = record
             .descriptor()
             .field_index(&logical)
@@ -3993,6 +3994,9 @@ fn aggregate_current_row_from_record(
     }
     let descriptor = RecordDescriptor::new(fields);
     let raw = descriptor.create(&values)?;
+    // This synthetic descriptor deliberately uses `_app_{column}` names for
+    // the grouped source column and aggregate outputs. Those are internal
+    // application slots, not public result fields named `_app_{column}`.
     Ok(CurrentRow::new(
         query.table.clone(),
         OwnedRecord::new(raw, descriptor),

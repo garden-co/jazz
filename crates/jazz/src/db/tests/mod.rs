@@ -82,6 +82,54 @@ use super::peer_connection::{
     authorization_scope_support_options_match, remove_scope_aggregate_member,
     send_subscriber_with_sync_context, view_update_is_empty,
 };
+
+#[test]
+fn terminal_root_binding_fields_preserve_hybrid_public_slot_provenance() {
+    // Local maintained-view reset snapshots must use the same slot mapping as
+    // terminal deltas. In particular, a result `_app_check` may coexist with
+    // stored application column `check` carried as `_app_check`.
+    let layout = TerminalRootLayout {
+        id: "hybrid-test-layout".to_owned(),
+        root_descriptor: RecordDescriptor::new([
+            ("row_uuid".to_owned(), ValueType::Uuid),
+            ("_app_check".to_owned(), ValueType::Bool),
+            ("_app_check".to_owned(), ValueType::Bool),
+        ]),
+        root_key_slot: 0,
+        root_key_field_name: "row_uuid".to_owned(),
+        public_fields: vec![
+            TerminalRootPublicField {
+                name: "_app_check".to_owned(),
+                descriptor_field_name: "_app_check".to_owned(),
+                slot: 1,
+                carrier: TerminalRootCarrier::Logical,
+                binding: AppRowFieldBinding::ResultField {
+                    name: "_app_check".to_owned(),
+                },
+            },
+            TerminalRootPublicField {
+                name: "check".to_owned(),
+                descriptor_field_name: "_app_check".to_owned(),
+                slot: 2,
+                carrier: TerminalRootCarrier::CurrentRow,
+                binding: AppRowFieldBinding::StoredColumn {
+                    id: PhysicalColumnId(7),
+                    output_name: "check".to_owned(),
+                },
+            },
+        ],
+        carrier: TerminalRootCarrier::Logical,
+    };
+
+    assert_eq!(
+        terminal_root_binding_fields(&layout),
+        vec![
+            CurrentRowBindingField::ResultField,
+            CurrentRowBindingField::ResultField,
+            CurrentRowBindingField::StoredColumn,
+        ]
+    );
+}
 use catalogue::assert_authority_rejects_staged_write;
 use support::block_on;
 use support::*;

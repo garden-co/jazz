@@ -123,7 +123,7 @@ fn collect_unwrapped_output_type(
     if source_field == source.row_shape.row_uuid_field {
         return fallback.clone();
     }
-    let logical = logical_user_column(source_field);
+    let logical = logical_app_column(source_field);
     source
         .table_schema
         .columns
@@ -169,7 +169,7 @@ fn collect_slot_layouts(
                         .table_schema
                         .columns
                         .iter()
-                        .map(|column| user_column_field(&column.name)),
+                        .map(|column| app_column_field(&column.name)),
                 ),
                 FieldProjection::Fields(fields) => selected.extend(
                     fields
@@ -249,7 +249,7 @@ fn collect_slot_layouts(
 fn collect_projection_source_field(_source: &ResolvedSource, field: &str) -> String {
     match field {
         "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
-        _ => user_column_field(field),
+        _ => app_column_field(field),
     }
 }
 
@@ -262,7 +262,7 @@ fn collect_projection_output_field(field: &str) -> String {
         "updated_by" => "$updatedBy".to_owned(),
         // The terminal owns row assembly, but its encoded record remains in
         // the canonical current-row codec namespace. Native/WASM adapters map
-        // `user_*` fields to public column names from the negotiated schema;
+        // `_app_*` fields to public column names from the negotiated schema;
         // emitting logical names here makes core CurrentRow decoding silently
         // treat every selected cell as absent.
         _ => field.to_owned(),
@@ -278,7 +278,7 @@ fn collect_nested_projection_output_field(field: &str) -> String {
         "updated_by" => "$updatedBy".to_owned(),
         // Nested records are public tree payloads rather than CurrentRow codec
         // records, so their user columns retain the logical schema names.
-        _ => logical_user_column(field).to_owned(),
+        _ => logical_app_column(field).to_owned(),
     }
 }
 

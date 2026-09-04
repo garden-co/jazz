@@ -106,6 +106,19 @@ enum discriminants in nested descriptors, and raw Groove record bytes are
 frozen once emitted: future ABI evolution requires a new explicitly versioned
 envelope, never a reordered field, permissive fallback, or in-place migration.
 
+The unreleased v1 row-batch descriptor is a postcard vector of tagged fields.
+Each entry encodes `name, value_type`, where `name` has exactly two variants:
+`StoredColumn = 0` followed by `id` (the physical column id as an unsigned
+postcard integer) and `output_name` (a postcard string), or `ResultField = 1`
+followed by `name` (a postcard string). `value_type` retains Groove's descriptor
+type encoding. Unknown name tags are rejected. Stored columns use their
+explicit output name; result fields keep their literal name, including names
+such as `_app_check`. Hosts never infer provenance from spelling. The
+compiler-owned application carrier prefix is `_app_`; the old `user_` storage
+and wire spelling is rejected, with no compatibility reader. This is an
+intentional pre-release format cut; the golden corpus pins the resulting v1
+layout.
+
 `binding_codec_golden.json` is the frozen cross-language corpus for this v1
 binding layout. Rust creates the hard-coded semantic cases and exact bytes;
 the TypeScript reader independently decodes them, and the generated NAPI and

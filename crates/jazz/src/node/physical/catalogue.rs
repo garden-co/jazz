@@ -582,11 +582,11 @@ pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -
 }
 
 pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {
-    format!("by_physical_user_v1_{}", column_id.0)
+    format!("by_physical_app_v1_{}", column_id.0)
 }
 
-pub(super) fn physical_user_column_field(column_id: PhysicalColumnId) -> String {
-    format!("user_{}", column_id.0)
+pub(super) fn physical_app_column_field(column_id: PhysicalColumnId) -> String {
+    format!("_app_{}", column_id.0)
 }
 
 pub(super) fn physical_history_projection_target(

@@ -1087,7 +1087,7 @@ impl TableSchema {
         ];
         columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1126,7 +1126,7 @@ impl TableSchema {
         ];
         columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1201,14 +1201,14 @@ impl TableSchema {
             column("updated_at", GrooveColumnType::U64),
             column("global_time", GrooveColumnType::U64.nullable()),
         ];
-        // Carry every user column (not only indexed ones) so the global-current
+        // Carry every app column (not only indexed ones) so the global-current
         // table is a self-sufficient current-row index: whole-table current
         // reads and subscriptions resolve cells here in O(current rows) without
         // joining the full history table. Secondary indexes are still built only
         // on the indexed subset below.
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1227,7 +1227,7 @@ impl TableSchema {
         for indexed in &indexed_columns {
             content_table = content_table.with_index(GrooveIndexSchema::new(
                 global_current_index_name(indexed),
-                ["branch_key".to_owned(), format!("user_{indexed}")],
+                ["branch_key".to_owned(), app_storage_column_name(indexed)],
             ));
         }
         vec![
@@ -1273,7 +1273,7 @@ impl TableSchema {
         ];
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1335,7 +1335,7 @@ impl TableSchema {
     /// Return the wire descriptor for replicated immutable row payloads.
     ///
     /// Wire records contain row payload data and immutable row provenance:
-    /// `row_uuid`, `parents`, provenance, `_deletion`, and nullable user cells.
+    /// `row_uuid`, `parents`, provenance, `_deletion`, and nullable app cells.
     /// Receiver-local currentness and authority-state columns are deliberately
     /// excluded. Schema changes change this descriptor; v0 requires identical
     /// descriptors at sender and receiver.
@@ -1359,7 +1359,7 @@ impl TableSchema {
             .into_iter()
             .chain(self.columns.iter().map(|column| {
                 (
-                    format!("user_{}", column.name),
+                    app_storage_column_name(&column.name),
                     ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             })),
@@ -1612,7 +1612,11 @@ fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::sch
 }
 
 pub(crate) fn global_current_index_name(column: &str) -> String {
-    format!("by_user_{column}")
+    format!("by_app_{column}")
+}
+
+fn app_storage_column_name(column: &str) -> String {
+    format!("_app_{column}")
 }
 
 fn nodes_table() -> GrooveTableSchema {
