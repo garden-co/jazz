@@ -537,6 +537,19 @@ do not need a new pending protocol: requests which would require asynchronous
 large-value hydration are not representable by this codec. Existing `Pending`
 and `Poll` remain the async path for query/subscription materialization.
 
+Explicit foreground transactions admit begin, staging, reads, commit and rollback
+onto the existing core FIFO without blocking the native owner thread. Returned
+transaction/row identifiers acknowledge admission; asynchronous staging failures
+surface through the committed write's ordinary settlement/error channel. Byte
+request and response tags are unchanged. A read is queued at command arrival,
+including its deferred preparation and transaction-scoped coverage, so a later
+stage or commit cannot overtake it. If coverage is awaiting delivery without
+holding the node owner, tick maintenance continues while the FIFO head stays
+retained; a cold operation retaining the owner still yields the native turn.
+Cancelling a read drops its coverage and releases that FIFO fence, but does not
+roll back a later admitted commit. Rollback and foreground close enqueue cleanup
+after already-admitted transaction work and immediately retire the public handle.
+
 The V1 subset otherwise deliberately supports only `ReadOpts::default()`
 local-first reads. It fails closed for remote tiers/read views, relation
 terminal operations, permission advice, and any not-yet-shared mutation

@@ -23,9 +23,9 @@ use std::thread;
 use futures::FutureExt;
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, ExclusiveTxOps, MergeableTxOps, PeerConnection,
-    PeerIoPump, PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream, TickScheduler,
-    TickUrgency, Transport, UpdateOptions, UpsertOptions, block_on,
+    Db, DbConfig, DbIdentity, DeleteOptions, PeerConnection, PeerIoPump, PreparedQuery, ReadOpts,
+    SubscriptionEvent, SubscriptionStream, TickScheduler, TickUrgency, Transport, UpdateOptions,
+    UpsertOptions, block_on,
 };
 use jazz::foreground_node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
@@ -4291,11 +4291,10 @@ impl ConnectedClient {
     fn abandon_foreground_transactions(&mut self) -> Result<(), RelayError> {
         self.cancel_pending_work();
         let transactions = std::mem::take(&mut self.transactions);
-        let mut first_error = self.mutations.close(&self.db).err();
+        let first_error = self.mutations.close(&self.db).err();
         for transaction in transactions.into_values() {
-            if let Err(error) = self.db.abandon_transaction_handle(transaction.open_tx_id) {
-                first_error.get_or_insert(RelayError::Db(error));
-            }
+            self.db
+                .enqueue_abandon_transaction_handle(transaction.open_tx_id);
         }
         first_error.map_or(Ok(()), Err)
     }
@@ -4799,10 +4798,34 @@ impl RelayWorker {
             })?;
             (Rc::clone(&client.db), prepared.clone())
         };
+        let owner = Rc::clone(&db);
         let future: ForegroundOperationFuture = Box::pin(async move {
             let prepared = prepared.await.map_err(RelayError::Db)?;
-            foreground_read_future(db, prepared, opts, open_tx, structured, cleanups).await
+            foreground_read_future(owner, prepared, opts, open_tx, structured, cleanups).await
         });
+        // Admit at command arrival, before a later commit can retire the open
+        // transaction. Deferred query preparation must not reorder this read.
+        let future = if let Some(tx) = open_tx {
+            let (cancel, cancelled) = futures::channel::oneshot::channel::<()>();
+            let receive = db.enqueue_transaction_read(tx, async move {
+                // Dropping the observation retires its coverage and releases
+                // the FIFO fence, without cancelling a later admitted commit.
+                let result = match futures::future::select(cancelled, future).await {
+                    futures::future::Either::Left(_) => Err(RelayError::Closed),
+                    futures::future::Either::Right((result, _)) => result,
+                };
+                Ok(result)
+            });
+            Box::pin(async move {
+                let _cancel_on_drop = cancel;
+                receive
+                    .await
+                    .map_err(|_| RelayError::Closed)?
+                    .map_err(RelayError::Db)?
+            }) as ForegroundOperationFuture
+        } else {
+            future
+        };
         self.start_foreground_operation(client, None, future)
     }
 
@@ -5107,10 +5130,16 @@ impl RelayWorker {
         };
         let open_tx_id = OpenTransactionId::new();
         match kind {
-            ForegroundTransactionKind::Mergeable => block_on(db.begin_mergeable(open_tx_id)),
-            ForegroundTransactionKind::Exclusive => block_on(db.begin_exclusive(open_tx_id)),
+            ForegroundTransactionKind::Mergeable => {
+                db.enqueue_begin_mergeable(open_tx_id, None, None)
+            }
+            ForegroundTransactionKind::Exclusive => db.enqueue_begin_exclusive(open_tx_id, None),
         }
         .map_err(RelayError::Db)?;
+        db.drive_queued_mutation_once();
+        if let Some(error) = db.queued_transaction_error(open_tx_id) {
+            return Err(RelayError::Db(error));
+        }
         self.foreground_client_mut(client)?
             .transactions
             .insert(handle, ForegroundTransaction { open_tx_id, kind });
@@ -5172,89 +5201,86 @@ impl RelayWorker {
             }
         };
         let updated_at_ms = options.updated_at_ms;
-        macro_rules! stage {
-            ($tx:expr) => {{
-                let tx = $tx;
+        let id = transaction.open_tx_id;
+        let exclusive = matches!(transaction.kind, ForegroundTransactionKind::Exclusive);
+        let result = match mutation {
+            ForegroundMutationKind::Insert => db
+                .enqueue_transaction_insert(
+                    id,
+                    exclusive,
+                    table,
+                    cells,
+                    jazz::db::InsertOptions {
+                        row_id,
+                        target: exact_target,
+                        updated_at_ms,
+                        ..Default::default()
+                    },
+                )
+                .map(Some),
+            mutation => {
+                let row = row_id.ok_or_else(|| {
+                    RelayError::ForegroundCommand("mutation requires row id".into())
+                })?;
                 match mutation {
-                    ForegroundMutationKind::Insert => block_on(tx.insert(
-                        &table,
+                    ForegroundMutationKind::Update => db.enqueue_transaction_update(
+                        id,
+                        exclusive,
+                        table,
+                        row,
                         cells,
-                        jazz::db::InsertOptions {
-                            row_id,
+                        UpdateOptions {
+                            target,
+                            updated_at_ms,
+                            ..Default::default()
+                        },
+                    ),
+                    ForegroundMutationKind::Upsert => db.enqueue_transaction_upsert(
+                        id,
+                        exclusive,
+                        table,
+                        row,
+                        cells,
+                        UpsertOptions {
+                            target,
+                            updated_at_ms,
+                            ..Default::default()
+                        },
+                    ),
+                    ForegroundMutationKind::Delete => db.enqueue_transaction_delete(
+                        id,
+                        exclusive,
+                        table,
+                        row,
+                        DeleteOptions {
+                            target,
+                            updated_at_ms,
+                            ..Default::default()
+                        },
+                    ),
+                    ForegroundMutationKind::Restore => db.enqueue_transaction_restore(
+                        id,
+                        exclusive,
+                        table,
+                        row,
+                        Some(cells),
+                        jazz::db::RestoreOptions {
                             target: exact_target,
                             updated_at_ms,
                             ..Default::default()
                         },
-                    ))
-                    .map(Some),
-                    mutation => {
-                        let row_id = row_id.ok_or_else(|| {
-                            RelayError::ForegroundCommand("mutation requires row id".into())
-                        })?;
-                        match mutation {
-                            ForegroundMutationKind::Update => block_on(tx.update(
-                                &table,
-                                row_id,
-                                cells,
-                                UpdateOptions {
-                                    target,
-                                    updated_at_ms,
-                                    ..Default::default()
-                                },
-                            )),
-                            ForegroundMutationKind::Upsert => {
-                                if options.branch.is_some() {
-                                    return Err(RelayError::ForegroundCommand(
-                                        "upsert option `branch` is not supported; use `head`"
-                                            .into(),
-                                    ));
-                                }
-                                block_on(tx.upsert(
-                                    &table,
-                                    row_id,
-                                    cells,
-                                    UpsertOptions {
-                                        target,
-                                        updated_at_ms,
-                                        ..Default::default()
-                                    },
-                                ))
-                            }
-                            ForegroundMutationKind::Delete => block_on(tx.delete(
-                                &table,
-                                row_id,
-                                DeleteOptions {
-                                    target,
-                                    updated_at_ms,
-                                    ..Default::default()
-                                },
-                            )),
-                            ForegroundMutationKind::Restore => block_on(tx.restore(
-                                &table,
-                                row_id,
-                                Some(cells),
-                                jazz::db::RestoreOptions {
-                                    target: exact_target,
-                                    updated_at_ms,
-                                    ..Default::default()
-                                },
-                            )),
-                            ForegroundMutationKind::Insert => unreachable!(),
-                        }
-                        .map(|()| None)
-                    }
+                    ),
+                    ForegroundMutationKind::Insert => unreachable!(),
                 }
-            }};
-        }
-        match transaction.kind {
-            ForegroundTransactionKind::Mergeable => {
-                stage!(db.mergeable_tx_ref(transaction.open_tx_id))
-            }
-            ForegroundTransactionKind::Exclusive => {
-                stage!(db.exclusive_tx_ref(transaction.open_tx_id))
+                .map(|()| None)
             }
         }
-        .map_err(RelayError::Db)
+        .map_err(RelayError::Db)?;
+        db.drive_queued_mutation_once();
+        if let Some(error) = db.queued_transaction_error(id) {
+            return Err(RelayError::Db(error));
+        }
+        Ok(result)
     }
 
     fn insert_foreground_transaction(
@@ -5265,32 +5291,16 @@ impl RelayWorker {
         cells: Vec<u8>,
         row_id: Option<[u8; 16]>,
     ) -> Result<RowUuid, RelayError> {
-        let cells = decode_foreground_cells(&cells)?;
-        let (db, transaction) = self.foreground_transaction(client, transaction)?;
-        let row_id = row_id.map(RowUuid::from_bytes);
-        match transaction.kind {
-            ForegroundTransactionKind::Mergeable => {
-                block_on(db.mergeable_tx_ref(transaction.open_tx_id).insert(
-                    &table,
-                    cells,
-                    jazz::db::InsertOptions {
-                        row_id,
-                        ..Default::default()
-                    },
-                ))
-            }
-            ForegroundTransactionKind::Exclusive => {
-                block_on(db.exclusive_tx_ref(transaction.open_tx_id).insert(
-                    &table,
-                    cells,
-                    jazz::db::InsertOptions {
-                        row_id,
-                        ..Default::default()
-                    },
-                ))
-            }
-        }
-        .map_err(RelayError::Db)
+        self.stage_foreground_mutation(
+            client,
+            transaction,
+            ForegroundMutationKind::Insert,
+            table,
+            row_id,
+            cells,
+            "{}".into(),
+        )?
+        .ok_or_else(|| RelayError::ForegroundCommand("insert omitted row id".into()))
     }
 
     fn update_foreground_transaction(
@@ -5301,28 +5311,16 @@ impl RelayWorker {
         row_id: [u8; 16],
         patch: Vec<u8>,
     ) -> Result<(), RelayError> {
-        let patch = decode_foreground_cells(&patch)?;
-        let (db, transaction) = self.foreground_transaction(client, transaction)?;
-        let row_id = RowUuid::from_bytes(row_id);
-        match transaction.kind {
-            ForegroundTransactionKind::Mergeable => {
-                block_on(db.mergeable_tx_ref(transaction.open_tx_id).update(
-                    &table,
-                    row_id,
-                    patch,
-                    UpdateOptions::default(),
-                ))
-            }
-            ForegroundTransactionKind::Exclusive => {
-                block_on(db.exclusive_tx_ref(transaction.open_tx_id).update(
-                    &table,
-                    row_id,
-                    patch,
-                    UpdateOptions::default(),
-                ))
-            }
-        }
-        .map_err(RelayError::Db)
+        self.stage_foreground_mutation(
+            client,
+            transaction,
+            ForegroundMutationKind::Update,
+            table,
+            Some(row_id),
+            patch,
+            "{}".into(),
+        )
+        .map(|_| ())
     }
 
     fn upsert_foreground_transaction(
@@ -5333,28 +5331,16 @@ impl RelayWorker {
         row_id: [u8; 16],
         cells: Vec<u8>,
     ) -> Result<(), RelayError> {
-        let cells = decode_foreground_cells(&cells)?;
-        let (db, transaction) = self.foreground_transaction(client, transaction)?;
-        let row_id = RowUuid::from_bytes(row_id);
-        match transaction.kind {
-            ForegroundTransactionKind::Mergeable => {
-                block_on(db.mergeable_tx_ref(transaction.open_tx_id).upsert(
-                    &table,
-                    row_id,
-                    cells,
-                    UpsertOptions::default(),
-                ))
-            }
-            ForegroundTransactionKind::Exclusive => {
-                block_on(db.exclusive_tx_ref(transaction.open_tx_id).upsert(
-                    &table,
-                    row_id,
-                    cells,
-                    UpsertOptions::default(),
-                ))
-            }
-        }
-        .map_err(RelayError::Db)
+        self.stage_foreground_mutation(
+            client,
+            transaction,
+            ForegroundMutationKind::Upsert,
+            table,
+            Some(row_id),
+            cells,
+            "{}".into(),
+        )
+        .map(|_| ())
     }
 
     fn delete_foreground_transaction(
@@ -5364,25 +5350,16 @@ impl RelayWorker {
         table: String,
         row_id: [u8; 16],
     ) -> Result<(), RelayError> {
-        let (db, transaction) = self.foreground_transaction(client, transaction)?;
-        let row_id = RowUuid::from_bytes(row_id);
-        match transaction.kind {
-            ForegroundTransactionKind::Mergeable => {
-                block_on(db.mergeable_tx_ref(transaction.open_tx_id).delete(
-                    &table,
-                    row_id,
-                    DeleteOptions::default(),
-                ))
-            }
-            ForegroundTransactionKind::Exclusive => {
-                block_on(db.exclusive_tx_ref(transaction.open_tx_id).delete(
-                    &table,
-                    row_id,
-                    DeleteOptions::default(),
-                ))
-            }
-        }
-        .map_err(RelayError::Db)
+        self.stage_foreground_mutation(
+            client,
+            transaction,
+            ForegroundMutationKind::Delete,
+            table,
+            Some(row_id),
+            Vec::new(),
+            "{}".into(),
+        )
+        .map(|_| ())
     }
 
     fn commit_foreground_transaction(
@@ -5391,22 +5368,28 @@ impl RelayWorker {
         transaction: u64,
     ) -> Result<TransactionId, RelayError> {
         let (db, transaction_state) = self.foreground_transaction(client, transaction)?;
-        let tx_id = match transaction_state.kind {
+        let write = match transaction_state.kind {
             ForegroundTransactionKind::Mergeable => {
-                block_on(db.commit_mergeable_handle(transaction_state.open_tx_id))
+                db.enqueue_commit_mergeable_handle(transaction_state.open_tx_id)
             }
             ForegroundTransactionKind::Exclusive => {
-                block_on(db.commit_exclusive_handle(transaction_state.open_tx_id))
+                db.enqueue_commit_exclusive_handle(transaction_state.open_tx_id)
             }
         }
         .map_err(RelayError::Db)?;
         self.foreground_client_mut(client)?
             .transactions
             .remove(&transaction);
-        let public_id = TransactionId::from_committed_tx(tx_id);
+        db.drive_queued_mutation_once();
+        if let Some(error) = db.take_queued_mutation_failure(write.mergeable_tx_id()) {
+            return Err(RelayError::Db(error));
+        }
+        let public_id = TransactionId::from_committed_tx(write.mergeable_tx_id());
         self.foreground_client_mut(client)?
-            .committed_transactions
-            .insert(public_id, tx_id);
+            .mutations
+            .writes
+            .borrow_mut()
+            .insert(public_id, Rc::new(write));
         Ok(public_id)
     }
 
@@ -5481,8 +5464,8 @@ impl RelayWorker {
         transaction: u64,
     ) -> Result<bool, RelayError> {
         let (db, transaction_state) = self.foreground_transaction(client, transaction)?;
-        db.abandon_transaction_handle(transaction_state.open_tx_id)
-            .map_err(RelayError::Db)?;
+        db.enqueue_abandon_transaction_handle(transaction_state.open_tx_id);
+        db.drive_queued_mutation_once();
         self.foreground_client_mut(client)?
             .transactions
             .remove(&transaction);
@@ -8137,6 +8120,298 @@ mod tests {
         };
         assert_exact_todo_rows(&rows, row_id, "queued");
         client.close().unwrap();
+    }
+
+    // Internal receipt: JS cannot deliberately hold the native owner. All results
+    // are asserted through the foreground transaction/read/settlement boundary.
+    #[test]
+    fn explicit_transactions_queue_reads_before_commit_under_owner_contention() {
+        for kind in [
+            ForegroundTransactionKind::Mergeable,
+            ForegroundTransactionKind::Exclusive,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let relay =
+                NativeRelay::spawn(config(directory.path().join("tx-owner.sqlite"), Some("tx")))
+                    .unwrap();
+            let client = relay
+                .attach_client(
+                    fresh_client_identity(AuthorSubject::for_test_bytes([0x49; 16])).unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            let id = client.id;
+            let query = client
+                .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+                .unwrap();
+            let holder = relay
+                .run(move |worker| {
+                    let db = Rc::clone(&worker.foreground_client(id)?.db);
+                    worker.start_foreground_operation(
+                        id,
+                        None,
+                        Box::pin(async move {
+                            db.hold_node_owner_for_test().await;
+                            unreachable!()
+                        }),
+                    )
+                })
+                .unwrap();
+            let ForegroundOperationPoll::Pending { operation: holder } = holder else {
+                unreachable!()
+            };
+            let transaction = client.begin_foreground_transaction(kind).unwrap();
+            let row = client
+                .insert_foreground_transaction(
+                    transaction,
+                    "todos".into(),
+                    encoded_title_cells("first"),
+                    None,
+                )
+                .unwrap();
+            client
+                .stage_foreground_mutation(
+                    transaction,
+                    ForegroundMutationKind::Update,
+                    "todos".into(),
+                    Some(*row.as_bytes()),
+                    encoded_title_cells("queued"),
+                    "{}".into(),
+                )
+                .unwrap();
+            let mut read = client
+                .start_foreground_read_with_options(query, "{}".into(), Some(transaction), false)
+                .unwrap();
+            assert!(matches!(read, ForegroundOperationPoll::Pending { .. }));
+            client
+                .update_foreground_transaction(
+                    transaction,
+                    "todos".into(),
+                    *row.as_bytes(),
+                    encoded_title_cells("after-read"),
+                )
+                .unwrap();
+            let tx_id = client.commit_foreground_transaction(transaction).unwrap();
+            assert!(client.cancel_foreground_operation(holder).unwrap());
+            for _ in 0..100 {
+                let ForegroundOperationPoll::Pending { operation } = read else {
+                    break;
+                };
+                relay.pump().unwrap();
+                read = client.poll_foreground_operation(operation).unwrap();
+            }
+            let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
+                panic!("transaction read did not complete")
+            };
+            assert_exact_todo_rows(&rows, row, "queued");
+            let mut wait = client
+                .wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local)
+                .unwrap();
+            for _ in 0..100 {
+                let ForegroundOperationPoll::Pending { operation } = wait else {
+                    break;
+                };
+                relay.pump().unwrap();
+                wait = client.poll_foreground_operation(operation).unwrap();
+            }
+            assert!(matches!(
+                wait,
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
+            ));
+            let mut committed = client.start_foreground_read(query).unwrap();
+            for _ in 0..100 {
+                let ForegroundOperationPoll::Pending { operation } = committed else {
+                    break;
+                };
+                relay.pump().unwrap();
+                committed = client.poll_foreground_operation(operation).unwrap();
+            }
+            let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = committed
+            else {
+                panic!("committed row absent")
+            };
+            assert_exact_todo_rows(&rows, row, "after-read");
+            client.close().unwrap();
+        }
+    }
+
+    // Internal owner hold makes cancellation and rollback contention deterministic.
+    #[test]
+    fn cancelled_transaction_read_releases_commit_fence_and_rollback_is_bounded() {
+        for rollback in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let relay = NativeRelay::spawn(config(
+                directory.path().join("tx-cancel.sqlite"),
+                Some("tx-cancel"),
+            ))
+            .unwrap();
+            let client = relay
+                .attach_client(
+                    fresh_client_identity(AuthorSubject::for_test_bytes([0x4a; 16])).unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            let id = client.id;
+            let query = client
+                .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+                .unwrap();
+            let holder = relay
+                .run(move |worker| {
+                    let db = Rc::clone(&worker.foreground_client(id)?.db);
+                    worker.start_foreground_operation(
+                        id,
+                        None,
+                        Box::pin(async move {
+                            db.hold_node_owner_for_test().await;
+                            unreachable!()
+                        }),
+                    )
+                })
+                .unwrap();
+            let ForegroundOperationPoll::Pending { operation: holder } = holder else {
+                unreachable!()
+            };
+            let tx = client
+                .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
+                .unwrap();
+            let row = client
+                .insert_foreground_transaction(
+                    tx,
+                    "todos".into(),
+                    encoded_title_cells("cancelled observer"),
+                    None,
+                )
+                .unwrap();
+            let read = client
+                .start_foreground_read_with_options(query, "{}".into(), Some(tx), false)
+                .unwrap();
+            let ForegroundOperationPoll::Pending { operation: read } = read else {
+                unreachable!()
+            };
+            assert!(client.cancel_foreground_operation(read).unwrap());
+            let committed = if rollback {
+                assert!(client.rollback_foreground_transaction(tx).unwrap());
+                None
+            } else {
+                Some(client.commit_foreground_transaction(tx).unwrap())
+            };
+            assert!(client.cancel_foreground_operation(holder).unwrap());
+            for _ in 0..20 {
+                relay.pump().unwrap();
+            }
+            if let Some(tx_id) = committed {
+                let mut wait = client
+                    .wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local)
+                    .unwrap();
+                for _ in 0..100 {
+                    let ForegroundOperationPoll::Pending { operation } = wait else {
+                        break;
+                    };
+                    relay.pump().unwrap();
+                    wait = client.poll_foreground_operation(operation).unwrap();
+                }
+                assert!(matches!(
+                    wait,
+                    ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(
+                        _
+                    ))
+                ));
+            }
+            let mut read = client.start_foreground_read(query).unwrap();
+            for _ in 0..100 {
+                let ForegroundOperationPoll::Pending { operation } = read else {
+                    break;
+                };
+                relay.pump().unwrap();
+                read = client.poll_foreground_operation(operation).unwrap();
+            }
+            let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
+                panic!("read did not settle")
+            };
+            if rollback {
+                assert!(
+                    postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
+                        .unwrap()
+                        .iter()
+                        .all(|b| b.rows.is_empty())
+                );
+            } else {
+                assert_exact_todo_rows(&rows, row, "cancelled observer");
+            }
+            client.close().unwrap();
+        }
+    }
+
+    // Internal owner contention has no public JS test control.
+    #[test]
+    fn foreground_close_with_queued_transaction_is_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("tx-close.sqlite"),
+            Some("tx-close"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4b; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                worker.start_foreground_operation(
+                    id,
+                    None,
+                    Box::pin(async move {
+                        db.hold_node_owner_for_test().await;
+                        unreachable!()
+                    }),
+                )
+            })
+            .unwrap();
+        let tx = client
+            .begin_foreground_transaction(ForegroundTransactionKind::Exclusive)
+            .unwrap();
+        client
+            .insert_foreground_transaction(
+                tx,
+                "todos".into(),
+                encoded_title_cells("abandoned"),
+                None,
+            )
+            .unwrap();
+        let stale = client.clone();
+        client.close().unwrap();
+        assert!(stale.commit_foreground_transaction(tx).is_err());
+        let sibling = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4c; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let query = sibling
+            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .unwrap();
+        let mut read = sibling.start_foreground_read(query).unwrap();
+        for _ in 0..100 {
+            let ForegroundOperationPoll::Pending { operation } = read else {
+                break;
+            };
+            relay.pump().unwrap();
+            read = sibling.poll_foreground_operation(operation).unwrap();
+        }
+        let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
+            panic!("sibling read stalled")
+        };
+        assert!(
+            postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
+                .unwrap()
+                .iter()
+                .all(|b| b.rows.is_empty())
+        );
+        sibling.close().unwrap();
     }
 
     #[test]

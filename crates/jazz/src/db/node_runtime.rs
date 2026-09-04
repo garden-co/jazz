@@ -440,9 +440,20 @@ where
         self.schedule_tick(TickUrgency::Immediate);
     }
 
-    /// Poll one FIFO owner-queue entry and report whether it retained its
-    /// continuation. A retained operation may still own [`NodeState`] across
-    /// a cold-storage or cooperative-evaluation await.
+    /// Whether owner-free queue waiting can coexist with semantic maintenance.
+    pub(super) fn owner_is_available(&self) -> bool {
+        // Drop the probe guard before maintenance can acquire the owner.
+        self.node.try_lock().is_some()
+    }
+
+    pub(super) fn queued_transaction_error(&self, id: OpenTransactionId) -> Option<Error> {
+        self.queued_open_transaction_failures
+            .borrow()
+            .get(&id)
+            .cloned()
+    }
+
+    /// Poll one FIFO owner-queue entry, retaining a pending continuation.
     pub(super) fn poll_queued_mutation_once(&self) -> bool {
         use std::task::{Context, Poll, Waker};
 

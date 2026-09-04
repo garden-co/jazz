@@ -38,6 +38,21 @@ describe("React Native transaction reads through the native C ABI", () => {
     });
   }
 
+  it("rejects staging against a deleted row without reviving it", async () => {
+    await withNativeRelayFixture(app, async (fixture) => {
+      const db = await fixture.createDb();
+      const row = db.insert(app.todos, { title: "deleted", done: false }).value;
+      await db.all(app.todos);
+      await db.delete(app.todos, row.id).wait();
+      const tx = db.beginTransaction();
+      await expect(async () => {
+        tx.update(app.todos, row.id, { title: "must not revive" });
+        await tx.commit().wait();
+      }).rejects.toThrow();
+      expect(await db.all(app.todos)).toEqual([]);
+    });
+  });
+
   it("anchors an exclusive snapshot at begin while ordinary reads advance", async () => {
     await withNativeRelayFixture(app, async (fixture) => {
       const db = await fixture.createDb();

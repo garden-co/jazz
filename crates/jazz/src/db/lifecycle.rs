@@ -622,6 +622,13 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Observe a ready queued staging failure without consuming its transaction
+    /// poison. A subsequent commit must report the same rejected transaction.
+    #[doc(hidden)]
+    pub fn queued_transaction_error(&self, id: OpenTransactionId) -> Option<Error> {
+        self.node.queued_transaction_error(id)
+    }
+
     /// Queue a transaction-local read behind already-admitted transaction
     /// work. Bindings retain the returned receiver instead of synchronously
     /// polling cold storage on their host thread.
@@ -1160,7 +1167,10 @@ where
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
-        if queued_mutation_pending {
+        // A queued read may await a delivery receipt without retaining the
+        // owner. Keep its FIFO position, but service the semantic/peer work
+        // producing that receipt. Cold operations holding the owner still yield.
+        if queued_mutation_pending && !self.node.owner_is_available() {
             // A cold FIFO owner operation remains retained at the queue head.
             // If a close future was cancelled while polling it, its terminal
             // sweeps still belong to node maintenance and must not wait for
@@ -1197,7 +1207,10 @@ where
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
-        if queued_mutation_pending {
+        // A queued read may await a delivery receipt without retaining the
+        // owner. Keep its FIFO position, but service the semantic/peer work
+        // producing that receipt. Cold operations holding the owner still yield.
+        if queued_mutation_pending && !self.node.owner_is_available() {
             if self.node.transaction_abandonment_shutdown_is_pending() {
                 self.node.finish_transaction_abandonment_shutdown().await?;
             }
