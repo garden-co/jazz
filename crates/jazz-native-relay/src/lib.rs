@@ -33,8 +33,12 @@ use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::time::TxTime;
+use jazz::tools::AppId;
+use jazz::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
+use jazz::tools::websocket_prelude_auth::AuthConfig;
 use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::wire::{TransportError, WireTransport, decode_sync_message, encode_sync_message};
+use jazz_native_transport::NativeWebSocketConnector;
 use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
 use thiserror::Error;
 
@@ -3006,6 +3010,181 @@ pub fn bridge_native_relay_wire_once<T: WireTransport>(
     }
 }
 
+/// Native-owned socket lifecycle for one untrusted foreground relay scope.
+///
+/// Android and iOS call this shared worker from their private session setup;
+/// neither platform gets a raw protocol codec or reconnect loop.  The worker
+/// supplies the bearer only to the normal Edge WebSocket prelude and always
+/// uses the authenticated, non-SYSTEM connection mode.
+pub struct NativeRelaySocketWorker {
+    cancelled: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+/// Private native socket inputs. This is intentionally absent from postcard
+/// commands and diagnostics: JavaScript can neither configure the endpoint
+/// nor read its bearer.
+pub struct NativeRelaySocketConfig {
+    pub server_url: String,
+    pub app_id: AppId,
+    pub peer_identity: jazz::ids::AuthorSubject,
+    pub auth: AuthConfig,
+    pub reconnect_delay: std::time::Duration,
+    pub on_event: Arc<dyn Fn(NativeRelaySocketEvent) + Send + Sync>,
+}
+
+impl std::fmt::Debug for NativeRelaySocketConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRelaySocketConfig")
+            .field("server_url", &self.server_url)
+            .field("app_id", &self.app_id)
+            .field("peer_identity", &self.peer_identity)
+            .field("auth", &"<redacted>")
+            .field("reconnect_delay", &self.reconnect_delay)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeRelaySocketEvent {
+    Connected,
+    Reconnecting,
+    Stopped,
+}
+
+impl NativeRelaySocketWorker {
+    /// Start the production native WebSocket worker.
+    pub fn start(relay: NativeRelay, config: NativeRelaySocketConfig) -> Result<Self, RelayError> {
+        Self::start_with_connector(relay, config, Arc::new(NativeWebSocketConnector))
+    }
+
+    /// Composition seam for deterministic native-host tests. Production uses
+    /// [`NativeWebSocketConnector`] above; the connector still owns TLS,
+    /// WebSocket framing, and Edge's authenticated handshake.
+    pub fn start_with_connector(
+        relay: NativeRelay,
+        config: NativeRelaySocketConfig,
+        connector: Arc<dyn NativeTransportConnector>,
+    ) -> Result<Self, RelayError> {
+        if config.peer_identity == jazz::ids::AuthorSubject::SYSTEM
+            || config.auth.jwt_token.as_deref().is_none_or(str::is_empty)
+            || config.auth.backend_secret.is_some()
+            || config.auth.admin_secret.is_some()
+            || config.auth.backend_session.is_some()
+        {
+            return Err(RelayError::ForegroundCommand(
+                "native relay sockets require an ordinary non-SYSTEM bearer session".to_owned(),
+            ));
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let thread_cancelled = Arc::clone(&cancelled);
+        let thread_wake = Arc::clone(&wake);
+        let join = thread::Builder::new()
+            .name("jazz-native-relay-socket".to_owned())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build();
+                if let Ok(runtime) = runtime {
+                    runtime.block_on(run_native_relay_socket_worker(
+                        relay,
+                        config,
+                        connector,
+                        thread_cancelled,
+                        thread_wake,
+                    ));
+                }
+            })
+            .map_err(|error| RelayError::OwnerThread(error.to_string()))?;
+        Ok(Self {
+            cancelled,
+            wake,
+            join: Mutex::new(Some(join)),
+        })
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.wake.notify_waiters();
+    }
+}
+
+impl Drop for NativeRelaySocketWorker {
+    fn drop(&mut self) {
+        self.cancel();
+        if let Ok(mut join) = self.join.lock()
+            && let Some(join) = join.take()
+        {
+            let _ = join.join();
+        }
+    }
+}
+
+async fn run_native_relay_socket_worker(
+    relay: NativeRelay,
+    config: NativeRelaySocketConfig,
+    connector: Arc<dyn NativeTransportConnector>,
+    cancelled: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    while !cancelled.load(Ordering::Acquire) {
+        let request = NativeTransportRequest {
+            server_url: config.server_url.clone(),
+            app_id: config.app_id,
+            peer_identity: config.peer_identity,
+            auth: config.auth.clone(),
+            wake: Arc::new(|| {}),
+        };
+        let connected = tokio::select! {
+            result = connector.connect(request) => result,
+            _ = wake.notified() => break,
+        };
+        let Ok(connected) = connected else {
+            (config.on_event)(NativeRelaySocketEvent::Reconnecting);
+            tokio::select! {
+                _ = tokio::time::sleep(config.reconnect_delay) => {},
+                _ = wake.notified() => break,
+            }
+            continue;
+        };
+        // An ordinary mobile session must never gain backend delegated-session
+        // authority, even if a future connector accidentally reports it.
+        if connected.permits_delegated_sessions {
+            (config.on_event)(NativeRelaySocketEvent::Reconnecting);
+            continue;
+        }
+        (config.on_event)(NativeRelaySocketEvent::Connected);
+        let mut upstream = jazz::db::WireTransportAdapter::new_with_session_context(
+            connected.transport,
+            connected.protocol_version,
+            connected.features,
+            None,
+            connected.session_context,
+        );
+        let mut terminal = connected.terminal;
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                (config.on_event)(NativeRelaySocketEvent::Stopped);
+                return;
+            }
+            let _ = bridge_native_relay_wire_once(&relay.wire(), &mut upstream);
+            let _ = relay.pump();
+            tokio::select! {
+                _ = &mut terminal => break,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+                _ = wake.notified() => {},
+            }
+        }
+        if !cancelled.load(Ordering::Acquire) {
+            (config.on_event)(NativeRelaySocketEvent::Reconnecting);
+        }
+    }
+    (config.on_event)(NativeRelaySocketEvent::Stopped);
+}
+
 fn validate_encoded_peer_message_len(len: usize) -> Result<(), RelayError> {
     validate_logical_message_len(len).map_err(RelayError::PeerMessageTooLarge)
 }
@@ -4198,6 +4377,65 @@ mod tests {
 
         fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
             self.inbound.pop_front()
+        }
+    }
+
+    struct IdleWire;
+
+    impl WireTransport for IdleWire {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    struct ReconnectingTestConnector {
+        calls: AtomicUsize,
+        bearer_seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl NativeTransportConnector for ReconnectingTestConnector {
+        fn connect(
+            &self,
+            request: NativeTransportRequest,
+        ) -> jazz::tools::native_transport_connector::NativeTransportFuture {
+            self.bearer_seen.lock().unwrap().push(
+                request
+                    .auth
+                    .jwt_token
+                    .expect("worker supplies bearer only to connector"),
+            );
+            let call = self.calls.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async move {
+                Ok(
+                    jazz::tools::native_transport_connector::ConnectedNativeTransport {
+                        transport: Box::new(IdleWire),
+                        protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                        features: jazz::wire::current_wire_features(),
+                        session_context: None,
+                        permits_delegated_sessions: false,
+                        terminal: if call == 0 {
+                            Box::pin(async {
+                                jazz::tools::native_transport_connector::NativeTransportTerminal::PeerClosed(
+                                "test close".to_owned(),
+                            )
+                            })
+                        } else {
+                            Box::pin(std::future::pending())
+                        },
+                    },
+                )
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> jazz::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
+            Box::pin(async { panic!("ordinary relay socket must not bootstrap as Edge") })
         }
     }
 
@@ -5778,6 +6016,70 @@ mod tests {
             outbound: Vec::new(),
         });
         assert_eq!(edge.try_recv(), Some(outbound));
+    }
+
+    #[test]
+    fn native_socket_worker_reauthenticates_on_reconnect_and_cancels_cleanly() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay =
+            NativeRelay::spawn(config(directory.path().join("relay.sqlite"), Some("alice")))
+                .unwrap();
+        let (events_tx, events_rx) = mpsc::channel();
+        let bearer_seen = Arc::new(Mutex::new(Vec::new()));
+        let connector = Arc::new(ReconnectingTestConnector {
+            calls: AtomicUsize::new(0),
+            bearer_seen: Arc::clone(&bearer_seen),
+        });
+        let worker = NativeRelaySocketWorker::start_with_connector(
+            relay,
+            NativeRelaySocketConfig {
+                server_url: "https://edge.example".to_owned(),
+                app_id: AppId::from_name("native-relay-socket-test"),
+                peer_identity: AuthorSubject::for_test_bytes([0x63; 16]),
+                auth: AuthConfig {
+                    jwt_token: Some("edge-validated-bearer".to_owned()),
+                    ..AuthConfig::default()
+                },
+                reconnect_delay: std::time::Duration::ZERO,
+                on_event: Arc::new(move |event| {
+                    let _ = events_tx.send(event);
+                }),
+            },
+            connector,
+        )
+        .unwrap();
+
+        assert_eq!(
+            events_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            NativeRelaySocketEvent::Connected
+        );
+        assert_eq!(
+            events_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            NativeRelaySocketEvent::Reconnecting
+        );
+        assert_eq!(
+            events_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            NativeRelaySocketEvent::Connected
+        );
+        worker.cancel();
+        assert_eq!(
+            events_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            NativeRelaySocketEvent::Stopped
+        );
+        drop(worker);
+        assert_eq!(
+            bearer_seen.lock().unwrap().as_slice(),
+            ["edge-validated-bearer", "edge-validated-bearer"],
+            "each reconnect sends the bearer to Edge again, without exposing it to relay state"
+        );
     }
 
     #[test]
