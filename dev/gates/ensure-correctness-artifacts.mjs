@@ -8,11 +8,16 @@ import { verifyCorrectnessArtifactProducer } from "../artifacts/correctness-arti
 export async function ensureCorrectnessArtifacts({
   root = fileURLToPath(new URL("../..", import.meta.url)),
   verify = verifyCorrectnessArtifactProducer,
-  build = () => new Promise((resolve, reject) => {
-    const child = spawn("pnpm", ["build:correctness-artifacts"], { cwd: root, stdio: "inherit" });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`correctness artifact producer failed: ${signal ?? code}`)));
-  }),
+  build = () =>
+    new Promise((resolve, reject) => {
+      const child = spawn("pnpm", ["build:correctness-artifacts"], { cwd: root, stdio: "inherit" });
+      child.once("error", reject);
+      child.once("exit", (code, signal) =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`correctness artifact producer failed: ${signal ?? code}`)),
+      );
+    }),
 } = {}) {
   try {
     verify(root);

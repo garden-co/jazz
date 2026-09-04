@@ -129,7 +129,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
-    command("native correctness-artifact producer", "node", ["dev/gates/ensure-correctness-artifacts.mjs"]),
+    command("native correctness-artifact producer", "node", [
+      "dev/gates/ensure-correctness-artifacts.mjs",
+    ]),
     command("preinstalled Chromium", "pnpm", [
       "exec",
       "playwright",
@@ -145,10 +147,21 @@ export const ciPartitions = Object.freeze({
   ]),
   "storage-compat": Object.freeze([
     command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
-    command("native correctness-artifact producer", "node", ["dev/gates/ensure-correctness-artifacts.mjs"]),
-    command("preinstalled Chromium", "pnpm", ["exec", "playwright", "install", "--dry-run", "chromium"]),
+    command("native correctness-artifact producer", "node", [
+      "dev/gates/ensure-correctness-artifacts.mjs",
+    ]),
+    command("preinstalled Chromium", "pnpm", [
+      "exec",
+      "playwright",
+      "install",
+      "--dry-run",
+      "chromium",
+    ]),
     command("browser storage compatibility corpus", "pnpm", [
-      "--dir", "packages/jazz-tools", "test:browser:focused", "--",
+      "--dir",
+      "packages/jazz-tools",
+      "test:browser:focused",
+      "--",
       "tests/browser/indexeddb-jazz-compat.test.ts",
     ]),
   ]),
