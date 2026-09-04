@@ -6053,21 +6053,22 @@ function nativeRowFieldPlans(
   const plans: NativeRowFieldPlan[] = [];
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
-    const fieldName = batch.descriptor[index]?.name;
+    const field = batch.descriptor[index];
+    const fieldName = field?.name;
     if (
       !fieldName ||
       isInternalField(fieldName) ||
-      (batch.kind === "current-row" && isCurrentRowPhysicalField(fieldName))
+      (field?.kind === "physical-column" && isCurrentRowPhysicalField(fieldName))
     ) {
       continue;
     }
 
-    // `user_` belongs to the private physical CurrentRow descriptor namespace
-    // only. Logical query/collector output preserves its public field names,
-    // even if a name happens to begin with `user_`. Provenance comes from the
-    // native batch envelope; never infer it from schema membership, since a
-    // schema may validly contain both `check` and a logical `user_check`.
-    const name = batch.kind === "current-row" ? publicFieldName(fieldName) : fieldName;
+    // `user_` belongs to a private physical CurrentRow field only. A logical
+    // query/collector field preserves its public name even if it begins with
+    // `user_`. The tagged descriptor is authoritative; never infer from
+    // schema membership, since a hybrid collector can contain physical `check`
+    // and logical `user_check` in one record.
+    const name = field?.kind === "physical-column" ? publicFieldName(fieldName) : fieldName;
     const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
     plans.push({
       name,

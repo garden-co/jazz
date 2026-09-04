@@ -28,18 +28,13 @@ export type EnumSchema = {
   cases?: { name: string; payload: DescriptorField[] }[];
 };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
-/**
- * The Rust-to-JavaScript binding provenance for a row batch.
- *
- * `current-row` descriptors use Jazz's private physical `user_` namespace;
- * `query-result` descriptors are public logical output and preserve names
- * verbatim. This is a host ABI discriminator, not a storage or sync wire tag.
- */
-export type NativeRowBatchKind = "current-row" | "query-result";
+/** Explicit Rust-to-JavaScript provenance for one descriptor field. */
+export type NativeRowDescriptorField = DescriptorField & {
+  kind: "physical-column" | "logical-field";
+};
 export type NativeRowBatch = {
-  kind: NativeRowBatchKind;
   table: string;
-  descriptor: DescriptorField[];
+  descriptor: NativeRowDescriptorField[];
   rows: NativeRow[];
 };
 export type NativeRemovedRow = { table: string; rowId: Uint8Array };
@@ -82,13 +77,9 @@ type PostcardWriterLike = {
 };
 
 export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
-  const kindTag = reader.u64();
-  const kind: NativeRowBatchKind =
-    kindTag === 0 ? "current-row" : kindTag === 1 ? "query-result" : invalidRowBatchKind(kindTag);
   return {
-    kind,
     table: reader.string(),
-    descriptor: readDescriptor(reader),
+    descriptor: readNativeRowDescriptor(reader),
     rows: reader.readVec((rowReader) => ({
       rowId: rowReader.bytes(),
       deleted: rowReader.bool(),
@@ -97,8 +88,33 @@ export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
   };
 }
 
-function invalidRowBatchKind(kindTag: number): never {
-  throw new Error(`unknown native row batch kind ${kindTag}`);
+export function writeNativeRowDescriptor(
+  writer: PostcardWriterLike,
+  descriptor: readonly (NativeRowDescriptorField | DescriptorField)[],
+): void {
+  writer.vec((fieldWriter, index) => {
+    const field = descriptor[index]!;
+    fieldWriter.u64("kind" in field && field.kind === "logical-field" ? 1 : 0);
+    fieldWriter.string(field.name ?? "");
+    writeValueType(fieldWriter, field.valueType);
+  }, descriptor.length);
+}
+
+export function readNativeRowDescriptor(reader: PostcardReaderLike): NativeRowDescriptorField[] {
+  return reader.readVec((fieldReader) => {
+    const kindTag = fieldReader.u64();
+    const kind =
+      kindTag === 0
+        ? "physical-column"
+        : kindTag === 1
+          ? "logical-field"
+          : invalidNativeRowDescriptorFieldKind(kindTag);
+    return { kind, name: fieldReader.string(), valueType: readValueType(fieldReader) };
+  });
+}
+
+function invalidNativeRowDescriptorFieldKind(kindTag: number): never {
+  throw new Error(`unknown native row descriptor field kind ${kindTag}`);
 }
 
 export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeSubscriptionDelta {

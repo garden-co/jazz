@@ -16,15 +16,17 @@ describe("formatUuid", () => {
 });
 
 describe("native row descriptor cache keys", () => {
-  it("uses explicit batch provenance when a physical column collides with a logical user_ field", () => {
+  it("uses explicit field provenance for hybrid physical and logical user_ fields", () => {
     const schema = {
       notes: {
         columns: [{ name: "check", column_type: { type: "Text" }, nullable: false }],
       },
     } satisfies WasmSchema;
-    const descriptor = [{ name: "user_check", valueType: { tag: 8 } as const }];
-    const physicalBatch = {
-      kind: "current-row" as const,
+    const descriptor = [
+      { kind: "physical-column" as const, name: "user_check", valueType: { tag: 8 } as const },
+      { kind: "logical-field" as const, name: "user_check", valueType: { tag: 8 } as const },
+    ];
+    const hybridBatch = {
       table: "notes",
       descriptor,
       rows: [
@@ -33,33 +35,30 @@ describe("native row descriptor cache keys", () => {
           deleted: false,
           raw: createRecord(descriptor, [
             Uint8Array.from([2, ...new TextEncoder().encode("included")]),
+            Uint8Array.from([2, ...new TextEncoder().encode("collector")]),
           ]),
         },
       ],
     };
-    const logicalBatch = { ...physicalBatch, kind: "query-result" as const };
-
-    const physical = rowsFromBatches([physicalBatch], schema)[0] as {
+    const hybrid = rowsFromBatches([hybridBatch], schema)[0] as {
       valuesByColumn?: Map<string, unknown>;
     };
-    const logical = rowsFromBatches([logicalBatch], schema)[0] as {
-      valuesByColumn?: Map<string, unknown>;
-    };
-    expect(physical?.valuesByColumn?.get("check")).toMatchObject({ type: "Text" });
-    expect(physical?.valuesByColumn?.has("user_check")).toBe(false);
-    expect(logical?.valuesByColumn?.get("user_check")).toMatchObject({ type: "Bytea" });
-    expect(logical?.valuesByColumn?.has("check")).toBe(false);
-    expect(nativeRowFieldPlanCacheKey(physicalBatch)).not.toBe(
-      nativeRowFieldPlanCacheKey(logicalBatch),
+    expect(hybrid?.valuesByColumn?.get("check")).toMatchObject({ type: "Text" });
+    expect(hybrid?.valuesByColumn?.get("user_check")).toMatchObject({ type: "Bytea" });
+    expect(nativeRowFieldPlanCacheKey(hybridBatch)).not.toBe(
+      nativeRowFieldPlanCacheKey({
+        ...hybridBatch,
+        descriptor: [{ ...descriptor[0]!, kind: "logical-field" as const }, descriptor[1]!],
+      }),
     );
   });
 
   it("includes the table identity", () => {
-    const descriptor = [{ name: "value", valueType: { tag: 8 } }];
+    const descriptor = [{ kind: "physical-column" as const, name: "value", valueType: { tag: 8 } }];
 
-    expect(
-      nativeRowFieldPlanCacheKey({ kind: "current-row", table: "first", descriptor }),
-    ).not.toBe(nativeRowFieldPlanCacheKey({ kind: "current-row", table: "second", descriptor }));
+    expect(nativeRowFieldPlanCacheKey({ table: "first", descriptor })).not.toBe(
+      nativeRowFieldPlanCacheKey({ table: "second", descriptor }),
+    );
   });
 
   it("includes payload enum registry identity when cases match", () => {
@@ -145,15 +144,13 @@ describe("native row descriptor cache keys", () => {
     expect(valueTypeCacheKey(payloadEnum)).not.toBe(valueTypeCacheKey(changedPayloadEnumCase));
     expect(
       nativeRowFieldPlanCacheKey({
-        kind: "current-row",
         table: "events",
-        descriptor: [{ name: "event", valueType: payloadEnum }],
+        descriptor: [{ kind: "physical-column", name: "event", valueType: payloadEnum }],
       }),
     ).not.toBe(
       nativeRowFieldPlanCacheKey({
-        kind: "current-row",
         table: "events",
-        descriptor: [{ name: "event", valueType: changedPayloadEnum }],
+        descriptor: [{ kind: "physical-column", name: "event", valueType: changedPayloadEnum }],
       }),
     );
   });
@@ -183,14 +180,21 @@ describe("native row descriptor cache keys", () => {
       { name: "ignored_fixed_field", valueType: { tag: 4 } },
     ];
     const firstDescriptor = [
-      { name: "child", valueType: { tag: 16, record: firstChildDescriptor } },
+      {
+        kind: "physical-column" as const,
+        name: "child",
+        valueType: { tag: 16, record: firstChildDescriptor },
+      },
     ];
     const secondDescriptor = [
-      { name: "child", valueType: { tag: 16, record: secondChildDescriptor } },
+      {
+        kind: "physical-column" as const,
+        name: "child",
+        valueType: { tag: 16, record: secondChildDescriptor },
+      },
     ];
     const childId = "00000000-0000-0000-0000-0000000000c1";
     const firstBatch = {
-      kind: "current-row" as const,
       table: "parents",
       descriptor: firstDescriptor,
       rows: [
@@ -207,7 +211,6 @@ describe("native row descriptor cache keys", () => {
       ],
     };
     const secondBatch = {
-      kind: "current-row" as const,
       table: "parents",
       descriptor: secondDescriptor,
       rows: [

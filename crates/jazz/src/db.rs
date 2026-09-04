@@ -39,7 +39,7 @@ pub use crate::node::CommitUnitTrust;
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, CurrentRowBindingKind, EdgeCacheBudget,
+    CommitUnitIngestContext, CurrentRow, CurrentRowBindingField, EdgeCacheBudget,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
     NodeState, PreparedQueryPlanHandle, PublicationOutcome, PublishedTransaction, QueryReadProfile,
     RelationEdge, RelationSnapshot, RowProvenance, TransactionBranchRowState, ViewUpdateParts,
@@ -5475,10 +5475,10 @@ fn materialize_subscription_terminal_record(
                 "retained terminal root position is outside snapshot",
             )
         })?;
-        *root = CurrentRow::new_with_binding_kind(
+        *root = CurrentRow::new_with_explicit_binding_fields(
             root.table().to_owned(),
             record.record()?,
-            root.binding_kind(),
+            root.binding_fields().to_vec(),
         );
     }
     Ok(())
@@ -5579,17 +5579,27 @@ fn terminal_subscription_output_row(
 
     Ok(SubscriptionOutputRow {
         occurrence_id,
-        row: CurrentRow::new_with_binding_kind(
+        row: CurrentRow::new_with_explicit_binding_fields(
             table.to_owned(),
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
-            match layout.carrier {
-                TerminalRootCarrier::CurrentRow => CurrentRowBindingKind::PhysicalCurrentRow,
-                TerminalRootCarrier::Logical => CurrentRowBindingKind::LogicalQueryResult,
-            },
+            terminal_root_binding_fields(layout),
         ),
         previous_index,
         index,
     })
+}
+
+fn terminal_root_binding_fields(layout: &TerminalRootLayout) -> Vec<CurrentRowBindingField> {
+    let binding_for_carrier = |carrier| match carrier {
+        TerminalRootCarrier::CurrentRow => CurrentRowBindingField::PhysicalColumn,
+        TerminalRootCarrier::Logical => CurrentRowBindingField::LogicalField,
+    };
+    let mut fields =
+        vec![binding_for_carrier(layout.carrier); layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        fields[field.slot] = binding_for_carrier(field.carrier);
+    }
+    fields
 }
 
 /// Decode the Groove ordered key used to address one root output occurrence.

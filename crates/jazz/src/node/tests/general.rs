@@ -1,4 +1,38 @@
 #[test]
+fn project_preserves_logical_binding_fields() {
+    // Query results use the same projection transform as current rows. The
+    // descriptor tag must survive so a logical public `user_check` is not
+    // decoded as physical application column `check` by a native host.
+    let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_check".to_owned(), records::ValueType::Bool),
+        ("$createdBy".to_owned(), records::ValueType::String),
+        ("$createdAt".to_owned(), records::ValueType::U64),
+        ("$updatedBy".to_owned(), records::ValueType::String),
+        ("$updatedAt".to_owned(), records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6d).0),
+            Value::Bool(true),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(10),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let projected = CurrentRow::new_logical("items", OwnedRecord::new(raw, descriptor))
+        .project(&table, &["check".to_owned()])
+        .expect("project logical result");
+
+    assert_eq!(
+        projected.binding_fields()[1],
+        CurrentRowBindingField::LogicalField
+    );
+}
+
+#[test]
 fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
     fn current_row(
         physical: bool,

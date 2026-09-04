@@ -1,5 +1,5 @@
 import { PostcardWriter, type NativeRowBatch } from "./native-codec.js";
-import { writeDescriptor, writeValueType, type ValueType } from "./native-row-codec.js";
+import { writeNativeRowDescriptor, writeValueType, type ValueType } from "./native-row-codec.js";
 
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 
@@ -20,12 +20,11 @@ export function valueTypeCacheKey(type: ValueType): string {
 
 /** A wire-exact cache key for the descriptor that controls row decoding. */
 export function nativeRowFieldPlanCacheKey(
-  batch: Pick<NativeRowBatch, "kind" | "table" | "descriptor">,
+  batch: Pick<NativeRowBatch, "table" | "descriptor">,
 ): string {
   const writer = new PostcardWriter();
-  writer.u64(batch.kind === "current-row" ? 0 : 1);
   writer.string(batch.table);
-  writeDescriptor(writer, [...batch.descriptor]);
+  writeNativeRowDescriptor(writer, [...batch.descriptor]);
   return bytesToHex(writer.finish());
 }
 

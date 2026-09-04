@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { PostcardWriter, createRecord, writeDescriptor } from "./native-codec.js";
+import { PostcardWriter, createRecord, writeNativeRowDescriptor } from "./native-codec.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import {
@@ -45,9 +45,8 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
   writer.vec((batch, batchIndex) => {
     const [table, tableRows] = Array.from(byTable.entries())[batchIndex]!;
     const descriptor = [{ name: "title", valueType: { tag: 8 } }];
-    batch.u64(0); // current-row
     batch.string(table);
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(batch, descriptor);
     batch.vec((row, index) => {
       const source = tableRows[index]!;
       row.bytes(source.rowId);

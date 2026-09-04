@@ -1382,21 +1382,20 @@ pub struct CurrentRow {
     table: groove::Intern<String>,
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
-    binding_kind: CurrentRowBindingKind,
+    binding_fields: std::sync::Arc<Vec<CurrentRowBindingField>>,
 }
 
-/// The native-host interpretation of a materialized record descriptor.
+/// The native-host interpretation of one materialized record-descriptor field.
 ///
-/// Current-row records use Jazz's private physical `user_{column}` namespace.
-/// Query materializers can instead create public logical records, whose field
-/// names must reach a binding unchanged. This stays internal to Jazz's native
-/// binding codec; it is neither storage nor sync-wire state.
+/// A descriptor may mix physical application columns with collector-owned
+/// logical fields. This stays internal to Jazz's native binding codec; it is
+/// neither storage nor sync-wire state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CurrentRowBindingKind {
-    /// A direct persisted CurrentRow descriptor using physical Jazz names.
-    PhysicalCurrentRow,
-    /// A collector or projection descriptor using logical public field names.
-    LogicalQueryResult,
+pub enum CurrentRowBindingField {
+    /// A persisted CurrentRow field using Jazz's private physical name.
+    PhysicalColumn,
+    /// A query, relation, or collector field using its public logical name.
+    LogicalField,
 }
 
 /// Work performed by the durable local-write replay lookup.
@@ -1452,24 +1451,38 @@ pub struct RelationSnapshot {
 impl CurrentRow {
     /// Construct a current row from an encoded projection record.
     pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
-        Self::new_with_binding_kind(table, record, CurrentRowBindingKind::PhysicalCurrentRow)
+        Self::new_with_binding_fields(table, record, CurrentRowBindingField::PhysicalColumn)
     }
 
     /// Construct a row whose descriptor has public logical query-result names.
     pub(crate) fn new_logical(table: impl Into<String>, record: OwnedRecord) -> Self {
-        Self::new_with_binding_kind(table, record, CurrentRowBindingKind::LogicalQueryResult)
+        Self::new_with_binding_fields(table, record, CurrentRowBindingField::LogicalField)
     }
 
-    pub(crate) fn new_with_binding_kind(
+    pub(crate) fn new_with_binding_fields(
         table: impl Into<String>,
         record: OwnedRecord,
-        binding_kind: CurrentRowBindingKind,
+        default_field: CurrentRowBindingField,
     ) -> Self {
+        let binding_fields = vec![default_field; record.descriptor().fields().len()];
+        Self::new_with_explicit_binding_fields(table, record, binding_fields)
+    }
+
+    pub(crate) fn new_with_explicit_binding_fields(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        binding_fields: Vec<CurrentRowBindingField>,
+    ) -> Self {
+        assert_eq!(
+            binding_fields.len(),
+            record.descriptor().fields().len(),
+            "native binding fields must align with their record descriptor"
+        );
         Self {
             table: groove::Intern::new(table.into()),
             record: std::sync::Arc::new(record),
             deleted: false,
-            binding_kind,
+            binding_fields: std::sync::Arc::new(binding_fields),
         }
     }
 
@@ -1483,10 +1496,10 @@ impl CurrentRow {
         self.deleted
     }
 
-    /// The explicit native-binding provenance of the encoded descriptor.
+    /// The explicit native-binding provenance of every encoded descriptor field.
     #[doc(hidden)]
-    pub fn binding_kind(&self) -> CurrentRowBindingKind {
-        self.binding_kind
+    pub fn binding_fields(&self) -> &[CurrentRowBindingField] {
+        &self.binding_fields
     }
 
     /// Logical table name.
@@ -1544,6 +1557,23 @@ impl CurrentRow {
             Value::Nullable(Some(value)) => Some(*value),
             value => Some(value),
         }
+    }
+
+    fn binding_field_for_column(
+        &self,
+        table: &TableSchema,
+        column: &str,
+    ) -> Option<CurrentRowBindingField> {
+        let _ = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)?;
+        let user_name = user_column_field(column);
+        let index = self.record.descriptor().fields().iter().position(|field| {
+            field.name.as_deref() == Some(user_name.as_str())
+                || field.name.as_deref() == Some(column)
+        })?;
+        self.binding_fields.get(index).copied()
     }
 
     /// Encoded groove record backing this projected current row.
@@ -1643,6 +1673,13 @@ impl CurrentRow {
                 ]),
         );
         let mut values = vec![Value::Uuid(self.row_uuid().0)];
+        let row_uuid_field = self
+            .record
+            .descriptor()
+            .field_index("row_uuid")
+            .and_then(|index| self.binding_fields.get(index).copied())
+            .unwrap_or(CurrentRowBindingField::LogicalField);
+        let mut binding_fields = vec![row_uuid_field];
         for column in projected_columns {
             let cell = self.cell(table, &column.name);
             let projected = if matches!(column.column_type, records::ValueType::Nullable(_)) {
@@ -1657,17 +1694,31 @@ impl CurrentRow {
                 Value::Nullable(cell.map(Box::new))
             };
             values.push(projected);
+            binding_fields.push(
+                self.binding_field_for_column(table, &column.name)
+                    .unwrap_or(CurrentRowBindingField::LogicalField),
+            );
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));
             values.push(Value::U64(provenance.created_at));
             values.push(Value::String(provenance.updated_by.canonical().to_owned()));
             values.push(Value::U64(provenance.updated_at));
+            binding_fields.extend(
+                ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"]
+                    .into_iter()
+                    .map(|column| {
+                        self.provenance_field_index(column)
+                            .and_then(|index| self.binding_fields.get(index).copied())
+                            .unwrap_or(CurrentRowBindingField::LogicalField)
+                    }),
+            );
         } else {
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
+            binding_fields.extend([CurrentRowBindingField::LogicalField; 4]);
         }
         if let Some((time, node)) = self.projected_tx_alias() {
             values.push(Value::U64(time.0));
@@ -1676,10 +1727,12 @@ impl CurrentRow {
             values.push(Value::U64(0));
             values.push(Value::U64(0));
         }
+        binding_fields.extend([CurrentRowBindingField::LogicalField; 2]);
         let raw = descriptor.create(&values)?;
-        Ok(Self::new(
+        Ok(Self::new_with_explicit_binding_fields(
             table.name.clone(),
             OwnedRecord::new(raw, descriptor),
+            binding_fields,
         ))
     }
 
