@@ -4001,7 +4001,9 @@ mod tests {
                             terminal,
                         })
                     }
-                    ControlledAdmissionResult::Refused(error) => Err(NativeTransportError(error)),
+                    ControlledAdmissionResult::Refused(error) => {
+                        Err(NativeTransportError::Terminal(error))
+                    }
                 }
             })
         }
@@ -4011,7 +4013,7 @@ mod tests {
             _request: NativeTransportRequest,
         ) -> NativeCatalogueBootstrapFuture {
             Box::pin(async {
-                Err(NativeTransportError(
+                Err(NativeTransportError::Terminal(
                     "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
                 ))
             })
@@ -5183,7 +5185,9 @@ mod tests {
                     ),
                     (
                         "failed",
-                        NativeTransportTerminal::Failed(NativeTransportError("failed".to_owned())),
+                        NativeTransportTerminal::Failed(NativeTransportError::Terminal(
+                            "failed".to_owned(),
+                        )),
                     ),
                 ] {
                     let (mut first, first_admission) = successful_controlled_admission();
@@ -5495,9 +5499,9 @@ mod tests {
                 .expect("connect");
                 let observed = Arc::clone(&first.observed);
 
-                first.send(NativeTransportTerminal::Failed(NativeTransportError(
-                    "controlled terminal failure".to_owned(),
-                )));
+                first.send(NativeTransportTerminal::Failed(
+                    NativeTransportError::Terminal("controlled terminal failure".to_owned()),
+                ));
                 wait_for_terminal_observation(&observed).await;
                 wait_for_connect_count(&connector, 2).await;
                 tokio::task::yield_now().await;

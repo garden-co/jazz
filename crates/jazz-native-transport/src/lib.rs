@@ -56,6 +56,7 @@ pub enum WebSocketClientError {
     DecodeFrame(postcard::Error),
     Negotiation(WireError),
     ServerRejected(String),
+    ServerWireError(WireError),
 }
 
 impl fmt::Display for WebSocketClientError {
@@ -77,11 +78,33 @@ impl fmt::Display for WebSocketClientError {
             Self::DecodeFrame(error) => write!(f, "failed to decode frame: {error}"),
             Self::Negotiation(error) => write!(f, "websocket negotiation failed: {error:?}"),
             Self::ServerRejected(reason) => write!(f, "websocket rejected: {reason}"),
+            Self::ServerWireError(error) => write!(f, "websocket rejected: {error:?}"),
         }
     }
 }
 
 impl std::error::Error for WebSocketClientError {}
+
+/// Match typed transport/wire causes, never diagnostic strings. Only the same
+/// NotReady/Later admission response accepted by the browser is retryable.
+fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
+    let retryable = match &error {
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(_))
+        | WebSocketClientError::Send(tokio_tungstenite::tungstenite::Error::Io(_))
+        | WebSocketClientError::Receive(tokio_tungstenite::tungstenite::Error::Io(_))
+        | WebSocketClientError::HandshakeTimeout => true,
+        WebSocketClientError::ServerWireError(error) => {
+            error.code == jazz::wire::WireErrorCode::NotReady
+                && error.retry == jazz::wire::WireRetry::Later
+        }
+        _ => false,
+    };
+    if retryable {
+        NativeTransportError::Retryable(error.to_string())
+    } else {
+        NativeTransportError::Terminal(error.to_string())
+    }
+}
 
 pub struct WebSocketTransport {
     inbound: Arc<Mutex<mpsc::Receiver<InboundFrame>>>,
@@ -109,7 +132,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
         app_id: AppId,
     ) -> Result<(), jazz::tools::native_transport_connector::NativeTransportError> {
         validate_catalogue_bootstrap_upstream_url(server_url, app_id)
-            .map_err(jazz::tools::native_transport_connector::NativeTransportError)
+            .map_err(NativeTransportError::Terminal)
     }
 
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
@@ -124,9 +147,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.wake,
             )
             .await
-            .map_err(|error| {
-                jazz::tools::native_transport_connector::NativeTransportError(error.to_string())
-            })?;
+            .map_err(native_transport_error)?;
             let (protocol_version, features, session_context) =
                 transport.negotiated_transport_metadata();
             let terminal = transport.take_terminal_future();
@@ -153,9 +174,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.auth,
             )
             .await
-            .map_err(|error| {
-                jazz::tools::native_transport_connector::NativeTransportError(error.to_string())
-            })
+            .map_err(native_transport_error)
         })
     }
 }
@@ -522,7 +541,7 @@ impl WebSocketTransport {
             .expect("native transport terminal future is taken exactly once");
         Box::pin(async move {
             terminal.await.unwrap_or_else(|_| {
-                NativeTransportTerminal::Failed(NativeTransportError(
+                NativeTransportTerminal::Failed(NativeTransportError::Terminal(
                     "websocket pump stopped without a terminal reason".to_owned(),
                 ))
             })
@@ -671,10 +690,7 @@ async fn receive_server_hello(
     let frame = decode_frame(&encoded[0]).map_err(WebSocketClientError::DecodeFrame)?;
     let WireFrame::Hello(hello) = frame else {
         if let WireFrame::Error(error) = frame {
-            return Err(WebSocketClientError::ServerRejected(format!(
-                "{:?}: {}",
-                error.code, error.message
-            )));
+            return Err(WebSocketClientError::ServerWireError(error));
         }
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     };
@@ -733,7 +749,7 @@ async fn run_ws_pump(
                             let bytes = match encode_outbound_batch(&batch) {
                                 Ok(bytes) => bytes,
                                 Err(error) => {
-                                    return NativeTransportTerminal::Failed(NativeTransportError(
+                                    return NativeTransportTerminal::Failed(NativeTransportError::Terminal(
                                         format!(
                                             "failed to encode websocket wire batch: {error}"
                                         ),
@@ -741,7 +757,7 @@ async fn run_ws_pump(
                                 }
                             };
                             if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                                return NativeTransportTerminal::Failed(NativeTransportError(
+                                return NativeTransportTerminal::Failed(NativeTransportError::Terminal(
                                     format!("websocket send failed: {error}"),
                                 ));
                             }
@@ -757,13 +773,13 @@ async fn run_ws_pump(
                     let bytes = match encode_outbound_batch(&batch) {
                         Ok(bytes) => bytes,
                         Err(error) => {
-                            return NativeTransportTerminal::Failed(NativeTransportError(format!(
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(format!(
                                 "failed to encode websocket wire batch: {error}"
                             )));
                         }
                     };
                     if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                        return NativeTransportTerminal::Failed(NativeTransportError(format!(
+                        return NativeTransportTerminal::Failed(NativeTransportError::Terminal(format!(
                             "websocket send failed: {error}"
                         )));
                     }
@@ -785,12 +801,12 @@ async fn run_ws_pump(
                             let reason = "websocket peer sent a non-binary wire batch".to_owned();
                             fail_inbound(&inbound_error, &inbound_notify, &reason);
                             let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError(reason));
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
                         }
                         Some(Err(error)) => {
                             let reason = format!("websocket receive failed: {error}");
                             fail_inbound(&inbound_error, &inbound_notify, &reason);
-                            return NativeTransportTerminal::Failed(NativeTransportError(reason));
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
                         }
                         None => {
                             let reason = "websocket peer closed before completing wire exchange"
@@ -804,14 +820,14 @@ async fn run_ws_pump(
                         Err(error) => {
                             fail_inbound(&inbound_error, &inbound_notify, &error);
                             let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError(error));
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
                         }
                     };
                     for frame in frames {
                         if let Err(error) = validate_wire_frame_len(frame.len()) {
                             fail_inbound(&inbound_error, &inbound_notify, &error);
                             let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError(error));
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
                         }
                         let permits =
                             u32::try_from(frame.len()).expect("wire frame limit fits u32");
@@ -853,6 +869,45 @@ fn decode_inbound_batch(bytes: &[u8], _bootstrap_catalogue: bool) -> Result<Vec<
 
 #[cfg(test)]
 mod tests {
+    // This adapter classification has no Db-level API: assert the typed socket
+    // and wire boundary, including conflicting error guidance, directly.
+    #[test]
+    fn native_connection_failures_preserve_retry_and_auth_categories() {
+        use jazz::wire::{WireErrorCode, WireRetry};
+        let refused = WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(
+            std::io::ErrorKind::ConnectionRefused.into(),
+        ));
+        assert!(native_transport_error(refused).is_retryable());
+        assert!(native_transport_error(WebSocketClientError::HandshakeTimeout).is_retryable());
+        for (code, retry, expected) in [
+            (WireErrorCode::NotReady, WireRetry::Later, true),
+            (WireErrorCode::NotReady, WireRetry::AfterAuth, false),
+            (WireErrorCode::AuthFailed, WireRetry::AfterAuth, false),
+            (WireErrorCode::AuthFailed, WireRetry::Later, false),
+            (WireErrorCode::MalformedFrame, WireRetry::Later, false),
+        ] {
+            assert_eq!(
+                native_transport_error(WebSocketClientError::ServerWireError(WireError::new(
+                    code,
+                    retry,
+                    "connection refused: diagnostic is not authority"
+                ),))
+                .is_retryable(),
+                expected
+            );
+        }
+        assert!(
+            !native_transport_error(WebSocketClientError::ServerRejected(
+                "connection refused".to_owned(),
+            ))
+            .is_retryable()
+        );
+        assert!(
+            !native_transport_error(WebSocketClientError::UnexpectedHandshakeMessage)
+                .is_retryable()
+        );
+    }
+
     use super::*;
     use jazz::db::Transport;
     use jazz::wire::WIRE_PROTOCOL_VERSION;

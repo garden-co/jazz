@@ -3982,9 +3982,11 @@ async fn run_native_relay_socket_worker(
         let connected = match connected {
             Ok(connected) => connected,
             Err(error) => {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay socket connect failed: {error}"
-                )));
+                if !error.is_retryable() {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay socket connect failed: {error}"
+                    )));
+                }
                 (config.on_event)(NativeRelaySocketEvent::Reconnecting);
                 tokio::select! {
                     _ = tokio::time::sleep(config.reconnect_delay) => {},
@@ -6498,6 +6500,62 @@ mod tests {
     /// acceptance receipt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn private_session_edge_core_write_survives_worker_and_relay_restart() {
+        private_session_restart_receipt(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn private_session_edge_core_write_survives_offline_relay_restart() {
+        private_session_restart_receipt(true).await;
+    }
+
+    /// The C ABI must surface an actual Edge authentication denial, even though
+    /// a disconnected peer no longer disables local SQLite work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn private_session_invalid_bearer_still_fails_closed() {
+        let issuer = TestJwtIssuer::start().await;
+        let schema = schema();
+        let edge = JazzServer::builder()
+            .with_schema(schema.public_schema().clone())
+            .with_jwks_url(issuer.endpoint())
+            .with_native_transport_connector(jazz_testkit::native_connector())
+            .start()
+            .await;
+        let mut bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
+        let signature = bearer.rfind('.').unwrap() + 1;
+        let replacement = if &bearer[signature..signature + 1] == "A" {
+            "B"
+        } else {
+            "A"
+        };
+        bearer.replace_range(signature..signature + 1, replacement);
+        let storage = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let admitted = fixture.begin_private_session(
+            &edge.base_url(),
+            &edge.app_id().to_string(),
+            &bearer,
+            storage.path(),
+            &schema,
+        );
+        let foreground = fixture.open_foreground(&admitted);
+        jazz_testkit::wait_for(
+            Duration::from_secs(5),
+            "invalid signature fails the native foreground closed",
+            || {
+                let denied =
+                    fixture.tick_status(foreground) == JazzNativeRelayStatus::LifecycleFailure;
+                async move { denied.then_some(()) }
+            },
+        )
+        .await;
+        fixture.revoke_private_session(&admitted);
+        assert_eq!(
+            edge.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
+    }
+
+    async fn private_session_restart_receipt(offline: bool) {
         let issuer = TestJwtIssuer::start().await;
         let schema = schema();
         let public_schema = schema.public_schema().clone();
@@ -6579,23 +6637,41 @@ mod tests {
             "revoked private-session capability cannot restart the old worker"
         );
 
-        let reopened = fixture.begin_private_session(
-            &edge.base_url(),
-            &core.app_id().to_string(),
-            &bearer,
-            storage.path(),
-            &schema,
-        );
+        let endpoint = edge.base_url();
+        let app_id = core.app_id().to_string();
+        let mut edge = Some(edge);
+        let mut core = Some(core);
+        if offline {
+            assert_eq!(
+                edge.take().unwrap().shutdown().await,
+                jazz_server::ShutdownPhase::StorageClosed
+            );
+            assert_eq!(
+                core.take().unwrap().shutdown().await,
+                jazz_server::ShutdownPhase::StorageClosed
+            );
+        }
+
+        let reopened =
+            fixture.begin_private_session(&endpoint, &app_id, &bearer, storage.path(), &schema);
         let reopened_foreground = fixture.open_foreground(&reopened);
-        jazz_testkit::wait_for(
-            Duration::from_secs(15),
-            "replacement native worker reconnects through normal Edge auth",
-            || {
-                let connected = edge.server_state().shutdown.active_websockets() > 0;
-                async move { connected.then_some(()) }
-            },
-        )
-        .await;
+        if !offline {
+            jazz_testkit::wait_for(
+                Duration::from_secs(15),
+                "replacement native worker reconnects through normal Edge auth",
+                || {
+                    let connected = edge
+                        .as_ref()
+                        .unwrap()
+                        .server_state()
+                        .shutdown
+                        .active_websockets()
+                        > 0;
+                    async move { connected.then_some(()) }
+                },
+            )
+            .await;
+        }
         wait_for_persisted_todo(
             &fixture,
             reopened_foreground,
@@ -6606,14 +6682,16 @@ mod tests {
         .await;
 
         fixture.revoke_private_session(&reopened);
-        assert_eq!(
-            edge.shutdown().await,
-            jazz_server::ShutdownPhase::StorageClosed
-        );
-        assert_eq!(
-            core.shutdown().await,
-            jazz_server::ShutdownPhase::StorageClosed
-        );
+        if !offline {
+            assert_eq!(
+                edge.take().unwrap().shutdown().await,
+                jazz_server::ShutdownPhase::StorageClosed
+            );
+            assert_eq!(
+                core.take().unwrap().shutdown().await,
+                jazz_server::ShutdownPhase::StorageClosed
+            );
+        }
     }
 
     impl Drop for NativeHostAbiFixture {

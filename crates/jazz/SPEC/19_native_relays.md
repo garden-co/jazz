@@ -49,8 +49,14 @@ joins that worker before publishing offline state; reconnect restarts it using
 the retained native admission. Trusted scope revocation and host teardown
 stop the worker and retire the admission. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
 accepted only for `localhost`, IP loopback, or the documented Android emulator
-host aliases (`10.0.2.2` and `10.0.3.2`). A failed connect, bridge, owner pump,
-or established transport is recorded as a scope terminal error and surfaced to
+host aliases (`10.0.2.2` and `10.0.3.2`). Typed connection I/O failures and
+handshake timeouts leave local relay work available while the worker retries.
+A structured pre-Hello `NotReady`/`Later` response is likewise retryable,
+matching browser admission. Authentication denial, invalid protocol, TLS, and
+unclassified connection failures remain terminal; diagnostic text never selects
+this category. A retryable failure cannot clear a previous terminal denial.
+A failed bridge, owner pump, or established transport is also recorded as a
+scope terminal error and surfaced to
 foreground ticks until a later authenticated reconnect clears it; it may never
 silently degrade into an indefinitely pending foreground operation.
 
