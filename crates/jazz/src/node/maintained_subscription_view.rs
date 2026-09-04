@@ -2129,7 +2129,12 @@ fn decode_typed_terminal_record(
                 value_fields: schema
                     .value_fields
                     .iter()
-                    .map(|field| field.name.clone())
+                    .map(|field| {
+                        field
+                            .name
+                            .clone()
+                            .expect("lowered aggregate output is named")
+                    })
                     .collect(),
             })
         }
@@ -2222,12 +2227,13 @@ fn decode_aggregate_app_row(
     let descriptor = record.descriptor();
     let (row_value, row_type) = match schema.group_key_fields.first() {
         Some(group) => {
-            let index =
-                descriptor
-                    .field_index(&group.name)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "aggregate app-row terminal is missing group identity",
-                    ))?;
+            let index = descriptor
+                .field_index_by_identity(group.identity.as_ref().ok_or(
+                    super::Error::InvalidStoredValue("aggregate group has no lowered identity"),
+                )?)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate app-row terminal is missing group identity",
+                ))?;
             let field = descriptor
                 .fields()
                 .get(index)
@@ -2241,12 +2247,13 @@ fn decode_aggregate_app_row(
     let row = settled_result_value_storage_bytes(&row_value, &row_type)?;
     let (replacement_value, replacement_type) = match schema.value_fields.first() {
         Some(output) => {
-            let index =
-                descriptor
-                    .field_index(&output.name)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "aggregate app-row terminal is missing aggregate output",
-                    ))?;
+            let index = descriptor
+                .field_index_by_identity(output.identity.as_ref().ok_or(
+                    super::Error::InvalidStoredValue("aggregate output has no lowered identity"),
+                )?)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate app-row terminal is missing aggregate output",
+                ))?;
             let field = descriptor
                 .fields()
                 .get(index)
@@ -2275,7 +2282,12 @@ fn decode_aggregate_app_row(
         value_fields: schema
             .value_fields
             .iter()
-            .map(|field| field.name.clone())
+            .map(|field| {
+                field
+                    .name
+                    .clone()
+                    .expect("lowered aggregate output is named")
+            })
             .collect(),
     })
 }

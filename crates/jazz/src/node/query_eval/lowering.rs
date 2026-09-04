@@ -225,7 +225,12 @@ pub(super) fn fact_public_fields(
                     .group_key_fields
                     .iter()
                     .chain(&schema.value_fields)
-                    .map(|field| field.name.clone()),
+                    .map(|field| {
+                        field
+                            .name
+                            .clone()
+                            .expect("lowered aggregate field is named")
+                    }),
             );
             fields.extend(schema.routing_param_fields.iter().cloned());
             Ok(fields)

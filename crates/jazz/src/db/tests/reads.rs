@@ -2647,9 +2647,6 @@ fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joi
             _ => None,
         })
         .expect("title has a stored binding");
-    // Grouped one-shot publication is covered here. Grouped reset currently
-    // fails earlier in the existing aggregate group-identity regression set;
-    // that compiler repair and reset receipt are tracked separately.
     let grouped = prepared_all(
         &db,
         &Query::from("todos").count().group_by("title"),
@@ -2673,6 +2670,7 @@ fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joi
         RowDescriptorFieldName::ResultField { name: "$createdAt" }
     )));
     for query in [
+        Query::from("todos").count().group_by("title"),
         Query::from("todos").select(["title", "$createdAt", "$updatedBy"]),
         Query::from("todos").aggregate([crate::query::Aggregate::count().alias("schema_version")]),
         Query::from("users").array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id")),
@@ -2703,6 +2701,22 @@ fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joi
         let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
         let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
         assert!(!snapshot.rows.is_empty());
+        if let Some(aggregate) = &query.aggregate {
+            assert_eq!(snapshot.rows.len(), 1);
+            assert_eq!(
+                snapshot.rows[0].application_field(&aggregate.aggregates[0].alias),
+                Some(Value::U64(1)),
+                "aggregate reset preserves the computed count",
+            );
+            if aggregate.group_by.is_some() {
+                assert!(snapshot.rows[0].application_field("title").is_some());
+                assert_eq!(
+                    snapshot.rows[0].application_field("title"),
+                    Some(Value::String("task".to_owned()))
+                );
+            }
+        }
+
         assert!(
             !encode_relation_snapshot(&snapshot)
                 .expect("reset producer retains finalized bindings")

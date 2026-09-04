@@ -3149,7 +3149,7 @@ fn aggregate_result_schema(
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<AggregateResultSchema> {
-    let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
+    let (group_by, _) = root_aggregate_step(plan).ok_or_else(|| {
         Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Runtime(
                 "aggregate result schema requested for non-aggregate plan".to_owned(),
@@ -3157,10 +3157,10 @@ fn aggregate_result_schema(
             explain: ExplainPlan::default(),
         })
     })?;
-    let group_key_fields = group_by
-        .iter()
-        .map(|value| aggregate_typed_group_field(value, source))
-        .collect::<CapabilityResult<Vec<_>>>()?;
+    // Use the same typed fields as the emitted app-row descriptor. Carrier
+    // spellings are diagnostic/output metadata, never a lookup identity.
+    let descriptor = aggregate_app_row_descriptor(plan, source)?;
+    let (group_key_fields, value_fields) = descriptor.fields().split_at(group_by.len());
     Ok(AggregateResultSchema {
         synthetic: SyntheticResultMembershipSchema {
             table_field: "table_name".to_owned(),
@@ -3168,11 +3168,8 @@ fn aggregate_result_schema(
             replacement_field: "synthetic_replacement".to_owned(),
             routing_param_fields: routing_param_fields.clone(),
         },
-        group_key_fields,
-        value_fields: outputs
-            .iter()
-            .map(|output| aggregate_typed_output_field(output, source))
-            .collect::<CapabilityResult<Vec<_>>>()?,
+        group_key_fields: group_key_fields.to_vec(),
+        value_fields: value_fields.to_vec(),
         routing_param_fields,
     })
 }
@@ -3256,37 +3253,6 @@ fn aggregate_result_membership_fields(
     );
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)
-}
-
-fn aggregate_typed_group_field(
-    value: &NormalizedValueRef,
-    source: &ResolvedSource,
-) -> CapabilityResult<TypedOutputField> {
-    let field = aggregate_source_field_name(value, source)?;
-    let value_type = aggregate_carrier_field_type(source, &field)
-        .cloned()
-        .ok_or_else(|| {
-            Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Runtime(format!(
-                    "aggregate group field {field:?} is missing from resolved descriptor"
-                ))],
-                explain: ExplainPlan::default(),
-            })
-        })?;
-    Ok(TypedOutputField {
-        name: field,
-        ty: value_type,
-    })
-}
-
-fn aggregate_typed_output_field(
-    output: &AggregateExpr,
-    source: &ResolvedSource,
-) -> CapabilityResult<TypedOutputField> {
-    Ok(TypedOutputField {
-        name: aggregate_output_field(&output.output.name),
-        ty: aggregate_output_value_type(output, source)?,
-    })
 }
 
 fn aggregate_output_value_type(

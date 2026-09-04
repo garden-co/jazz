@@ -229,14 +229,19 @@ that representation. Scalar type variant numbers and enum registry metadata
 remain unchanged. This is a native publication DTO, not a blanket change to
 execution descriptor serde or VersionRecord peer-wire serialization.
 
-The original contained relation snapshot golden is restored verbatim. An actual
-typed writer now reproduces it, including adjacent/nonadjacent batches and a
-deleted row; an independently declared frozen publication reader decodes and
-re-encodes the same bytes. The nested scalar-record type proof pins the old
+The unified-binding checkpoint first restored the original contained relation
+snapshot golden verbatim, including adjacent/nonadjacent batches and a deleted
+row. The approved tag2 uplift below changes only explicit hidden metadata tags;
+an independently declared shared publication reader decodes and re-encodes the
+resulting bytes. The nested scalar-record type proof pins the old
 bytes as well. These are component receipts, not a cross-database guarantee.
-Grouped one-shot publication retains the source column's catalogue ID; grouped
-subscription reset remains blocked by the existing aggregate group-identity
-failures and is a separately scoped compiler repair.
+Grouped one-shot publication retains the source column's catalogue ID. The
+subsequent grouped reset repair retains the exact DescriptorFields emitted by
+aggregate lowering, including their FieldIdentity, instead of reducing them to
+carrier names. Group and aggregate-value lookup use that identity. Cached
+aggregate payload materialization finalizes source cells against the selected
+read schema's physical catalogue before publication, just like the noncached
+path. The public Db proof checks grouped reset count/value and native encoding.
 
 ### Approved pre-freeze native visibility uplift
 
@@ -270,5 +275,5 @@ carrier spelling or compiler slots.
 
 This typed trial does not yet prove the contained producer port or two-way host
 artifact compatibility. VersionRecord peer-wire descriptors, durable
-ResultCurrent payloads, root-layout hashes, grouped reset, and both directions
+ResultCurrent payloads, root-layout hashes, and both directions
 of database reopen/recovery still prevent a shared-format-complete claim.

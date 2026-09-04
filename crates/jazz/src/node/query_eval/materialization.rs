@@ -317,7 +317,12 @@ where
                     "aggregate result member is missing its payload",
                 ))?;
             return self
-                .current_row_from_aggregate_result_payload(&local.result_query, member, payload)
+                .current_row_from_aggregate_result_payload(
+                    local.result_schema_version,
+                    &local.result_query,
+                    member,
+                    payload,
+                )
                 .map(Some);
         }
         let Some(entry) = member.as_row() else {
@@ -433,7 +438,12 @@ where
                     "aggregate result member is missing its payload",
                 ))?;
             return self
-                .current_row_from_aggregate_result_payload(&local.result_query, member, payload)
+                .current_row_from_aggregate_result_payload(
+                    local.result_schema_version,
+                    &local.result_query,
+                    member,
+                    payload,
+                )
                 .map(Some);
         }
         let Some(entry) = member.as_row() else {
@@ -654,6 +664,7 @@ where
 
     fn current_row_from_aggregate_result_payload(
         &mut self,
+        read_schema: SchemaVersionId,
         query: &crate::query::Query,
         member: &ResultMemberEntry,
         payload: &ResultMemberPayloadEntry,
@@ -670,11 +681,13 @@ where
             ));
         }
         let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
-        aggregate_current_row_from_record(
+        let mut row = aggregate_current_row_from_record(
             query,
             aggregate_result_member_row_uuid(member)?,
             &payload_record,
-        )
+        )?;
+        self.bind_current_row_columns_in_schema(read_schema, &mut row)?;
+        Ok(row)
     }
 
     pub(super) fn current_row_from_result_payload(

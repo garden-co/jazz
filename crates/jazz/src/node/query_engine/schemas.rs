@@ -468,9 +468,9 @@ pub(crate) struct AggregateResultSchema {
     /// Synthetic result membership for this aggregate group.
     pub(crate) synthetic: SyntheticResultMembershipSchema,
     /// Ordered stable group-key fields.
-    pub(crate) group_key_fields: Vec<TypedOutputField>,
+    pub(crate) group_key_fields: Vec<groove::records::DescriptorField>,
     /// Ordered aggregate value fields.
-    pub(crate) value_fields: Vec<TypedOutputField>,
+    pub(crate) value_fields: Vec<groove::records::DescriptorField>,
     /// Retained binding/routing parameter fields.
     pub(crate) routing_param_fields: BTreeSet<String>,
 }
