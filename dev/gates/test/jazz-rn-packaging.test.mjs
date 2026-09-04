@@ -337,7 +337,9 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
   };
   const fatMachO = (slices, mutate = () => {}) => {
     const tableSize = 8 + slices.length * 20;
-    const bytes = Buffer.alloc(tableSize + slices.reduce((size, slice) => size + slice.bytes.length, 0));
+    const bytes = Buffer.alloc(
+      tableSize + slices.reduce((size, slice) => size + slice.bytes.length, 0),
+    );
     bytes.writeUInt32BE(0xcafebabe, 0);
     bytes.writeUInt32BE(slices.length, 4);
     let offset = tableSize;

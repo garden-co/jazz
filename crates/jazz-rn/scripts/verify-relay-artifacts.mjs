@@ -156,7 +156,10 @@ function staticLibraryArchitectures(file) {
   const bytes = readFileSync(file);
   const architectures = new Set();
   const addElfArchitecture = (offset) => {
-    if (offset + 20 > bytes.length || !bytes.subarray(offset, offset + 4).equals(Buffer.from("\x7fELF")))
+    if (
+      offset + 20 > bytes.length ||
+      !bytes.subarray(offset, offset + 4).equals(Buffer.from("\x7fELF"))
+    )
       return;
     const machine = bytes.readUInt16LE(offset + 18);
     if (machine === 183) architectures.add("arm64");
@@ -209,14 +212,22 @@ function staticLibraryArchitectures(file) {
     let offset = start + 8;
     let hasExpectedMachO = false;
     while (offset + 60 <= end) {
-      const size = Number(bytes.subarray(offset + 48, offset + 58).toString("ascii").trim());
+      const size = Number(
+        bytes
+          .subarray(offset + 48, offset + 58)
+          .toString("ascii")
+          .trim(),
+      );
       if (!Number.isSafeInteger(size) || size < 0 || offset + 60 + size > end)
         throw new Error(`malformed static-library archive ${file}`);
       const payload = offset + 60;
       // BSD ar archives prefix a member with a long filename (#1/<length>).
       // GNU's /offset form has no payload prefix, so only skip the explicitly
       // declared BSD bytes.
-      const memberName = bytes.subarray(offset, offset + 16).toString("ascii").trim();
+      const memberName = bytes
+        .subarray(offset, offset + 16)
+        .toString("ascii")
+        .trim();
       const bsdNameLength = /^#1\/(\d+)$/.exec(memberName)?.[1];
       const object = bsdNameLength === undefined ? payload : payload + Number(bsdNameLength);
       if (object > payload + size) throw new Error(`malformed BSD static-library member ${file}`);
@@ -249,7 +260,9 @@ function requireArchitectures(file, expected, label) {
   const actual = staticLibraryArchitectures(file);
   for (const architecture of expected) {
     if (!actual.has(architecture))
-      throw new Error(`${label} is missing ${architecture}; found ${[...actual].sort().join(", ")}`);
+      throw new Error(
+        `${label} is missing ${architecture}; found ${[...actual].sort().join(", ")}`,
+      );
   }
 }
 
