@@ -525,6 +525,13 @@ pub enum ForegroundDbCommandRequest {
         descriptors_json: String,
         updated_at_ms: Option<u64>,
     },
+    DirectMutation {
+        mutation: ForegroundMutationKind,
+        table: String,
+        row_id: Option<[u8; 16]>,
+        cells: Vec<u8>,
+        options_json: String,
+    },
 }
 
 /// Frozen postcard mutation ordinals within the V1 StageMutation envelope.
@@ -622,6 +629,10 @@ pub enum ForegroundDbCommandResponse {
     StreamingMutationPushed,
     StreamingMutationAborted {
         aborted: bool,
+    },
+    MutationCommitted {
+        tx_id: [u8; 16],
+        row_id: [u8; 16],
     },
 }
 
@@ -2906,7 +2917,8 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         | ForegroundDbCommandRequest::PushStreamingMutation { .. }
         | ForegroundDbCommandRequest::FinishStreamingMutation { .. }
         | ForegroundDbCommandRequest::AbortStreamingMutation { .. }
-        | ForegroundDbCommandRequest::UpdateLargeValues { .. }) => {
+        | ForegroundDbCommandRequest::UpdateLargeValues { .. }
+        | ForegroundDbCommandRequest::DirectMutation { .. }) => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
                 Err(status) => return status,
@@ -3235,12 +3247,23 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay.run(move |worker| {
             let client = worker.foreground_client(id)?;
-            let row = block_on(
+            let mut read = Box::pin(
                 client
                     .db
                     .local_current_row(&table, RowUuid::from_bytes(row_id)),
-            )
-            .map_err(RelayError::Db)?;
+            );
+            let row = match read
+                .as_mut()
+                .poll(&mut Context::from_waker(futures::task::noop_waker_ref()))
+            {
+                Poll::Ready(row) => row.map_err(RelayError::Db)?,
+                Poll::Pending => {
+                    return Err(RelayError::ForegroundCommand(
+                        "local write row is temporarily busy; retry after the next native turn"
+                            .into(),
+                    ));
+                }
+            };
             jazz::binding_codec::encode_rows(&row.into_iter().collect::<Vec<_>>()).map_err(
                 |error| RelayError::ForegroundCommand(format!("encode local current row: {error}")),
             )
@@ -7513,6 +7536,103 @@ mod tests {
         client.close().unwrap();
     }
 
+    // Internal receipt: deterministic owner contention is not exposed by the public JS API.
+    #[test]
+    fn standalone_mutation_queues_behind_a_held_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("write-owner.sqlite"),
+            Some("write"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x48; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let holder = relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                worker.start_foreground_operation(
+                    id,
+                    None,
+                    Box::pin(async move {
+                        db.hold_node_owner_for_test().await;
+                        unreachable!()
+                    }),
+                )
+            })
+            .unwrap();
+        let ForegroundOperationPoll::Pending { operation: holder } = holder else {
+            unreachable!()
+        };
+        let (tx_id, row_id) = relay
+            .run(move |worker| {
+                worker.direct_foreground_mutation(
+                    id,
+                    ForegroundMutationKind::Insert,
+                    "todos".into(),
+                    None,
+                    encoded_title_cells("queued"),
+                    "{}".into(),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            relay
+                .run(move |worker| worker.foreground_write_state(id, *tx_id.as_bytes()))
+                .unwrap(),
+            "{\"fate\":\"Pending\",\"global_time\":null,\"durability\":\"None\"}"
+        );
+        assert!(
+            client
+                .local_current_foreground_row("todos".into(), *row_id.as_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains("temporarily busy")
+        );
+        assert!(client.cancel_foreground_operation(holder).unwrap());
+        let mut wait = client
+            .wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local)
+            .unwrap();
+        for _ in 0..100 {
+            let ForegroundOperationPoll::Pending { operation } = wait else {
+                break;
+            };
+            relay.pump().unwrap();
+            wait = client.poll_foreground_operation(operation).unwrap();
+        }
+        assert!(matches!(
+            wait,
+            ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
+        ));
+        let rows = client
+            .local_current_foreground_row("todos".into(), *row_id.as_bytes())
+            .unwrap();
+        let batches: Vec<DecodedForegroundRowBatch> = postcard::from_bytes(&rows).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].rows.len(), 1);
+        assert_eq!(batches[0].rows[0].row_id, row_id);
+        let query = client
+            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .unwrap();
+        let mut read = client.start_foreground_read(query).unwrap();
+        for _ in 0..100 {
+            let ForegroundOperationPoll::Pending { operation } = read else {
+                break;
+            };
+            relay.pump().unwrap();
+            read = client.poll_foreground_operation(operation).unwrap();
+        }
+        let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
+            panic!("queued row must become readable");
+        };
+        assert_exact_todo_rows(&rows, row_id, "queued");
+        client.close().unwrap();
+    }
+
     #[test]
     fn cancelled_read_releases_coverage_after_contended_owner_resumes() {
         let directory = tempfile::tempdir().unwrap();
@@ -10313,6 +10433,16 @@ mod tests {
                 ]
                 .concat(),
             ),
+            (
+                ForegroundDbCommandRequest::DirectMutation {
+                    mutation: ForegroundMutationKind::Insert,
+                    table: "t".into(),
+                    row_id: Some([7; 16]),
+                    cells: vec![9],
+                    options_json: "{}".into(),
+                },
+                [vec![36, 0, 1, 116, 1], vec![7; 16], vec![1, 9, 2, 123, 125]].concat(),
+            ),
         ];
         for (command, bytes) in cases {
             assert_eq!(postcard::to_allocvec(&command).unwrap(), bytes);
@@ -10352,6 +10482,13 @@ mod tests {
             (
                 ForegroundDbCommandResponse::StreamingMutationAborted { aborted: true },
                 vec![23, 1],
+            ),
+            (
+                ForegroundDbCommandResponse::MutationCommitted {
+                    tx_id: [7; 16],
+                    row_id: [8; 16],
+                },
+                [vec![24], vec![7; 16], vec![8; 16]].concat(),
             ),
         ];
         for (response, bytes) in responses {

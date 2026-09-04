@@ -112,6 +112,7 @@ export type NativeForegroundCommand =
   | { type: 'disconnectNativeUpstream' }
   | { type: 'reconnectNativeUpstream' }
   | { type: 'nativeConnectionStatus' }
+  | { type: 'directMutation'; mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore'; table: string; rowId?: Uint8Array; cells: Uint8Array; optionsJson: string }
   | { type: 'stageMutation'; transaction: number; mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore';
       table: string; rowId?: Uint8Array; cells: Uint8Array; optionsJson: string }
   | { type: 'nativeSessionMetadata' }
@@ -151,7 +152,8 @@ export type NativeForegroundResponse =
   | { type: 'mutationErrors'; eventsJson: string }
   | { type: 'streamingMutationOpened'; upload: number }
   | { type: 'streamingMutationPushed' }
-  | { type: 'streamingMutationAborted'; aborted: boolean };
+  | { type: 'streamingMutationAborted'; aborted: boolean }
+  | { type: 'mutationCommitted'; txId: Uint8Array; rowId: Uint8Array };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -343,13 +345,13 @@ export function encodeNativeForegroundCommand(
   if (command.type === 'pushStreamingMutation') return concatForegroundBytes(Uint8Array.of(30), encodeForegroundU64(command.upload), encodeForegroundBytes(command.chunk));
   if (command.type === 'finishStreamingMutation' || command.type === 'abortStreamingMutation') return concatForegroundBytes(Uint8Array.of(command.type === 'finishStreamingMutation' ? 31 : 32), encodeForegroundU64(command.upload));
   if (command.type === 'updateLargeValues') return concatForegroundBytes(Uint8Array.of(35), encodeForegroundString(command.table), encodeForegroundId(command.rowId, 'row id'), encodeForegroundBytes(command.patch), encodeForegroundString(command.descriptorsJson), command.updatedAtMs === undefined ? Uint8Array.of(0) : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.updatedAtMs)));
-  if (command.type === 'stageMutation') {
+  if (command.type === 'stageMutation' || command.type === 'directMutation') {
     const kinds = ['insert', 'update', 'upsert', 'delete', 'restore'];
     const kind = kinds.indexOf(command.mutation);
     if (kind < 0) throw new Error('Invalid foreground mutation kind');
     return concatForegroundBytes(
-      Uint8Array.of(22),
-      encodeForegroundU64(command.transaction),
+      Uint8Array.of(command.type === 'directMutation' ? 36 : 22),
+      command.type === 'directMutation' ? new Uint8Array() : encodeForegroundU64(command.transaction),
       Uint8Array.of(kind),
       encodeForegroundString(command.table),
       command.rowId === undefined
@@ -512,6 +514,7 @@ export function decodeNativeForegroundResponse(
   if (tag === 20) return { type: 'mutationErrors', eventsJson: decodeForegroundString(bytes.subarray(1), 'mutation errors') };
   if (tag === 21) return { type: 'streamingMutationOpened', upload: decodeForegroundU64(bytes.subarray(1), 'upload') };
   if (tag === 22 && bytes.length === 1) return { type: 'streamingMutationPushed' };
+  if (tag === 24 && bytes.length === 33) return { type: 'mutationCommitted', txId: bytes.slice(1, 17), rowId: bytes.slice(17) };
   if (tag === 23 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) return { type: 'streamingMutationAborted', aborted: bytes[1] === 1 };
   if (tag === 17 && bytes.length === 4 && bytes.subarray(1).every(value => value === 0 || value === 1)) {
     return { type: 'nativeConnectionStatus', configured: bytes[1] === 1, explicitlyOffline: bytes[2] === 1, connected: bytes[3] === 1 };

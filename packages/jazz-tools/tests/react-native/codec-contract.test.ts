@@ -64,6 +64,25 @@ const cases: [string, unknown, unknown][] = [
       },
     },
   ],
+  [
+    "direct queued mutation",
+    {
+      type: "directMutation",
+      mutation: "insert",
+      table: "records",
+      cells: Uint8Array.of(1, 2),
+      optionsJson: "{}",
+    },
+    {
+      DirectMutation: {
+        mutation: "Insert",
+        table: "records",
+        row_id: null,
+        cells: [1, 2],
+        options_json: "{}",
+      },
+    },
+  ],
   ["disconnect", { type: "disconnectNativeUpstream" }, "DisconnectNativeUpstream"],
   ["reconnect", { type: "reconnectNativeUpstream" }, "ReconnectNativeUpstream"],
   ["status", { type: "nativeConnectionStatus" }, "NativeConnectionStatus"],

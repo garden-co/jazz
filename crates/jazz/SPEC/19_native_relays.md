@@ -393,7 +393,14 @@ Request 34 is LocalCurrentRow: table string, row_id 16 raw bytes; its response
 is existing 3 Rows. Request 35 is UpdateLargeValues: table string, row_id
 16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option
 u64; its response is existing 14 TransactionCommitted. The continuation bytes
-are pinned by `foreground_continuation_v1_byte_contract`. Subscription event ordinal 3 is reserved for
+are pinned by `foreground_continuation_v1_byte_contract`.
+Request 36 is DirectMutation: mutation enum, table string, optional row_id 16 raw
+bytes, cells byte vector, options_json string. Response 24 is MutationCommitted:
+tx_id 16 raw bytes followed by row_id 16 raw bytes. Direct writes use the core's
+queued admission and return its reserved write identity before suspended owner
+work completes. Synchronous LocalCurrentRow and WriteState report an explicit
+transient busy error when the semantic owner is unavailable; they never invent
+an empty row or an unobserved write state. Subscription event ordinal 3 is reserved for
 StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
 terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
 terminal operations use `binding_codec::terminal_operations_to_json`.

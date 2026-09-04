@@ -75,6 +75,123 @@ fn register_write(writes: &Writes, write: WriteHandle<MemoryStorage>) -> Transac
 }
 
 impl RelayWorker {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn direct_foreground_mutation(
+        &mut self,
+        client: u64,
+        mutation: ForegroundMutationKind,
+        table: String,
+        row_id: Option<[u8; 16]>,
+        cells: Vec<u8>,
+        options_json: String,
+    ) -> Result<(TransactionId, RowUuid), RelayError> {
+        let options: ForegroundMutationOptions =
+            serde_json::from_str(&options_json).map_err(|error| {
+                RelayError::ForegroundCommand(format!("invalid mutation options: {error}"))
+            })?;
+        let cells = if matches!(mutation, ForegroundMutationKind::Delete) {
+            Default::default()
+        } else {
+            decode_foreground_cells(&cells)?
+        };
+        let exact_target = options
+            .branch
+            .clone()
+            .map(jazz::db::ExactWriteTarget::Branch)
+            .unwrap_or_default();
+        let target = match options.head {
+            Some(head) => jazz::db::WriteTarget::BranchView {
+                head,
+                base: options.base,
+            },
+            None if options.base.is_none() => Default::default(),
+            None => {
+                return Err(RelayError::ForegroundCommand(
+                    "branch view base requires a head selector".into(),
+                ));
+            }
+        };
+        let updated_at_ms = options.updated_at_ms;
+        let row_id = row_id.map(RowUuid::from_bytes);
+        let client = self.foreground_client_mut(client)?;
+        let write = match mutation {
+            ForegroundMutationKind::Insert => client.db.enqueue_insert(
+                table,
+                cells,
+                jazz::db::InsertOptions {
+                    row_id,
+                    target: exact_target,
+                    updated_at_ms,
+                    ..Default::default()
+                },
+            ),
+            mutation => {
+                let row_id = row_id.ok_or_else(|| {
+                    RelayError::ForegroundCommand("mutation requires row id".into())
+                })?;
+                match mutation {
+                    ForegroundMutationKind::Update => client.db.enqueue_update(
+                        table,
+                        row_id,
+                        cells,
+                        UpdateOptions {
+                            target,
+                            updated_at_ms,
+                            ..Default::default()
+                        },
+                    ),
+                    ForegroundMutationKind::Upsert => {
+                        if options.branch.is_some() {
+                            return Err(RelayError::ForegroundCommand(
+                                "upsert option `branch` is not supported; use `head`".into(),
+                            ));
+                        }
+                        client.db.enqueue_upsert(
+                            table,
+                            row_id,
+                            cells,
+                            UpsertOptions {
+                                target,
+                                updated_at_ms,
+                                ..Default::default()
+                            },
+                        )
+                    }
+                    ForegroundMutationKind::Delete => client.db.enqueue_delete(
+                        table,
+                        row_id,
+                        DeleteOptions {
+                            target,
+                            updated_at_ms,
+                            ..Default::default()
+                        },
+                    ),
+                    ForegroundMutationKind::Restore => client.db.enqueue_restore(
+                        table,
+                        row_id,
+                        Some(cells),
+                        jazz::db::RestoreOptions {
+                            target: exact_target,
+                            updated_at_ms,
+                            ..Default::default()
+                        },
+                    ),
+                    ForegroundMutationKind::Insert => unreachable!(),
+                }
+            }
+        }
+        .map_err(RelayError::Db)?;
+        client.db.drive_queued_mutation_once();
+        if let Some(error) = client
+            .db
+            .take_queued_mutation_failure(write.mergeable_tx_id())
+        {
+            return Err(RelayError::Db(error));
+        }
+        let row_id = write.row_uuid();
+        Ok((register_write(&client.mutations.writes, write), row_id))
+    }
+
     fn ensure_mutation_operation_capacity(&self, client: u64) -> Result<(), RelayError> {
         if self.foreground_client(client)?.pending_operations.len()
             >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
@@ -361,6 +478,26 @@ impl NativeRelayClient {
             use ForegroundDbCommandRequest as Request;
             use ForegroundDbCommandResponse as Response;
             Ok(match command {
+                Request::DirectMutation {
+                    mutation,
+                    table,
+                    row_id,
+                    cells,
+                    options_json,
+                } => {
+                    let (tx_id, row_id) = worker.direct_foreground_mutation(
+                        id,
+                        mutation,
+                        table,
+                        row_id,
+                        cells,
+                        options_json,
+                    )?;
+                    Response::MutationCommitted {
+                        tx_id: *tx_id.as_bytes(),
+                        row_id: *row_id.as_bytes(),
+                    }
+                }
                 Request::WriteState { tx_id } => Response::WriteState {
                     state_json: worker.foreground_write_state(id, tx_id)?,
                 },
