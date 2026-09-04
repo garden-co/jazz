@@ -114,7 +114,14 @@ export type NativeForegroundCommand =
   | { type: 'nativeConnectionStatus' }
   | { type: 'stageMutation'; transaction: number; mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore';
       table: string; rowId?: Uint8Array; cells: Uint8Array; optionsJson: string }
-  | { type: 'nativeSessionMetadata' };
+  | { type: 'nativeSessionMetadata' }
+  | { type: 'writeState'; txId: Uint8Array }
+  | { type: 'drainMutationErrors' }
+  | { type: 'beginStreamingMutation'; mutation: 'insert' | 'update' | 'upsert';
+      table: string; rowId: Uint8Array; cells: Uint8Array; column: string; optionsJson: string }
+  | { type: 'pushStreamingMutation'; upload: number; chunk: Uint8Array }
+  | { type: 'finishStreamingMutation' | 'abortStreamingMutation'; upload: number }
+  | { type: 'updateLargeValues'; table: string; rowId: Uint8Array; patch: Uint8Array; descriptorsJson: string; updatedAtMs?: number };
 
 
 /** The existing core transaction semantics selected by the foreground codec. */
@@ -139,7 +146,12 @@ export type NativeForegroundResponse =
   | { type: 'mutationStaged' }
   | { type: 'transactionCommitted'; txId: Uint8Array }
   | { type: 'transactionRolledBack'; rolledBack: boolean }
-  | { type: 'transactionSettled'; txId: Uint8Array };
+  | { type: 'transactionSettled'; txId: Uint8Array }
+  | { type: 'writeState'; stateJson: string }
+  | { type: 'mutationErrors'; eventsJson: string }
+  | { type: 'streamingMutationOpened'; upload: number }
+  | { type: 'streamingMutationPushed' }
+  | { type: 'streamingMutationAborted'; aborted: boolean };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -321,6 +333,16 @@ export function encodeNativeForegroundCommand(
       Uint8Array.of(9),
       encodeForegroundU64(command.operation)
     );
+  if (command.type === 'writeState') return concatForegroundBytes(Uint8Array.of(27), encodeForegroundId(command.txId, 'txId'));
+  if (command.type === 'drainMutationErrors') return Uint8Array.of(28);
+  if (command.type === 'beginStreamingMutation') {
+    const kind = ['insert', 'update', 'upsert'].indexOf(command.mutation);
+    if (kind < 0) throw new Error('Invalid streaming mutation kind');
+    return concatForegroundBytes(Uint8Array.of(29, kind), encodeForegroundString(command.table), encodeForegroundId(command.rowId, 'row id'), encodeForegroundBytes(command.cells), encodeForegroundString(command.column), encodeForegroundString(command.optionsJson));
+  }
+  if (command.type === 'pushStreamingMutation') return concatForegroundBytes(Uint8Array.of(30), encodeForegroundU64(command.upload), encodeForegroundBytes(command.chunk));
+  if (command.type === 'finishStreamingMutation' || command.type === 'abortStreamingMutation') return concatForegroundBytes(Uint8Array.of(command.type === 'finishStreamingMutation' ? 31 : 32), encodeForegroundU64(command.upload));
+  if (command.type === 'updateLargeValues') return concatForegroundBytes(Uint8Array.of(35), encodeForegroundString(command.table), encodeForegroundId(command.rowId, 'row id'), encodeForegroundBytes(command.patch), encodeForegroundString(command.descriptorsJson), command.updatedAtMs === undefined ? Uint8Array.of(0) : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.updatedAtMs)));
   if (command.type === 'stageMutation') {
     const kinds = ['insert', 'update', 'upsert', 'delete', 'restore'];
     const kind = kinds.indexOf(command.mutation);
@@ -486,6 +508,11 @@ export function decodeNativeForegroundResponse(
     return { type: 'nativeSessionMetadata', issuer: decodeForegroundUtf8(bytes, end + 1, length, 'issuer'), userId: decodeForegroundString(bytes.subarray(next), 'user id') };
   }
 
+  if (tag === 19) return { type: 'writeState', stateJson: decodeForegroundString(bytes.subarray(1), 'write state') };
+  if (tag === 20) return { type: 'mutationErrors', eventsJson: decodeForegroundString(bytes.subarray(1), 'mutation errors') };
+  if (tag === 21) return { type: 'streamingMutationOpened', upload: decodeForegroundU64(bytes.subarray(1), 'upload') };
+  if (tag === 22 && bytes.length === 1) return { type: 'streamingMutationPushed' };
+  if (tag === 23 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) return { type: 'streamingMutationAborted', aborted: bytes[1] === 1 };
   if (tag === 17 && bytes.length === 4 && bytes.subarray(1).every(value => value === 0 || value === 1)) {
     return { type: 'nativeConnectionStatus', configured: bytes[1] === 1, explicitlyOffline: bytes[2] === 1, connected: bytes[3] === 1 };
   }

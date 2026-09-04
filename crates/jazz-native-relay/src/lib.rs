@@ -6,6 +6,8 @@
 //! Swift, and Kotlin bindings put their ABI-specific command codecs above this
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
+mod foreground_mutations;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
@@ -2898,16 +2900,23 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 },
             }
         }
-        // Continuations remain explicit until their API handlers are integrated.
-        ForegroundDbCommandRequest::WriteState { .. }
+        command @ (ForegroundDbCommandRequest::WriteState { .. }
         | ForegroundDbCommandRequest::DrainMutationErrors
         | ForegroundDbCommandRequest::BeginStreamingMutation { .. }
         | ForegroundDbCommandRequest::PushStreamingMutation { .. }
         | ForegroundDbCommandRequest::FinishStreamingMutation { .. }
         | ForegroundDbCommandRequest::AbortStreamingMutation { .. }
-        | ForegroundDbCommandRequest::UpdateLargeValues { .. } => {
-            ForegroundDbCommandResponse::OperationError {
-                reason: "foreground command handler is unavailable".to_owned(),
+        | ForegroundDbCommandRequest::UpdateLargeValues { .. }) => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.execute_mutation_command(command) {
+                Ok(response) => response,
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
             }
         }
     };
@@ -4094,6 +4103,7 @@ struct ConnectedClient {
     /// Public transaction ids are opaque digests, while only the foreground
     /// owner may retain the core causal id needed for a settlement wait.
     committed_transactions: BTreeMap<TransactionId, TxId>,
+    mutations: foreground_mutations::MutationHandles,
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
@@ -4141,13 +4151,13 @@ impl ConnectedClient {
     fn abandon_foreground_transactions(&mut self) -> Result<(), RelayError> {
         self.cancel_pending_work();
         let transactions = std::mem::take(&mut self.transactions);
-        let mut first_error = None;
+        let mut first_error = self.mutations.close(&self.db).err();
         for transaction in transactions.into_values() {
             if let Err(error) = self.db.abandon_transaction_handle(transaction.open_tx_id) {
-                first_error.get_or_insert(error);
+                first_error.get_or_insert(RelayError::Db(error));
             }
         }
-        first_error.map_or(Ok(()), |error| Err(RelayError::Db(error)))
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -4262,6 +4272,7 @@ enum ForegroundOperationResult {
     Rows(Vec<u8>),
     SubscriptionEvents(Vec<ForegroundSubscriptionEvent>),
     TransactionSettled(TransactionId),
+    TransactionCommitted(TransactionId),
 }
 
 enum ForegroundOperationPoll {
@@ -4280,6 +4291,11 @@ fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbC
         }
         ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(events)) => {
             ForegroundDbCommandResponse::SubscriptionEvents { events }
+        }
+        ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionCommitted(tx_id)) => {
+            ForegroundDbCommandResponse::TransactionCommitted {
+                tx_id: *tx_id.as_bytes(),
+            }
         }
         ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(tx_id)) => {
             ForegroundDbCommandResponse::TransactionSettled {
@@ -4445,6 +4461,7 @@ impl RelayWorker {
         self.clients.insert(
             id,
             ConnectedClient {
+                mutations: foreground_mutations::MutationHandles::new(&db),
                 db,
                 tick: None,
                 upstream_io,
@@ -5151,6 +5168,23 @@ impl RelayWorker {
         public_tx_id: [u8; 16],
         tier: CoreDurabilityTier,
     ) -> Result<ForegroundOperationPoll, RelayError> {
+        let retained = {
+            let client = self.foreground_client(client)?;
+            client
+                .mutations
+                .writes
+                .borrow()
+                .iter()
+                .find(|(id, _)| *id.as_bytes() == public_tx_id)
+                .map(|(id, write)| (*id, Rc::clone(write)))
+        };
+        if let Some((id, write)) = retained {
+            let future: ForegroundOperationFuture = Box::pin(async move {
+                write.wait(tier).await.map_err(RelayError::Db)?;
+                Ok(ForegroundOperationResult::TransactionSettled(id))
+            });
+            return self.start_foreground_operation(client, None, future);
+        }
         let (db, public_tx_id, tx_id) = {
             let client = self.foreground_client(client)?;
             let (&public_tx_id, &tx_id) = client

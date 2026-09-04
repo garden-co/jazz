@@ -1,3 +1,5 @@
+import type { MutationErrorEvent } from "../runtime/client.js";
+
 type ForegroundMutationKind = "insert" | "update" | "upsert" | "delete" | "restore";
 type ForegroundMutationOptions = {
   rowId?: Uint8Array;
@@ -65,6 +67,27 @@ type ForegroundCommand =
       rowId?: Uint8Array;
       cells: Uint8Array;
       optionsJson: string;
+    }
+  | { type: "writeState"; txId: Uint8Array }
+  | { type: "drainMutationErrors" }
+  | {
+      type: "beginStreamingMutation";
+      mutation: "insert" | "update" | "upsert";
+      table: string;
+      rowId: Uint8Array;
+      cells: Uint8Array;
+      column: string;
+      optionsJson: string;
+    }
+  | { type: "pushStreamingMutation"; upload: number; chunk: Uint8Array }
+  | { type: "finishStreamingMutation" | "abortStreamingMutation"; upload: number }
+  | {
+      type: "updateLargeValues";
+      table: string;
+      rowId: Uint8Array;
+      patch: Uint8Array;
+      descriptorsJson: string;
+      updatedAtMs?: number;
     };
 
 type ForegroundEvent =
@@ -104,7 +127,12 @@ type ForegroundResponse =
   | { type: "mutationStaged" }
   | { type: "transactionCommitted"; txId: Uint8Array }
   | { type: "transactionRolledBack"; rolledBack: boolean }
-  | { type: "transactionSettled"; txId: Uint8Array };
+  | { type: "transactionSettled"; txId: Uint8Array }
+  | { type: "writeState"; stateJson: string }
+  | { type: "mutationErrors"; eventsJson: string }
+  | { type: "streamingMutationOpened"; upload: number }
+  | { type: "streamingMutationPushed" }
+  | { type: "streamingMutationAborted"; aborted: boolean };
 
 export type NativeForegroundRuntime = {
   execute(command: Uint8Array): Uint8Array;
@@ -147,6 +175,7 @@ export const REACT_NATIVE_UNSUPPORTED_ERROR =
  */
 export class NativeForegroundDb {
   private closed = false;
+  private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
 
   constructor(
@@ -169,7 +198,10 @@ export class NativeForegroundDb {
     });
   }
 
-  onMutationError(_callback: unknown): void {}
+  onMutationError(callback: (event: MutationErrorEvent) => void): void {
+    this.assertOpen();
+    this.mutationErrorCallback = callback;
+  }
 
   prepareQuery(query: Uint8Array): object {
     const response = this.execute({ type: "prepareQuery", query });
@@ -277,6 +309,17 @@ export class NativeForegroundDb {
   tick(): void {
     this.assertOpen();
     this.runtime.tick();
+    if (this.mutationErrorCallback) {
+      const response = this.execute({ type: "drainMutationErrors" });
+      if (response.type === "operationError") throw new Error(response.reason);
+      if (response.type !== "mutationErrors")
+        return unexpected("drainMutationErrors", response.type);
+      const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
+      for (const event of events)
+        queueMicrotask(() => {
+          if (!this.closed) this.mutationErrorCallback?.(event);
+        });
+    }
   }
 
   close(): boolean {
@@ -531,6 +574,98 @@ export class NativeForegroundDb {
     return unsupported("JavaScript upstream transport");
   }
 
+  writeState(txId: Uint8Array): unknown {
+    const response = this.execute({ type: "writeState", txId });
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "writeState") return unexpected("writeState", response.type);
+    return JSON.parse(response.stateJson);
+  }
+
+  updateLargeValuesEncoded(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    descriptors: readonly unknown[],
+    updatedAtMs?: number,
+  ): NativeForegroundWrite {
+    const response = this.execute({
+      type: "updateLargeValues",
+      table,
+      rowId,
+      patch,
+      descriptorsJson: JSON.stringify(descriptors),
+      updatedAtMs,
+    });
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "transactionCommitted")
+      return unexpected("updateLargeValues", response.type);
+    return nativeWrite(this, response.txId, rowId);
+  }
+
+  beginStreamingMutationEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    column: string,
+    mutation: "insert" | "update" | "upsert" = "insert",
+    _author?: Uint8Array,
+    updatedAtMs?: number,
+    head?: unknown,
+    base?: unknown,
+  ) {
+    const response = this.execute({
+      type: "beginStreamingMutation",
+      mutation,
+      table,
+      rowId,
+      cells,
+      column,
+      optionsJson: JSON.stringify({ updatedAtMs, head, base }),
+    });
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "streamingMutationOpened")
+      return unexpected("beginStreamingMutation", response.type);
+    const upload = response.upload;
+    let closed = false;
+    const assertOpen = () => {
+      if (closed) throw new Error("streaming mutation is closed");
+      this.assertOpen();
+    };
+    return {
+      push: (chunk: Uint8Array): void => {
+        assertOpen();
+        const pushed = this.execute({ type: "pushStreamingMutation", upload, chunk });
+        if (pushed.type === "operationError") throw new Error(pushed.reason);
+        if (pushed.type !== "streamingMutationPushed")
+          return unexpected("pushStreamingMutation", pushed.type);
+      },
+      finish: async (): Promise<NativeForegroundWrite> => {
+        assertOpen();
+        let finished = this.execute({ type: "finishStreamingMutation", upload });
+        closed = true;
+        while (finished.type === "pending") {
+          const operation = finished.operation;
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          this.tick();
+          finished = this.execute({ type: "poll", operation });
+        }
+        if (finished.type === "operationError") throw new Error(finished.reason);
+        if (finished.type !== "transactionCommitted")
+          return unexpected("finishStreamingMutation", finished.type);
+        return nativeWrite(this, finished.txId, rowId);
+      },
+      abort: (): boolean => {
+        if (closed || this.closed) return false;
+        closed = true;
+        const aborted = this.execute({ type: "abortStreamingMutation", upload });
+        if (aborted.type === "operationError") throw new Error(aborted.reason);
+        if (aborted.type !== "streamingMutationAborted")
+          return unexpected("abortStreamingMutation", aborted.type);
+        return aborted.aborted;
+      },
+    };
+  }
+
   private withOneMutation(
     operation: string,
     stage: (transaction: NativeForegroundTransaction) => Uint8Array,
@@ -712,7 +847,10 @@ function nativeWrite(
     async wait(tier: string): Promise<void> {
       await db.waitForTransaction(txId, tier);
     },
-    writeState: () => ({ state: "committed" }),
+    writeState: () => {
+      if (closed) throw new Error("write state is unavailable");
+      return db.writeState(txId);
+    },
     close: () => {
       if (closed) return false;
       closed = true;
