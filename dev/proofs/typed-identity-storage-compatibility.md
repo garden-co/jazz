@@ -93,3 +93,19 @@ open/write → contained reopen, and the reverse; schemas/lenses, enum payloads,
 nested includes, aggregate identity, flat-join revision identity, indexes,
 reconnect/no-op sync, and recovery must agree. Running both codec implementations
 inside one process is deliberately narrower than that receipt.
+
+## First Route A implementation boundary
+
+The typed physical catalogue now uses the contained `_app_{PhysicalColumnId}`
+field spelling and `by_physical_app_v1_{PhysicalColumnId}` index spelling. The
+numeric ID remains the persisted semantic identity. Construction of execution
+source descriptors binds that exact ID as `Slot`/`NamedSlot` using the catalogue
+and the selected schema; this metadata does not rename the durable field.
+The physical descriptor enum-registry resolver and index-write classifier use
+the same restored spellings. Query/application carriers remain unchanged in this
+first isolated step.
+
+Existing indexed backfill across schema variants, catalogue restart, and
+rename/physical-ID reuse tests pass in the typed implementation. These are
+same-version behavioral checks, **not** cross-version database receipts. The
+descriptor-codec and payload/digest gaps documented above remain open in #2558.

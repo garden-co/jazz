@@ -1173,7 +1173,7 @@ fn physical_descriptor_with_enum_registries(
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
     fn physical_user_slot(name: &str) -> Option<PhysicalColumnId> {
-        name.strip_prefix("user_")
+        name.strip_prefix("_app_")
             .and_then(|id| id.parse::<u64>().ok())
             .map(PhysicalColumnId)
     }
