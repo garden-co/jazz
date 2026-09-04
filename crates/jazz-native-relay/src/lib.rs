@@ -20,8 +20,8 @@ use std::thread;
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, ExclusiveTxOps, MergeableTxOps, PeerConnection,
-    PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream, TickScheduler, TickUrgency,
-    Transport, UpdateOptions, UpsertOptions, block_on,
+    PeerIoPump, PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream, TickScheduler,
+    TickUrgency, Transport, UpdateOptions, UpsertOptions, block_on,
 };
 use jazz::foreground_node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
@@ -3104,8 +3104,11 @@ impl NativeRelayClient {
         self.relay.run_teardown(move |worker| {
             let client = worker
                 .clients
-                .get(&id)
+                .get_mut(&id)
                 .ok_or(RelayError::UnknownClient(id))?;
+            // Clean handoff retires this foreground. Release any suspended
+            // owner before reading its monotonic minted HLC.
+            client.cancel_pending_work();
             Ok(block_on(client.db.minted_tx_time_high_water()))
         })
     }
@@ -3483,6 +3486,21 @@ struct BoundedMessageQueue {
 }
 
 impl BoundedMessageQueue {
+    fn pop_auxiliary(&mut self) -> Option<SyncMessage> {
+        let position = self.messages.iter().position(|queued| {
+            matches!(
+                queued.message,
+                SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_)
+            )
+        })?;
+        let queued = self
+            .messages
+            .remove(position)
+            .expect("position was present");
+        self.encoded_bytes -= queued.encoded_len;
+        Some(queued.message)
+    }
+
     fn push(&mut self, message: SyncMessage, direction: &'static str) -> Result<(), RelayError> {
         if self.messages.len() >= NATIVE_RELAY_QUEUE_MAX_MESSAGES {
             return Err(RelayError::QueueCapacityExceeded {
@@ -3938,6 +3956,9 @@ fn duplex(
 
 struct ConnectedClient {
     db: Rc<Db<MemoryStorage>>,
+    tick: Option<RelayTickFuture>,
+    upstream_io: RelayPeerIo,
+    served_io: RelayPeerIo,
     wire: NativeRelayWire,
     prepared_queries: BTreeMap<u64, PreparedQuery>,
     subscriptions: BTreeMap<u64, SubscriptionStream>,
@@ -3960,11 +3981,19 @@ struct ForegroundTransaction {
 }
 
 impl ConnectedClient {
+    fn cancel_pending_work(&mut self) {
+        self.pending_operations.clear();
+        self.tick = None;
+        self.upstream_io.incoming = None;
+        self.served_io.incoming = None;
+    }
+
     /// Abandon every foreground-owned transaction before dropping the client.
     /// An attached foreground can be closed explicitly, revoked, or retired
     /// during host shutdown; none of those paths may leave a mutable core
     /// transaction reusable by a later foreground handle.
     fn abandon_foreground_transactions(&mut self) -> Result<(), RelayError> {
+        self.cancel_pending_work();
         let transactions = std::mem::take(&mut self.transactions);
         let mut first_error = None;
         for transaction in transactions.into_values() {
@@ -3984,6 +4013,95 @@ impl Drop for ConnectedClient {
 
 type ForegroundOperationFuture =
     Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
+
+type RelayTickFuture = Pin<Box<dyn Future<Output = Result<(), jazz::db::Error>>>>;
+
+/// A peer's chunk lane must progress even while its semantic tick or a
+/// foreground read owns the node. Retain both the endpoint and any suspended
+/// local chunk read without borrowing the semantic connection.
+struct RelayPeerIo {
+    pump: PeerIoPump,
+    wire: NativeRelayWire,
+    incoming: Option<Pin<Box<dyn Future<Output = ()>>>>,
+}
+
+impl RelayPeerIo {
+    fn new(pump: PeerIoPump, wire: NativeRelayWire) -> Self {
+        Self {
+            pump,
+            wire,
+            incoming: None,
+        }
+    }
+
+    fn poll(&mut self) -> Result<(), RelayError> {
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..NATIVE_RELAY_DRAIN_MAX_MESSAGES {
+            if self.incoming.is_none() {
+                let message = self
+                    .wire
+                    .inbound
+                    .lock()
+                    .map_err(|_| RelayError::Poisoned("auxiliary inbound queue"))?
+                    .pop_auxiliary();
+                let Some(message) = message else { break };
+                let pump = self.pump.clone();
+                self.incoming = Some(Box::pin(async move {
+                    // Only chunk messages are extracted; canonical traffic
+                    // remains in its original FIFO for the semantic tick.
+                    let _ = pump.route_incoming(message).await;
+                }));
+            }
+            if self
+                .incoming
+                .as_mut()
+                .expect("incoming was installed")
+                .as_mut()
+                .poll(&mut context)
+                .is_pending()
+            {
+                break;
+            }
+            self.incoming = None;
+        }
+        let mut transport = QueueTransport {
+            wire: self.wire.clone(),
+        };
+        for _ in 0..NATIVE_RELAY_DRAIN_MAX_MESSAGES {
+            match self.pump.send_outbound(&mut transport, 1) {
+                Ok(true) => {}
+                Ok(false) | Err(TransportError::Backpressure) => break,
+                Err(error) => {
+                    return Err(RelayError::ForegroundCommand(format!(
+                        "auxiliary transport failed: {error:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn poll_relay_tick<S>(
+    db: &Rc<Db<S>>,
+    pending: &mut Option<RelayTickFuture>,
+) -> Result<(), RelayError>
+where
+    S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    let tick = pending.get_or_insert_with(|| {
+        let db = Rc::clone(db);
+        Box::pin(async move { db.tick().await })
+    });
+    let mut context = Context::from_waker(Waker::noop());
+    match tick.as_mut().poll(&mut context) {
+        Poll::Ready(result) => {
+            *pending = None;
+            map_tick_result(result)
+        }
+        Poll::Pending => Ok(()),
+    }
+}
 
 /// A pending binding operation is foreground-owned, bounded, and deliberately
 /// independent from the JSI call that started it. Dropping it cancels any
@@ -4073,7 +4191,9 @@ fn decode_foreground_command(bytes: &[u8]) -> Result<ForegroundDbCommandRequest,
 }
 
 struct RelayWorker {
-    persistent: Db<SqliteStorage>,
+    persistent: Rc<Db<SqliteStorage>>,
+    persistent_tick: Option<RelayTickFuture>,
+    upstream_io: RelayPeerIo,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
     clients: BTreeMap<u64, ConnectedClient>,
     next_client_id: u64,
@@ -4094,23 +4214,28 @@ impl RelayWorker {
             .map(String::as_str)
             .collect::<Vec<_>>();
         let codec_profile = epoch_1_storage_codec_profile().map_err(RelayError::Storage)?;
-        let persistent = block_on(Db::open(DbConfig {
-            schema: config.schema.clone(),
-            storage: SqliteStorage::open_with_durability_and_codec_profile(
-                config.sqlite_path,
-                &refs,
-                SqliteDurability::WalNoSync,
-                &codec_profile,
-            )
-            .map_err(RelayError::Storage)?,
-            identity: config.identity,
-            id_source: None,
-        }))
-        .map_err(RelayError::Db)?;
+        let persistent = Rc::new(
+            block_on(Db::open(DbConfig {
+                schema: config.schema.clone(),
+                storage: SqliteStorage::open_with_durability_and_codec_profile(
+                    config.sqlite_path,
+                    &refs,
+                    SqliteDurability::WalNoSync,
+                    &codec_profile,
+                )
+                .map_err(RelayError::Storage)?,
+                identity: config.identity,
+                id_source: None,
+            }))
+            .map_err(RelayError::Db)?,
+        );
         let upstream =
             block_on(persistent.connect_upstream(Box::new(QueueTransport { wire: wire.clone() })));
+        let upstream_io = RelayPeerIo::new(block_on(upstream.lock()).io_pump(), wire);
         Ok(Self {
             persistent,
+            persistent_tick: None,
+            upstream_io,
             _upstream: upstream,
             clients: BTreeMap::new(),
             next_client_id: 1,
@@ -4153,6 +4278,15 @@ impl RelayWorker {
         let served =
             self.persistent
                 .accept_subscriber_with_claims(relay_transport, identity.author, claims);
+        let upstream_io = RelayPeerIo::new(block_on(upstream.lock()).io_pump(), wire.clone());
+        let served_io = RelayPeerIo::new(
+            block_on(served.lock()).io_pump(),
+            NativeRelayWire {
+                inbound: Arc::clone(&wire.outbound),
+                outbound: Arc::clone(&wire.inbound),
+                liveness: wire.liveness.clone(),
+            },
+        );
         let id = self.next_client_id;
         self.next_client_id = self
             .next_client_id
@@ -4162,6 +4296,9 @@ impl RelayWorker {
             id,
             ConnectedClient {
                 db,
+                tick: None,
+                upstream_io,
+                served_io,
                 wire,
                 prepared_queries: BTreeMap::new(),
                 subscriptions: BTreeMap::new(),
@@ -4187,13 +4324,18 @@ impl RelayWorker {
             self.pump_cursor = Some(*last);
         }
         for id in &client_ids {
-            let client = &self.clients[id];
-            map_tick_result(block_on(client.db.tick()))?;
+            let client = self.clients.get_mut(id).expect("selected client exists");
+            client.upstream_io.poll()?;
+            poll_relay_tick(&client.db, &mut client.tick)?;
+            client.served_io.poll()?;
         }
-        map_tick_result(block_on(self.persistent.tick()))?;
+        self.upstream_io.poll()?;
+        poll_relay_tick(&self.persistent, &mut self.persistent_tick)?;
         for id in &client_ids {
-            let client = &self.clients[id];
-            map_tick_result(block_on(client.db.tick()))?;
+            let client = self.clients.get_mut(id).expect("selected client exists");
+            client.served_io.poll()?;
+            client.upstream_io.poll()?;
+            poll_relay_tick(&client.db, &mut client.tick)?;
         }
         Ok(())
     }

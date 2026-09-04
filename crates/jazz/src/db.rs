@@ -1073,6 +1073,25 @@ impl PeerIoPump {
         }
     }
 
+    /// Hand one bounded auxiliary batch to an in-process transport. Preserve
+    /// its source obligation when the transport rejects the send, just as the
+    /// wire-frame reservation does for socket bindings.
+    pub fn send_outbound(
+        &self,
+        transport: &mut dyn Transport,
+        limit: usize,
+    ) -> Result<bool, TransportError> {
+        let Some(message) = self.take_outbound(limit) else {
+            return Ok(false);
+        };
+        if let Err(error) = transport.send(message.clone()) {
+            self.restore_outbound(message);
+            return Err(error);
+        }
+        self.acknowledge_outbound(&message);
+        Ok(true)
+    }
+
     fn restore_outbound(&self, message: SyncMessage) {
         match (self.role, message) {
             (PeerIoPumpRole::Upstream, SyncMessage::ChunkRequestBatch(batch)) => {
