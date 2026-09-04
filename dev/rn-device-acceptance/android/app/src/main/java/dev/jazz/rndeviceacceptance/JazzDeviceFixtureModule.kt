@@ -15,6 +15,9 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
 
 /**
  * Test-app-only trusted fixture. It is compiled into the development build,
@@ -46,6 +49,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "public-client-write-failed",
     "public-client-read-failed",
     "public-client-publish-failed",
+    "public-client-core-observation-failed",
     "public-client-shutdown-failed",
     "public-client-relay-readback-failed",
     "scope-isolation-failed",
@@ -137,6 +141,46 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
       admitPrivateSession("b").also { capability = it }
       promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
+  }
+
+  /** The host acknowledges only after its independent Core reader sees the
+   * run's write. No bearer or endpoint is exposed to JavaScript. */
+  @ReactMethod fun waitForCoreObservation(promise: Promise) {
+    try {
+      val activity = reactApplicationContext.currentActivity
+        ?: error("acceptance activity is unavailable")
+      val endpoint = activity.intent.getStringExtra("jazzDeviceCoreObservationEndpoint")
+        ?: error("missing Core observation endpoint")
+      val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
+        ?: error("missing acceptance run nonce")
+      val identity = JSONObject().apply {
+        put("platform", "android")
+        put("deviceIdentifier", Build.FINGERPRINT)
+        put("buildFingerprint", sha256File(reactApplicationContext.applicationInfo.sourceDir))
+        put("runNonce", nonce)
+      }.toString().toByteArray(Charsets.UTF_8)
+      Thread({
+        var connection: HttpURLConnection? = null
+        try {
+          val request = URL(endpoint).openConnection() as HttpURLConnection
+          connection = request
+          request.requestMethod = "POST"
+          request.connectTimeout = 5_000
+          request.readTimeout = 65_000
+          request.instanceFollowRedirects = false
+          request.doOutput = true
+          request.setRequestProperty("Content-Type", "application/json")
+          request.setFixedLengthStreamingMode(identity.size)
+          request.outputStream.use { it.write(identity) }
+          check(request.responseCode == 204) { "Core observation was not acknowledged" }
+          promise.resolve(null)
+        } catch (_: Throwable) {
+          promise.reject("E_JAZZ_DEVICE_CORE", "Core observation was not acknowledged")
+        } finally { connection?.disconnect() }
+      }, "JazzCoreObservation").start()
+    } catch (_: Throwable) {
+      promise.reject("E_JAZZ_DEVICE_CORE", "Missing Core observation launch metadata")
+    }
   }
 
   @ReactMethod fun receiptContext(promise: Promise) {

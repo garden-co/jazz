@@ -10,7 +10,7 @@
     "prebuild": "expo prebuild --clean",
     "typecheck": "tsc --noEmit",
     "build:workspace-prerequisites": "pnpm --filter jazz-tools build:react-native && pnpm --filter jazz-rn build",
-    "test:protocol": "pnpm build:workspace-prerequisites && node --experimental-strip-types --test src/base64.test.ts src/protocol.test.ts src/relay-admission.test.ts src/foreground-byte-abi.test.ts src/native-subscription-observation.test.ts src/run-marker.test.ts src/diagnostic-lifecycle.test.ts src/high-level-foreground.test.ts src/publication-wait.test.ts scripts/device-driver.test.mjs scripts/android-adb.test.mjs scripts/android-diagnostics.test.mjs scripts/android-relay-stage.test.mjs scripts/boot-android-emulator.test.mjs scripts/ios-diagnostics.test.mjs scripts/native-host-contract.test.mjs",
+    "test:protocol": "pnpm build:workspace-prerequisites && node --experimental-strip-types --test src/base64.test.ts src/protocol.test.ts src/relay-admission.test.ts src/foreground-byte-abi.test.ts src/native-subscription-observation.test.ts src/run-marker.test.ts src/diagnostic-lifecycle.test.ts src/high-level-foreground.test.ts src/publication-wait.test.ts scripts/device-driver.test.mjs scripts/edge-session-harness.test.mjs scripts/android-adb.test.mjs scripts/android-diagnostics.test.mjs scripts/android-relay-stage.test.mjs scripts/boot-android-emulator.test.mjs scripts/ios-diagnostics.test.mjs scripts/native-host-contract.test.mjs",
     "verify": "pnpm test:protocol && pnpm typecheck",
     "device:android": "node --experimental-strip-types scripts/run-android.mjs",
     "device:ios": "node --experimental-strip-types scripts/run-ios.mjs"

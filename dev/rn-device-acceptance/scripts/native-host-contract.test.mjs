@@ -99,10 +99,10 @@ function assertAndroidRelayAssemblyAbiContract(libraryBuild, workflow) {
   );
 }
 
-function assertAndroidHarnessStartupContract(driver) {
-  const build = driver.indexOf('execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]');
-  const spawn = driver.indexOf('spawn("cargo", ["run", "--quiet", ...harnessCargoArgs]');
-  const readinessTimeout = driver.indexOf("60_000");
+function assertAndroidHarnessStartupContract(driver, harness) {
+  const build = harness.indexOf('execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]');
+  const spawn = harness.indexOf('spawn("cargo", ["run", "--quiet", ...harnessCargoArgs]');
+  const readinessTimeout = harness.indexOf("60_000");
   assert.ok(build >= 0, "the local Edge/Core harness must be built before it is started");
   assert.ok(spawn > build, "the readiness process must start only after its Cargo build succeeds");
   assert.ok(
@@ -110,19 +110,19 @@ function assertAndroidHarnessStartupContract(driver) {
     "the 60-second readiness allowance must not include cold Cargo compilation",
   );
   assert.match(
-    driver,
+    harness,
     /stdio: \["ignore", "pipe", "pipe"\]/,
     "harness stdout and stderr must both be retained for a bounded failure diagnostic",
   );
-  assert.match(driver, /child\.once\("exit", \(code, signal\) =>/);
+  assert.match(harness, /child\.once\("exit", \(code, signal\) =>/);
   assert.match(driver, /import \{ adb \} from "\.\/android-adb\.mjs"/);
   assert.match(driver, /const androidAdb = \(args\) => adb\(args, \{ serial \}\)/);
   assert.doesNotMatch(driver, /execFileSync\("adb"/);
   assert.match(driver, /androidAdb\(\["get-state"\]\)/);
-  assert.match(driver, /retainHarnessOutput\(stdout, chunk\)/);
-  assert.match(driver, /retainHarnessOutput\(stderr, chunk\)/);
-  assert.match(driver, /JAZZ_RN_EDGE_SESSION \[redacted\]/);
-  assert.match(driver, /\[redacted-token\]/);
+  assert.match(harness, /retainHarnessOutput\(stdout, chunk\)/);
+  assert.match(harness, /retainHarnessOutput\(stderr, chunk\)/);
+  assert.match(harness, /JAZZ_RN_EDGE_SESSION \[redacted\]/);
+  assert.match(harness, /\[redacted-token\]/);
 }
 
 function assertPackedJvmAdmissionWorkflowContract(workflow, packagingReceipt) {
@@ -285,7 +285,7 @@ function swapSubscriptionWriteStages(fixture) {
 }
 
 function assertPublicClientSeedStages(source) {
-  const stages = ["open", "subscribe", "write", "read", "publish", "shutdown"];
+  const stages = ["open", "subscribe", "write", "read", "publish", "core-observation", "shutdown"];
   let previous = -1;
   for (const stage of stages) {
     const marker = `markFailure("public-client-${stage}-failed")`;
@@ -300,6 +300,7 @@ function assertPublicClientSeedStages(source) {
     /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
     /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
     /markFailure\("public-client-publish-failed"\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
+    /markFailure\("public-client-core-observation-failed"\);\s*await waitForCoreObservation\(\);/,
     /if \(completed && !failed\) markFailure\("public-client-shutdown-failed"\);\s*await finishSeedClient/,
   ]) {
     assert.match(source, pattern, "public client seed stage moved away from its native boundary");
@@ -599,7 +600,8 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
 test("Android acceptance reads only bounded receipt and allowlisted diagnostic tags", () => {
   const driver = read("scripts/run-android.mjs");
   const fixture = read("native/android/JazzDeviceFixtureModule.kt");
-  assertAndroidHarnessStartupContract(driver);
+  const harness = read("scripts/edge-session-harness.mjs");
+  assertAndroidHarnessStartupContract(driver, harness);
   // A planted return to `cargo run` in place of the explicit build puts cold
   // compilation back inside the quiet readiness window. The structural receipt
   // must reject that regression before an Android runner spends a minute with
@@ -607,15 +609,17 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
   assert.throws(
     () =>
       assertAndroidHarnessStartupContract(
-        driver.replace(
+        driver,
+        harness.replace(
           'execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]',
           'execFileSync("cargo", ["run", "--quiet", ...harnessCargoArgs]',
         ),
       ),
     /must be built before it is started/,
   );
-  assert.match(driver, /rn_edge_session_harness/);
-  assert.match(driver, /http:\/\/10\.0\.2\.2:\$\{session\.edge_port\}/);
+  assert.match(harness, /rn_edge_session_harness/);
+  assert.match(driver, /host: "10\.0\.2\.2"/);
+  assert.match(harness, /http:\/\/\$\{host\}:\$\{session\.edge_port\}/);
   for (const input of ["jazzDeviceEdgeEndpoint", "jazzDeviceBearerA", "jazzDeviceBearerB"]) {
     assert.match(driver, new RegExp(`"${input}"`));
     assert.match(fixture, new RegExp(`"${input}"`));
@@ -901,7 +905,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   );
   assert.match(
     app,
-    /seedHighLevelForegroundRuntime\(scopeA\.capability, receipt\.runNonce, markFailure\)/,
+    /seedHighLevelForegroundRuntime\(\s*scopeA\.capability,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,?\s*\)/,
   );
   // Before the driver ends the seed process, a separately opened public
   // foreground must read the run-bound row. This prevents the restart claim
@@ -992,7 +996,15 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     "relay readback must reject an empty catch that hides read or assertion failures",
   );
   assertPublicClientSeedStages(highLevelForeground);
-  for (const stage of ["open", "subscribe", "write", "read", "publish", "shutdown"]) {
+  for (const stage of [
+    "open",
+    "subscribe",
+    "write",
+    "read",
+    "publish",
+    "core-observation",
+    "shutdown",
+  ]) {
     assert.throws(
       () =>
         assertPublicClientSeedStages(
@@ -1279,19 +1291,26 @@ test("checksum pin rejects a planted corrupt cache archive", () => {
 test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", () => {
   const fixture = read("native/ios/JazzDeviceFixture.mm");
   const checkedInFixture = read("ios/JazzDeviceFixture.mm");
-  assert.match(fixture, /JazzRelayTrustedAdmission admitScopeJSON/);
-  assert.match(fixture, /replaceCapability:self\.capability withScopeJSON/);
-  assert.match(fixture, /JazzDeviceScopeFixture\(NSString \*authScope\)/);
+  assert.match(fixture, /JazzRelayTrustedAdmission beginPrivateSessionWithServerURL:endpoint/);
+  assert.match(fixture, /JazzRelayTrustedAdmission attachCanonicalSchemaJSON/);
+  assert.match(fixture, /sessionCapability:session error:error/);
+  assert.match(fixture, /JazzDeviceAdmitPrivateSession\(NO, &error\)/);
+  assert.match(fixture, /JazzDeviceAdmitPrivateSession\(YES, &error\)/);
+  assert.match(fixture, /appID:@"jazz-device-acceptance" jwt:bearer/);
   assert.match(fixture, /RCT_REMAP_METHOD\(receiptContext/);
-  assert.match(fixture, /@"schema_json": @"\{\\"tables\\":\{\\"todos\\":/);
-  assert.match(fixture, /\\"column_type\\":\{\\"type\\":\\"Text\\"\}/);
-  assert.doesNotMatch(fixture, /@"schema_json": @"\{\\"tables\\":\{\}\}"/);
-  assert.match(fixture, /11111111-1111-4111-8111-111111111111/);
-  assert.match(fixture, /fixture-user-a/);
-  assert.match(fixture, /fixture-user-b/);
-  assert.match(fixture, /22222222-2222-4222-8222-222222222222/);
-  assert.match(fixture, /jazz-device-%@\.sqlite/);
-  assert.match(fixture, /@"claims": @\{\}/);
+  assert.doesNotMatch(fixture, /admitScopeJSON|withScopeJSON|sqlite_path|@"claims"/);
+  for (const input of ["-JazzDeviceEdgeEndpoint", "-JazzDeviceBearerA", "-JazzDeviceBearerB"]) {
+    assert.ok(fixture.includes(input));
+    assert.ok(read("scripts/run-ios.mjs").includes(input));
+  }
+  const switchBody = fixture.slice(
+    fixture.indexOf("RCT_REMAP_METHOD(switchAuthScope"),
+    fixture.indexOf("RCT_REMAP_METHOD(receiptContext"),
+  );
+  assert.ok(
+    switchBody.indexOf("revokeCapability:self.capability") <
+      switchBody.indexOf("JazzDeviceAdmitPrivateSession(YES"),
+  );
   for (const key of ["-JazzDeviceRunNonce", "-JazzDeviceDeviceIdentifier"]) {
     assert.match(fixture, new RegExp(key));
   }

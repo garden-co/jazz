@@ -14,6 +14,7 @@ export type DeviceReceiptContext = {
 };
 
 type FixtureModule = {
+  waitForCoreObservation(): Promise<void>;
   admittedCapability(): Promise<string>;
   logout(): Promise<void>;
   switchAuthScope(): Promise<string>;
@@ -113,4 +114,9 @@ export async function recordDeviceDiagnostic(code: DeviceDiagnosticCode): Promis
 /** Clear the pending stage only after the complete native lifecycle succeeds. */
 export async function clearDeviceDiagnostic(): Promise<void> {
   await fixtureModule().clearDiagnostic();
+}
+
+/** Test-only host acknowledgement, separate from the public write wait API. */
+export async function waitForNativeCoreObservation(): Promise<void> {
+  await fixtureModule().waitForCoreObservation();
 }

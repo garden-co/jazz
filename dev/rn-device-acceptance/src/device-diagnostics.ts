@@ -19,6 +19,7 @@ export const DEVICE_DIAGNOSTIC_CODES = [
   "public-client-write-failed",
   "public-client-read-failed",
   "public-client-publish-failed",
+  "public-client-core-observation-failed",
   "public-client-shutdown-failed",
   "public-client-relay-readback-failed",
   "scope-isolation-failed",

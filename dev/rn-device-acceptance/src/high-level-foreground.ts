@@ -37,6 +37,7 @@ export async function seedHighLevelForegroundRuntime(
   capability: Uint8Array,
   runNonce: string,
   markFailure: (code: DeviceDiagnosticCode) => void,
+  waitForCoreObservation: () => Promise<void>,
 ): Promise<void> {
   markFailure("public-client-open-failed");
   const client = await createJazzClient(clientConfig(capability));
@@ -65,6 +66,11 @@ export async function seedHighLevelForegroundRuntime(
     if (!(await waitForPublication(() => observed))) {
       throw new Error("high-level React Native foreground did not publish its local write");
     }
+    // Keep this foreground and its native relay alive until the host's
+    // independent Core reader observes the same run-bound title. This fixture
+    // handshake does not widen the public RN local-only write.wait contract.
+    markFailure("public-client-core-observation-failed");
+    await waitForCoreObservation();
     completed = true;
   } catch (error) {
     failed = true;
