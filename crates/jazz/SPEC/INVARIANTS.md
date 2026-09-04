@@ -11,11 +11,9 @@ Filter Jazz records with `rg '"domain":"jazz"' crates/invariant-registry.jsonl`,
 or find one directly with `rg '"id":"INV-API-1"' crates/invariant-registry.jsonl`.
 
 `dev/gates/invariant-registry.sh` validates the record shape, stable IDs,
-duplicate IDs, cited Rust/TypeScript tests, covered-without-test mistakes, and
-a one-time parity receipt for all 334 Jazz records migrated from the legacy
-table. The gate commits that frozen receipt's digest and Jazz/Groove record
-counts, so removing a record together with its receipt line cannot erase
-legacy coverage; newly introduced JSONL records need no receipt amendment.
+duplicate domain/IDs, cited Rust/TypeScript tests, and covered-without-test
+mistakes. The JSONL itself is the complete invariant data source; it carries
+no migration shadow registry or historical receipt.
 It reports `now` + `untested` as visible documented debt without failing.
 Groove-owned IDs live in
 [`../../groove/SPEC/INVARIANTS.md`](../../groove/SPEC/INVARIANTS.md).

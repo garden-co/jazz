@@ -8,13 +8,6 @@ set +e
 set -u -o pipefail
 
 readonly REGISTRY="${INVARIANT_REGISTRY:-crates/invariant-registry.jsonl}"
-readonly PARITY_RECEIPT="${INVARIANT_PARITY_RECEIPT:-crates/invariant-registry-parity.tsv}"
-# This is a one-time migration commitment, not a registry. It pins every
-# historical ID and field hash while later JSONL records remain appendable
-# without touching the frozen receipt.
-readonly LEGACY_PARITY_SHA256="12e257ba861b9613c8061a5b2f81fbe9e336b3f6e170bdd7d069ea70d216bdd8"
-readonly LEGACY_JAZZ_RECORDS=334
-readonly LEGACY_GROOVE_RECORDS=143
 
 failures=0
 rows=0
@@ -44,8 +37,6 @@ parse_registry() {
     PARSED_ROWS="$(perl - "$registry" <<'PERL'
 use strict;
 use warnings;
-use Digest::SHA qw(sha256_hex);
-use Encode qw(encode_utf8);
 use JSON::PP ();
 use open qw(:std :encoding(UTF-8));
 
@@ -87,11 +78,9 @@ while (my $line = <$fh>) {
     if ($previous ne '' && $sort_key le $previous) {
         warn "$path:$line_number: records must be strictly sorted by id then domain\n";
         $bad++;
-        next;
     }
     $previous = $sort_key;
-    my @fields = @{$record}{@keys};
-    print join("\x1f", @fields, sha256_hex(encode_utf8(join("\x1f", @fields)))), "\n";
+    print join("\x1f", @{$record}{@keys}), "\n";
 }
 exit($bad ? 1 : 0);
 PERL
@@ -208,53 +197,11 @@ check_test_citations() {
     done
 }
 
-# The receipt is deliberately one-way: every legacy-table record must remain
-# byte-identical after canonical whitespace normalization, while new records
-# may be added without editing a shared inventory/count file.
-check_migration_parity() {
-    local registry=$1 receipt=$2 row domain id expected actual_hash receipt_hash jazz_records=0 groove_records=0
-    local -A actual=()
-    if [[ ! -f $receipt ]]; then
-        fail "$registry: missing migration parity receipt $receipt"
-        return
-    fi
-    while IFS= read -r row; do
-        [[ -n $row ]] || continue
-        domain=${row%%$'\x1f'*}
-        id=${row#*$'\x1f'}; id=${id%%$'\x1f'*}
-        actual["$domain:$id"]=${row##*$'\x1f'}
-    done <<< "$PARSED_ROWS"
-    receipt_hash="$(perl -MDigest::SHA=sha256_hex -e 'open my $fh, "<:raw", shift or die $!; local $/; print sha256_hex(<$fh>)' "$receipt")"
-    if [[ $receipt_hash != "$LEGACY_PARITY_SHA256" ]]; then
-        fail "$receipt: frozen legacy parity receipt digest differs"
-    fi
-    while IFS=$'\t' read -r domain id expected; do
-        [[ -z $domain || $domain == \#* ]] && continue
-        if [[ ! $domain =~ ^(jazz|groove)$ || ! $id =~ ^(G-)?INV-[A-Za-z0-9-]+$ || ! $expected =~ ^[0-9a-f]{64}$ ]]; then
-            fail "$receipt: malformed parity row '$domain:$id'"
-            continue
-        fi
-        actual_hash=${actual["$domain:$id"]-}
-        if [[ -z $actual_hash ]]; then
-            fail "$registry: migrated invariant $domain:$id is missing"
-        elif [[ $actual_hash != "$expected" ]]; then
-            fail "$registry: migrated invariant $domain:$id changed from its canonical legacy fields"
-        fi
-        case $domain in
-            jazz) jazz_records=$((jazz_records + 1)) ;;
-            groove) groove_records=$((groove_records + 1)) ;;
-        esac
-    done < "$receipt"
-    if (( jazz_records != LEGACY_JAZZ_RECORDS || groove_records != LEGACY_GROOVE_RECORDS )); then
-        fail "$receipt: frozen legacy inventory count differs (expected jazz=$LEGACY_JAZZ_RECORDS groove=$LEGACY_GROOVE_RECORDS; got jazz=$jazz_records groove=$groove_records)"
-    fi
-}
-
 check_registry() {
-    local registry=$1 receipt=$2 record domain id invariant tests impl status coverage record_hash registry_rows=0
+    local registry=$1 record domain id invariant tests impl status coverage registry_rows=0
     local -A seen_ids=()
     parse_registry "$registry"
-    while IFS=$'\x1f' read -r domain id invariant tests impl status coverage record_hash; do
+    while IFS=$'\x1f' read -r domain id invariant tests impl status coverage; do
         [[ -n $id ]] || continue
         if [[ ! $domain =~ ^(jazz|groove)$ ]]; then
             fail "$registry: invalid invariant domain '$domain'"
@@ -291,14 +238,13 @@ check_registry() {
         registry_rows=$((registry_rows + 1))
         rows=$((rows + 1))
     done <<< "$PARSED_ROWS"
-    check_migration_parity "$registry" "$receipt"
     printf 'invariant-registry: checked %s (%d rows)\n' "$registry" "$registry_rows"
 }
 
 require_command git || exit 1
 require_command perl || exit 1
 index_test_functions
-check_registry "$REGISTRY" "$PARITY_RECEIPT"
+check_registry "$REGISTRY"
 printf 'invariant-registry: summary: %d rows, %d missing test citations, %d covered rows without a test, %d now + untested (not failing)\n' \
     "$rows" "$missing_tests" "$uncited_covered" "$now_untested"
 
