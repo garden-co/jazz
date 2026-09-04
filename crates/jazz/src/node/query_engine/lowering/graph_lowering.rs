@@ -3059,8 +3059,33 @@ fn lower_aggregate_expr(
         .input
         .as_ref()
         .map(|value| {
-            lower_field_ref(value, plan, source, request, "aggregate input")
-                .map(GroovePlanExpr::field)
+            let carrier = lower_field_ref(value, plan, source, request, "aggregate input")?;
+            let descriptor = &source.row_shape.descriptor;
+            let index = descriptor
+                .fields()
+                .iter()
+                .position(|field| field.name.as_deref() == Some(carrier.as_str()))
+                .ok_or_else(|| {
+                    UnsupportedReason::Operator(format!(
+                        "aggregate input carrier {carrier:?} is missing from resolved source"
+                    ))
+                })?;
+            let field = &descriptor.fields()[index];
+            // PlanExpr carries a name. Preserve the selected source slot by
+            // choosing a spelling that its logical-then-carrier resolver will
+            // bind back to that exact slot, including user-prefix collisions.
+            let name = field
+                .name
+                .as_deref()
+                .into_iter()
+                .chain(field.logical_name())
+                .find(|name| resolved_source_descriptor_index(source, name) == Some(index))
+                .ok_or_else(|| {
+                    UnsupportedReason::Operator(format!(
+                        "aggregate input carrier {carrier:?} has no unambiguous expression name"
+                    ))
+                })?;
+            Ok(GroovePlanExpr::field(name))
         })
         .transpose()?;
     Ok(GrooveAggregateExpr {

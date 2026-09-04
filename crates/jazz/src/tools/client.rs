@@ -5763,6 +5763,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregate_value_inputs_preserve_declared_column_identity_with_carrier_collision() {
+        use crate::query::Query;
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .column("state", ColumnType::Integer)
+                        .column("user_state", ColumnType::Integer),
+                )
+                .build(),
+        )
+        .await;
+        for (id, state) in [(1, 1_i32), (2, 2_i32), (3, 1_i32)] {
+            client
+                .upsert(
+                    "items",
+                    Uuid::from_u128(id),
+                    crate::row_input!("state" => state, "user_state" => 7_i32),
+                )
+                .unwrap();
+        }
+        for (column, sum, min, max) in [("state", 4, 1, 2), ("user_state", 21, 7, 7)] {
+            for (query, alias, expected) in [
+                (
+                    Query::from("items").sum(column),
+                    format!("sum_{column}"),
+                    sum,
+                ),
+                (
+                    Query::from("items").min(column),
+                    format!("min_{column}"),
+                    min,
+                ),
+                (
+                    Query::from("items").max(column),
+                    format!("max_{column}"),
+                    max,
+                ),
+            ] {
+                let rows = client
+                    .query_results(query, Some(DurabilityTier::Local))
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    rows[0].get(&alias),
+                    Some(&Value::Integer(expected)),
+                    "{alias}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn grouped_aggregate_preserves_declared_column_identity_with_carrier_collision() {
         use crate::query::{OrderDirection, Query};
         let client = JazzClient::test_client(

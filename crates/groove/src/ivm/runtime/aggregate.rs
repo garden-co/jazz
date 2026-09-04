@@ -10,19 +10,19 @@ pub(super) fn resolve_aggregate_expr(
     aggregate: &AggregateExpr,
 ) -> Result<AggregateExpr, IvmRuntimeError> {
     let expression = match &aggregate.expression {
-        Some(PlanExpr::Field(field)) => Some(PlanExpr::Field(resolve_field_name(input, field)?)),
+        Some(PlanExpr::Field(field)) => Some(PlanExpr::Field(validated_field_name(input, field)?)),
         Some(PlanExpr::Nullable(field)) => {
-            Some(PlanExpr::Nullable(resolve_field_name(input, field)?))
+            Some(PlanExpr::Nullable(validated_field_name(input, field)?))
         }
         Some(PlanExpr::NullableFlat(field)) => {
-            Some(PlanExpr::NullableFlat(resolve_field_name(input, field)?))
+            Some(PlanExpr::NullableFlat(validated_field_name(input, field)?))
         }
         Some(PlanExpr::EnumTagRemap { field, tags }) => Some(PlanExpr::EnumTagRemap {
-            field: resolve_field_name(input, field)?,
+            field: validated_field_name(input, field)?,
             tags: tags.clone(),
         }),
         Some(PlanExpr::EnumRemap { field, tags }) => Some(PlanExpr::EnumRemap {
-            field: resolve_field_name(input, field)?,
+            field: validated_field_name(input, field)?,
             tags: tags.clone(),
         }),
         Some(PlanExpr::RecursiveEnumRemap {
@@ -30,7 +30,7 @@ pub(super) fn resolve_aggregate_expr(
             remaps,
             omit_unrepresentable,
         }) => Some(PlanExpr::RecursiveEnumRemap {
-            field: resolve_field_name(input, field)?,
+            field: validated_field_name(input, field)?,
             remaps: remaps.clone(),
             omit_unrepresentable: *omit_unrepresentable,
         }),
@@ -45,10 +45,12 @@ pub(super) fn resolve_aggregate_expr(
     })
 }
 
-fn resolve_field_name(input: &RecordDescriptor, field: &str) -> Result<String, IvmRuntimeError> {
-    let field_idx = super::record_projection::resolve_field_name(input, field)
+fn validated_field_name(input: &RecordDescriptor, field: &str) -> Result<String, IvmRuntimeError> {
+    super::record_projection::resolve_field_name(input, field)
         .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
-    field_name_at(input, field_idx)
+    // Evaluation resolves this same PlanExpr name again. Returning the raw
+    // carrier here could instead bind a different field's logical identity.
+    Ok(field.to_owned())
 }
 
 /// Reconstructs the positive pre-tick input multiset from its post-tick state.
