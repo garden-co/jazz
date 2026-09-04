@@ -384,6 +384,18 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.doesNotMatch(fixture, /jazzDeviceBuildFingerprint/);
 });
 
+test("native relay reserves platform-owned storage roots before session wiring", () => {
+  const android = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayBridge.kt"),
+    "utf8",
+  );
+  const ios = fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/ios/JazzRelay.mm"), "utf8");
+  assert.match(android, /context\.noBackupFilesDir/);
+  assert.match(android, /nativeRelayStorageRoot/);
+  assert.match(ios, /NSApplicationSupportDirectory/);
+  assert.match(ios, /JazzRelayStorageRoot/);
+});
+
 test("iOS fixture imports the public JazzRn pod header, not its private relay framework", () => {
   const podspec = fs.readFileSync(
     path.resolve(root, "../../crates/jazz-rn/JazzRn.podspec"),

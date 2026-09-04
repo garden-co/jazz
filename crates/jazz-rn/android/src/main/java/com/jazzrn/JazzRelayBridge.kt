@@ -1,6 +1,8 @@
 package com.jazzrn
 
 import android.util.Base64
+import android.content.Context
+import java.io.File
 import com.facebook.react.turbomodule.core.interfaces.BindingsInstallerHolder
 import org.json.JSONObject
 
@@ -145,4 +147,15 @@ object JazzRelayTrustedAdmission {
   }
 
   fun revoke(capability: ByteArray) = JazzRelayBridge.revokeTrustedScope(capability)
+}
+
+/**
+ * Native relay state is never named by JavaScript.  The session boundary may
+ * use this deterministic, app-private root when it creates its SQLite file;
+ * callers provide only an opaque capability back to JS.
+ */
+internal fun nativeRelayStorageRoot(context: Context): File {
+  val root = File(context.noBackupFilesDir, "jazz-relay")
+  check(root.exists() || root.mkdirs()) { "Unable to create Jazz relay storage root" }
+  return root
 }

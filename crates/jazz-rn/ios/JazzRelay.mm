@@ -68,6 +68,18 @@ static NSError *RelayLifecycleError(NSString *message) {
   return [NSError errorWithDomain:@"JazzRelay" code:1
                           userInfo:@{NSLocalizedDescriptionKey: message}];
 }
+
+// Session setup never receives a storage path from JavaScript.  Keep relay
+// SQLite under Application Support (excluded from user-visible documents) so
+// iOS backup/lifecycle policy remains platform-owned.
+static NSURL *JazzRelayStorageRoot(void) {
+  NSFileManager *manager = [NSFileManager defaultManager];
+  NSURL *support = [manager URLsForDirectory:NSApplicationSupportDirectory
+                                   inDomains:NSUserDomainMask].firstObject;
+  NSURL *root = [support URLByAppendingPathComponent:@"JazzRelay" isDirectory:YES];
+  [manager createDirectoryAtURL:root withIntermediateDirectories:YES attributes:nil error:nil];
+  return root;
+}
 #endif
 
 - (instancetype)init {
