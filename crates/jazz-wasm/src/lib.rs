@@ -1066,41 +1066,18 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
+        open_tx: Option<OpenTransactionId>,
+        author: Option<AuthorSubject>,
     ) -> Result<QueryAttachment, jazz::db::Error> {
-        with_wasm_db!(self, |db| db.attach_query_with_opts(query, opts))
-    }
-
-    fn attach_query_for_identity(
-        &self,
-        query: &PreparedQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<QueryAttachment, jazz::db::Error> {
-        with_wasm_db!(self, |db| db
-            .attach_query_with_opts_for_identity(query, opts, author))
-    }
-
-    fn attach_query_in_transaction(
-        &self,
-        query: &PreparedQuery,
-        tx_id: OpenTransactionId,
-        opts: ReadOpts,
-    ) -> Result<QueryAttachment, jazz::db::Error> {
-        with_wasm_db!(self, |db| db
-            .attach_query_in_transaction_with_opts(query, tx_id, opts))
-    }
-
-    fn attach_query_in_transaction_for_identity(
-        &self,
-        query: &PreparedQuery,
-        tx_id: OpenTransactionId,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<QueryAttachment, jazz::db::Error> {
-        with_wasm_db!(self, |db| db
-            .attach_query_in_transaction_with_opts_for_identity(
-                query, tx_id, opts, author
-            ))
+        with_wasm_db!(self, |db| match (open_tx, author) {
+            (Some(open_tx), Some(author)) =>
+                db.attach_query_in_transaction_with_opts_for_identity(query, open_tx, opts, author,),
+            (Some(open_tx), None) => {
+                db.attach_query_in_transaction_with_opts(query, open_tx, opts)
+            }
+            (None, Some(author)) => db.attach_query_with_opts_for_identity(query, opts, author),
+            (None, None) => db.attach_query_with_opts(query, opts),
+        })
     }
 
     fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
@@ -2359,112 +2336,32 @@ impl WasmDb {
         subscription_stream_to_js(inner, stream)
     }
 
-    #[wasm_bindgen(js_name = attachQueryForBackend)]
-    pub fn attach_query_for_backend(
-        &self,
-        query: &WasmPreparedQuery,
-        opts: JsValue,
-    ) -> Result<WasmQueryAttachment, JsValue> {
-        self.require_trusted_backend()?;
-        let opts = read_opts_from_js(opts)?;
-        Ok(WasmQueryAttachment {
-            inner: self
-                .open_inner()?
-                .attach_query_for_identity(&query.inner, opts, AuthorSubject::SYSTEM)
-                .map_err(to_js_error)?,
-        })
-    }
-
+    /// Attach query coverage using one native entry point. An optional open
+    /// transaction selects its frozen snapshot; an explicit author selects
+    /// trusted-serving authorization. With no author, an explicit backend
+    /// open uses backend authority and an ordinary open remains client-local.
     #[wasm_bindgen(js_name = attachQuery)]
     pub fn attach_query(
         &self,
         query: &WasmPreparedQuery,
         opts: JsValue,
+        open_transaction_id: Option<String>,
+        author: Option<Vec<u8>>,
     ) -> Result<WasmQueryAttachment, JsValue> {
         let opts = read_opts_from_js(opts)?;
+        let open_tx = open_transaction_id
+            .map(|id| id.parse::<OpenTransactionId>())
+            .transpose()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let author = match author {
+            Some(author) => Some(author_id_from_bytes(&author)?),
+            None if self.trusted_backend => Some(AuthorSubject::SYSTEM),
+            None => None,
+        };
         Ok(WasmQueryAttachment {
             inner: self
                 .open_inner()?
-                .attach_query(&query.inner, opts)
-                .map_err(to_js_error)?,
-        })
-    }
-
-    #[wasm_bindgen(js_name = attachQueryForIdentity)]
-    pub fn attach_query_for_identity(
-        &self,
-        query: &WasmPreparedQuery,
-        author: Vec<u8>,
-        opts: JsValue,
-    ) -> Result<WasmQueryAttachment, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let author = author_id_from_bytes(&author)?;
-        Ok(WasmQueryAttachment {
-            inner: self
-                .open_inner()?
-                .attach_query_for_identity(&query.inner, opts, author)
-                .map_err(to_js_error)?,
-        })
-    }
-
-    #[wasm_bindgen(js_name = attachQueryInTransaction)]
-    pub fn attach_query_in_transaction(
-        &self,
-        query: &WasmPreparedQuery,
-        tx: &WasmTx,
-        opts: JsValue,
-    ) -> Result<WasmQueryAttachment, JsValue> {
-        let inner = self.open_inner()?;
-        ensure_transaction_runtime(&inner, tx)?;
-        let opts = read_opts_from_js(opts)?;
-        let tx_id = tx.open_tx_for_read()?;
-        Ok(WasmQueryAttachment {
-            inner: inner
-                .attach_query_in_transaction(&query.inner, tx_id, opts)
-                .map_err(to_js_error)?,
-        })
-    }
-
-    #[wasm_bindgen(js_name = attachQueryInTransactionForIdentity)]
-    pub fn attach_query_in_transaction_for_identity(
-        &self,
-        query: &WasmPreparedQuery,
-        tx: &WasmTx,
-        author: Vec<u8>,
-        opts: JsValue,
-    ) -> Result<WasmQueryAttachment, JsValue> {
-        let inner = self.open_inner()?;
-        ensure_transaction_runtime(&inner, tx)?;
-        let opts = read_opts_from_js(opts)?;
-        let tx_id = tx.open_tx_for_read()?;
-        let author = author_id_from_bytes(&author)?;
-        Ok(WasmQueryAttachment {
-            inner: inner
-                .attach_query_in_transaction_for_identity(&query.inner, tx_id, opts, author)
-                .map_err(to_js_error)?,
-        })
-    }
-
-    #[wasm_bindgen(js_name = attachQueryInTransactionForBackend)]
-    pub fn attach_query_in_transaction_for_backend(
-        &self,
-        query: &WasmPreparedQuery,
-        tx: &WasmTx,
-        opts: JsValue,
-    ) -> Result<WasmQueryAttachment, JsValue> {
-        self.require_trusted_backend()?;
-        let inner = self.open_inner()?;
-        ensure_transaction_runtime(&inner, tx)?;
-        let opts = read_opts_from_js(opts)?;
-        let tx_id = tx.open_tx_for_read()?;
-        Ok(WasmQueryAttachment {
-            inner: inner
-                .attach_query_in_transaction_for_identity(
-                    &query.inner,
-                    tx_id,
-                    opts,
-                    AuthorSubject::SYSTEM,
-                )
+                .attach_query(&query.inner, opts, open_tx, author)
                 .map_err(to_js_error)?,
         })
     }

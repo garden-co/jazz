@@ -3359,12 +3359,12 @@ describe("NativeRuntimeAdapter server transport", () => {
             },
             connectUpstream: () => new FakeTransport([]),
             prepareQuery: () => ({}),
-            attachQuery: () => {
+            attachQuery: (_query, _opts, _openTransactionId, author) => {
+              if (author) {
+                throw new Error("client coverage must not select an authority identity");
+              }
               attachedSubjects.push("client");
               return {};
-            },
-            attachQueryForIdentity: () => {
-              throw new Error("client coverage must not select attachQueryForIdentity");
             },
             queryAttachmentIsCovered: () => true,
             detachQuery: () => undefined,
@@ -3803,10 +3803,12 @@ describe("NativeRuntimeAdapter server transport", () => {
               allForIdentity: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: () => {
-                throw new Error("trusted-serving coverage must use identity attachment");
+              attachQuery: (_query, _opts, _openTransactionId, author) => {
+                if (!author) {
+                  throw new Error("trusted-serving coverage must use an authority identity");
+                }
+                return {};
               },
-              attachQueryForIdentity: () => ({}),
               queryAttachmentIsCovered: () => true,
               detachQuery: () => undefined,
               setNonDurableClient: () => undefined,
@@ -3886,10 +3888,12 @@ describe("NativeRuntimeAdapter server transport", () => {
               allForIdentity: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: () => {
-                throw new Error("trusted-serving coverage must use identity attachment");
+              attachQuery: (_query, _opts, _openTransactionId, author) => {
+                if (!author) {
+                  throw new Error("trusted-serving coverage must use an authority identity");
+                }
+                return {};
               },
-              attachQueryForIdentity: () => ({}),
               queryAttachmentIsCovered: () => true,
               detachQuery: () => undefined,
               setNonDurableClient: () => undefined,
@@ -3959,10 +3963,12 @@ describe("NativeRuntimeAdapter server transport", () => {
               allForIdentity: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: () => {
-                throw new Error("trusted-serving coverage must use identity attachment");
+              attachQuery: (_query, _opts, _openTransactionId, author) => {
+                if (!author) {
+                  throw new Error("trusted-serving coverage must use an authority identity");
+                }
+                return {};
               },
-              attachQueryForIdentity: () => ({}),
               queryAttachmentIsCovered: () => true,
               detachQuery: () => undefined,
               setIdentityClaims: () => undefined,

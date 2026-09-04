@@ -100,10 +100,10 @@ const MAX_CORE_TICKS_PER_TURN = 4;
 
 type ReadAuthorizationHost = "client-local" | "trusted-serving";
 /**
- * The native ABI has three deliberately non-interchangeable read entry
- * points.  This is an adapter-private capability choice, never wire/session
- * data: callers can supply a public session, but cannot name backend
- * authority or turn a client-local read into an authority read.
+ * The adapter selects one of three non-interchangeable authorization contexts.
+ * This is an adapter-private capability choice, never wire/session data:
+ * callers can supply a public session, but cannot name backend authority or
+ * turn a client-local read into an authority read.
  */
 type NativeReadContext =
   | { readonly kind: "client-local" }
@@ -226,17 +226,12 @@ type NativeDb = {
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
-  attachQuery?(query: PreparedQuery, opts: unknown): unknown;
-  attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
-  attachQueryForBackend?(query: PreparedQuery, opts: unknown): unknown;
-  attachQueryInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): unknown;
-  attachQueryInTransactionForIdentity?(
+  attachQuery?(
     query: PreparedQuery,
-    tx: Tx,
-    author: Uint8Array,
     opts: unknown,
+    openTransactionId?: OpenTransactionId,
+    author?: Uint8Array,
   ): unknown;
-  attachQueryInTransactionForBackend?(query: PreparedQuery, tx: Tx, opts: unknown): unknown;
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
@@ -2810,46 +2805,11 @@ export class NativeRuntimeAdapter implements Runtime {
     context: NativeReadContext,
     pendingTx?: PendingTx,
   ): unknown {
-    const tx = pendingTx ? this.txForRead(pendingTx) : undefined;
-    switch (context.kind) {
-      case "backend-authority":
-        if (tx) {
-          if (!this.db.attachQueryInTransactionForBackend) {
-            throw new Error(
-              "Native runtime does not support backend transaction snapshot query coverage",
-            );
-          }
-          return this.db.attachQueryInTransactionForBackend(query, tx, opts);
-        }
-        if (!this.db.attachQueryForBackend) {
-          throw new Error("Native runtime does not support backend authority query coverage");
-        }
-        return this.db.attachQueryForBackend(query, opts);
-      case "session-authority":
-        if (tx) {
-          if (!this.db.attachQueryInTransactionForIdentity) {
-            throw new Error(
-              "Native runtime does not support session transaction snapshot query coverage",
-            );
-          }
-          return this.db.attachQueryInTransactionForIdentity(query, tx, context.identity, opts);
-        }
-        if (!this.db.attachQueryForIdentity) {
-          throw new Error("Native runtime does not support session-authority query coverage");
-        }
-        return this.db.attachQueryForIdentity(query, context.identity, opts);
-      case "client-local":
-        if (tx) {
-          if (!this.db.attachQueryInTransaction) {
-            throw new Error("Native runtime does not support transaction snapshot query coverage");
-          }
-          return this.db.attachQueryInTransaction(query, tx, opts);
-        }
-        if (!this.db.attachQuery) {
-          throw new Error("Native runtime does not support query coverage");
-        }
-        return this.db.attachQuery(query, opts);
+    if (!this.db.attachQuery) {
+      throw new Error("Native runtime does not support query coverage");
     }
+    const author = context.kind === "session-authority" ? context.identity : undefined;
+    return this.db.attachQuery(query, opts, pendingTx?.id, author);
   }
 
   /**

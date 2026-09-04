@@ -147,16 +147,13 @@ export declare class NapiDb {
   /** Execute relation IR through the authority of an explicit backend open. */
   allRelationQueryForBackend(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
-  attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
-  attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
-  attachQueryInTransaction(query: PreparedQuery, tx: Tx, opts?: any | undefined | null): QueryAttachment
-  attachQueryInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
-  attachQueryInTransactionForBackend(query: PreparedQuery, tx: Tx, opts?: any | undefined | null): QueryAttachment
   /**
-   * Attach remote coverage using the authority identity of an explicit
-   * backend open. This has no public author argument by design.
+   * Attach query coverage using one native entry point. An optional open
+   * transaction selects its frozen snapshot; an explicit author selects
+   * trusted-serving authorization. With no author, an explicit backend
+   * open uses backend authority and an ordinary open remains client-local.
    */
-  attachQueryForBackend(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
+  attachQuery(query: PreparedQuery, opts?: any | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): QueryAttachment
   queryAttachmentIsCovered(attachment: QueryAttachment): boolean
   detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
