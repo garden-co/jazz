@@ -12,9 +12,17 @@ crates/jazz/SPEC/invariants`.
 
 `dev/gates/invariant-registry.sh` validates the record shape, stable IDs,
 duplicate IDs, cited Rust/TypeScript tests, covered-without-test mistakes, and
-the migrated 316-record minimum Jazz inventory. It reports `now` + `untested` as
-visible documented debt without failing. Groove-owned IDs live in
+a one-time parity receipt for all 334 records migrated from the legacy table.
+It reports `now` + `untested` as visible documented debt without failing.
+Groove-owned IDs live in
 [`../../groove/SPEC/INVARIANTS.md`](../../groove/SPEC/INVARIANTS.md).
+
+`Status` is a closed planning vocabulary validated by the gate. `Coverage` is
+deliberately free-form human receipt text, not an enum: only `✓` has a machine
+meaning (it requires a cited existing test). Implementation anchors are
+human-maintained pointers and are not mechanically validated because the
+existing corpus intentionally permits abbreviated files, multi-symbol anchors,
+and planned implementations; test citations are the validated contract.
 
 ## Reserved ids
 

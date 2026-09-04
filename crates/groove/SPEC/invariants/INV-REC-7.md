@@ -5,7 +5,7 @@
 
 ## Invariant
 
-Recursive evaluation MUST fail with `IvmRuntimeError::RecursiveIterationLimit { node, max_iters }` when the number of step iterations exceeds `RecursiveOp::max_iters`.
+Fixpoint recursion MUST fail with `IvmRuntimeError::RecursiveIterationLimit { node, max_iters }` when the number of step iterations exceeds its independent safety limit.
 
 ## Enforced by (tests)
 
@@ -13,4 +13,4 @@ Recursive evaluation MUST fail with `IvmRuntimeError::RecursiveIterationLimit { 
 
 ## Implementation
 
-`groove/src/ivm/runtime/recursion.rs::recursive_delta`; `groove/src/ivm/runtime/recursion.rs::recompute_recursive`
+`groove/src/ivm/runtime/recursion.rs::recursive_delta`

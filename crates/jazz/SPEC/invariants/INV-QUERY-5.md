@@ -9,7 +9,7 @@
 
 ## Enforced by (tests)
 
-`jazz::node::tests::harness::binding_delta_validates_shape_arity_binding_id_and_removes_result_set`
+`jazz::node::tests::queries::binding_delta_validates_shape_arity_and_cleans_up_binding_usage`
 
 ## Implementation
 

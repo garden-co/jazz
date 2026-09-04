@@ -9,7 +9,7 @@ A fast known-state declaration MUST only be made for contiguously applied, unevi
 
 ## Enforced by (tests)
 
-`jazz::node::tests::harness::fast_known_state_fact_survives_reopen_and_eviction_clears_it`
+`jazz::node::tests::sync::known_state::fast_known_state_requires_a_live_receipt_after_reopen_and_eviction`
 
 ## Implementation
 

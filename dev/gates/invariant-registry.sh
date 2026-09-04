@@ -9,8 +9,8 @@ set -u -o pipefail
 
 readonly JAZZ_REGISTRY="${JAZZ_INVARIANT_REGISTRY:-crates/jazz/SPEC/invariants}"
 readonly GROOVE_REGISTRY="${GROOVE_INVARIANT_REGISTRY:-crates/groove/SPEC/invariants}"
-readonly JAZZ_MIN_MIGRATED_RECORDS="${JAZZ_MIN_MIGRATED_RECORDS:-316}"
-readonly GROOVE_MIN_MIGRATED_RECORDS="${GROOVE_MIN_MIGRATED_RECORDS:-138}"
+readonly JAZZ_PARITY_RECEIPT="${JAZZ_INVARIANT_PARITY_RECEIPT:-crates/jazz/SPEC/invariant-registry-parity.tsv}"
+readonly GROOVE_PARITY_RECEIPT="${GROOVE_INVARIANT_PARITY_RECEIPT:-crates/groove/SPEC/invariant-registry-parity.tsv}"
 
 failures=0
 rows=0
@@ -194,8 +194,38 @@ check_test_citations() {
     done
 }
 
+# The receipt is deliberately one-way: every legacy-table record must remain
+# byte-identical after canonical whitespace normalization, while new records
+# may be added without editing a shared inventory/count file.
+check_migration_parity() {
+    local registry=$1 receipt=$2 row id expected actual_hash
+    local -A actual=()
+    if [[ ! -f $receipt ]]; then
+        fail "$registry: missing migration parity receipt $receipt"
+        return
+    fi
+    while IFS= read -r row; do
+        [[ -n $row ]] || continue
+        id=${row%%$'\x1f'*}
+        actual[$id]="$(printf '%s' "$row" | sha256sum | awk '{print $1}')"
+    done <<< "$PARSED_ROWS"
+    while IFS=$'\t' read -r id expected; do
+        [[ -z $id || $id == \#* ]] && continue
+        if [[ ! $id =~ ^(G-)?INV-[A-Za-z0-9-]+$ || ! $expected =~ ^[0-9a-f]{64}$ ]]; then
+            fail "$receipt: malformed parity row '$id'"
+            continue
+        fi
+        actual_hash=${actual[$id]-}
+        if [[ -z $actual_hash ]]; then
+            fail "$registry: migrated invariant $id is missing"
+        elif [[ $actual_hash != "$expected" ]]; then
+            fail "$registry: migrated invariant $id changed from its canonical legacy fields"
+        fi
+    done < "$receipt"
+}
+
 check_registry() {
-    local registry=$1 minimum_rows=$2 record id invariant tests impl status coverage registry_rows=0
+    local registry=$1 receipt=$2 record id invariant tests impl status coverage registry_rows=0
     local -A seen_ids=()
     parse_registry "$registry"
     while IFS=$'\x1f' read -r id invariant tests impl status coverage; do
@@ -212,6 +242,10 @@ check_registry() {
         if [[ -z $status || -z $coverage ]]; then
             fail "$registry:$id: status and coverage must not be empty"
         fi
+        case $status in
+            now|target|next|planned|prov|open) ;;
+            *) fail "$registry:$id: unknown status '$status'" ;;
+        esac
         if [[ $coverage == '✓' \
             && ! $tests =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ \
             && ! $tests =~ packages/[A-Za-z0-9_./-]+\.test\.(ts|tsx) ]]; then
@@ -227,17 +261,16 @@ check_registry() {
         registry_rows=$((registry_rows + 1))
         rows=$((rows + 1))
     done <<< "$PARSED_ROWS"
-    if (( registry_rows < minimum_rows )); then
-        fail "$registry: expected at least $minimum_rows migrated records, found $registry_rows"
-    fi
+    check_migration_parity "$registry" "$receipt"
     printf 'invariant-registry: checked %s (%d rows)\n' "$registry" "$registry_rows"
 }
 
 require_command git || exit 1
 require_command perl || exit 1
+require_command sha256sum || exit 1
 index_test_functions
-check_registry "$JAZZ_REGISTRY" "$JAZZ_MIN_MIGRATED_RECORDS"
-check_registry "$GROOVE_REGISTRY" "$GROOVE_MIN_MIGRATED_RECORDS"
+check_registry "$JAZZ_REGISTRY" "$JAZZ_PARITY_RECEIPT"
+check_registry "$GROOVE_REGISTRY" "$GROOVE_PARITY_RECEIPT"
 printf 'invariant-registry: summary: %d rows, %d missing test citations, %d covered rows without a test, %d now + untested (not failing)\n' \
     "$rows" "$missing_tests" "$uncited_covered" "$now_untested"
 
