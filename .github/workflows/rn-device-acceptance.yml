@@ -1,0 +1,237 @@
+name: React Native device acceptance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+    paths:
+      - "dev/rn-device-acceptance/**"
+      - "crates/jazz-rn/**"
+      - "crates/jazz-native-relay/**"
+      - "packages/jazz-tools/src/react-native/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/rn-device-acceptance.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rn-device-acceptance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-source-scaffold:
+    name: Android source scaffold verification (not device acceptance)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with: { version: 10.14.0 }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter rn-device-acceptance verify
+      # TODO(#1974): the `rn-preview-release` label gates device work
+      # will stage relay libraries, use Gradle/Cargo caches, assemble/install,
+      # launch, and run the receipt driver. Do not call that job acceptance
+      # until all of those steps exist.
+
+  ios-source-scaffold:
+    name: iOS source scaffold verification (not device acceptance)
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with: { version: 10.14.0 }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter rn-device-acceptance verify
+      # The label-gated iOS simulator job below is the device acceptance gate;
+      # this quick source job remains deliberately non-acceptance coverage.
+
+  ios-simulator:
+    name: iOS simulator device acceptance
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch'
+        || (
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 45
+    env:
+      COCOAPODS_DISABLE_STATS: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select task-local build paths
+        run: echo "JAZZ_DEVICE_DERIVED_DATA=${RUNNER_TEMP}/jazz-rn-device-derived-data" >> "${GITHUB_ENV}"
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with: { version: 10.14.0 }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          prefix-key: rn-device-ios-macos-15
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**') }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            dev/rn-device-acceptance/ios/Pods
+            ~/Library/Caches/CocoaPods
+            ${{ env.JAZZ_DEVICE_DERIVED_DATA }}
+          key: rn-device-ios-macos-15-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
+      - run: pnpm install --frozen-lockfile
+      - name: Build the React Native JavaScript workspace entrypoints
+        run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
+      - name: Build and stage the relay XCFramework
+        run: |
+          pnpm --filter jazz-rn build:relay:ios
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
+      - name: Generate the Expo development host
+        run: pnpm --filter rn-device-acceptance exec expo prebuild --platform ios --clean --no-install --non-interactive
+      - name: Register the trusted test fixture
+        working-directory: dev/rn-device-acceptance/ios
+        run: |
+          ruby <<'RUBY'
+          require "xcodeproj"
+          project = Xcodeproj::Project.open("JazzRNdeviceacceptance.xcodeproj")
+          target = project.targets.find { |item| item.name == "JazzRNdeviceacceptance" } or abort("acceptance target missing")
+          file = project.files.find { |item| item.path == "JazzDeviceFixture.mm" } || project.main_group.new_file("JazzDeviceFixture.mm")
+          target.add_file_references([file]) unless target.source_build_phase.files_references.include?(file)
+          project.save
+          RUBY
+      - name: Install CocoaPods for the staged native package
+        run: pod install
+        working-directory: dev/rn-device-acceptance/ios
+      - name: Select and boot an available iOS simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          udid="$(node -e '
+            const { execFileSync } = require("node:child_process");
+            const devices = JSON.parse(execFileSync("xcrun", ["simctl", "list", "devices", "available", "-j"], { encoding: "utf8" })).devices;
+            const device = Object.values(devices).flat().find((item) => item.isAvailable && item.name.startsWith("iPhone"));
+            if (!device) process.exit(1);
+            process.stdout.write(device.udid);
+          ')"
+          echo "IOS_SIMULATOR_UDID=${udid}" >> "${GITHUB_ENV}"
+          xcrun simctl boot "${udid}" 2>/dev/null || true
+          xcrun simctl bootstatus "${udid}" -b
+      - name: Build the staged app with its JavaScript embedded
+        run: |
+          xcodebuild -workspace JazzRNdeviceacceptance.xcworkspace -scheme JazzRNdeviceacceptance -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_UDID}" -derivedDataPath "${JAZZ_DEVICE_DERIVED_DATA}" build
+        working-directory: dev/rn-device-acceptance/ios
+      - name: Install, launch, and require run-bound device receipts
+        env:
+          JAZZ_DEVICE_APP: ${{ env.JAZZ_DEVICE_DERIVED_DATA }}/Build/Products/Release-iphonesimulator/JazzRNdeviceacceptance.app
+        run: pnpm --filter rn-device-acceptance device:ios
+
+  android-device-acceptance:
+    # Keep the expensive installed-device receipt opt-in, but make its label
+    # contract identical to iOS. Forks never receive native artifacts/caches.
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch'
+        || (
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    name: Android device acceptance
+    # Keep Android and iOS installed-app receipts on the dedicated Blacksmith
+    # fleet. They are deliberately label/manual only, never an ordinary PR
+    # gate; the runner is selected for x86_64 Android emulation support.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with: { version: 10.14.0 }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          prefix-key: rn-device-android-ubuntu-2404
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**') }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .cache/android-device-acceptance
+          key: rn-device-android-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
+      - run: pnpm install --frozen-lockfile
+      - name: Build the React Native JavaScript workspace entrypoints
+        run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
+      - name: Grant the runner user access to KVM
+        shell: bash
+        run: |
+          [[ -c /dev/kvm ]] || { echo "Android acceptance requires a KVM-capable runner" >&2; exit 1; }
+          sudo setfacl -m "u:${USER}:rw" /dev/kvm
+          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance could not grant the runner user KVM access" >&2; exit 1; }
+      - name: Bootstrap pinned lane-local Android toolchain
+        run: dev/rn-device-acceptance/scripts/bootstrap-android.sh --emulator
+      - name: Stage and verify all relay ABI artifacts
+        shell: bash
+        run: |
+          cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
+          export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk"
+          export PATH="$cache/cargo/bin:$PATH"
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
+          export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION=4.1.2
+          pnpm --filter jazz-rn build:relay:android
+          node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+      - name: Assemble, launch, and require the run-bound receipt
+        shell: bash
+        run: |
+          cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
+          export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk" ANDROID_HOME="$cache/sdk"
+          export PATH="$cache/cargo/bin:$cache/sdk/cmdline-tools/latest/bin:$cache/sdk/platform-tools:$cache/sdk/emulator:$PATH"
+          export ANDROID_AVD_HOME="$cache/avd"
+          # The acceptance receipt's production cleanup contract is a real
+          # Linux session, never the portable test double used by macOS tests.
+          export JAZZ_ANDROID_SESSION_LAUNCHER=setsid
+          export JAZZ_ANDROID_SESSION_PROCESS_GROUP=1
+          relay_abis=armeabi-v7a,arm64-v8a,x86_64
+          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance requires readable/writable /dev/kvm after the KVM access step" >&2; exit 1; }
+          dev/rn-device-acceptance/scripts/create-android-avd.sh \
+            jazz-device-acceptance-api35 \
+            'system-images;android-35;google_apis;x86_64'
+          dev/rn-device-acceptance/scripts/boot-android-emulator.sh \
+            jazz-device-acceptance-api35 \
+            "$cache/emulator.log" \
+            "$ANDROID_AVD_HOME/jazz-device-acceptance-api35.avd/config.ini"
+          (
+            cd dev/rn-device-acceptance/android
+            grep -Fx "reactNativeArchitectures=${relay_abis}" gradle.properties
+            ./gradlew -q -PreactNativeArchitectures="${relay_abis}" :app:properties | grep -Fx "reactNativeArchitectures: ${relay_abis}"
+            NODE_ENV=production ./gradlew -PreactNativeArchitectures="${relay_abis}" :app:assembleRelease --console=plain
+          )
+          # The Android build has already provisioned Gradle's Kotlin compiler;
+          # make the packed JVM admission receipt mandatory on this JDK lane.
+          export PATH="$JAVA_HOME/bin:$PATH"
+          JAZZ_REQUIRE_RN_JVM_CONTRACT=1 \
+            node --test --test-name-pattern='a freshly installed Expo app prebuilds the packed jazz-rn relay host' dev/gates/test/jazz-rn-packaging.test.mjs
+          export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
+          export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
+          pnpm --filter rn-device-acceptance device:android

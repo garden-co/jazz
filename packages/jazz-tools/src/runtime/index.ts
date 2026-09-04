@@ -5,7 +5,6 @@ export {
   type TransactionFate,
   type PermissionAdvice,
   PersistedWriteRejectedError,
-  loadWasmModule,
   type DurabilityTier,
   ReadTier,
   type Row,
@@ -13,17 +12,17 @@ export {
   type SubscriptionCallbacks,
   type StreamingValueChunk,
   type StreamingValueSource,
-  type WasmModule,
   WriteHandle,
   WriteResult,
   ExclusiveWriteHandle,
   ExclusiveWriteResult,
 } from "./client.js";
+export { loadWasmModule, type WasmModule } from "./wasm-loader.js";
+export { createDb } from "./default-create-db.js";
 export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
 /** Encode the opaque logical identity exposed as `session.user` by bindings. */
 export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
-  createDb,
   Db,
   type ActiveQuerySubscriptionTrace,
   type DbConfig,

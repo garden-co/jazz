@@ -1,11 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
-  createDb,
   getDbSubscriptionSource,
   type Db,
   type QueryBuilder,
   type TableProxy,
 } from "../../src/runtime/db.js";
+import { createDb } from "../../src/runtime/default-create-db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 

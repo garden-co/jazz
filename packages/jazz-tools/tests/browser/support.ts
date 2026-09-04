@@ -5,7 +5,8 @@
  * primitives, query helpers, cleanup tracking, and synced-Db factory.
  */
 
-import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
+import { createDb } from "../../src/runtime/default-create-db.js";
+import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { getJazzServerInfo } from "./testing-server.js";
 import type { JazzServerInfo } from "./testing-server.js";
