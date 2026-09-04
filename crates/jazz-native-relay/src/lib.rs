@@ -4235,7 +4235,29 @@ impl RelayWorker {
         client: u64,
         query: u64,
     ) -> Result<ForegroundOperationPoll, RelayError> {
-        self.start_foreground_read_with_options(client, query, "{}".to_owned(), None, false)
+        // Preserve request 3's established immediate local materialization.
+        // Request 18/19 separately opt into owner/authority coverage receipts.
+        let (db, prepared) = {
+            let client = self.foreground_client(client)?;
+            let prepared = client.prepared_queries.get(&query).ok_or_else(|| {
+                RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
+            })?;
+            (Rc::clone(&client.db), prepared.clone())
+        };
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let mut rows = db
+                .all(&prepared, ReadOpts::default())
+                .await
+                .map_err(RelayError::Db)?;
+            db.hydrate_rows_for_binding(&mut rows)
+                .await
+                .map_err(RelayError::Db)?;
+            let rows = jazz::binding_codec::encode_rows(&rows).map_err(|error| {
+                RelayError::ForegroundCommand(format!("encode row payload: {error}"))
+            })?;
+            Ok(ForegroundOperationResult::Rows(rows))
+        });
+        self.start_foreground_operation(client, None, future)
     }
 
     fn start_foreground_read_with_options(
