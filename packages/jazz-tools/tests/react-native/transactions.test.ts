@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ReadTier } from "../../src/runtime/client.js";
 import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
@@ -65,3 +66,76 @@ describe("React Native transaction reads through the native C ABI", () => {
     });
   });
 });
+
+it("waits for native upstream authority before accepting an exclusive commit", async () => {
+  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+    await import("../../src/testing/index.js");
+  const issuer = await startTestJwtIssuer();
+  const server = await startLocalJazzServer({
+    inMemory: true,
+    jwksUrl: issuer.jwksUrl,
+    jwtIssuer: issuer.issuer,
+    jwtAudience: issuer.audience,
+  });
+  try {
+    const permissions = schema.definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+      policy.todos.allowUpdate.always(),
+    ]);
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.url,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    await withNativeRelayFixture(
+      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      async (fixture) => {
+        const db = await fixture.createDb();
+        const base = await db
+          .insert(app.todos, { title: "before", done: false })
+          .wait({ tier: "global" });
+        await db.all(app.todos, { tier: ReadTier.Remote });
+        await db.disconnect();
+        const tx = db.beginExclusiveTransaction();
+        tx.update(app.todos, base.id, { title: "accepted" });
+        expect(await tx.one(app.todos)).toEqual({ ...base, title: "accepted" });
+        const committed = tx.commit();
+        let settled = false;
+        const accepted = committed.wait();
+        void accepted.then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          },
+        );
+        // A configured native authority still owns acceptance while offline.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(settled).toBe(false);
+        await db.reconnect();
+        await accepted;
+        expect(await db.one(app.todos, { tier: ReadTier.Remote })).toEqual({
+          ...base,
+          title: "accepted",
+        });
+      },
+      {
+        appId: server.appId,
+        session: {
+          issuer: issuer.issuer,
+          user_id: "rn-exclusive-writer",
+          claims: { role: "user" },
+          authMode: "external",
+        },
+        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-exclusive-writer") },
+      },
+    );
+  } finally {
+    await server.stop();
+    await issuer.stop();
+  }
+}, 30_000);
