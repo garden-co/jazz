@@ -1887,56 +1887,65 @@ describe("SharedWorker bridge with IndexedDB", () => {
         { tier: "global" },
       ),
     );
-    await waitForCondition(
-      async () => transitionSnapshots.some((rows) => rows.length === 0),
-      15_000,
+    const matchingTransition = { id: transition.id, title: transitionTitle, done: false };
+    const expectedTransitionSnapshots: { id: string; title: string; done: boolean }[][] = [];
+    const assertTransitionSnapshots = () => {
+      expect(
+        transitionSnapshots.map((rows) => rows.map(({ id, title, done }) => ({ id, title, done }))),
+      ).toEqual(expectedTransitionSnapshots);
+    };
+    const awaitTransitionSnapshot = async (
+      cursor: number,
+      expectedRows: { id: string; title: string; done: boolean }[],
+      message: string,
+    ) => {
+      await waitForCondition(async () => transitionSnapshots.length > cursor, 15_000, message);
+      expectedTransitionSnapshots.push(expectedRows);
+      assertTransitionSnapshots();
+    };
+    await awaitTransitionSnapshot(
+      0,
+      [],
       "non-matching indexed row must not appear in the initial intersected snapshot",
     );
+    let transitionCursor = transitionSnapshots.length;
     await writer
       .update(maintainedIndexedTodos, transition.id, { done: false })
       .wait({ tier: "global" });
-    await waitForCondition(
-      async () =>
-        transitionSnapshots.some(
-          (rows) => rows.length === 1 && rows[0]?.id === transition.id && rows[0]?.done === false,
-        ),
-      15_000,
+    await awaitTransitionSnapshot(
+      transitionCursor,
+      [matchingTransition],
       "changing an indexed equality must enter the remote maintained subscription",
     );
+    transitionCursor = transitionSnapshots.length;
     await writer
       .update(maintainedIndexedTodos, transition.id, { title: `${transitionTitle}-outside` })
       .wait({ tier: "global" });
-    await waitForCondition(
-      async () => transitionSnapshots.filter((rows) => rows.length === 0).length >= 2,
-      15_000,
+    await awaitTransitionSnapshot(
+      transitionCursor,
+      [],
       "changing title equality must leave the remote maintained subscription",
     );
+    transitionCursor = transitionSnapshots.length;
     await writer
       .update(maintainedIndexedTodos, transition.id, { title: transitionTitle })
       .wait({ tier: "global" });
-    await waitForCondition(
-      async () =>
-        transitionSnapshots.filter(
-          (rows) => rows.length === 1 && rows[0]?.id === transition.id && rows[0]?.done === false,
-        ).length >= 2,
-      15_000,
+    await awaitTransitionSnapshot(
+      transitionCursor,
+      [matchingTransition],
       "restoring title equality must re-enter the remote maintained subscription",
     );
+    transitionCursor = transitionSnapshots.length;
     await writer
       .update(maintainedIndexedTodos, transition.id, { done: true })
       .wait({ tier: "global" });
-    await waitForCondition(
-      async () => transitionSnapshots.filter((rows) => rows.length === 0).length >= 3,
-      15_000,
+    await awaitTransitionSnapshot(
+      transitionCursor,
+      [],
       "changing done equality back must leave the remote maintained subscription",
     );
     await sleep(500);
-    expect(
-      transitionSnapshots.filter(
-        (rows) => rows.length === 1 && rows[0]?.id === transition.id && rows[0]?.done === false,
-      ),
-    ).toHaveLength(2);
-    expect(transitionSnapshots.filter((rows) => rows.length === 0)).toHaveLength(3);
+    assertTransitionSnapshots();
     stopTransition();
   }, 120000);
 
