@@ -47,9 +47,10 @@ Invariant digest:
   authority across tables.
 - `INV-RLS-23`: Jazz derives the reserved logical `session.user` and user
   authorship from the exact trusted JWT subject pair `(iss, sub)`, represented
-  portably as canonical JSON `[iss,sub]`. Raw provider claims remain exclusively
-  under `session.claims[<name>]`, including `session.claims["iss"]`,
-  `session.claims["sub"]`, and a provider claim named `user`.
+  portably as canonical JSON `[iss,sub]`. Registered JWT transport/security
+  claims, including `iss` and `sub`, are not application metadata and are
+  excluded from public `session.claims`; a provider claim named `user` remains
+  available as `session.claims["user"]`.
   Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
   the reserved system issuer. Local intern handles MUST never become wire,
   storage, query, equality, or ordering values.
@@ -125,9 +126,10 @@ supplying claims (`INV-RLS-23`).
 External JWTs use the standard flat payload shape. `iss`, `sub`, `aud`, `exp`,
 `nbf`, `iat`, and `jti` are reserved registered transport/security claims and
 are not application metadata. The exact verified `iss` and `sub` determine
-`session.user`; no custom ID claim can replace either component. Every other
-top-level JSON claim is exposed by name in `session.claims`, including `null`,
-arrays, and objects. A top-level `claims` key is not special and remains
+`session.user`; no custom ID claim can replace either component, and neither is
+exposed through public `session.claims`. Every other top-level JSON claim is
+exposed by name in `session.claims`, including `null`, arrays, and objects. A
+top-level `claims` key is not special and remains
 `session.claims.claims`; Jazz neither requires it nor flattens it. Core policy
 evaluation projects only scalar values and arrays whose members are likewise
 representable. Objects, and arrays containing an object at any depth, remain

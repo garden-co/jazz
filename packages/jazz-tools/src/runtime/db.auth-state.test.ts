@@ -210,7 +210,7 @@ describe("Db auth state", () => {
   it("reports backend-scoped auth state for session-backed dbs", () => {
     const session = {
       user: canonicalAuthorSubject("https://issuer.example", "alice"),
-      claims: { role: "writer", iss: "https://issuer.example", sub: "alice" },
+      claims: { role: "writer" },
       authMode: "external" as const,
     };
     const runtimeClient = {
@@ -264,7 +264,7 @@ describe("Db auth state", () => {
         authMode: "external",
         session: {
           user: canonicalAuthorSubject("https://issuer.example", "bob"),
-          claims: { role: "writer", iss: "https://issuer.example", sub: "bob" },
+          claims: { role: "writer" },
           authMode: "external",
         },
       },
