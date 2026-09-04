@@ -1,4 +1,11 @@
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -92,6 +99,34 @@ describe("writeHostedEnv", () => {
       expect(content).toContain("JAZZ_ADMIN_SECRET=original_admin");
       expect(content).toContain("BACKEND_SECRET=original_backend");
       expect(content).not.toContain("new_app");
+    });
+
+    it("tightens an unchanged complete hosted env to 0600 on POSIX", () => {
+      const existing =
+        "NEXT_PUBLIC_JAZZ_APP_ID=original_app\n" +
+        "NEXT_PUBLIC_JAZZ_SERVER_URL=https://original.example.com\n" +
+        "JAZZ_ADMIN_SECRET=original_admin\n" +
+        "BACKEND_SECRET=original_backend\n";
+      const envPath = join(dir, ".env");
+      writeFileSync(envPath, existing);
+      if (process.platform !== "win32") chmodSync(envPath, 0o644);
+
+      writeHostedEnv({
+        dir,
+        values: {
+          NEXT_PUBLIC_JAZZ_APP_ID: "original_app",
+          NEXT_PUBLIC_JAZZ_SERVER_URL: "https://original.example.com",
+          JAZZ_ADMIN_SECRET: "original_admin",
+          BACKEND_SECRET: "original_backend",
+        },
+      });
+
+      expect(readEnv(dir)).toBe(existing);
+      // Windows uses ACLs rather than POSIX mode bits, so this assertion is
+      // intentionally limited to platforms where chmod is the security model.
+      if (process.platform !== "win32") {
+        expect(statSync(envPath).mode & 0o777).toBe(0o600);
+      }
     });
   });
 

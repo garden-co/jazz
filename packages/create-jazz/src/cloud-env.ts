@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 const DEFAULT_HOSTED_KEYS = [
@@ -31,9 +38,24 @@ function writeEnvAtomically(envPath: string, content: string): void {
     writeFileSync(tempPath, content, { encoding: "utf8", mode: 0o600 });
     // The source and destination share a directory, so rename is an atomic replacement.
     renameSync(tempPath, envPath);
-  } catch (error) {
-    if (existsSync(tempPath)) unlinkSync(tempPath);
-    throw error;
+  } catch {
+    try {
+      if (existsSync(tempPath)) unlinkSync(tempPath);
+    } catch {
+      // Preserve the safe, actionable write error below.
+    }
+    throw new Error("Could not write hosted .env.");
+  }
+}
+
+function restrictEnvPermissions(envPath: string): void {
+  // Windows confidentiality is governed by ACLs; POSIX mode bits cannot prove it.
+  if (process.platform === "win32") return;
+  try {
+    chmodSync(envPath, 0o600);
+  } catch {
+    // Do not include filesystem errors here: their text can expose a project path.
+    throw new Error("Could not restrict hosted .env permissions.");
   }
 }
 
@@ -110,6 +132,7 @@ export function writeHostedEnv({
   if (missing.length === 0) {
     if (!base.endsWith("\n")) writeEnvAtomically(envPath, base + "\n");
     else if (base !== existing) writeEnvAtomically(envPath, base);
+    else restrictEnvPermissions(envPath);
     return;
   }
 
