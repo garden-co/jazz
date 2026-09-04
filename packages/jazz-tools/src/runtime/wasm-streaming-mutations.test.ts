@@ -108,6 +108,7 @@ async function createBrowserWasmFixture() {
     pageStore.pageStore,
     encodeSchema(streamingApp.wasmSchema),
     openConfig(node, author, 1, true),
+    "wasm-streaming-abort-owner",
   );
   const runtime = NativeRuntimeAdapter.fromDb(db, streamingApp.wasmSchema, node, author, 1, true);
   onTestFinished(async () => {
