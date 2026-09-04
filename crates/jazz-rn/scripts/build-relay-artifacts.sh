@@ -102,20 +102,7 @@ case "$platform" in
     )
     for android_abi in "${!rust_targets[@]}"; do
       rust_target=${rust_targets[$android_abi]}
-      if [[ "$rust_target" == armv7-linux-androideabi ]]; then
-        # rust-librocksdb-sys enables this GCC/Clang extension for every
-        # non-MSVC target, but Android's 32-bit ARM clang does not implement
-        # __uint128_t. cc-rs appends target-specific CXXFLAGS after its build
-        # script's defines, so this narrowly overrides only the armv7 build.
-        # NDK API 21 supplies MADV_* but withholds its POSIX_MADV_* aliases
-        # until API 23. RocksDB's Android Madvise wrapper is a no-op, so bind
-        # those aliases to the NDK's existing constants without raising the
-        # app's minimum API or changing the runtime advice behavior.
-        CXXFLAGS_armv7_linux_androideabi="${CXXFLAGS_armv7_linux_androideabi:-} -UHAVE_UINT128_EXTENSION -DPOSIX_MADV_NORMAL=MADV_NORMAL -DPOSIX_MADV_RANDOM=MADV_RANDOM -DPOSIX_MADV_SEQUENTIAL=MADV_SEQUENTIAL -DPOSIX_MADV_WILLNEED=MADV_WILLNEED -DPOSIX_MADV_DONTNEED=MADV_DONTNEED" \
-          cargo ndk -t "$android_abi" build --manifest-path "$relay_manifest" --release
-      else
-        cargo ndk -t "$android_abi" build --manifest-path "$relay_manifest" --release
-      fi
+      cargo ndk -t "$android_abi" build --manifest-path "$relay_manifest" --release
       mkdir -p "$stage/$android_abi"
       cp "$root/target/$rust_target/release/libjazz_native_relay.a" "$stage/$android_abi/"
     done

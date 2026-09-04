@@ -80,37 +80,6 @@ function assertRnDeviceWorkflowContract(workflow) {
   );
 }
 
-function assertArmv7RocksDbBuildConfiguration(builder) {
-  const branch =
-    /^      if \[\[ "\$rust_target" == armv7-linux-androideabi \]\]; then\n(?<armv7>[\s\S]*?)^      else\n(?<otherTargets>[\s\S]*?)^      fi$/m.exec(
-      builder,
-    );
-  assert.ok(
-    branch?.groups,
-    "the RocksDB uint128 override must be conditioned on the exact armv7 Rust target",
-  );
-  assert.match(
-    branch.groups.armv7,
-    /CXXFLAGS_armv7_linux_androideabi=.*-UHAVE_UINT128_EXTENSION.*-DPOSIX_MADV_NORMAL=MADV_NORMAL.*-DPOSIX_MADV_RANDOM=MADV_RANDOM.*-DPOSIX_MADV_SEQUENTIAL=MADV_SEQUENTIAL.*-DPOSIX_MADV_WILLNEED=MADV_WILLNEED.*-DPOSIX_MADV_DONTNEED=MADV_DONTNEED[\s\S]*cargo ndk -t "\$android_abi" build --manifest-path "\$relay_manifest" --release/,
-    "the armv7 cargo invocation must carry the NDK API 21 RocksDB compatibility flags",
-  );
-  assert.equal(
-    (builder.match(/CXXFLAGS_armv7_linux_androideabi=/g) ?? []).length,
-    1,
-    "the uint128 override must have one target-specific application",
-  );
-  assert.doesNotMatch(
-    branch.groups.otherTargets,
-    /CXXFLAGS_armv7_linux_androideabi|-UHAVE_UINT128_EXTENSION|POSIX_MADV_/,
-    "arm64 and x86_64 builds must retain their unmodified cargo invocation without API 21 aliases",
-  );
-  assert.match(
-    branch.groups.otherTargets,
-    /^        cargo ndk -t "\$android_abi" build --manifest-path "\$relay_manifest" --release$/m,
-    "non-armv7 Android targets must use the ordinary cargo invocation",
-  );
-}
-
 test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   const sources = new Map([
     [
@@ -170,39 +139,6 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   assert.match(builder, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(builder, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(builder, /\[x86_64\]=x86_64-linux-android/);
-  assertArmv7RocksDbBuildConfiguration(builder);
-  assert.throws(
-    () =>
-      assertArmv7RocksDbBuildConfiguration(
-        builder.replace("armv7-linux-androideabi ]]; then", "aarch64-linux-android ]]; then"),
-      ),
-    /exact armv7 Rust target/,
-    "the contract must reject moving the uint128 override to arm64",
-  );
-  assert.throws(
-    () => assertArmv7RocksDbBuildConfiguration(builder.replace("-UHAVE_UINT128_EXTENSION", "")),
-    /NDK API 21 RocksDB compatibility flags/,
-    "the contract must reject removing the armv7 uint128 override",
-  );
-  assert.throws(
-    () =>
-      assertArmv7RocksDbBuildConfiguration(
-        builder.replace("-DPOSIX_MADV_DONTNEED=MADV_DONTNEED", ""),
-      ),
-    /NDK API 21 RocksDB compatibility flags/,
-    "the contract must reject removing an API 21 POSIX_MADV alias",
-  );
-  assert.throws(
-    () =>
-      assertArmv7RocksDbBuildConfiguration(
-        builder.replace(
-          "      else\n        cargo ndk",
-          '      else\n        CXXFLAGS_arm64_linux_android="-DPOSIX_MADV_NORMAL=MADV_NORMAL" cargo ndk',
-        ),
-      ),
-    /without API 21 aliases/,
-    "the contract must reject leaking an API 21 alias into the ordinary Android builds",
-  );
 });
 
 function assertAtomicAndroidDiagnostic(fixture) {

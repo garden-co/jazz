@@ -16,6 +16,53 @@ const packageJson = JSON.parse(
 );
 const withJazzRn = require("../../../crates/jazz-rn/app.plugin.js");
 
+function productionDependencyNames(metadata, rootPackageName) {
+  const packageById = new Map(metadata.packages.map((pkg) => [pkg.id, pkg]));
+  const nodeById = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
+  const root = metadata.packages.find((pkg) => pkg.name === rootPackageName);
+  assert.ok(root, `cargo metadata is missing ${rootPackageName}`);
+  const reachable = new Set([root.id]);
+  const pending = [root.id];
+  while (pending.length) {
+    const id = pending.pop();
+    const node = nodeById.get(id);
+    assert.ok(node, `cargo metadata is missing resolved node ${id}`);
+    for (const dependency of node.deps) {
+      if (!dependency.dep_kinds.some((kind) => kind.kind !== "dev")) continue;
+      if (!reachable.has(dependency.pkg)) {
+        reachable.add(dependency.pkg);
+        pending.push(dependency.pkg);
+      }
+    }
+  }
+  return new Set([...reachable].map((id) => packageById.get(id)?.name));
+}
+
+test("jazz-rn relay production builds are SQLite-only on every artifact target", () => {
+  const workspace = join(import.meta.dirname, "../../..");
+  const targets = [
+    "aarch64-linux-android",
+    "armv7-linux-androideabi",
+    "x86_64-linux-android",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+    "x86_64-apple-ios",
+  ];
+  for (const target of targets) {
+    const metadata = JSON.parse(
+      execFileSync("cargo", ["metadata", "--format-version", "1", "--filter-platform", target], {
+        cwd: workspace,
+        encoding: "utf8",
+        maxBuffer: 10 * 1024 * 1024,
+      }),
+    );
+    const dependencies = productionDependencyNames(metadata, "jazz-native-relay");
+    assert.ok(dependencies.has("jazz-storage-sqlite"), `${target} relay must retain SQLite`);
+    for (const forbidden of ["jazz-storage-rocksdb", "jazz-benchmark-guard", "tempfile"])
+      assert.ok(!dependencies.has(forbidden), `${target} relay must exclude ${forbidden}`);
+  }
+});
+
 // This is a fixed ABI, not a denylist of sensitive-looking names. The public
 // JavaScript surface may only probe the ABI, install/open the private JSI
 // factory, and submit opaque relay/foreground byte commands. Trusted native
