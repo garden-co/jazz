@@ -7424,6 +7424,97 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_read_cleanup_keeps_scheduling_until_its_bounded_queue_is_empty() {
+        // Cancellation and coalesced native callbacks have no one-shot JS
+        // public API. Exercise real coverage attachments and the registered
+        // host callback while isolating cleanup from unrelated peer wakes.
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("cleanup-batch.sqlite"),
+            "cleanup-batch",
+            &permissive_schema(),
+            0x62,
+        );
+        let foreground = fixture.open_foreground(&capability);
+        let wake = Arc::new(QueuedNativeWake::active());
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_set_foreground_wake_callback(
+                    fixture.lease,
+                    foreground,
+                    Some(queue_native_wake),
+                    Arc::as_ptr(&wake) as *mut c_void,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        let client = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(foreground)
+                .unwrap()
+                .clone()
+        };
+        let query = client
+            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .unwrap();
+        for _ in 0..7 {
+            let ForegroundOperationPoll::Pending { operation } = client
+                .start_foreground_read_with_options(
+                    query,
+                    "{\"tier\":\"edge\"}".into(),
+                    None,
+                    false,
+                )
+                .unwrap()
+            else {
+                panic!("remote read without an authority remains pending");
+            };
+            assert!(client.cancel_foreground_operation(operation).unwrap());
+        }
+        let id = client.id;
+        for remaining in (0..7).rev() {
+            assert!(
+                wake.queued() > 0,
+                "the remaining cleanup batch must have a scheduled owner turn"
+            );
+            // Simulate the platform consuming every coalesced notification.
+            wake.queued.lock().unwrap().clear();
+            let queued = client
+                .relay
+                .run(move |worker| {
+                    let waker = Waker::from(Arc::clone(&worker.wake));
+                    let client = worker.foreground_client_mut(id)?;
+                    client.poll_read_cleanup(&waker);
+                    assert!(
+                        client.read_cleanup.is_none(),
+                        "resident detach finishes in its turn"
+                    );
+                    let queued = client.read_cleanups.borrow().len();
+                    Ok(queued)
+                })
+                .unwrap();
+            assert_eq!(
+                queued, remaining,
+                "each cleanup turn drains exactly one attachment"
+            );
+        }
+        assert_eq!(
+            client
+                .with_db(|db| Ok(db.query_coverage_attachment_counts_for_test()))
+                .unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            fixture.execute(foreground, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+    }
+
+    #[test]
     fn retained_pump_waker_reaches_live_siblings_and_retires_closed_callbacks() {
         // A suspended future's actual Context waker and the raw platform
         // callback lifetime are host mechanics, so exercise them at this
