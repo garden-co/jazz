@@ -1994,7 +1994,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session, pendingTx);
     if (this.closed) return [];
-    this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
+    if (!pendingTx) {
+      this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
+    }
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
         if (pendingTx) {

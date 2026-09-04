@@ -809,6 +809,21 @@ where
         )
     }
 
+    /// Queue capture of an open transaction's immutable base snapshot behind
+    /// its already-admitted operations. Foreign-function bindings use this to
+    /// defer snapshot-scoped query coverage until transaction opening finishes.
+    #[doc(hidden)]
+    pub fn enqueue_open_transaction_snapshot(
+        &self,
+        id: OpenTransactionId,
+    ) -> futures::channel::oneshot::Receiver<Result<crate::tx::Snapshot, Error>> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_read(id, async move {
+            let node = db.lock_for_transaction_operation(id).await?;
+            node.open_transaction_snapshot(id).map_err(Into::into)
+        })
+    }
+
     /// Return a non-owning operations handle for an already-open exclusive transaction.
     ///
     /// This handle never closes the transaction when dropped, so it is suitable

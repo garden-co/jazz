@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
   const loadWasmModule = vi.fn();
   const installWasmTelemetry = vi.fn();
   const openPageStore = vi.fn();
+  const acquireBrowserPhysicalDatabaseEpoch = vi.fn();
   const openBrowser = vi.fn();
   const openBrowserWithSelfSignedProof = vi.fn();
   const fromDb = vi.fn();
@@ -60,6 +61,7 @@ const mocks = vi.hoisted(() => {
     loadWasmModule,
     installWasmTelemetry,
     openPageStore,
+    acquireBrowserPhysicalDatabaseEpoch,
     openBrowser,
     openBrowserWithSelfSignedProof,
     fromDb,
@@ -105,6 +107,10 @@ const mocks = vi.hoisted(() => {
         pageStores.push(pageStore);
         return pageStore;
       });
+      acquireBrowserPhysicalDatabaseEpoch.mockReset().mockImplementation(async () => ({
+        id: `epoch-${pageStores.length}`,
+        release: vi.fn(async () => undefined),
+      }));
       openBrowser.mockReset().mockImplementation(async () => createBrowserDb());
       openBrowserWithSelfSignedProof.mockReset().mockImplementation(async () => createBrowserDb());
       fromDb.mockReset().mockImplementation(() => {
@@ -148,6 +154,11 @@ vi.mock("../runtime/client.js", () => ({
 
 vi.mock("../runtime/indexeddb-page-store.js", () => ({
   IndexedDbPageStore: { open: mocks.openPageStore },
+}));
+
+vi.mock("../runtime/browser-physical-database-epoch.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../runtime/browser-physical-database-epoch.js")>()),
+  acquireBrowserPhysicalDatabaseEpoch: mocks.acquireBrowserPhysicalDatabaseEpoch,
 }));
 
 vi.mock("../runtime/sync-telemetry.js", () => ({
@@ -888,7 +899,8 @@ describe("broker worker context initialization", () => {
     const { BrowserPhysicalDatabaseBusyError } =
       await import("../runtime/browser-physical-database-epoch.js");
     const busy = new BrowserPhysicalDatabaseBusyError("busy-lease-root");
-    mocks.openPageStore.mockRejectedValueOnce(busy).mockRejectedValueOnce(new Error("bad storage"));
+    mocks.acquireBrowserPhysicalDatabaseEpoch.mockRejectedValueOnce(busy);
+    mocks.openPageStore.mockRejectedValueOnce(new Error("bad storage"));
 
     const busyLease = connectLease({
       type: "acquire-foreground-node-lease",

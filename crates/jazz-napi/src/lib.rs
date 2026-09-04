@@ -83,7 +83,7 @@ use jazz::ids::{
 use jazz::protocol::{
     BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
     PermissionAdvice as CorePermissionAdvice, PermissionAdviceAction as CorePermissionAdviceAction,
-    ReadViewSpec as CoreReadViewSpec,
+    ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
 };
 use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
@@ -333,7 +333,73 @@ pub struct PreparedQuery {
 
 #[napi(js_name = "QueryAttachment")]
 pub struct QueryAttachment {
-    inner: CoreQueryAttachment,
+    state: Rc<RefCell<QueryAttachmentState>>,
+}
+
+enum QueryAttachmentState {
+    Pending(LocalBoxFuture<'static, napi::Result<CoreQueryAttachment>>),
+    Ready(CoreQueryAttachment),
+    Detached,
+}
+
+impl QueryAttachment {
+    fn from_ready(inner: CoreQueryAttachment) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(QueryAttachmentState::Ready(inner))),
+        }
+    }
+
+    fn pending(future: LocalBoxFuture<'static, napi::Result<CoreQueryAttachment>>) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(QueryAttachmentState::Pending(future))),
+        }
+    }
+
+    fn poll_ready(&self) -> napi::Result<bool> {
+        let state = std::mem::replace(
+            &mut *self.state.borrow_mut(),
+            QueryAttachmentState::Detached,
+        );
+        let QueryAttachmentState::Pending(mut future) = state else {
+            let ready = matches!(state, QueryAttachmentState::Ready(_));
+            *self.state.borrow_mut() = state;
+            return Ok(ready);
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => {
+                *self.state.borrow_mut() = QueryAttachmentState::Ready(result?);
+                Ok(true)
+            }
+            Poll::Pending => {
+                *self.state.borrow_mut() = QueryAttachmentState::Pending(future);
+                Ok(false)
+            }
+        }
+    }
+
+    fn ready(&self) -> napi::Result<Option<CoreQueryAttachment>> {
+        if !self.poll_ready()? {
+            return Ok(None);
+        }
+        let state = self.state.borrow();
+        let QueryAttachmentState::Ready(inner) = &*state else {
+            return Err(napi::Error::from_reason("query attachment is detached"));
+        };
+        Ok(Some(inner.clone()))
+    }
+
+    fn detach(&self) -> Option<CoreQueryAttachment> {
+        let state = std::mem::replace(
+            &mut *self.state.borrow_mut(),
+            QueryAttachmentState::Detached,
+        );
+        match state {
+            QueryAttachmentState::Ready(inner) => Some(inner),
+            QueryAttachmentState::Pending(_) | QueryAttachmentState::Detached => None,
+        }
+    }
 }
 
 #[napi(js_name = "Write")]
@@ -2880,54 +2946,82 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         macro_rules! attach {
-            ($db:expr) => {
-                match (open_tx, author) {
-                    (Some(open_tx), Some(author)) => $db
-                        .attach_query_in_transaction_with_opts_for_identity(
-                            &query.inner,
-                            open_tx,
-                            opts,
-                            author,
-                        ),
-                    (Some(open_tx), None) => {
-                        $db.attach_query_in_transaction_with_opts(&query.inner, open_tx, opts)
+            ($db:expr) => {{
+                match open_tx {
+                    None => {
+                        let inner = match author {
+                            Some(author) => {
+                                $db.attach_query_with_opts_for_identity(&query.inner, opts, author)
+                            }
+                            None => $db.attach_query_with_opts(&query.inner, opts),
+                        }
+                        .map_err(napi_error)?;
+                        Ok(QueryAttachment::from_ready(inner))
                     }
-                    (None, Some(author)) => {
-                        $db.attach_query_with_opts_for_identity(&query.inner, opts, author)
+                    Some(open_tx) => {
+                        let snapshot = $db.enqueue_open_transaction_snapshot(open_tx);
+                        let db = Rc::clone($db);
+                        let query = query.inner.clone();
+                        Ok(QueryAttachment::pending(Box::pin(async move {
+                            let snapshot = snapshot
+                                .await
+                                .map_err(|_| {
+                                    napi::Error::from_reason(
+                                        "transaction snapshot request was dropped",
+                                    )
+                                })?
+                                .map_err(napi_error)?;
+                            let mut opts = opts;
+                            opts.read_view = CoreReadViewSpec {
+                                source: CoreReadViewSourceSpec::Snapshot {
+                                    snapshot: snapshot.into(),
+                                },
+                            };
+                            match author {
+                                Some(author) => {
+                                    db.attach_query_with_opts_for_identity(&query, opts, author)
+                                }
+                                None => db.attach_query_with_opts(&query, opts),
+                            }
+                            .map_err(napi_error)
+                        })))
                     }
-                    (None, None) => $db.attach_query_with_opts(&query.inner, opts),
                 }
-            };
+            }};
         }
-        let inner = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => attach!(db),
             NapiDbInnerStorage::Persistent(db) => attach!(db),
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        Ok(QueryAttachment { inner })
     }
 
     #[napi(js_name = "queryAttachmentIsCovered")]
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> napi::Result<bool> {
+        let Some(attachment) = attachment.ready()? else {
+            return Ok(false);
+        };
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(match db {
-            NapiDbInnerStorage::Memory(db) => db.query_attachment_is_covered(&attachment.inner),
-            NapiDbInnerStorage::Persistent(db) => db.query_attachment_is_covered(&attachment.inner),
+            NapiDbInnerStorage::Memory(db) => db.query_attachment_is_covered(&attachment),
+            NapiDbInnerStorage::Persistent(db) => db.query_attachment_is_covered(&attachment),
         })
     }
 
     #[napi(js_name = "detachQuery")]
     pub fn detach_query(&self, attachment: &QueryAttachment) -> napi::Result<()> {
+        let Some(attachment) = attachment.detach() else {
+            return Ok(());
+        };
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => db.detach_query(attachment.inner.clone()),
-            NapiDbInnerStorage::Persistent(db) => db.detach_query(attachment.inner.clone()),
+            NapiDbInnerStorage::Memory(db) => db.detach_query(attachment.clone()),
+            NapiDbInnerStorage::Persistent(db) => db.detach_query(attachment),
         }
         Ok(())
     }
