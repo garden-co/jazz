@@ -381,10 +381,7 @@ test("Windows line endings do not create false declaration drift", () => {
     const staged = stage(root, ".napi-stage-windows", "next");
     const stableDeclarations = join(root, "index.d.ts");
     writeFileSync(stableDeclarations, "export declare class NapiDb { tick(): void }\n");
-    writeFileSync(
-      join(staged, "index.d.ts"),
-      "export declare class NapiDb { tick(): void }\r\n",
-    );
+    writeFileSync(join(staged, "index.d.ts"), "export declare class NapiDb { tick(): void }\r\n");
     assert.doesNotThrow(() =>
       validateNapiStage(staged, "jazz-napi.linux-x64-gnu.node", "next", "cross-target", {
         stableDeclarationsPath: stableDeclarations,
@@ -400,20 +397,19 @@ test("Windows declaration drift points at the substantive changed line", () => {
   try {
     const staged = stage(root, ".napi-stage-windows-drift", "next");
     const stableDeclarations = join(root, "index.d.ts");
-    writeFileSync(stableDeclarations, "export declare const first: 1\nexport declare const second: 2\n");
+    writeFileSync(
+      stableDeclarations,
+      "export declare const first: 1\nexport declare const second: 2\n",
+    );
     writeFileSync(
       join(staged, "index.d.ts"),
       "export declare const first: 1\r\nexport declare const second: 3\r\n",
     );
     assert.throws(
       () =>
-        validateNapiStage(
-          staged,
-          "jazz-napi.linux-x64-gnu.node",
-          "next",
-          "cross-target",
-          { stableDeclarationsPath: stableDeclarations },
-        ),
+        validateNapiStage(staged, "jazz-napi.linux-x64-gnu.node", "next", "cross-target", {
+          stableDeclarationsPath: stableDeclarations,
+        }),
       /first difference near line 2/,
     );
   } finally {
