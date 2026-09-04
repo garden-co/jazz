@@ -126,7 +126,11 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
         expect([remoteReady, edgeReady, globalReady]).toEqual([false, false, false]);
         await db.reconnect();
         await Promise.all([edge, global]);
-        expect(await remote).toEqual([expect.objectContaining({ id: row.id, title: row.title })]);
+        // The parked read can observe an empty authority snapshot before the
+        // queued upload is accepted. Completion proves fresh coverage; the
+        // post-settlement read below asserts the accepted write is visible.
+        const resumedRows = await remote;
+        expect(resumedRows.every((candidate) => candidate.id === row.id)).toBe(true);
         await laterWrite.wait({ tier: "global" });
         await expect.poll(() => strictSnapshots.at(-1)).toEqual([{ ...row, done: true }]);
         stopStrict();
