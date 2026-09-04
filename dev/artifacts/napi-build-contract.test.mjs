@@ -375,6 +375,26 @@ test("a newly generated public export absent from the stable package declaration
   }
 });
 
+test("Windows line endings do not create false declaration drift", () => {
+  const root = fixture();
+  try {
+    const staged = stage(root, ".napi-stage-windows", "next");
+    const stableDeclarations = join(root, "index.d.ts");
+    writeFileSync(stableDeclarations, "export declare class NapiDb { tick(): void }\n");
+    writeFileSync(
+      join(staged, "index.d.ts"),
+      "export declare class NapiDb { tick(): void }\r\n",
+    );
+    assert.doesNotThrow(() =>
+      validateNapiStage(staged, "jazz-napi.linux-x64-gnu.node", "next", "cross-target", {
+        stableDeclarationsPath: stableDeclarations,
+      }),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the package declaration overlay exposes Promise close without leaking the raw pollable ABI", () => {
   const root = fixture();
   try {

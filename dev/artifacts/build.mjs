@@ -392,7 +392,11 @@ export function validateNapiStage(
   assertRealNapiGeneration(stagePath, expectedBinding, { sealed: false });
   const generatedDeclarations = readFileSync(declarations, "utf8");
   const stableDeclarations = readFileSync(stableDeclarationsPath, "utf8");
-  if (generatedDeclarations !== stableDeclarations)
+  // napi-rs follows the host's native line endings. Declaration parity is a
+  // semantic ABI guard, so Windows CRLF must compare equal to the checked-in
+  // LF surface while every other generated difference remains fatal.
+  const normalizeLineEndings = (value) => value.replaceAll("\r\n", "\n");
+  if (normalizeLineEndings(generatedDeclarations) !== normalizeLineEndings(stableDeclarations))
     throw new Error(
       declarationMismatchDiagnostic(
         stableDeclarationsPath,
