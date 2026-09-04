@@ -80,6 +80,37 @@ function assertRnDeviceWorkflowContract(workflow) {
   );
 }
 
+function assertArmv7RocksDbBuildConfiguration(builder) {
+  const branch =
+    /^      if \[\[ "\$rust_target" == armv7-linux-androideabi \]\]; then\n(?<armv7>[\s\S]*?)^      else\n(?<otherTargets>[\s\S]*?)^      fi$/m.exec(
+      builder,
+    );
+  assert.ok(
+    branch?.groups,
+    "the RocksDB uint128 override must be conditioned on the exact armv7 Rust target",
+  );
+  assert.match(
+    branch.groups.armv7,
+    /CXXFLAGS_armv7_linux_androideabi=.*-UHAVE_UINT128_EXTENSION[\s\S]*cargo ndk -t "\$android_abi" build --manifest-path "\$relay_manifest" --release/,
+    "the armv7 cargo invocation must undefine RocksDB's unsupported uint128 extension",
+  );
+  assert.equal(
+    (builder.match(/CXXFLAGS_armv7_linux_androideabi=/g) ?? []).length,
+    1,
+    "the uint128 override must have one target-specific application",
+  );
+  assert.doesNotMatch(
+    branch.groups.otherTargets,
+    /CXXFLAGS_armv7_linux_androideabi|-UHAVE_UINT128_EXTENSION/,
+    "arm64 and x86_64 builds must retain their unmodified cargo invocation",
+  );
+  assert.match(
+    branch.groups.otherTargets,
+    /^        cargo ndk -t "\$android_abi" build --manifest-path "\$relay_manifest" --release$/m,
+    "non-armv7 Android targets must use the ordinary cargo invocation",
+  );
+}
+
 test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   const sources = new Map([
     [
@@ -102,18 +133,30 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
     ],
     ["Android acceptance metadata", read("android/gradle.properties")],
     ["Android stage verifier", read("scripts/android-relay-stage.mjs")],
-    ["RN dependency bootstrap", fs.readFileSync(path.resolve(root, "../../dev/scripts/install-jazz-rn-deps.sh"), "utf8")],
+    [
+      "RN dependency bootstrap",
+      fs.readFileSync(path.resolve(root, "../../dev/scripts/install-jazz-rn-deps.sh"), "utf8"),
+    ],
     [
       "Android device workflow",
-      fs.readFileSync(path.resolve(root, "../../.github/workflows/rn-device-acceptance.yml"), "utf8"),
+      fs.readFileSync(
+        path.resolve(root, "../../.github/workflows/rn-device-acceptance.yml"),
+        "utf8",
+      ),
     ],
     [
       "Android artifact workflow",
-      fs.readFileSync(path.resolve(root, "../../.github/workflows/rn-native-artifacts.yml"), "utf8"),
+      fs.readFileSync(
+        path.resolve(root, "../../.github/workflows/rn-native-artifacts.yml"),
+        "utf8",
+      ),
     ],
     [
       "Android publication workflow",
-      fs.readFileSync(path.resolve(root, "../../.github/workflows/build-jazz-packages.yml"), "utf8"),
+      fs.readFileSync(
+        path.resolve(root, "../../.github/workflows/build-jazz-packages.yml"),
+        "utf8",
+      ),
     ],
   ]);
   for (const [name, source] of sources) {
@@ -127,10 +170,19 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   assert.match(builder, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(builder, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(builder, /\[x86_64\]=x86_64-linux-android/);
-  assert.match(
-    builder,
-    /CXXFLAGS_armv7_linux_androideabi=.*-UHAVE_UINT128_EXTENSION/,
-    "the 32-bit ARM build must override RocksDB's unsupported uint128 define",
+  assertArmv7RocksDbBuildConfiguration(builder);
+  assert.throws(
+    () =>
+      assertArmv7RocksDbBuildConfiguration(
+        builder.replace("armv7-linux-androideabi ]]; then", "aarch64-linux-android ]]; then"),
+      ),
+    /exact armv7 Rust target/,
+    "the contract must reject moving the uint128 override to arm64",
+  );
+  assert.throws(
+    () => assertArmv7RocksDbBuildConfiguration(builder.replace("-UHAVE_UINT128_EXTENSION", "")),
+    /unsupported uint128 extension/,
+    "the contract must reject removing the armv7 uint128 override",
   );
 });
 
@@ -400,7 +452,10 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(fixture, /jazzDeviceBearerB/);
   assert.match(fixture, /JazzRelayBridge\.beginPrivateSession/);
   assert.match(fixture, /JazzRelayBridge\.attachCanonicalSchema/);
-  assert.doesNotMatch(fixture, /JazzRelayTrustedAdmission|TrustedRelayScopeConfig|admitTrustedScope/);
+  assert.doesNotMatch(
+    fixture,
+    /JazzRelayTrustedAdmission|TrustedRelayScopeConfig|admitTrustedScope/,
+  );
   assert.match(fixture, /jazzDeviceRunNonce/);
   assert.match(fixture, /applicationInfo\.sourceDir/);
   assert.match(fixture, /MessageDigest\.getInstance\("SHA-256"\)/);
@@ -453,7 +508,10 @@ test("both platform session wrappers delegate one authenticated socket owner to 
     "utf8",
   );
   const ios = fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/ios/JazzRelay.mm"), "utf8");
-  const relay = fs.readFileSync(path.resolve(root, "../../crates/jazz-native-relay/src/lib.rs"), "utf8");
+  const relay = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-native-relay/src/lib.rs"),
+    "utf8",
+  );
   for (const wrapper of [android, ios]) {
     assert.match(wrapper, /shared Rust socket worker/);
     assert.doesNotMatch(wrapper, /WebSocketTransport|NativeWebSocketConnector/);
@@ -485,11 +543,7 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
   const fixture = read("native/android/JazzDeviceFixtureModule.kt");
   assert.match(driver, /rn_edge_session_harness/);
   assert.match(driver, /http:\/\/10\.0\.2\.2:\$\{session\.edge_port\}/);
-  for (const input of [
-    "jazzDeviceEdgeEndpoint",
-    "jazzDeviceBearerA",
-    "jazzDeviceBearerB",
-  ]) {
+  for (const input of ["jazzDeviceEdgeEndpoint", "jazzDeviceBearerA", "jazzDeviceBearerB"]) {
     assert.match(driver, new RegExp(`"${input}"`));
     assert.match(fixture, new RegExp(`"${input}"`));
   }
