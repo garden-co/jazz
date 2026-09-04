@@ -197,6 +197,8 @@ export function parseJwtPayload(jwtToken: string): JwtPayload | null {
   if (!payloadJson) return null;
 
   try {
+    // Session claims intentionally use ordinary host JSON semantics: in JS,
+    // JSON numbers become numbers rather than a lossless-number wrapper.
     const parsed = JSON.parse(payloadJson);
     return isRecord(parsed) ? (parsed as JwtPayload) : null;
   } catch {
