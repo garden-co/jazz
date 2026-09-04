@@ -1497,7 +1497,9 @@ fn resolve_join_column<'a>(
         (JoinSide::Right, right_fields),
     ] {
         for field in fields {
-            if field.name == column.name
+            // Prepared bindings are carried through CTEs but are not SQL-visible.
+            if field.qualifier.as_deref() != Some(BINDING_QUALIFIER)
+                && field.name == column.name
                 && qualifier
                     .as_ref()
                     .is_none_or(|qualifier| field.qualifier.as_deref() == Some(qualifier))
@@ -1985,6 +1987,46 @@ mod tests {
             planner.plan_query(&outside_cte),
             Err(PlannerError::TableNotFound(table)) if table == "album_ids"
         ));
+    }
+
+    #[test]
+    fn hidden_binding_is_not_a_visible_join_column() {
+        let cte = Cte::new(
+            "filtered",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("artist_id"))])
+                    .from([TableRef::named("albums")])
+                    .where_(Expr::binary(
+                        Expr::column("title"),
+                        BinaryOp::Eq,
+                        Expr::parameter("id"),
+                    )),
+            )),
+        );
+        let joined = TableRef::Join {
+            left: Box::new(TableRef::named("filtered")),
+            right: Box::new(TableRef::named("artists")),
+            kind: JoinKind::Inner,
+            constraint: JoinConstraint::On(Expr::binary(
+                Expr::Column(ColumnRef::qualified(["filtered"], "artist_id")),
+                BinaryOp::Eq,
+                Expr::column("id"),
+            )),
+        };
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::Column(ColumnRef::qualified(
+                    ["filtered"],
+                    "artist_id",
+                )))])
+                .from([joined]),
+            )),
+        )));
+        let planned = plan_prepared_shape(&query, &schema())
+            .expect("hidden parameter id must not make artists.id ambiguous");
+        assert_eq!(planned.public_output.len(), 1);
+        assert_eq!(planned.public_output[0].name, "artist_id");
     }
 
     #[test]
