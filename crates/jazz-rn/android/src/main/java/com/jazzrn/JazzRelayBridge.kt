@@ -69,7 +69,10 @@ internal object JazzRelayBridge {
    * The only Android entry for trusted scope configuration. It is deliberately
    * not part of the TurboModule: JS gets the returned random capability but
    * cannot supply path/schema/identity/claims to the generic command channel.
+   * Kotlin's `internal` does not restrict Java bytecode callers, so the
+   * admission methods are synthetic at the JVM boundary as well.
    */
+  @JvmSynthetic
   @Synchronized
   fun admitTrustedScope(config: TrustedRelayScopeConfig): ByteArray {
     val payload = JSONObject().apply {
@@ -89,6 +92,7 @@ internal object JazzRelayBridge {
     }
   }
 
+  @JvmSynthetic
   @Synchronized
   fun revokeTrustedScope(capability: ByteArray) {
     check(capability.size == 32) { "Jazz admission capabilities are exactly 32 bytes" }
@@ -97,6 +101,7 @@ internal object JazzRelayBridge {
     destroyIfUnused()
   }
 
+  @JvmSynthetic
   @Synchronized
   fun beginPrivateSession(context: Context, serverUrl: String, appId: String, jwt: String): ByteArray {
     val payload = JSONObject().apply {
@@ -110,6 +115,7 @@ internal object JazzRelayBridge {
     }
   }
 
+  @JvmSynthetic
   @Synchronized
   fun attachCanonicalSchema(session: ByteArray, schemaJson: String): ByteArray {
     check(session.size == 32) { "Jazz session capabilities are exactly 32 bytes" }
@@ -166,8 +172,10 @@ data class TrustedRelayScopeConfig(
  * old value before admitting a changed authenticated scope.
  */
 object JazzRelayTrustedAdmission {
+  @JvmSynthetic
   fun admit(config: TrustedRelayScopeConfig): ByteArray = JazzRelayBridge.admitTrustedScope(config)
 
+  @JvmSynthetic
   fun beginPrivateSession(
     context: Context,
     serverUrl: String,
@@ -175,22 +183,27 @@ object JazzRelayTrustedAdmission {
     jwt: String,
   ): ByteArray = JazzRelayBridge.beginPrivateSession(context, serverUrl, appId, jwt)
 
+  @JvmSynthetic
   fun attachCanonicalSchema(session: ByteArray, schemaJson: String): ByteArray =
     JazzRelayBridge.attachCanonicalSchema(session, schemaJson)
 
+  @JvmSynthetic
   fun replace(previous: ByteArray?, next: TrustedRelayScopeConfig): ByteArray {
     previous?.let(JazzRelayBridge::revokeTrustedScope)
     return JazzRelayBridge.admitTrustedScope(next)
   }
 
+  @JvmSynthetic
   fun revoke(capability: ByteArray): Unit = JazzRelayBridge.revokeTrustedScope(capability)
 }
 
 /**
  * Native relay state is never named by JavaScript.  The session boundary may
  * use this deterministic, app-private root when it creates its SQLite file;
- * callers provide only an opaque capability back to JS.
+ * callers provide only an opaque capability back to JS. It is synthetic too,
+ * so an external Java consumer cannot recover the private storage root.
  */
+@JvmSynthetic
 internal fun nativeRelayStorageRoot(context: Context): File {
   val root = File(context.noBackupFilesDir, "jazz-relay")
   check(root.exists() || root.mkdirs()) { "Unable to create Jazz relay storage root" }

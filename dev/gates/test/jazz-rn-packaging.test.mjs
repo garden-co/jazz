@@ -1108,7 +1108,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     assert.match(
       packedAndroidAdmission,
       /^internal object JazzRelayBridge \{/m,
-      "a packed consumer must not be able to require the relay bridge directly",
+      "the packed runtime bridge remains Kotlin-internal; Java compatibility is checked below",
     );
     assert.match(
       packedAndroidAdmission,
@@ -1125,6 +1125,162 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       /^  fun revoke\(capability: ByteArray\): Unit = JazzRelayBridge\.revokeTrustedScope/m,
       "a packed consumer must be able to revoke through the public facade",
     );
+    for (const method of [
+      "admitTrustedScope",
+      "revokeTrustedScope",
+      "beginPrivateSession",
+      "attachCanonicalSchema",
+    ])
+      assert.match(
+        packedAndroidAdmission,
+        new RegExp(`@JvmSynthetic\\s+@Synchronized\\s+fun ${method}`),
+        `${method} must be synthetic to Java callers`,
+      );
+    for (const method of [
+      "admit",
+      "beginPrivateSession",
+      "attachCanonicalSchema",
+      "replace",
+      "revoke",
+    ])
+      assert.match(
+        packedAndroidAdmission,
+        new RegExp(
+          `object JazzRelayTrustedAdmission \\{[\\s\\S]*@JvmSynthetic[\\s\\S]*fun ${method}`,
+        ),
+        `the public Kotlin ${method} facade must remain Java-synthetic`,
+      );
+    assert.throws(
+      () =>
+        assert.match(
+          packedAndroidAdmission.replace(
+            "  @JvmSynthetic\n  @Synchronized\n  fun beginPrivateSession",
+            "  @Synchronized\n  fun beginPrivateSession",
+          ),
+          /@JvmSynthetic\s+@Synchronized\s+fun beginPrivateSession/,
+        ),
+      /did not match/,
+      "removing Java synthesis protection from a sensitive bridge method must fail",
+    );
+
+    // Kotlin `internal` compiles to public JVM bytecode. Compile the Kotlin
+    // sources from the packed tarball in a standalone module, then use javac
+    // as an external consumer: sensitive bridge entry points must not resolve
+    // from Java, while a second Kotlin module can use the Kotlin-only facade.
+    const hasJvmToolchain = ["java", "javac"].every((command) => {
+      try {
+        execFileSync(command, ["-version"], { stdio: "ignore" });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (hasJvmToolchain) {
+      const jvmReceiptDirectory = join(directory, "packed-jvm-admission-receipt");
+      const relaySourceDirectory = join(jvmReceiptDirectory, "relay", "src", "main");
+      const relayKotlinDirectory = join(relaySourceDirectory, "kotlin", "com", "jazzrn");
+      const relayJavaDirectory = join(relaySourceDirectory, "java");
+      const consumerKotlinDirectory = join(
+        jvmReceiptDirectory,
+        "consumer",
+        "src",
+        "main",
+        "kotlin",
+        "consumer",
+      );
+      await mkdir(relayKotlinDirectory, { recursive: true });
+      await mkdir(relayJavaDirectory, { recursive: true });
+      await mkdir(consumerKotlinDirectory, { recursive: true });
+      await writeFile(join(relayKotlinDirectory, "JazzRelayBridge.kt"), packedAndroidAdmission);
+      for (const [relativePath, source] of [
+        [
+          "android/content/Context.java",
+          "package android.content; public class Context { public java.io.File getNoBackupFilesDir() { return null; } }",
+        ],
+        [
+          "android/util/Base64.java",
+          "package android.util; public final class Base64 { public static final int NO_WRAP = 2; public static byte[] decode(String value, int flags) { return null; } public static String encodeToString(byte[] value, int flags) { return null; } }",
+        ],
+        [
+          "com/facebook/react/turbomodule/core/interfaces/BindingsInstallerHolder.java",
+          "package com.facebook.react.turbomodule.core.interfaces; public interface BindingsInstallerHolder {}",
+        ],
+        [
+          "org/json/JSONObject.java",
+          "package org.json; public class JSONObject { public static final Object NULL = new Object(); public JSONObject() {} public JSONObject(String value) {} public JSONObject put(String key, Object value) { return this; } }",
+        ],
+      ]) {
+        const destination = join(relayJavaDirectory, relativePath);
+        await mkdir(dirname(destination), { recursive: true });
+        await writeFile(destination, source);
+      }
+      await writeFile(
+        join(consumerKotlinDirectory, "FacadeConsumer.kt"),
+        [
+          "package consumer",
+          "",
+          "import android.content.Context",
+          "import com.jazzrn.JazzRelayTrustedAdmission",
+          "",
+          "fun admit(context: Context): ByteArray = JazzRelayTrustedAdmission.beginPrivateSession(",
+          '  context, "https://relay.invalid", "app", "jwt",',
+          ")",
+        ].join("\n"),
+      );
+      await writeFile(
+        join(jvmReceiptDirectory, "settings.gradle"),
+        'rootProject.name = "packed-jvm-admission-receipt"\ninclude(":relay", ":consumer")\n',
+      );
+      await writeFile(
+        join(jvmReceiptDirectory, "relay", "build.gradle"),
+        'plugins { id "org.jetbrains.kotlin.jvm" version "2.1.20" }\nrepositories { mavenCentral() }\n',
+      );
+      await writeFile(
+        join(jvmReceiptDirectory, "consumer", "build.gradle"),
+        'plugins { id "org.jetbrains.kotlin.jvm" version "2.1.20" }\nrepositories { mavenCentral() }\ndependencies { implementation project(":relay") }\n',
+      );
+      const gradle = new URL("../../../dev/rn-device-acceptance/android/gradlew", import.meta.url)
+        .pathname;
+      execFileSync(
+        gradle,
+        [
+          "--offline",
+          "--no-daemon",
+          "-p",
+          jvmReceiptDirectory,
+          ":relay:classes",
+          ":consumer:compileKotlin",
+        ],
+        { stdio: "inherit" },
+      );
+      const javaEscape = join(jvmReceiptDirectory, "JavaBridgeEscape.java");
+      await writeFile(
+        javaEscape,
+        [
+          "package consumer;",
+          "import android.content.Context;",
+          "import com.jazzrn.JazzRelayBridge;",
+          "class JavaBridgeEscape {",
+          "  byte[] admit(Context context) {",
+          '    return JazzRelayBridge.INSTANCE.beginPrivateSession(context, "https://relay.invalid", "app", "jwt");',
+          "  }",
+          "}",
+        ].join("\n"),
+      );
+      const relayClasses = [
+          join(jvmReceiptDirectory, "relay", "build", "classes", "kotlin", "main"),
+          join(jvmReceiptDirectory, "relay", "build", "classes", "java", "main"),
+        ].join(":"),
+        javaEscapeOutput = join(jvmReceiptDirectory, "java-escape-output");
+      assert.throws(
+        () => execFileSync("javac", ["-cp", relayClasses, "-d", javaEscapeOutput, javaEscape]),
+        (error) =>
+          error.status !== 0 &&
+          /beginPrivateSession/.test(String(error.stderr)) &&
+          /cannot find symbol/.test(String(error.stderr)),
+        "a Java consumer must not resolve the packed bridge's sensitive admission methods",
+      );
+    }
     for (const platform of ["android", "ios"]) {
       execFileSync(
         join(canonicalNodeModules, ".bin", "expo"),
