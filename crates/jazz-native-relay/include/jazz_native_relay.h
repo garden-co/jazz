@@ -56,6 +56,18 @@ jazz_native_relay_status jazz_native_relay_host_execute(
     size_t request_len,
     jazz_native_relay_bytes *out);
 
+/* Trusted platform-only two phase admission. Setup receives serverUrl, appId,
+ * jwt, and the platform-selected storage root; JWT payload decoding only
+ * selects a local cache scope and is never authentication. Attach receives
+ * only the opaque setup capability and canonical schema JSON. */
+jazz_native_relay_status jazz_native_relay_host_begin_private_session_json(
+    jazz_native_relay_host *host, const uint8_t *request, size_t request_len,
+    jazz_native_relay_bytes *out);
+jazz_native_relay_status jazz_native_relay_host_attach_canonical_schema_json(
+    jazz_native_relay_host *host, const uint8_t *session_capability,
+    size_t capability_len, const uint8_t *schema_json, size_t schema_len,
+    jazz_native_relay_bytes *out);
+
 /* Admit strict JSON from trusted Kotlin/Swift platform code. This is not a
  * JavaScript command: unknown fields, malformed config, SYSTEM identity, and
  * bearer-token claims are rejected by Rust. On success `out` is exactly the

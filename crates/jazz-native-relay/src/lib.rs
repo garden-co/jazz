@@ -149,6 +149,27 @@ struct RelayScopeAdmissionRequest {
     pub claims: BTreeMap<String, Value>,
 }
 
+/// Credential-bearing setup is a private platform-to-relay handoff.  The
+/// bearer is decoded only through Jazz's shared *unverified* scope projection
+/// so a refresh can select a distinct local cache.  It is never verified,
+/// turned into claims, or exposed to postcard/JSI; Edge authentication remains
+/// authoritative.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateSessionSetupJson {
+    server_url: String,
+    app_id: String,
+    jwt: String,
+    storage_root: String,
+}
+
+#[derive(Clone)]
+struct PendingPrivateSession {
+    scope: RelayScopeRequest,
+    sqlite_path: String,
+    identity: DbIdentity,
+}
+
 /// JSON-shaped form accepted only by the platform-owned admission C entry
 /// point. Keeping this separate from the postcard command codec makes the
 /// platform integration practical without letting JavaScript construct scope
@@ -482,6 +503,7 @@ pub enum JazzNativeRelayStatus {
 pub struct NativeRelayHost {
     registry: NativeRelayRegistry,
     admitted_scopes: BTreeMap<AdmissionCapability, AdmittedRelayScope>,
+    pending_private_sessions: BTreeMap<AdmissionCapability, PendingPrivateSession>,
     relays: BTreeMap<u64, OpenedRelay>,
     clients: BTreeMap<u64, (u64, NativeRelayClient)>,
     /// Foreground aliases opened through the capability-only C ABI. Keeping
@@ -597,6 +619,7 @@ impl Default for NativeRelayHost {
         Self {
             registry: NativeRelayRegistry::default(),
             admitted_scopes: BTreeMap::new(),
+            pending_private_sessions: BTreeMap::new(),
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
             foregrounds: BTreeMap::new(),
@@ -1238,6 +1261,88 @@ impl NativeRelayHost {
         Ok(handle)
     }
 
+    fn begin_private_session(
+        &mut self,
+        request: PrivateSessionSetupJson,
+    ) -> Result<AdmissionCapability, JazzNativeRelayStatus> {
+        let origin = url::Url::parse(request.server_url.trim())
+            .ok()
+            .and_then(|url| {
+                (url.scheme() == "https" || url.scheme() == "http")
+                    .then(|| url.origin().ascii_serialization())
+            })
+            .filter(|origin| origin != "null")
+            .ok_or(JazzNativeRelayStatus::LifecycleFailure)?;
+        let app_id = request.app_id.trim();
+        if app_id.is_empty() || request.storage_root.trim().is_empty() {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
+        let (issuer, subject) = jazz::tools::unverified_jwt_scope_subject(&request.jwt)
+            .ok_or(JazzNativeRelayStatus::LifecycleFailure)?;
+        let author = jazz::ids::AuthorSubject::authenticated(&issuer, &subject)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let canonical_subject = author.canonical().to_owned();
+        let scope = RelayScopeRequest {
+            app_namespace: origin,
+            storage_namespace: app_id.to_owned(),
+            auth_scope: Some(canonical_subject.clone()),
+        };
+        RelayScope::from(scope.clone())
+            .validate()
+            .map_err(relay_status)?;
+        let digest = blake3::hash(
+            format!(
+                "{}\0{}\0{}",
+                scope.app_namespace, scope.storage_namespace, canonical_subject
+            )
+            .as_bytes(),
+        );
+        let sqlite_path = PathBuf::from(request.storage_root)
+            .join(format!("{}.sqlite", digest.to_hex()))
+            .display()
+            .to_string();
+        let mut node = [0_u8; 16];
+        getrandom::fill(&mut node).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let capability = self.allocate_admission_capability().map_err(relay_status)?;
+        self.pending_private_sessions.insert(
+            capability,
+            PendingPrivateSession {
+                scope,
+                sqlite_path,
+                identity: DbIdentity {
+                    node: NodeUuid::from_bytes(node),
+                    author,
+                },
+            },
+        );
+        Ok(capability)
+    }
+
+    fn attach_canonical_schema(
+        &mut self,
+        session: AdmissionCapability,
+        schema_json: &str,
+    ) -> Result<AdmissionCapability, JazzNativeRelayStatus> {
+        let pending = self
+            .pending_private_sessions
+            .remove(&session)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        // Canonicalize at this credential-free boundary before constructing a
+        // JazzSchema. A malformed schema consumes the one-shot session setup;
+        // callers must restart setup rather than attach a different schema.
+        let value = serde_json::from_str::<serde_json::Value>(schema_json)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let schema_json =
+            serde_json::to_string(&value).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        self.admit_scope(RelayScopeAdmissionRequest {
+            scope: pending.scope,
+            sqlite_path: pending.sqlite_path,
+            schema_json,
+            identity: pending.identity,
+            claims: BTreeMap::new(),
+        })
+    }
+
     fn revoke_scope(
         &mut self,
         admitted_scope: AdmissionCapability,
@@ -1605,6 +1710,111 @@ pub unsafe extern "C" fn jazz_native_relay_host_admit_scope_json(
         };
     }
     std::mem::forget(capability);
+    JazzNativeRelayStatus::Ok
+}
+
+/// Begin private native session setup. This accepts a bearer only on the
+/// trusted platform boundary and uses its unverified payload solely to choose
+/// the local SQLite partition. It returns an opaque one-shot setup capability;
+/// a schema must be attached separately without credentials.
+///
+/// # Safety
+/// `host`, request bytes, and `out` obey the same validity and ownership rules
+/// as [`jazz_native_relay_host_admit_scope_json`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_begin_private_session_json(
+    host: *mut JazzNativeRelayHost,
+    request: *const u8,
+    request_len: usize,
+    out: *mut JazzNativeRelayBytes,
+) -> JazzNativeRelayStatus {
+    if out.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out = JazzNativeRelayBytes::EMPTY };
+    if host.is_null()
+        || request.is_null()
+        || request_len == 0
+        || request_len > NATIVE_RELAY_ADMISSION_MAX_BYTES
+    {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let request = unsafe { std::slice::from_raw_parts(request, request_len) };
+    let request = match serde_json::from_slice::<PrivateSessionSetupJson>(request) {
+        Ok(request) => request,
+        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
+    };
+    let mut host = match unsafe { (&*host).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    let capability = match host.begin_private_session(request) {
+        Ok(capability) => capability,
+        Err(status) => return status,
+    };
+    let mut bytes = capability.0.to_vec();
+    unsafe {
+        *out = JazzNativeRelayBytes {
+            data: bytes.as_mut_ptr(),
+            len: bytes.len(),
+        }
+    };
+    std::mem::forget(bytes);
+    JazzNativeRelayStatus::Ok
+}
+
+/// Attach one credential-free canonical schema to a one-shot private setup.
+///
+/// # Safety
+/// `host` and `out` are live ABI pointers; `session_capability` points to
+/// exactly 32 readable bytes and `schema_json` points to `schema_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_attach_canonical_schema_json(
+    host: *mut JazzNativeRelayHost,
+    session_capability: *const u8,
+    capability_len: usize,
+    schema_json: *const u8,
+    schema_len: usize,
+    out: *mut JazzNativeRelayBytes,
+) -> JazzNativeRelayStatus {
+    if out.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out = JazzNativeRelayBytes::EMPTY };
+    if host.is_null()
+        || session_capability.is_null()
+        || capability_len != 32
+        || schema_json.is_null()
+        || schema_len == 0
+        || schema_len > NATIVE_RELAY_ADMISSION_MAX_BYTES
+    {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let mut capability = [0; 32];
+    unsafe {
+        capability.copy_from_slice(std::slice::from_raw_parts(session_capability, 32));
+    }
+    let schema = unsafe { std::slice::from_raw_parts(schema_json, schema_len) };
+    let schema = match std::str::from_utf8(schema) {
+        Ok(schema) => schema,
+        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
+    };
+    let mut host = match unsafe { (&*host).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    let capability = match host.attach_canonical_schema(AdmissionCapability(capability), schema) {
+        Ok(capability) => capability,
+        Err(status) => return status,
+    };
+    let mut bytes = capability.0.to_vec();
+    unsafe {
+        *out = JazzNativeRelayBytes {
+            data: bytes.as_mut_ptr(),
+            len: bytes.len(),
+        }
+    };
+    std::mem::forget(bytes);
     JazzNativeRelayStatus::Ok
 }
 
@@ -3969,6 +4179,52 @@ mod tests {
                 .build(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn private_session_setup_partitions_before_credential_free_schema_attachment() {
+        use base64::Engine;
+        let root = tempfile::tempdir().unwrap();
+        let jwt = format!(
+            "x.{}.x",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(br#"{"iss":"https://issuer.example","sub":"alice"}"#)
+        );
+        let mut host = NativeRelayHost::default();
+        let setup = host
+            .begin_private_session(PrivateSessionSetupJson {
+                server_url: "HTTPS://EDGE.example:443/sync?ignored=yes".to_owned(),
+                app_id: "app-a".to_owned(),
+                jwt,
+                storage_root: root.path().display().to_string(),
+            })
+            .unwrap();
+        let pending = host.pending_private_sessions.get(&setup).unwrap();
+        assert_eq!(pending.scope.app_namespace, "https://edge.example");
+        assert_eq!(pending.scope.storage_namespace, "app-a");
+        assert_eq!(
+            pending.scope.auth_scope.as_deref(),
+            Some(r#"["https://issuer.example","alice"]"#)
+        );
+        assert_eq!(
+            host.attach_canonical_schema(setup, "not-json"),
+            Err(JazzNativeRelayStatus::LifecycleFailure)
+        );
+        assert_eq!(
+            host.attach_canonical_schema(setup, "{}"),
+            Err(JazzNativeRelayStatus::InvalidHandle),
+            "a malformed schema consumes the setup capability"
+        );
+        assert!(host.admitted_scopes.is_empty());
+        assert!(
+            host.begin_private_session(PrivateSessionSetupJson {
+                server_url: "ftp://edge.example".to_owned(),
+                app_id: "app-a".to_owned(),
+                jwt: "x.e30.x".to_owned(),
+                storage_root: root.path().display().to_string(),
+            })
+            .is_err()
+        );
     }
 
     fn encoded_title_cells(title: &str) -> Vec<u8> {

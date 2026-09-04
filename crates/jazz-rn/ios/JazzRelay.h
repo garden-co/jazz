@@ -8,6 +8,13 @@
  * JazzRelayModule.h because it depends on a pod-target-only generated header.
  */
 @interface JazzRelayTrustedAdmission : NSObject
++ (nullable NSData *)beginPrivateSessionWithServerURL:(NSString *)serverURL
+                                                 appID:(NSString *)appID
+                                                   jwt:(NSString *)jwt
+                                                 error:(NSError * _Nullable * _Nullable)error;
++ (nullable NSData *)attachCanonicalSchemaJSON:(NSData *)schema
+                              sessionCapability:(NSData *)session
+                                         error:(NSError * _Nullable * _Nullable)error;
 + (nullable NSData *)admitScopeJSON:(NSData *)configuration
                               error:(NSError * _Nullable * _Nullable)error;
 + (BOOL)revokeCapability:(NSData *)capability

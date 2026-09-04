@@ -177,6 +177,44 @@ static NSURL *JazzRelayStorageRoot(void) {
 
 @implementation JazzRelayTrustedAdmission
 
++ (NSData *)beginPrivateSessionWithServerURL:(NSString *)serverURL
+                                        appID:(NSString *)appID
+                                          jwt:(NSString *)jwt
+                                        error:(NSError **)error {
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE
+  NSDictionary *payload = @{ @"server_url": serverURL ?: @"", @"app_id": appID ?: @"",
+    @"jwt": jwt ?: @"", @"storage_root": JazzRelayStorageRoot().path ?: @"" };
+  NSData *json = [NSJSONSerialization dataWithJSONObject:payload options:0 error:error];
+  if (json == nil) return nil;
+  jazz_native_relay_bytes output = {0};
+  jazz_native_relay_status status = jazz_native_relay_host_begin_private_session_json(
+      EnsureRelayHost(), (const uint8_t *)json.bytes, json.length, &output);
+  if (status != JAZZ_NATIVE_RELAY_OK) { if (error) *error = RelayLifecycleError(@"Jazz private relay session setup was rejected"); return nil; }
+  NSData *capability = [NSData dataWithBytes:output.data length:output.len];
+  jazz_native_relay_bytes_free(&output);
+  return capability.length == 32 ? capability : nil;
+#else
+  if (error) *error = RelayLifecycleError(@"Jazz native relay is unavailable"); return nil;
+#endif
+}
+
++ (NSData *)attachCanonicalSchemaJSON:(NSData *)schema sessionCapability:(NSData *)session error:(NSError **)error {
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE
+  if (session.length != 32) { if (error) *error = RelayLifecycleError(@"Jazz session capabilities are exactly 32 bytes"); return nil; }
+  jazz_native_relay_bytes output = {0};
+  jazz_native_relay_status status = jazz_native_relay_host_attach_canonical_schema_json(
+      EnsureRelayHost(), (const uint8_t *)session.bytes, session.length,
+      (const uint8_t *)schema.bytes, schema.length, &output);
+  if (status != JAZZ_NATIVE_RELAY_OK) { if (error) *error = RelayLifecycleError(@"Jazz canonical relay schema attachment was rejected"); return nil; }
+  NSData *capability = [NSData dataWithBytes:output.data length:output.len];
+  jazz_native_relay_bytes_free(&output);
+  if (capability.length == 32) { if (trustedCapabilities == nil) trustedCapabilities = [NSMutableSet set]; [trustedCapabilities addObject:capability]; return capability; }
+  return nil;
+#else
+  if (error) *error = RelayLifecycleError(@"Jazz native relay is unavailable"); return nil;
+#endif
+}
+
 + (NSData *)admitScopeJSON:(NSData *)configuration
                      error:(NSError **)error {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE

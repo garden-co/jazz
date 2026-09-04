@@ -97,6 +97,28 @@ internal object JazzRelayBridge {
     destroyIfUnused()
   }
 
+  @Synchronized
+  fun beginPrivateSession(context: Context, serverUrl: String, appId: String, jwt: String): ByteArray {
+    val payload = JSONObject().apply {
+      put("server_url", serverUrl)
+      put("app_id", appId)
+      put("jwt", jwt)
+      put("storage_root", nativeRelayStorageRoot(context).absolutePath)
+    }.toString().encodeToByteArray()
+    return nativeBeginPrivateSessionJson(ensureHost(), payload).also {
+      check(it.size == 32) { "Jazz native relay returned an invalid session capability" }
+    }
+  }
+
+  @Synchronized
+  fun attachCanonicalSchema(session: ByteArray, schemaJson: String): ByteArray {
+    check(session.size == 32) { "Jazz session capabilities are exactly 32 bytes" }
+    return nativeAttachCanonicalSchemaJson(ensureHost(), session, schemaJson.encodeToByteArray()).also {
+      check(it.size == 32) { "Jazz native relay returned an invalid admission capability" }
+      trustedCapabilities += Base64.encodeToString(it, Base64.NO_WRAP)
+    }
+  }
+
   private fun destroyIfUnused() {
     if (host != 0L && activeRuntimeTokens.isEmpty() && trustedCapabilities.isEmpty()) {
       nativeDestroy(host)
@@ -109,6 +131,8 @@ internal object JazzRelayBridge {
   @JvmStatic private external fun nativeAbiVersion(): Int
   @JvmStatic private external fun nativeExecute(host: Long, command: ByteArray): ByteArray
   @JvmStatic private external fun nativeAdmitTrustedScopeJson(host: Long, admissionJson: ByteArray): ByteArray
+  @JvmStatic private external fun nativeBeginPrivateSessionJson(host: Long, sessionJson: ByteArray): ByteArray
+  @JvmStatic private external fun nativeAttachCanonicalSchemaJson(host: Long, capability: ByteArray, schemaJson: ByteArray): ByteArray
   @JvmStatic private external fun nativeRevokeTrustedScope(host: Long, capability: ByteArray)
   @JvmStatic private external fun nativeForegroundBindingsInstaller(
     host: Long,

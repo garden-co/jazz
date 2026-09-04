@@ -2232,6 +2232,8 @@ dependencies = [
 name = "jazz-native-relay"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "blake3",
  "futures",
  "getrandom 0.3.4",
  "jazz",
@@ -2241,6 +2243,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "url",
 ]
 
 [[package]]

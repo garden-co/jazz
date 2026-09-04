@@ -108,6 +108,36 @@ Java_com_jazzrn_JazzRelayBridge_nativeAdmitTrustedScopeJson(
                        "Jazz trusted relay admission was rejected");
 }
 
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_jazzrn_JazzRelayBridge_nativeBeginPrivateSessionJson(
+    JNIEnv *env, jclass, jlong host, jbyteArray session_json) {
+  const jsize length = env->GetArrayLength(session_json);
+  jbyte *input = env->GetByteArrayElements(session_json, nullptr);
+  jazz_native_relay_bytes output{};
+  const auto status = jazz_native_relay_host_begin_private_session_json(
+      reinterpret_cast<jazz_native_relay_host *>(host),
+      reinterpret_cast<const uint8_t *>(input), static_cast<size_t>(length), &output);
+  env->ReleaseByteArrayElements(session_json, input, JNI_ABORT);
+  return copy_response(env, &output, status, "Jazz private relay session setup was rejected");
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_jazzrn_JazzRelayBridge_nativeAttachCanonicalSchemaJson(
+    JNIEnv *env, jclass, jlong host, jbyteArray capability, jbyteArray schema_json) {
+  const jsize capability_length = env->GetArrayLength(capability);
+  const jsize schema_length = env->GetArrayLength(schema_json);
+  jbyte *capability_bytes = env->GetByteArrayElements(capability, nullptr);
+  jbyte *schema_bytes = env->GetByteArrayElements(schema_json, nullptr);
+  jazz_native_relay_bytes output{};
+  const auto status = jazz_native_relay_host_attach_canonical_schema_json(
+      reinterpret_cast<jazz_native_relay_host *>(host),
+      reinterpret_cast<const uint8_t *>(capability_bytes), static_cast<size_t>(capability_length),
+      reinterpret_cast<const uint8_t *>(schema_bytes), static_cast<size_t>(schema_length), &output);
+  env->ReleaseByteArrayElements(capability, capability_bytes, JNI_ABORT);
+  env->ReleaseByteArrayElements(schema_json, schema_bytes, JNI_ABORT);
+  return copy_response(env, &output, status, "Jazz canonical relay schema attachment was rejected");
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_jazzrn_JazzRelayBridge_nativeRevokeTrustedScope(
     JNIEnv *env, jclass, jlong host, jbyteArray capability) {
