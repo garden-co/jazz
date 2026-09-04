@@ -5,7 +5,7 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
-import com.jazzrn.JazzRelayBridge
+import com.jazzrn.JazzRelayTrustedAdmission
 import android.util.Base64
 import android.os.Build
 import android.system.Os
@@ -105,13 +105,13 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
 
   private fun admitPrivateSession(scope: String): ByteArray {
     val inputs = privateSessionInputs(scope)
-    val setup = JazzRelayBridge.beginPrivateSession(
+    val setup: ByteArray = JazzRelayTrustedAdmission.beginPrivateSession(
       reactApplicationContext,
       inputs.endpoint,
       BuildConfig.JAZZ_DEVICE_APP_ID,
       inputs.bearer,
     )
-    return JazzRelayBridge.attachCanonicalSchema(setup, BuildConfig.JAZZ_DEVICE_SCHEMA_JSON)
+    return JazzRelayTrustedAdmission.attachCanonicalSchema(setup, BuildConfig.JAZZ_DEVICE_SCHEMA_JSON)
   }
 
   @ReactMethod fun admittedCapability(promise: Promise) {
@@ -123,7 +123,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
   }
 
   @ReactMethod fun logout(promise: Promise) {
-    capability?.let(JazzRelayBridge::revokeTrustedScope)
+    capability?.let(JazzRelayTrustedAdmission::revoke)
     capability = null
     promise.resolve(null)
   }
@@ -132,7 +132,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
    * JS capability bytes cannot cross the authenticated scope boundary. */
   @ReactMethod fun switchAuthScope(promise: Promise) {
     try {
-      capability?.let(JazzRelayBridge::revokeTrustedScope)
+      capability?.let(JazzRelayTrustedAdmission::revoke)
       capability = null
       admitPrivateSession("b").also { capability = it }
       promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))

@@ -446,11 +446,19 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(fixture, /jazzDeviceEdgeEndpoint/);
   assert.match(fixture, /jazzDeviceBearerA/);
   assert.match(fixture, /jazzDeviceBearerB/);
-  assert.match(fixture, /JazzRelayBridge\.beginPrivateSession/);
-  assert.match(fixture, /JazzRelayBridge\.attachCanonicalSchema/);
-  assert.doesNotMatch(
-    fixture,
-    /JazzRelayTrustedAdmission|TrustedRelayScopeConfig|admitTrustedScope/,
+  assert.match(fixture, /import com\.jazzrn\.JazzRelayTrustedAdmission/);
+  assert.match(fixture, /val setup: ByteArray = JazzRelayTrustedAdmission\.beginPrivateSession/);
+  assert.match(fixture, /JazzRelayTrustedAdmission\.attachCanonicalSchema/);
+  assert.match(fixture, /JazzRelayTrustedAdmission::revoke/);
+  assert.doesNotMatch(fixture, /JazzRelayBridge|TrustedRelayScopeConfig|admitTrustedScope/);
+  assert.throws(
+    () =>
+      assert.doesNotMatch(
+        fixture.replace("JazzRelayTrustedAdmission", "JazzRelayBridge"),
+        /JazzRelayBridge|TrustedRelayScopeConfig|admitTrustedScope/,
+      ),
+    /expected to not match/,
+    "an external fixture must not regain access to the internal relay bridge",
   );
   assert.match(fixture, /jazzDeviceRunNonce/);
   assert.match(fixture, /applicationInfo\.sourceDir/);

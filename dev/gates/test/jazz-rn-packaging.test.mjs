@@ -1091,6 +1091,40 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       join(bareAppNodeModules, "jazz-rn", "lib", "module", "index.js"),
       "the direct bare receipt must resolve the published JavaScript entry, not workspace source",
     );
+    const packedAndroidAdmission = await readFile(
+      join(
+        bareAppNodeModules,
+        "jazz-rn",
+        "android",
+        "src",
+        "main",
+        "java",
+        "com",
+        "jazzrn",
+        "JazzRelayBridge.kt",
+      ),
+      "utf8",
+    );
+    assert.match(
+      packedAndroidAdmission,
+      /^internal object JazzRelayBridge \{/m,
+      "a packed consumer must not be able to require the relay bridge directly",
+    );
+    assert.match(
+      packedAndroidAdmission,
+      /^object JazzRelayTrustedAdmission \{[\s\S]*^  fun beginPrivateSession\([\s\S]*\): ByteArray = JazzRelayBridge\.beginPrivateSession/m,
+      "a packed consumer must be able to reference the public private-session facade",
+    );
+    assert.match(
+      packedAndroidAdmission,
+      /^  fun attachCanonicalSchema\(session: ByteArray, schemaJson: String\): ByteArray =[\s\S]*JazzRelayBridge\.attachCanonicalSchema/m,
+      "a packed consumer must be able to reference the public schema facade",
+    );
+    assert.match(
+      packedAndroidAdmission,
+      /^  fun revoke\(capability: ByteArray\): Unit = JazzRelayBridge\.revokeTrustedScope/m,
+      "a packed consumer must be able to revoke through the public facade",
+    );
     for (const platform of ["android", "ios"]) {
       execFileSync(
         join(canonicalNodeModules, ".bin", "expo"),

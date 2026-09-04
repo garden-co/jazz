@@ -168,12 +168,22 @@ data class TrustedRelayScopeConfig(
 object JazzRelayTrustedAdmission {
   fun admit(config: TrustedRelayScopeConfig): ByteArray = JazzRelayBridge.admitTrustedScope(config)
 
+  fun beginPrivateSession(
+    context: Context,
+    serverUrl: String,
+    appId: String,
+    jwt: String,
+  ): ByteArray = JazzRelayBridge.beginPrivateSession(context, serverUrl, appId, jwt)
+
+  fun attachCanonicalSchema(session: ByteArray, schemaJson: String): ByteArray =
+    JazzRelayBridge.attachCanonicalSchema(session, schemaJson)
+
   fun replace(previous: ByteArray?, next: TrustedRelayScopeConfig): ByteArray {
     previous?.let(JazzRelayBridge::revokeTrustedScope)
     return JazzRelayBridge.admitTrustedScope(next)
   }
 
-  fun revoke(capability: ByteArray) = JazzRelayBridge.revokeTrustedScope(capability)
+  fun revoke(capability: ByteArray): Unit = JazzRelayBridge.revokeTrustedScope(capability)
 }
 
 /**
