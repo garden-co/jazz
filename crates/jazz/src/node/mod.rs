@@ -683,7 +683,8 @@ struct Clock {
     global_time_register: GlobalTime,
     /// Authority timestamps allocated here and awaiting accepted application.
     locally_minted_global_times: BTreeSet<GlobalTime>,
-    /// Highest globally accepted timestamp durably committed by this core.
+    /// Highest authority-committed timestamp known to this node. On a
+    /// history-complete core this is also the locally complete history cut.
     committed_global_time: GlobalTime,
     /// Global transactions held by a partial node outside its core frontier.
     applied_global_times_after_frontier: BTreeSet<GlobalTime>,

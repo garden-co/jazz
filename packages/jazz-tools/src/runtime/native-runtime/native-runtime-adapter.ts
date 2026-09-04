@@ -100,10 +100,10 @@ const MAX_CORE_TICKS_PER_TURN = 4;
 
 type ReadAuthorizationHost = "client-local" | "trusted-serving";
 /**
- * The native ABI has three deliberately non-interchangeable read entry
- * points.  This is an adapter-private capability choice, never wire/session
- * data: callers can supply a public session, but cannot name backend
- * authority or turn a client-local read into an authority read.
+ * The adapter selects one of three non-interchangeable authorization contexts.
+ * This is an adapter-private capability choice, never wire/session data:
+ * callers can supply a public session, but cannot name backend authority or
+ * turn a client-local read into an authority read.
  */
 type NativeReadContext =
   | { readonly kind: "client-local" }
@@ -189,46 +189,38 @@ type NativeDb = {
   rollbackTransaction(openTransactionId: string): void;
   attachMergeableTx(openTransactionId: string): Tx;
   attachExclusiveTx?(openTransactionId: string): Tx;
-  all(query: PreparedQuery, opts: unknown): NativeReadResult;
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
-  allForBackend?(query: PreparedQuery, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
-  allAsync?(query: PreparedQuery, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
-  allForIdentityAsync?(
+  all(
     query: PreparedQuery,
-    author: Uint8Array,
     opts: unknown,
+    openTransactionId?: OpenTransactionId,
+    author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
-  allRelationQuery?(queryJson: string, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
-  allRelationQueryForIdentity?(
-    queryJson: string,
-    author: Uint8Array,
+  allAsync?(
+    query: PreparedQuery,
     opts: unknown,
+    openTransactionId?: OpenTransactionId,
+    author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
-  /** Authority-serving relation read owned by an explicit backend open. */
-  allRelationQueryForBackend?(
+  allRelationQuery?(
     queryJson: string,
     opts: unknown,
+    author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
   allRelationSnapshot?(
     query: PreparedQuery,
     opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  allRelationSnapshotForIdentity?(
-    query: PreparedQuery,
-    author: Uint8Array,
-    opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  /** Authority-serving nested/array snapshot owned by an explicit backend open. */
-  allRelationSnapshotForBackend?(
-    query: PreparedQuery,
-    opts: unknown,
+    openTransactionId?: OpenTransactionId,
+    author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
-  attachQuery?(query: PreparedQuery, opts: unknown): unknown;
-  attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
-  attachQueryForBackend?(query: PreparedQuery, opts: unknown): unknown;
+  attachQuery?(
+    query: PreparedQuery,
+    opts: unknown,
+    openTransactionId?: OpenTransactionId,
+    author?: Uint8Array,
+  ): unknown;
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
@@ -331,48 +323,6 @@ type NativeDb = {
   mergeableTx(openTransactionId: OpenTransactionId): Tx;
   mergeableTxForIdentity?(openTransactionId: OpenTransactionId, author: Uint8Array): Tx;
   exclusiveTx?(openTransactionId: OpenTransactionId): Tx;
-  /**
-   * Transaction-local reads may wait for the owning runtime to finish queued
-   * staging work or cold storage. Callers must preserve FIFO visibility by
-   * awaiting this result before decoding it.
-   */
-  allInTransaction?(
-    query: PreparedQuery,
-    tx: Tx,
-    opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  /** Trusted-serving transaction reads must retain the identity fixed at begin. */
-  allInTransactionForIdentity?(
-    query: PreparedQuery,
-    tx: Tx,
-    author: Uint8Array,
-    opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  /** Backend authority transaction read; no public author may select it. */
-  allInTransactionForBackend?(
-    query: PreparedQuery,
-    tx: Tx,
-    opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  /** Relation snapshots must use the transaction's snapshot and staged overlay. */
-  allRelationSnapshotInTransaction?(
-    query: PreparedQuery,
-    tx: Tx,
-    opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  /** Trusted-serving relation snapshots retain the identity fixed at begin. */
-  allRelationSnapshotInTransactionForIdentity?(
-    query: PreparedQuery,
-    tx: Tx,
-    author: Uint8Array,
-    opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  /** Backend authority transaction relation snapshot; no public author may select it. */
-  allRelationSnapshotInTransactionForBackend?(
-    query: PreparedQuery,
-    tx: Tx,
-    opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -2042,17 +1992,19 @@ export class NativeRuntimeAdapter implements Runtime {
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
-    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
+    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session, pendingTx);
     if (this.closed) return [];
-    this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
+    if (!pendingTx) {
+      this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
+    }
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
         if (pendingTx) {
-          const payload = await this.readRelationSnapshotInTransactionForContext(
+          const payload = await this.readRelationSnapshotForContext(
             query,
-            this.txForRead(pendingTx),
             opts,
             readContext,
+            pendingTx.id,
           );
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
@@ -2505,12 +2457,15 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.db.all(query, readOptions());
+    if (typeof (rows as Promise<unknown>).then === "function") {
+      throw new Error("write merge requires the synchronous native read boundary");
+    }
     if (isPendingNativeRead(rows)) {
       throw new Error(
         "write merge cannot synchronously hydrate a large value; use the exact local row reader",
       );
     }
-    return rowsFromBatches(readRowBatches(rows), this.schema).find(
+    return rowsFromBatches(readRowBatches(rows as Uint8Array), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
   }
@@ -2564,27 +2519,7 @@ export class NativeRuntimeAdapter implements Runtime {
     pendingTx: PendingTx | undefined,
   ): Promise<Uint8Array> {
     const context = this.nativeReadContext(session, pendingTx);
-    if (!pendingTx) return this.readRowsForContextAsync(query, opts, context);
-    const tx = this.txForRead(pendingTx);
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.allInTransactionForBackend) {
-          throw new Error("Native runtime does not support backend authority transaction reads");
-        }
-        return this.awaitNativeRead(this.db.allInTransactionForBackend(query, tx, opts));
-      case "session-authority":
-        if (!this.db.allInTransactionForIdentity) {
-          throw new Error("Native runtime does not support session-authority transaction reads");
-        }
-        return this.awaitNativeRead(
-          this.db.allInTransactionForIdentity(query, tx, context.identity, opts),
-        );
-      case "client-local":
-        if (!this.db.allInTransaction) {
-          throw new Error("Native runtime does not support transaction reads");
-        }
-        return this.awaitNativeRead(this.db.allInTransaction(query, tx, opts));
-    }
+    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id);
   }
 
   /**
@@ -2597,7 +2532,7 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     context: NativeReadContext,
   ): Uint8Array {
-    const result = this.startRowsForContext(query, opts, context);
+    const result = this.db.all(query, opts, undefined, this.nativeReadAuthor(context));
     if (typeof (result as Promise<unknown>).then === "function") {
       throw new Error("native read is asynchronous; use the asynchronous read boundary");
     }
@@ -2611,31 +2546,25 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     opts: unknown,
     context: NativeReadContext,
+    openTransactionId?: OpenTransactionId,
   ): Promise<Uint8Array> {
-    return this.awaitNativeRead(this.startRowsForContext(query, opts, context));
+    return this.awaitNativeRead(this.startRowsForContext(query, opts, context, openTransactionId));
   }
 
   private startRowsForContext(
     query: PreparedQuery,
     opts: unknown,
     context: NativeReadContext,
+    openTransactionId?: OpenTransactionId,
   ): NativeReadResult | Promise<NativeReadResult> {
-    switch (context.kind) {
-      case "backend-authority":
-        return (
-          this.db.allForBackend?.(query, opts) ??
-          (() => {
-            throw new Error("Native runtime does not support backend authority reads");
-          })()
-        );
-      case "session-authority":
-        return (
-          this.db.allForIdentityAsync?.(query, context.identity, opts) ??
-          this.db.allForIdentity(query, context.identity, opts)
-        );
-      case "client-local":
-        return this.db.allAsync?.(query, opts) ?? this.db.all(query, opts);
-    }
+    const author = this.nativeReadAuthor(context);
+    return this.db.allAsync
+      ? this.db.allAsync(query, opts, openTransactionId, author)
+      : this.db.all(query, opts, openTransactionId, author);
+  }
+
+  private nativeReadAuthor(context: NativeReadContext): Uint8Array | undefined {
+    return context.kind === "session-authority" ? context.identity : undefined;
   }
 
   /**
@@ -2666,84 +2595,26 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     context: NativeReadContext,
   ): Promise<Uint8Array> {
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.allRelationQueryForBackend) {
-          throw new Error("Native runtime does not support backend authority relation queries");
-        }
-        return this.awaitNativeRead(this.db.allRelationQueryForBackend(queryJson, opts));
-      case "session-authority":
-        if (!this.db.allRelationQueryForIdentity) {
-          throw new Error("Native runtime does not support session-authority relation queries");
-        }
-        return this.awaitNativeRead(
-          this.db.allRelationQueryForIdentity(queryJson, context.identity, opts),
-        );
-      case "client-local":
-        if (!this.db.allRelationQuery) {
-          throw new Error("Native runtime does not support relation queries");
-        }
-        return this.awaitNativeRead(this.db.allRelationQuery(queryJson, opts));
+    if (!this.db.allRelationQuery) {
+      throw new Error("Native runtime does not support relation queries");
     }
+    return this.awaitNativeRead(
+      this.db.allRelationQuery(queryJson, opts, this.nativeReadAuthor(context)),
+    );
   }
 
   private readRelationSnapshotForContext(
     query: PreparedQuery,
     opts: unknown,
     context: NativeReadContext,
+    openTransactionId?: OpenTransactionId,
   ): Promise<Uint8Array> {
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.allRelationSnapshotForBackend) {
-          throw new Error("Native runtime does not support backend authority relation snapshots");
-        }
-        return this.awaitNativeRead(this.db.allRelationSnapshotForBackend(query, opts));
-      case "session-authority":
-        if (!this.db.allRelationSnapshotForIdentity) {
-          throw new Error("Native runtime does not support session-authority relation snapshots");
-        }
-        return this.awaitNativeRead(
-          this.db.allRelationSnapshotForIdentity(query, context.identity, opts),
-        );
-      case "client-local":
-        if (!this.db.allRelationSnapshot) {
-          throw new Error("Native runtime does not support relation snapshots");
-        }
-        return this.awaitNativeRead(this.db.allRelationSnapshot(query, opts));
+    if (!this.db.allRelationSnapshot) {
+      throw new Error("Native runtime does not support relation snapshots");
     }
-  }
-
-  private readRelationSnapshotInTransactionForContext(
-    query: PreparedQuery,
-    tx: Tx,
-    opts: unknown,
-    context: NativeReadContext,
-  ): Promise<Uint8Array> {
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.allRelationSnapshotInTransactionForBackend) {
-          throw new Error(
-            "Native runtime does not support backend authority transaction relation reads",
-          );
-        }
-        return this.awaitNativeRead(
-          this.db.allRelationSnapshotInTransactionForBackend(query, tx, opts),
-        );
-      case "session-authority":
-        if (!this.db.allRelationSnapshotInTransactionForIdentity) {
-          throw new Error(
-            "Native runtime does not support session-authority transaction relation reads",
-          );
-        }
-        return this.awaitNativeRead(
-          this.db.allRelationSnapshotInTransactionForIdentity(query, tx, context.identity, opts),
-        );
-      case "client-local":
-        if (!this.db.allRelationSnapshotInTransaction) {
-          throw new Error("Native runtime does not support transaction relation reads");
-        }
-        return this.awaitNativeRead(this.db.allRelationSnapshotInTransaction(query, tx, opts));
-    }
+    return this.awaitNativeRead(
+      this.db.allRelationSnapshot(query, opts, openTransactionId, this.nativeReadAuthor(context)),
+    );
   }
 
   private subscribeForContext(
@@ -2800,24 +2671,13 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     opts: unknown,
     context: NativeReadContext,
+    pendingTx?: PendingTx,
   ): unknown {
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.attachQueryForBackend) {
-          throw new Error("Native runtime does not support backend authority query coverage");
-        }
-        return this.db.attachQueryForBackend(query, opts);
-      case "session-authority":
-        if (!this.db.attachQueryForIdentity) {
-          throw new Error("Native runtime does not support session-authority query coverage");
-        }
-        return this.db.attachQueryForIdentity(query, context.identity, opts);
-      case "client-local":
-        if (!this.db.attachQuery) {
-          throw new Error("Native runtime does not support query coverage");
-        }
-        return this.db.attachQuery(query, opts);
+    if (!this.db.attachQuery) {
+      throw new Error("Native runtime does not support query coverage");
     }
+    const author = context.kind === "session-authority" ? context.identity : undefined;
+    return this.db.attachQuery(query, opts, pendingTx?.id, author);
   }
 
   /**
@@ -2935,6 +2795,7 @@ export class NativeRuntimeAdapter implements Runtime {
     optionsJson: string | null | undefined,
     query: PreparedQuery,
     session: RuntimeSession | null,
+    pendingTx?: PendingTx,
   ): Promise<unknown | undefined> {
     if (this.closed) return;
     if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
@@ -2945,9 +2806,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // storage-backed evaluator may hold that node across suspension, so enter
     // the same owner-wide idle boundary used for peer admission first.
     const opts = readOptions(tier, false, optionsJson);
-    const readContext = this.nativeReadContext(session);
+    const readContext = this.nativeReadContext(session, pendingTx);
     const attachment = await this.runWhenCoreIdle(() =>
-      this.closed ? undefined : this.attachQueryForContext(query, opts, readContext),
+      this.closed ? undefined : this.attachQueryForContext(query, opts, readContext, pendingTx),
     );
     if (attachment === undefined) return;
     this.emitQueryCoverageTrace("attach");

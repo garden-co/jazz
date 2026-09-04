@@ -964,13 +964,16 @@ updates marked ineligible for an authority receipt, even if their link becomes
 selected before the update is finally applied.
 
 Only cores are history-complete. An edge or client therefore tracks
-`settled_through` per binding/subscription and MUST NOT combine those receipts
-into a node-wide global-history watermark. A fresh subscription requires its own
-authoritative evaluation; a receipt for one binding says nothing about another.
-When a result is assembled from multiple binding views, coverage is bounded by
-the required views' confirmed cuts. A history-complete core's separate
-`committed_global_time` is specified in ch. 3 and is not reconstructed from
-downstream query receipts.
+`settled_through` per binding/subscription as proof that each exact result is
+materialized. A fresh subscription requires its own authoritative evaluation; a
+receipt for one binding says nothing about another binding's local result. A
+validated receipt from the selected authority nevertheless advances the node's
+`committed_global_time`: that field is the newest authority-committed coordinate
+known to the node, not a claim of local data completeness. When a result is
+assembled from multiple binding views, coverage is bounded by the required
+views' confirmed cuts. The separate `history_complete` capability determines
+whether `committed_global_time` is also a locally readable complete-history
+frontier (ch. 3 and ch. 5).
 
 For the reconstruction contract, `settled_through` is necessary but not
 sufficient. Settlement means the receiver has installed a **complete,

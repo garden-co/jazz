@@ -29,7 +29,7 @@ Invariant digest:
 - `INV-TX-10`: Applying a fate update MUST NOT move `global_time` backward and MUST update `durability` only monotonically upward.
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; the accepted transaction, global-current maintenance, and core `committed_global_time` MUST become durable atomically before publication, and the fate MUST report `DurabilityTier::Global`.
 - `INV-TX-12`: Local durability MUST NOT imply upstream survival; committed local transactions that have not reached an upstream tier MAY be lost if local storage is destroyed.
-- `INV-TX-13`: An exclusive transaction opened on a history-complete core MUST capture that core's atomically committed `GlobalTime` as `base_snapshot.global_base`; a partial edge/client MUST NOT promote query-scoped settlement into a whole-database global base.
+- `INV-TX-13`: An exclusive transaction MUST capture the highest authority-committed `GlobalTime` known to its node as `base_snapshot.global_base`. On a history-complete core this is also the complete local-history frontier; on a partial edge/client it is a remote history coordinate, and cold reads MUST hydrate through the authority at that frozen snapshot.
 - `INV-TX-14`: Exclusive snapshot reads MUST remain stable after later commits and MUST record the read version (including deletion-register versions when deleted) or an absent read.
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
@@ -176,13 +176,17 @@ If all 262,144 values in one physical millisecond are consumed, allocation
 advances to the next physical millisecond without wrapping or reusing a value.
 Only exhaustion at the packed maximum physical millisecond is a typed failure.
 
-The core maintains an HLC register separately from its committed frontier. The
-register may advance speculatively; the accepted transaction, global-current
-maintenance, and `committed_global_time` advance atomically at the durable
-publication boundary (§3.2.1). Because only cores are history-complete and core
-acceptance is serialized, the latest durably committed timestamp is the complete
-core history frontier. No `+1` gap inference or above-watermark set participates
-in that proof. Recovery restores both registers from durable accepted state.
+Every node maintains an HLC register separately from its known committed
+frontier. The register may advance speculatively. On the core, the accepted
+transaction, global-current maintenance, and `committed_global_time` advance
+atomically at the durable publication boundary (§3.2.1). A downstream node
+advances `committed_global_time` only after it successfully applies a validated,
+non-pending receipt from its selected authority. Because only cores are
+history-complete, the same value proves complete local history only when paired
+with `history_complete`; on an edge/client it is a stable coordinate for remote
+snapshot reads. No `+1` gap inference participates in either meaning. Recovery
+restores the core cut from durable accepted state and a partial node's known cut
+from its durable authority receipts.
 Accepted global transactions then maintain the per-layer global-current tables
 and change stream (`INV-TX-21`, ch. 4). Crucially, **local durability does not
 imply upstream survival**: a committed local transaction that has not reached an

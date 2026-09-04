@@ -443,8 +443,10 @@ fn jwt_error(error: jsonwebtoken::errors::Error) -> AuthAdmissionError {
     AuthAdmissionError::InvalidJwt(error.to_string())
 }
 
-/// Convert verified JWT JSON claims into scalar policy values. Registered
-/// identity fields are excluded because admission supplies verified values.
+/// Convert flat verified JWT metadata into scalar policy values. RFC 7519
+/// registered transport/security fields are excluded because admission supplies
+/// verified identity separately. Objects remain available to application
+/// handlers as session metadata but are not representable in core policies.
 pub fn jwt_json_claims_to_policy_claims(
     extra: BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, Value>, AuthAdmissionError> {
@@ -456,63 +458,16 @@ pub fn jwt_json_claims_to_policy_claims(
         ) {
             continue;
         }
-        if name == "claims" {
-            let serde_json::Value::Object(nested) = value else {
-                return Err(AuthAdmissionError::InvalidJwt(
-                    "JWT claims claim must be an object".to_owned(),
-                ));
-            };
-            for (nested_name, nested_value) in nested {
-                let value = json_claim_to_policy_claim(nested_value)?.ok_or_else(|| {
-                    AuthAdmissionError::InvalidJwt(
-                        "nested JWT claim objects are not supported".to_owned(),
-                    )
-                })?;
-                claims.insert(nested_name, value);
-            }
-            continue;
-        }
-        if let Some(value) = json_claim_to_policy_claim(value)? {
+        if let Some(value) = crate::tools::policy_claims::json_value_to_policy_claim(
+            value,
+            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+        )
+        .map_err(AuthAdmissionError::InvalidJwt)?
+        {
             claims.insert(name, value);
         }
     }
     Ok(claims)
-}
-
-fn json_claim_to_policy_claim(
-    value: serde_json::Value,
-) -> Result<Option<Value>, AuthAdmissionError> {
-    match value {
-        serde_json::Value::Null => Ok(Some(Value::Nullable(None))),
-        serde_json::Value::Bool(value) => Ok(Some(Value::Bool(value))),
-        serde_json::Value::Number(number) => {
-            crate::tools::policy_claims::json_number_to_policy_claim(
-                number,
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
-            )
-            .map_err(AuthAdmissionError::InvalidJwt)
-            .map(Some)
-        }
-        serde_json::Value::String(value) => Ok(Some(
-            value
-                .parse()
-                .map(Value::Uuid)
-                .unwrap_or(Value::String(value)),
-        )),
-        serde_json::Value::Array(values) => {
-            let mut claims = Vec::with_capacity(values.len());
-            for value in values {
-                let Some(value) = json_claim_to_policy_claim(value)? else {
-                    return Ok(None);
-                };
-                claims.push(value);
-            }
-            Ok(Some(Value::Array(claims)))
-        }
-        // OIDC providers routinely attach unrelated nested metadata. It is not
-        // representable in policy claims, so omit this claim as before.
-        serde_json::Value::Object(_) => Ok(None),
-    }
 }
 
 /// Bind an exact issuer/subject pair into the logical Jazz author identity.
@@ -666,13 +621,14 @@ mod tests {
             claims.is_empty(),
             "unrepresentable OIDC metadata stays ignored"
         );
+        let claims = jwt_json_claims_to_policy_claims(BTreeMap::from([(
+            "claims".to_owned(),
+            serde_json::json!({ "profile": { "department": "engineering" } }),
+        )]))
+        .unwrap();
         assert!(
-            jwt_json_claims_to_policy_claims(BTreeMap::from([(
-                "claims".to_owned(),
-                serde_json::json!({ "profile": { "department": "engineering" } }),
-            )]))
-            .is_err(),
-            "the dedicated policy claims object rejects nested objects"
+            claims.is_empty(),
+            "a top-level claims object is ordinary unsupported object metadata, never a second flattening path"
         );
     }
 }

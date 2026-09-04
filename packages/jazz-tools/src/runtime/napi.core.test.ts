@@ -1636,32 +1636,25 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     // bytes directly cannot re-authorize this Alice-opened mergeable batch.
     const raw = runtime as unknown as {
       db: {
-        allInTransactionForIdentity(
+        all(
           query: unknown,
-          tx: unknown,
-          author: Uint8Array,
           opts: unknown,
+          openTransactionId: string,
+          author: Uint8Array,
         ): Uint8Array | Promise<Uint8Array>;
       };
-      pendingTxs: Map<OpenTransactionId, { txByView: Map<NativeRuntimeAdapter, unknown> }>;
       prepareQuery(queryJson: string): unknown;
     };
-    const tx = raw.pendingTxs.get(transactionId)?.txByView.get(runtime);
-    expect(tx).toBeDefined();
     const query = raw.prepareQuery(JSON.stringify({ table: "todos" }));
     const aliceAuthor = new TextEncoder().encode(
       JSON.stringify(["https://issuer.example", ALICE_ID]),
     );
     const bobAuthor = new TextEncoder().encode(JSON.stringify(["https://issuer.example", BOB_ID]));
     await expect(
-      Promise.resolve().then(() =>
-        raw.db.allInTransactionForIdentity(query, tx, aliceAuthor, undefined),
-      ),
+      Promise.resolve().then(() => raw.db.all(query, undefined, transactionId, aliceAuthor)),
     ).resolves.toBeInstanceOf(Uint8Array);
     await expect(
-      Promise.resolve().then(() =>
-        raw.db.allInTransactionForIdentity(query, tx, bobAuthor, undefined),
-      ),
+      Promise.resolve().then(() => raw.db.all(query, undefined, transactionId, bobAuthor)),
     ).rejects.toThrow(/open transaction identity.*bound identity/i);
     await runtime.rollbackTransaction(transactionId);
   });

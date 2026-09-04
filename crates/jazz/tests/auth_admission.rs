@@ -16,9 +16,7 @@ fn signed_test_jwt(issuer: &str, subject: &str) -> String {
             "aud": "jazz-audience",
             "sub": subject,
             "exp": 4_102_444_800_u64,
-            "claims": {
-                "role": "editor",
-            },
+            "role": "editor",
         }),
         &EncodingKey::from_secret(TEST_JWT_SECRET),
     )

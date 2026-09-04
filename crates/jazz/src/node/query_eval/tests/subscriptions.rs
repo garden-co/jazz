@@ -3,7 +3,103 @@
 use super::*;
 use crate::legacy_test_future::FutureResolveExt as _;
 use crate::peer::PeerState;
-use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey};
+use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey, ReadViewSourceSpec, SnapshotRef};
+
+#[test]
+fn maintained_snapshot_view_compiles_remote_delivery_witnesses() {
+    let (_dir, mut node) = open_node();
+    let reader = author(1);
+    commit_global_issue(&mut node, 0, "open", reader, 1);
+    let shape = Query::from("issues")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0).0))))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let read_view = ReadViewSpec {
+        source: ReadViewSourceSpec::Snapshot {
+            snapshot: SnapshotRef {
+                owner: node.node_uuid,
+                global_base: GlobalTime(1),
+                local_base: TxTime(0),
+                dots: Vec::new(),
+            },
+        },
+    };
+
+    node.compile_current_query_program_for_read_view(
+        &shape,
+        &binding,
+        DurabilityTier::Global,
+        reader,
+        CurrentQueryProgramOutput::MaintainedView,
+        &read_view,
+    )
+    .expect("a frozen remote snapshot must compile its policy and delivery witnesses");
+}
+
+#[test]
+fn exclusive_snapshot_applies_same_cut_to_policy_relation_sources() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .column("assignee", PublicColumnType::Uuid)
+                    .column("priority", PublicColumnType::Timestamp)
+                    .policies(PublicTablePolicies::new().with_select(public_outer_exists(
+                        "issue_members",
+                        "issue",
+                        "id",
+                        [],
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_members")
+                    .fk_column("issue", "issues")
+                    .column("user", PublicColumnType::Text),
+            ),
+    );
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([9; 16]), schema.clone());
+    let reader = author(1);
+    commit_global_issue(&mut node, 0, "open", reader, 1);
+    node.record_authoritative_settled_through(GlobalTime(1));
+    let tx_id = OpenTransactionId::new();
+    node.open_exclusive_for_identity(tx_id, reader).unwrap();
+
+    commit_global_cells(
+        &mut node,
+        "issue_members",
+        row(10_000),
+        BTreeMap::from([
+            ("issue".to_owned(), Value::Uuid(row(0).0)),
+            ("user".to_owned(), Value::String("member".to_owned())),
+        ]),
+        3_002,
+        2,
+    );
+    let shape = Query::from("issues")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0).0))))
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let frozen = node
+        .tx_query_for_identity(tx_id, &shape, &binding, reader)
+        .unwrap();
+    let current = node
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+        .unwrap();
+    assert!(
+        frozen.is_empty(),
+        "the membership grant postdates the transaction"
+    );
+    assert_eq!(
+        current.len(),
+        1,
+        "the same grant is visible outside the snapshot"
+    );
+}
 
 /// Cold and registered receivers must compile the same page-relative window.
 /// Real-server pagination tests cover returned rows; this compiler-level test

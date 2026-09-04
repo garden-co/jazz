@@ -1480,6 +1480,34 @@ where
         newly_applied.then_some(global_time).into_iter().collect()
     }
 
+    /// Advance the highest authority-committed cut known to this node.
+    ///
+    /// On a history-complete node this is also a local completeness frontier.
+    /// On a partial node it is only a stable coordinate in the authority's
+    /// history; query-specific receipts still decide which rows are locally
+    /// materialized. Callers must admit only validated receipts from the
+    /// currently selected authority.
+    pub(crate) fn record_authoritative_settled_through(&mut self, settled_through: GlobalTime) {
+        if settled_through == GlobalTime::default() {
+            return;
+        }
+        self.clock.global_time_register = self.clock.global_time_register.max(settled_through);
+        if settled_through <= self.clock.committed_global_time {
+            return;
+        }
+        self.clock.committed_global_time = settled_through;
+        self.clock
+            .applied_global_times_after_frontier
+            .retain(|applied| *applied > settled_through);
+    }
+
+    pub(crate) fn open_transaction_snapshot(
+        &self,
+        tx_id: OpenTransactionId,
+    ) -> Result<Snapshot, Error> {
+        Ok(self.open_tx(tx_id)?.base_snapshot.clone())
+    }
+
     pub(super) async fn transaction_ids_for_global_time(
         &mut self,
         global_time: GlobalTime,

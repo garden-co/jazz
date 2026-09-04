@@ -2818,7 +2818,9 @@ fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
 fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
     if matches!(
         opts.read_view.source,
-        ReadViewSourceSpec::Current | ReadViewSourceSpec::BranchView { .. }
+        ReadViewSourceSpec::Current
+            | ReadViewSourceSpec::BranchView { .. }
+            | ReadViewSourceSpec::Snapshot { .. }
     ) {
         return Ok(());
     }

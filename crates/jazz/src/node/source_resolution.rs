@@ -825,7 +825,28 @@ where
                 continue;
             };
             if projected_table == table {
-                match current_row_from_cells(&read_table, row_uuid, &cells) {
+                let updated = match deletions.get(&row_uuid) {
+                    Some(deletion)
+                        if self
+                            .version_tx_id(deletion)?
+                            .time
+                            .sort_key(self.version_tx_id(deletion)?.node)
+                            > self
+                                .version_tx_id(&content)?
+                                .time
+                                .sort_key(self.version_tx_id(&content)?.node) =>
+                    {
+                        deletion
+                    }
+                    _ => &content,
+                };
+                match current_row_from_materialized_cells_with_layer_provenance(
+                    &read_table,
+                    &content,
+                    &content,
+                    updated,
+                    &cells,
+                ) {
                     Ok(row) => rows.push(row),
                     Err(error) if is_unrepresentable_enum_projection(&error) => {}
                     Err(error) => return Err(error),

@@ -101,6 +101,38 @@ pub fn json_number_to_policy_claim(
     Ok(Value::F64(value))
 }
 
+/// Project one JSON provider value into Groove's non-recursive policy value
+/// corpus. Objects, including arrays that contain an object at any depth, are
+/// intentionally omitted rather than rejecting an otherwise valid session.
+/// The original JSON remains available to the handler/session surface.
+pub fn json_value_to_policy_claim(
+    value: serde_json::Value,
+    origin: NumericClaimOrigin,
+) -> Result<Option<Value>, String> {
+    Ok(match value {
+        serde_json::Value::Null => Some(Value::Nullable(None)),
+        serde_json::Value::Bool(value) => Some(Value::Bool(value)),
+        serde_json::Value::Number(value) => Some(json_number_to_policy_claim(value, origin)?),
+        serde_json::Value::String(value) => Some(
+            value
+                .parse()
+                .map(Value::Uuid)
+                .unwrap_or(Value::String(value)),
+        ),
+        serde_json::Value::Array(values) => {
+            let mut projected = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(value) = json_value_to_policy_claim(value, origin)? else {
+                    return Ok(None);
+                };
+                projected.push(value);
+            }
+            Some(Value::Array(projected))
+        }
+        serde_json::Value::Object(_) => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +241,30 @@ mod tests {
             )
             .unwrap(),
             Value::U64(9_007_199_254_740_992)
+        );
+    }
+
+    #[test]
+    fn policy_projection_omits_recursive_json_without_rejecting_scalars() {
+        assert_eq!(
+            json_value_to_policy_claim(
+                json!(["editor", { "nested": true }]),
+                NumericClaimOrigin::JavaScript,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            json_value_to_policy_claim(
+                json!({ "profile": "handler-only" }),
+                NumericClaimOrigin::ExactJson
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            json_value_to_policy_claim(json!("editor"), NumericClaimOrigin::JavaScript).unwrap(),
+            Some(Value::String("editor".to_owned()))
         );
     }
 }

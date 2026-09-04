@@ -179,8 +179,10 @@ impl AuthConfig {
 /// Expected JWT payload:
 /// ```json
 /// {
+///   "iss": "https://auth.example.com",
 ///   "sub": "user-123",
-///   "claims": {"role": "admin", "teams": ["eng"]},
+///   "role": "admin",
+///   "teams": ["eng"],
 ///   "exp": 1735689600
 /// }
 /// ```
@@ -191,9 +193,10 @@ pub struct JwtClaims {
     /// Optional issuer.
     #[serde(default)]
     pub iss: Option<String>,
-    /// Additional claims.
+    /// Additional JWT payload fields retained alongside registered claims.
+    #[serde(flatten)]
     #[serde(default)]
-    pub claims: serde_json::Value,
+    pub claims: std::collections::BTreeMap<String, serde_json::Value>,
     /// Expiration time (Unix timestamp).
     #[serde(default)]
     pub exp: Option<u64>,
@@ -225,12 +228,16 @@ struct DecodedJwtClaims {
     iss: Option<String>,
     #[serde(default)]
     aud: Option<JwtAudience>,
-    #[serde(default)]
-    claims: serde_json::Value,
+    #[serde(flatten)]
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     exp: Option<u64>,
     #[serde(default)]
     nbf: Option<u64>,
+    #[serde(default)]
+    iat: Option<u64>,
+    #[serde(default)]
+    jti: Option<String>,
 }
 
 /// JWT identity data extracted after signature validation.
@@ -764,10 +771,45 @@ fn signature_only_validation(alg: Algorithm) -> Validation {
 }
 
 fn verified_jwt(claims: DecodedJwtClaims) -> VerifiedJwt {
+    let mut full = claims.extra;
+    full.insert(
+        "sub".to_owned(),
+        serde_json::Value::String(claims.sub.clone()),
+    );
+    if let Some(issuer) = &claims.iss {
+        full.insert("iss".to_owned(), serde_json::Value::String(issuer.clone()));
+    }
+    if let Some(audience) = &claims.aud {
+        full.insert(
+            "aud".to_owned(),
+            match audience {
+                JwtAudience::One(value) => serde_json::Value::String(value.clone()),
+                JwtAudience::Many(values) => serde_json::Value::Array(
+                    values
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            },
+        );
+    }
+    for (name, value) in [
+        ("exp", claims.exp),
+        ("nbf", claims.nbf),
+        ("iat", claims.iat),
+    ] {
+        if let Some(value) = value {
+            full.insert(name.to_owned(), serde_json::Value::Number(value.into()));
+        }
+    }
+    if let Some(jti) = claims.jti {
+        full.insert("jti".to_owned(), serde_json::Value::String(jti));
+    }
     VerifiedJwt {
         subject: claims.sub,
         issuer: claims.iss,
-        claims: claims.claims,
+        claims: serde_json::Value::Object(full.into_iter().collect()),
         exp: claims.exp,
         audiences: claims.aud.map(JwtAudience::into_values).unwrap_or_default(),
         not_before: claims.nbf,
@@ -1011,17 +1053,7 @@ pub fn resolve_verified_jwt_session(
         .ok_or_else(|| UnauthenticatedResponse::invalid("JWT iss claim is required"))?
         .to_owned();
 
-    let claims = match verified.claims {
-        serde_json::Value::Object(mut map) => {
-            map.insert("subject".to_string(), serde_json::json!(subject));
-            map.insert("issuer".to_string(), serde_json::json!(issuer.clone()));
-            serde_json::Value::Object(map)
-        }
-        _ => serde_json::json!({
-            "subject": subject,
-            "issuer": issuer.clone(),
-        }),
-    };
+    let claims = verified.claims;
 
     Ok(Session {
         issuer,
@@ -1322,6 +1354,17 @@ mod tests {
         encode(&header, &claims, &key).unwrap()
     }
 
+    fn flat_claims(
+        value: serde_json::Value,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        value
+            .as_object()
+            .expect("test claims are an object")
+            .clone()
+            .into_iter()
+            .collect()
+    }
+
     fn make_raw_jwt(claims: serde_json::Value) -> String {
         let key = EncodingKey::from_secret(TEST_JWKS_SECRET.as_bytes());
         let mut header = Header::new(Algorithm::HS256);
@@ -1413,7 +1456,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(session.user_id, subject);
-        assert_eq!(session.claims["subject"], subject);
+        assert_eq!(session.claims, serde_json::json!({}));
     }
 
     #[test]
@@ -1422,7 +1465,7 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: Some("https://issuer.jazz.test".to_owned()),
-            claims: serde_json::json!({"role": "admin"}),
+            claims: flat_claims(serde_json::json!({"role": "admin"})),
             exp: None,
             iat: None,
         };
@@ -1434,12 +1477,69 @@ mod tests {
     }
 
     #[test]
+    fn flat_external_jwt_claims_preserve_the_complete_verified_payload() {
+        let token = make_raw_jwt(serde_json::json!({
+            "iss": "https://issuer.jazz.test",
+            "sub": "better-auth-user-123",
+            "aud": "jazz-audience",
+            "exp": 4_102_444_800_u64,
+            "nbf": 0,
+            "iat": 0,
+            "jti": "transport-token-id",
+            "better_auth_user_id": "better-auth-user-123",
+            "profile_id": "profile-456",
+            "issuer": "application-issuer",
+            "subject": "application-subject",
+            "roles": ["editor", "beta"],
+            "profile": {"name": "Alice"},
+            "revoked_at": null,
+            "claims": {"legacy": "not flattened"}
+        }));
+
+        let verified = verify_jwt_signature_with_jwks(
+            &token,
+            &make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET),
+        )
+        .expect("signature verifies");
+        let session = resolve_verified_jwt_session(verified).expect("session resolves");
+
+        assert_eq!(session.user_id, "better-auth-user-123");
+        assert_eq!(
+            session.claims["better_auth_user_id"],
+            "better-auth-user-123"
+        );
+        assert_eq!(session.claims["profile_id"], "profile-456");
+        assert_eq!(session.claims["issuer"], "application-issuer");
+        assert_eq!(session.claims["subject"], "application-subject");
+        assert_eq!(
+            session.claims["roles"],
+            serde_json::json!(["editor", "beta"])
+        );
+        assert_eq!(
+            session.claims["profile"],
+            serde_json::json!({"name": "Alice"})
+        );
+        assert_eq!(session.claims["revoked_at"], serde_json::Value::Null);
+        assert_eq!(
+            session.claims["claims"],
+            serde_json::json!({"legacy": "not flattened"})
+        );
+        assert_eq!(session.claims["iss"], "https://issuer.jazz.test");
+        assert_eq!(session.claims["sub"], "better-auth-user-123");
+        assert_eq!(session.claims["aud"], "jazz-audience");
+        assert_eq!(session.claims["exp"], serde_json::json!(4_102_444_800_u64));
+        assert_eq!(session.claims["nbf"], serde_json::json!(0));
+        assert_eq!(session.claims["iat"], serde_json::json!(0));
+        assert_eq!(session.claims["jti"], "transport-token-id");
+    }
+
+    #[test]
     fn test_jwt_validation_wrong_secret() {
         let jwks = make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET);
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: None,
-            claims: serde_json::json!({}),
+            claims: flat_claims(serde_json::json!({})),
             exp: None,
             iat: None,
         };
@@ -1455,7 +1555,7 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: None,
-            claims: serde_json::json!({}),
+            claims: flat_claims(serde_json::json!({})),
             exp: None,
             iat: None,
         };
@@ -1531,7 +1631,7 @@ mod tests {
         let claims = JwtClaims {
             sub: "jwt-user".to_string(),
             iss: Some("https://issuer.jazz.test".to_owned()),
-            claims: serde_json::json!({}),
+            claims: flat_claims(serde_json::json!({})),
             exp: None,
             iat: None,
         };
@@ -1556,7 +1656,7 @@ mod tests {
         let claims = JwtClaims {
             sub: "cookie-user".to_string(),
             iss: Some("https://issuer.jazz.test".to_string()),
-            claims: serde_json::json!({ "role": "editor" }),
+            claims: flat_claims(serde_json::json!({ "role": "editor" })),
             exp: None,
             iat: None,
         };
@@ -1584,7 +1684,7 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-42".to_string(),
             iss: Some("https://issuer.jazz.test".to_string()),
-            claims: serde_json::json!({ "role": "admin" }),
+            claims: flat_claims(serde_json::json!({ "role": "admin" })),
             exp: None,
             iat: None,
         };
@@ -1598,8 +1698,7 @@ mod tests {
 
         assert_eq!(session.user_id, "user-42");
         assert_eq!(session.auth_mode, jazz::tools::AuthMode::External);
-        assert_eq!(session.claims["subject"], "user-42");
-        assert_eq!(session.claims["issuer"], "https://issuer.jazz.test");
+        assert_eq!(session.claims["role"], "admin");
     }
 
     #[test]
@@ -1633,7 +1732,7 @@ mod tests {
         })
         .expect("non-empty issuer is retained exactly");
         assert_eq!(session.issuer, " https://issuer.example ");
-        assert_eq!(session.claims["issuer"], " https://issuer.example ");
+        assert_eq!(session.claims, serde_json::json!({}));
     }
 
     #[tokio::test]
@@ -1655,7 +1754,7 @@ mod tests {
         let claims = JwtClaims {
             sub: "jwt-user".to_string(),
             iss: None,
-            claims: serde_json::json!({}),
+            claims: flat_claims(serde_json::json!({})),
             exp: None,
             iat: None,
         };
@@ -1867,7 +1966,7 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: Some("https://auth.example.com".to_string()),
-            claims: serde_json::json!({}),
+            claims: flat_claims(serde_json::json!({})),
             exp: None,
             iat: None,
         };

@@ -1452,7 +1452,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => {
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+              if (author) {
+                throw new Error("ordinary client query must not use trusted serving");
+              }
               clientReads += 1;
               return encodeRows([
                 {
@@ -1461,9 +1464,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                   title: "client local",
                 },
               ]);
-            },
-            allForIdentity: () => {
-              throw new Error("ordinary client query must not use trusted serving");
             },
             prepareQuery: () => ({}),
             tick: () => undefined,
@@ -1727,10 +1727,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => {
-              throw new Error("trusted serving query must not use client-local all");
-            },
-            allForIdentity: (_query: unknown, author: Uint8Array) => {
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+              if (!author) throw new Error("trusted serving query must provide an author");
               authors.push(new TextDecoder().decode(author));
               return encodeRows([
                 {
@@ -1798,7 +1796,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allForIdentity: (_query: unknown, author: Uint8Array) => {
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+              if (!author) throw new Error("trusted serving query must provide an author");
               authors.push(new TextDecoder().decode(author));
               return encodeRows([
                 {
@@ -1872,7 +1871,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allForIdentity: (_query: unknown, author: Uint8Array) => {
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+              if (!author) throw new Error("trusted serving query must provide an author");
               authors.push(new TextDecoder().decode(author));
               return encodeRows([
                 {
@@ -3071,23 +3071,24 @@ describe("NativeRuntimeAdapter server transport", () => {
     const calls: string[] = [];
     const nativeDb = fakeDb({
       prepareQuery: () => ({}),
-      all: () => {
-        throw new Error("backend read must not use client-local ABI");
-      },
-      allForBackend: () => {
-        calls.push("plain");
+      all: (_query: unknown, _opts: unknown, openTransactionId: string, author: Uint8Array) => {
+        if (author) throw new Error("backend authority must be implicit in its native open");
+        calls.push(openTransactionId ? "transaction" : "plain");
         return encodeRows([]);
       },
-      allRelationQueryForBackend: () => {
+      allRelationQuery: (_query: unknown, _opts: unknown, author: Uint8Array) => {
+        if (author) throw new Error("backend authority must be implicit in its native open");
         calls.push("relation");
         return encodeRows([]);
       },
-      allRelationSnapshotForBackend: () => {
-        calls.push("snapshot");
-        return encodeRelationSnapshot([]);
-      },
-      allRelationSnapshotInTransactionForBackend: () => {
-        calls.push("transaction-snapshot");
+      allRelationSnapshot: (
+        _query: unknown,
+        _opts: unknown,
+        openTransactionId: string,
+        author: Uint8Array,
+      ) => {
+        if (author) throw new Error("backend authority must be implicit in its native open");
+        calls.push(openTransactionId ? "transaction-snapshot" : "snapshot");
         return encodeRelationSnapshot([]);
       },
       subscribeForBackend: () => {
@@ -3097,10 +3098,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       subscribeRelationQueryForBackend: () => {
         calls.push("relation-subscription");
         return new ReadableStream();
-      },
-      allInTransactionForBackend: () => {
-        calls.push("transaction");
-        return encodeRows([]);
       },
       tick: () => undefined,
     });
@@ -3176,11 +3173,11 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 
   it("keeps backend authority when registering a schema view", async () => {
-    const allForBackend = vi.fn(() => encodeRows([]));
+    const all = vi.fn(() => encodeRows([]));
     let nativeDb: ReturnType<typeof fakeDb>;
     nativeDb = fakeDb({
       prepareQuery: () => ({}),
-      allForBackend,
+      all,
       registerSchema: () => nativeDb,
       tick: () => undefined,
     });
@@ -3204,7 +3201,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     await runtime.registerSchemaView(testSchema).query(JSON.stringify({ table: "todos" }));
 
-    expect(allForBackend).toHaveBeenCalledOnce();
+    expect(all).toHaveBeenCalledOnce();
   });
 
   it("hydrates broad Edge members through its attached Edge receipt, never a nested exact read", async () => {
@@ -3353,18 +3350,23 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => encodeRows([]),
-            allForIdentity: () => {
-              throw new Error("client coverage must not compile trusted-serving queries");
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+              if (author) throw new Error("client coverage must not use an authority identity");
+              return encodeRows([]);
             },
             connectUpstream: () => new FakeTransport([]),
             prepareQuery: () => ({}),
-            attachQuery: () => {
+            attachQuery: (
+              _query: unknown,
+              _opts: unknown,
+              _openTransactionId: string | undefined,
+              author: Uint8Array | undefined,
+            ) => {
+              if (author) {
+                throw new Error("client coverage must not select an authority identity");
+              }
               attachedSubjects.push("client");
               return {};
-            },
-            attachQueryForIdentity: () => {
-              throw new Error("client coverage must not select attachQueryForIdentity");
             },
             queryAttachmentIsCovered: () => true,
             detachQuery: () => undefined,
@@ -3800,13 +3802,20 @@ describe("NativeRuntimeAdapter server transport", () => {
         {
           openMemory: () =>
             fakeDb({
-              allForIdentity: () => new Uint8Array([0]),
+              all: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: () => {
-                throw new Error("trusted-serving coverage must use identity attachment");
+              attachQuery: (
+                _query: unknown,
+                _opts: unknown,
+                _openTransactionId: string | undefined,
+                author: Uint8Array | undefined,
+              ) => {
+                if (!author) {
+                  throw new Error("trusted-serving coverage must use an authority identity");
+                }
+                return {};
               },
-              attachQueryForIdentity: () => ({}),
               queryAttachmentIsCovered: () => true,
               detachQuery: () => undefined,
               setNonDurableClient: () => undefined,
@@ -3883,13 +3892,20 @@ describe("NativeRuntimeAdapter server transport", () => {
         {
           openMemory: () =>
             fakeDb({
-              allForIdentity: () => new Uint8Array([0]),
+              all: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: () => {
-                throw new Error("trusted-serving coverage must use identity attachment");
+              attachQuery: (
+                _query: unknown,
+                _opts: unknown,
+                _openTransactionId: string | undefined,
+                author: Uint8Array | undefined,
+              ) => {
+                if (!author) {
+                  throw new Error("trusted-serving coverage must use an authority identity");
+                }
+                return {};
               },
-              attachQueryForIdentity: () => ({}),
               queryAttachmentIsCovered: () => true,
               detachQuery: () => undefined,
               setNonDurableClient: () => undefined,
@@ -3956,13 +3972,20 @@ describe("NativeRuntimeAdapter server transport", () => {
         {
           openMemory: () =>
             fakeDb({
-              allForIdentity: () => new Uint8Array([0]),
+              all: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: () => {
-                throw new Error("trusted-serving coverage must use identity attachment");
+              attachQuery: (
+                _query: unknown,
+                _opts: unknown,
+                _openTransactionId: string | undefined,
+                author: Uint8Array | undefined,
+              ) => {
+                if (!author) {
+                  throw new Error("trusted-serving coverage must use an authority identity");
+                }
+                return {};
               },
-              attachQueryForIdentity: () => ({}),
               queryAttachmentIsCovered: () => true,
               detachQuery: () => undefined,
               setIdentityClaims: () => undefined,

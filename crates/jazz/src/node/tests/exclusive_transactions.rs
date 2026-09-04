@@ -445,6 +445,55 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
 }
 
 #[test]
+fn partial_node_snapshot_advances_from_authoritative_settled_through() {
+    let (_temp_dir, mut reader) = open_node_with_uuid(node(3));
+
+    for seq in [1, 3] {
+        let tx_id = TxId::new(TxTime::new(10 + seq, 0), node(9));
+        reader
+            .ingest_known_transaction(
+                Transaction {
+                    tx_id,
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 1,
+                    made_by: AuthorSubject::SYSTEM,
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    contribution_merge: None,
+                },
+                vec![version_record(
+                    row(seq as u8),
+                    Vec::new(),
+                    title_cells(format!("seq-{seq}")),
+                    None,
+                )],
+                Fate::Accepted,
+                Some(GlobalTime(seq)),
+                DurabilityTier::Global,
+            )
+            .unwrap();
+    }
+
+    reader.record_authoritative_settled_through(GlobalTime(2));
+
+    let open_id = OpenTransactionId::new();
+    reader.open_exclusive(open_id).unwrap();
+    let base = reader.open_tx(open_id).unwrap().base_snapshot.clone();
+    assert_eq!(base.global_base, GlobalTime(2));
+    assert_eq!(base.dots, vec![TxId::new(TxTime::new(13, 0), node(9))]);
+    let rows = reader
+        .projected_snapshot_current_rows("todos", schema().version_id(), &base)
+        .resolve()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.projected_tx_alias().is_some()));
+}
+
+#[test]
 fn core_snapshot_uses_atomically_committed_global_time() {
     let (_temp_dir, mut core) = open_node_with_uuid(node(9));
     let tx_id = core

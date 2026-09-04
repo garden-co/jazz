@@ -2,14 +2,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createDb,
   generateAuthSecret,
-  publishStoredPermissions,
   schema,
   type CompiledPermissions,
   type Db,
   type Query,
   type RowOf,
 } from "../../src/index.js";
-import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
+import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
   uniqueDbName,
@@ -903,21 +902,12 @@ async function publishSchemaAndPermissions(
   permissions: CompiledPermissions,
   schemaApp: { wasmSchema: typeof app.wasmSchema } = app,
 ): Promise<void> {
-  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+  await deploy({
     appId,
+    serverUrl,
     adminSecret,
     schema: schemaApp.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(serverUrl, {
-    appId,
-    adminSecret,
-  });
-  await publishStoredPermissions(serverUrl, {
-    appId,
-    adminSecret,
-    schemaHash,
     permissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 }
 

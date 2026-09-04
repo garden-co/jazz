@@ -508,7 +508,6 @@ it("stages authenticated client mutations through the optimistic local core path
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          allForIdentity: () => encodeRows([]),
           insertEncoded: (table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
             staged.push(table);
             return { ...fakeWrite(), rowId: options?.rowId ?? new Uint8Array(16) };
@@ -601,7 +600,6 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          allForIdentity: () => encodeRows([]),
           mergeableTxForIdentity: (_openTransactionId: string, author: Uint8Array) => {
             authors.push(new TextDecoder().decode(author));
             return fakeTx({
@@ -656,7 +654,6 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
       openMemory: () => {
         const db = fakeDb({
           all: () => encodeRows([]),
-          allForIdentity: () => encodeRows([]),
           exclusiveTx: () => fakeTx(),
           prepareQuery: () => ({}),
           tick: () => undefined,
@@ -717,17 +714,13 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
     {
       openMemory: () =>
         fakeDb({
-          all: () => encodeRows([]),
-          allForIdentity: () => encodeRows([]),
-          allInTransaction: () => {
-            throw new Error("trusted-serving reads must not use the ambient transaction method");
-          },
-          allInTransactionForIdentity: (
+          all: (
             _query: object,
-            receivedTx: TxForTest,
+            _opts: unknown,
+            receivedTransactionId: string,
             receivedIdentity: Uint8Array,
           ) => {
-            expect(receivedTx).toBe(tx);
+            expect(receivedTransactionId).toBe(transactionId);
             expect(new TextDecoder().decode(receivedIdentity)).toBe(`["${issuer}","${alice}"]`);
             return encodeRows([
               {
@@ -1223,7 +1216,6 @@ it("rejects mixed identities within one trusted-serving mergeable transaction", 
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          allForIdentity: () => encodeRows([]),
           mergeableTxForIdentity: () => fakeTx(),
           prepareQuery: () => ({}),
           tick: () => undefined,
@@ -1274,10 +1266,14 @@ it("keeps session-scoped transaction reads on the client-local native method", a
     {
       openMemory: () =>
         fakeDb({
-          all: () => encodeRows([]),
-          allForIdentity: () => encodeRows([]),
-          allInTransaction: (_query: object, receivedTx: TxForTest) => {
-            expect(receivedTx).toBe(tx);
+          all: (
+            _query: object,
+            _opts: unknown,
+            receivedTransactionId: string,
+            receivedIdentity: Uint8Array,
+          ) => {
+            expect(receivedTransactionId).toBe(transactionId);
+            expect(receivedIdentity).toBeUndefined();
             transactionReads += 1;
             return encodeRows([
               {
@@ -1286,9 +1282,6 @@ it("keeps session-scoped transaction reads on the client-local native method", a
                 title: "alice pending",
               },
             ]);
-          },
-          allInTransactionForIdentity: () => {
-            throw new Error("ordinary client transaction reads must not use trusted serving");
           },
           mergeableTx: () => tx,
           prepareQuery: () => ({}),
