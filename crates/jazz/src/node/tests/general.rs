@@ -1,4 +1,182 @@
 #[test]
+fn project_preserves_logical_binding_fields() {
+    // Query results use the same projection transform as current rows. The
+    // descriptor tag must survive so a logical public `user_check` is not
+    // decoded as physical application column `check` by a native host.
+    let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_check".to_owned(), records::ValueType::Bool),
+        ("$createdBy".to_owned(), records::ValueType::String),
+        ("$createdAt".to_owned(), records::ValueType::U64),
+        ("$updatedBy".to_owned(), records::ValueType::String),
+        ("$updatedAt".to_owned(), records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6d).0),
+            Value::Bool(true),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(10),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let projected = CurrentRow::new_with_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingField::LogicalField,
+    )
+    .project(&table, &["check".to_owned()])
+    .expect("project logical result");
+
+    assert_eq!(
+        projected.binding_fields()[1],
+        CurrentRowBindingField::LogicalField
+    );
+}
+
+#[test]
+fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff() {
+    // A terminal can reuse `user_title` as its private carrier for the public
+    // application field `title`, while also exposing a genuine logical output
+    // named `user_title`. The explicit override, rather than prefix stripping,
+    // distinguishes them.
+    let table = TableSchema::new("items", [ColumnSchema::new("title", ColumnType::String)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_title".to_owned(), records::ValueType::String),
+        ("user_title".to_owned(), records::ValueType::String),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6a).0),
+            Value::String("application title".to_owned()),
+            Value::String("genuine logical user_title".to_owned()),
+        ])
+        .unwrap();
+    let terminal = CurrentRow::new_with_explicit_binding_fields_and_names(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        vec![
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::LogicalField,
+        ],
+        vec![None, Some("title".to_owned()), None],
+    );
+
+    assert_eq!(
+        terminal.cell(&table, "title"),
+        Some(Value::String("application title".to_owned()))
+    );
+    let projected = terminal.project(&table, &["title".to_owned()]).unwrap();
+    assert_eq!(
+        projected.cell(&table, "title"),
+        Some(Value::String("application title".to_owned()))
+    );
+    assert_eq!(projected.binding_field_names()[1].as_deref(), Some("title"));
+
+    let physical_descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_title".to_owned(), records::ValueType::String),
+        ("user_title".to_owned(), records::ValueType::String),
+    ]);
+    let physical_raw = physical_descriptor
+        .create(&[
+            Value::Uuid(row(0x6a).0),
+            Value::String("application title".to_owned()),
+            Value::String("genuine logical user_title".to_owned()),
+        ])
+        .unwrap();
+    let physical_then_logical = CurrentRow::new_with_explicit_binding_fields(
+        "items",
+        OwnedRecord::new(physical_raw, physical_descriptor),
+        vec![
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::PhysicalColumn,
+            CurrentRowBindingField::LogicalField,
+        ],
+    );
+    assert!(
+        terminal.subscription_equivalent(&physical_then_logical),
+        "a cache handoff must not emit a reset solely because the terminal carrier changed"
+    );
+}
+
+#[test]
+fn projection_prefers_tagged_physical_column_over_reverse_order_logical_collision() {
+    // A hybrid collector may expose a logical `user_check` beside the physical
+    // storage field `user_check`. Descriptor position is not provenance: the
+    // logical field deliberately comes first here, and projecting schema
+    // column `check` must still select the physical true value.
+    let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_check".to_owned(), records::ValueType::Bool),
+        ("user_check".to_owned(), records::ValueType::Bool),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6e).0),
+            Value::Bool(false),
+            Value::Bool(true),
+        ])
+        .unwrap();
+    let hybrid = CurrentRow::new_with_explicit_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        vec![
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::PhysicalColumn,
+        ],
+    );
+
+    assert_eq!(hybrid.cell(&table, "check"), Some(Value::Bool(true)));
+    let projected = hybrid
+        .project(&table, &["check".to_owned()])
+        .expect("project hybrid result");
+    assert_eq!(projected.cell(&table, "check"), Some(Value::Bool(true)));
+    assert_eq!(
+        projected.binding_fields()[1],
+        CurrentRowBindingField::PhysicalColumn
+    );
+}
+
+#[test]
+fn subscription_equivalence_keeps_hybrid_physical_and_logical_user_names_distinct() {
+    // Before descriptor provenance was consulted here, both fields were
+    // normalized to `check`. Swapping their values then made two observably
+    // different public rows compare equal and suppressed an update.
+    fn hybrid_row(physical_check: bool, logical_user_check: bool) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new([
+            ("row_uuid".to_owned(), records::ValueType::Uuid),
+            ("user_check".to_owned(), records::ValueType::Bool),
+            ("user_check".to_owned(), records::ValueType::Bool),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(row(0x6f).0),
+                Value::Bool(logical_user_check),
+                Value::Bool(physical_check),
+            ])
+            .unwrap();
+        CurrentRow::new_with_explicit_binding_fields(
+            "items",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                CurrentRowBindingField::LogicalField,
+                CurrentRowBindingField::LogicalField,
+                CurrentRowBindingField::PhysicalColumn,
+            ],
+        )
+    }
+
+    assert!(!hybrid_row(true, false).subscription_equivalent(&hybrid_row(false, true)));
+}
+
+#[test]
 fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
     fn current_row(
         physical: bool,

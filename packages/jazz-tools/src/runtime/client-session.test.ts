@@ -36,6 +36,13 @@ describe("client session resolution", () => {
         auth_mode: "external",
         subject: "subject-123",
         issuer: "https://issuer.example",
+        iss: "untrusted-cookie-issuer",
+        sub: "untrusted-cookie-subject",
+        aud: "untrusted-cookie-audience",
+        exp: 123,
+        nbf: 45,
+        iat: 67,
+        jti: "untrusted-cookie-id",
       },
       authMode: "external",
     };
@@ -49,7 +56,19 @@ describe("client session resolution", () => {
       transport: "cookie",
       session: {
         user: '["https://issuer.example","cookie-user"]',
-        claims: { ...session.claims, iss: session.issuer, sub: session.user_id },
+        claims: {
+          role: "writer",
+          auth_mode: "external",
+          subject: "subject-123",
+          issuer: "https://issuer.example",
+          iss: "untrusted-cookie-issuer",
+          sub: "untrusted-cookie-subject",
+          aud: "untrusted-cookie-audience",
+          exp: 123,
+          nbf: 45,
+          iat: 67,
+          jti: "untrusted-cookie-id",
+        },
         authMode: "external",
       },
       internalSession: session,
@@ -72,11 +91,12 @@ describe("client session resolution", () => {
     }
   });
 
-  it("uses JWT sub as user_id", () => {
+  it("derives the user from iss/sub and exposes flat Better Auth-style metadata", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       iss: "https://issuer.example",
-      claims: { role: "editor" },
+      better_auth_user_id: "user-subject",
+      profile_id: "profile-456",
     });
 
     const session = resolveClientSessionSync({
@@ -86,34 +106,36 @@ describe("client session resolution", () => {
 
     expect(session).toEqual({
       user: '["https://issuer.example","user-subject"]',
-      claims: { role: "editor", iss: "https://issuer.example", sub: "user-subject" },
+      claims: {
+        iss: "https://issuer.example",
+        sub: "user-subject",
+        better_auth_user_id: "user-subject",
+        profile_id: "profile-456",
+      },
       authMode: "external",
     });
   });
 
-  it("preserves provider claims but overwrites spoofed iss/sub with verified identity", () => {
-    const claims = {
+  it("keeps app metadata flat while reserved transport claims determine identity", () => {
+    const metadata = {
       subject: "application-owned-subject",
       issuer: "application-owned-issuer",
-      sub: "application-owned-sub",
       role: "editor",
     };
 
     expect(
       resolveClientSessionSync({
         appId: "app-exact-claims",
-        jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", claims }),
+        jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", ...metadata }),
       }),
     ).toMatchObject({
       user: '["https://issuer.example","alice"]',
-      claims: { ...claims, iss: "https://issuer.example", sub: "alice" },
+      claims: metadata,
     });
   });
 
   it("publishes an independent deeply immutable session without transport fields", () => {
     const providerClaims = {
-      iss: "spoofed-issuer",
-      sub: "spoofed-subject",
       roles: ["writer"],
     };
     const session = resolveClientSessionSync({
@@ -121,7 +143,7 @@ describe("client session resolution", () => {
       jwtToken: makeJwt({
         iss: "https://issuer.example",
         sub: "verified-subject",
-        claims: providerClaims,
+        ...providerClaims,
       }),
     })!;
 
@@ -143,43 +165,108 @@ describe("client session resolution", () => {
     }
   });
 
-  it("mirrors server JWT policy-claim admission, including deterministic collision precedence", () => {
-    const session = resolveClientSessionSync({
+  it("projects every registered external JWT claim with its original JSON shape", () => {
+    const stringAudience = resolveClientSessionSync({
       appId: "app-jwt-policy-claim-corpus",
       jwtToken: makeJwt({
         iss: "https://issuer.example",
         sub: "alice",
-        // `claims` is visited before `role`; the later top-level custom claim
-        // wins exactly as server admission's BTreeMap traversal does.
-        claims: { role: "nested", issuer: "nested-issuer" },
+        aud: "jazz-web",
+        exp: 4_102_444_800,
+        nbf: 0,
+        iat: 1_706_000_000,
+        jti: "token-123",
         role: "top-level",
         issuer: "custom-provider-issuer",
-        metadata: { intentionally: "not policy-visible" },
+        flags: ["writer", "beta"],
+        profile: { id: "profile-456", active: true },
+        revoked_at: null,
+        // This spelling is ordinary app metadata; Jazz never flattens it.
+        claims: { role: "nested" },
       }),
     });
 
-    expect(session).toMatchObject({
+    expect(stringAudience).toEqual({
+      user: '["https://issuer.example","alice"]',
       claims: {
-        role: "top-level",
-        issuer: "custom-provider-issuer",
         iss: "https://issuer.example",
         sub: "alice",
+        aud: "jazz-web",
+        exp: 4_102_444_800,
+        nbf: 0,
+        iat: 1_706_000_000,
+        jti: "token-123",
+        role: "top-level",
+        issuer: "custom-provider-issuer",
+        flags: ["writer", "beta"],
+        profile: { id: "profile-456", active: true },
+        revoked_at: null,
+        claims: { role: "nested" },
       },
+      authMode: "external",
     });
-    expect(session?.claims.metadata).toBeUndefined();
+
+    const arrayAudience = resolveClientSessionSync({
+      appId: "app-jwt-array-audience",
+      jwtToken: makeJwt({
+        iss: "https://issuer.example",
+        sub: "alice",
+        aud: ["jazz-web", "jazz-mobile"],
+      }),
+    });
+    expect(arrayAudience?.claims.aud).toEqual(["jazz-web", "jazz-mobile"]);
   });
 
-  it("rejects unsupported nested policy claims instead of diverging from server admission", () => {
-    expect(
-      resolveClientSessionSync({
-        appId: "app-jwt-nested-policy-claim",
-        jwtToken: makeJwt({
-          iss: "https://issuer.example",
-          sub: "alice",
-          claims: { profile: { role: "writer" } },
-        }),
-      }),
-    ).toBeNull();
+  it("preserves prototype-named flat claims as own data properties through public cloning", () => {
+    // JSON payloads cannot contain symbols or accessors, but they can contain
+    // every string key, including names with legacy Object.prototype behavior.
+    const payload = JSON.parse(
+      '{"iss":"https://issuer.example","sub":"alice","__proto__":{"polluted":true},"constructor":"app-constructor","prototype":{"version":1},"role":"editor"}',
+    ) as Record<string, unknown>;
+    const internal = internalSessionFromVerifiedReservedJwtPayload(
+      { ...payload, iss: LOCAL_FIRST_JWT_ISSUER },
+      "local-first",
+    )!;
+    const session = sessionFromVerifiedReservedJwtPayload(
+      { ...payload, iss: LOCAL_FIRST_JWT_ISSUER },
+      "local-first",
+    )!;
+
+    expect(Object.getPrototypeOf(internal.claims)).toBeNull();
+    expect(Object.keys(internal.claims)).toEqual([
+      "__proto__",
+      "constructor",
+      "iss",
+      "prototype",
+      "role",
+      "sub",
+    ]);
+    expect(Object.hasOwn(internal.claims, "__proto__")).toBe(true);
+    expect(Object.hasOwn(internal.claims, "constructor")).toBe(true);
+    expect(Object.hasOwn(internal.claims, "prototype")).toBe(true);
+    expect(internal.claims.__proto__).toEqual({ polluted: true });
+    expect(internal.claims.constructor).toBe("app-constructor");
+    expect(internal.claims.prototype).toEqual({ version: 1 });
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+
+    // Public publication clones and freezes the claim dictionary, while the
+    // native bridge can enumerate these own JSON properties as a BTreeMap.
+    expect(Object.keys(session.claims)).toEqual([
+      "__proto__",
+      "constructor",
+      "iss",
+      "prototype",
+      "role",
+      "sub",
+    ]);
+    expect(session.claims.__proto__).toEqual({ polluted: true });
+    expect(session.claims.constructor).toBe("app-constructor");
+    expect(session.claims.prototype).toEqual({ version: 1 });
+    expect(JSON.parse(JSON.stringify(session.claims))).toEqual(
+      JSON.parse(
+        '{"__proto__":{"polluted":true},"constructor":"app-constructor","iss":"urn:jazz:local-first","prototype":{"version":1},"role":"editor","sub":"alice"}',
+      ),
+    );
   });
 
   it("preserves exact nonblank JWT issuer and subject bytes and rejects ASCII-whitespace-only components", () => {
@@ -192,11 +279,11 @@ describe("client session resolution", () => {
       jwtToken: makeJwt({ iss: "issuer", sub: "alice" }),
     });
 
+    expect(spaced?.user).toBe('[" issuer "," alice "]');
     expect(spaced?.claims.iss).toBe(" issuer ");
     expect(spaced?.claims.sub).toBe(" alice ");
     expect(spaced?.claims.subject).toBeUndefined();
-    expect(spaced?.claims.iss).not.toBe(plain?.claims.iss);
-    expect(spaced?.claims.sub).not.toBe(plain?.claims.sub);
+    expect(spaced?.user).not.toBe(plain?.user);
     for (const subject of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
       expect(
         resolveClientSessionSync({
@@ -222,6 +309,7 @@ describe("client session resolution", () => {
         jwtToken: makeJwt({ iss: `${subject}issuer`, sub: subject }),
       });
 
+      expect(session?.user).toBe(JSON.stringify([`${subject}issuer`, subject]));
       expect(session?.claims.iss).toBe(`${subject}issuer`);
       expect(session?.claims.sub).toBe(subject);
       expect(session?.claims.subject).toBeUndefined();
@@ -261,14 +349,14 @@ describe("client session resolution", () => {
       }),
     ).toMatchObject({
       user: '["issuer🚀","alice🚀"]',
-      claims: { iss: "issuer🚀", sub: "alice🚀" },
+      claims: {},
     });
   });
 
   it("rejects a JWT without an iss claim", () => {
     const jwt = makeJwt({
       sub: "user-subject",
-      claims: { team: "eng" },
+      team: "eng",
     });
 
     const session = resolveClientSessionSync({
@@ -312,7 +400,7 @@ describe("client session resolution", () => {
       }),
     ).toMatchObject({
       user: `["https://issuer.example","${SYSTEM_SESSION_ISSUER}"]`,
-      claims: { iss: "https://issuer.example", sub: SYSTEM_SESSION_ISSUER },
+      claims: {},
       authMode: "external",
     });
   });
@@ -347,12 +435,12 @@ describe("resolveJwtSession — reserved issuer admission", () => {
 
   it("verified reserved JWT paths construct only their dedicated auth modes", () => {
     const localFirst = sessionFromVerifiedReservedJwtPayload(
-      { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, claims: { role: "writer" } },
+      { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, role: "writer" },
       "local-first",
     );
     expect(localFirst).toEqual({
       user: '["urn:jazz:local-first","u1"]',
-      claims: { role: "writer", iss: LOCAL_FIRST_JWT_ISSUER, sub: "u1" },
+      claims: { iss: LOCAL_FIRST_JWT_ISSUER, sub: "u1", role: "writer" },
       authMode: "local-first",
     });
     expect(
@@ -360,18 +448,21 @@ describe("resolveJwtSession — reserved issuer admission", () => {
         appId: "app-verified-local-first",
         jwtToken: jwt({ sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER }),
         trustedReservedSession: internalSessionFromVerifiedReservedJwtPayload(
-          { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, claims: { role: "writer" } },
+          { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, role: "writer" },
           "local-first",
         )!,
       }),
     ).toEqual(localFirst);
-    expect(
-      sessionFromVerifiedReservedJwtPayload({ sub: "u1", iss: ANONYMOUS_JWT_ISSUER }, "anonymous"),
-    ).toMatchObject({
+    const anonymous = sessionFromVerifiedReservedJwtPayload(
+      { sub: "u1", iss: ANONYMOUS_JWT_ISSUER, jazz_pub_key: "anonymous-proof" },
+      "anonymous",
+    );
+    expect(anonymous).toEqual({
       user: '["urn:jazz:anonymous","u1"]',
       claims: { iss: ANONYMOUS_JWT_ISSUER, sub: "u1" },
       authMode: "anonymous",
     });
+    expect(anonymous?.claims).not.toHaveProperty("jazz_pub_key");
     expect(
       sessionFromVerifiedReservedJwtPayload(
         { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER },
@@ -380,7 +471,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
     ).toBeNull();
   });
 
-  it("does not expose reserved self-signed proof keys as policy claims", () => {
+  it("does not expose reserved self-signed proof keys while retaining identity metadata", () => {
     for (const [authMode, issuer] of [
       ["anonymous", ANONYMOUS_JWT_ISSUER],
       ["local-first", LOCAL_FIRST_JWT_ISSUER],
@@ -392,9 +483,10 @@ describe("resolveJwtSession — reserved issuer admission", () => {
           claims: { iss: issuer, sub: "user" },
           authMode,
         });
-        expect(internalSessionFromVerifiedReservedJwtPayload(payload, authMode)?.claims).toEqual(
-          {},
-        );
+        expect(internalSessionFromVerifiedReservedJwtPayload(payload, authMode)?.claims).toEqual({
+          iss: issuer,
+          sub: "user",
+        });
       }
     }
     // An external provider may legitimately use this spelling as a custom

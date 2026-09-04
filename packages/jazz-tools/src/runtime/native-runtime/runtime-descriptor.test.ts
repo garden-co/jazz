@@ -16,8 +16,125 @@ describe("formatUuid", () => {
 });
 
 describe("native row descriptor cache keys", () => {
+  it("uses explicit field provenance for hybrid physical and logical user_ fields", () => {
+    const schema = {
+      notes: {
+        columns: [{ name: "check", column_type: { type: "Text" }, nullable: false }],
+      },
+    } satisfies WasmSchema;
+    const descriptor = [
+      { kind: "physical-column" as const, name: "user_check", valueType: { tag: 8 } as const },
+      { kind: "logical-field" as const, name: "user_check", valueType: { tag: 8 } as const },
+    ];
+    const hybridBatch = {
+      table: "notes",
+      descriptor,
+      rows: [
+        {
+          rowId: uuidBytes("00000000-0000-0000-0000-0000000000a0"),
+          deleted: false,
+          raw: createRecord(descriptor, [
+            Uint8Array.from([2, ...new TextEncoder().encode("included")]),
+            Uint8Array.from([2, ...new TextEncoder().encode("collector")]),
+          ]),
+        },
+      ],
+    };
+    const hybrid = rowsFromBatches([hybridBatch], schema)[0] as {
+      valuesByColumn?: Map<string, unknown>;
+    };
+    expect(hybrid?.valuesByColumn?.get("check")).toMatchObject({ type: "Text" });
+    expect(hybrid?.valuesByColumn?.get("user_check")).toMatchObject({ type: "Bytea" });
+    expect(nativeRowFieldPlanCacheKey(hybridBatch)).not.toBe(
+      nativeRowFieldPlanCacheKey({
+        ...hybridBatch,
+        descriptor: [{ ...descriptor[0]!, kind: "logical-field" as const }, descriptor[1]!],
+      }),
+    );
+  });
+
+  it("normalizes physical grouped and aggregate fields without rewriting a logical aggregate collision", () => {
+    const schema = {
+      totals: {
+        columns: [
+          { name: "category", column_type: { type: "Text" }, nullable: false },
+          { name: "total", column_type: { type: "Integer" }, nullable: false },
+        ],
+      },
+    } satisfies WasmSchema;
+    const descriptor = [
+      { kind: "physical-column" as const, name: "user_category", valueType: { tag: 8 } as const },
+      {
+        kind: "physical-column" as const,
+        name: "user___jazz_aggregate_total",
+        valueType: { tag: 4 } as const,
+      },
+      {
+        kind: "logical-field" as const,
+        name: "user___jazz_aggregate_total",
+        valueType: { tag: 8 } as const,
+      },
+    ];
+    const batch = {
+      table: "totals",
+      descriptor,
+      rows: [
+        {
+          rowId: uuidBytes("00000000-0000-0000-0000-0000000000a1"),
+          deleted: false,
+          raw: createRecord(descriptor, [
+            Uint8Array.from([2, ...new TextEncoder().encode("books")]),
+            i32Bytes(42),
+            Uint8Array.from([2, ...new TextEncoder().encode("logical collision")]),
+          ]),
+        },
+      ],
+    };
+
+    const decoded = rowsFromBatches([batch], schema)[0] as {
+      valuesByColumn?: Map<string, unknown>;
+    };
+    expect(decoded?.valuesByColumn?.get("category")).toEqual({ type: "Text", value: "books" });
+    expect(decoded?.valuesByColumn?.get("total")).toEqual({ type: "Integer", value: 42 });
+    expect(decoded?.valuesByColumn?.get("user___jazz_aggregate_total")).toMatchObject({
+      type: "Bytea",
+    });
+  });
+
+  it("normalizes physical user_total while preserving a logical user_total field", () => {
+    const schema = {
+      totals: {
+        columns: [{ name: "total", column_type: { type: "Integer" }, nullable: false }],
+      },
+    } satisfies WasmSchema;
+    const descriptor = [
+      { kind: "physical-column" as const, name: "user_total", valueType: { tag: 4 } as const },
+      { kind: "logical-field" as const, name: "user_total", valueType: { tag: 8 } as const },
+    ];
+    const batch = {
+      table: "totals",
+      descriptor,
+      rows: [
+        {
+          rowId: uuidBytes("00000000-0000-0000-0000-0000000000a2"),
+          deleted: false,
+          raw: createRecord(descriptor, [
+            i32Bytes(7),
+            Uint8Array.from([2, ...new TextEncoder().encode("collector total")]),
+          ]),
+        },
+      ],
+    };
+
+    const decoded = rowsFromBatches([batch], schema)[0] as {
+      valuesByColumn?: Map<string, unknown>;
+    };
+    expect(decoded?.valuesByColumn?.get("total")).toEqual({ type: "Integer", value: 7 });
+    expect(decoded?.valuesByColumn?.get("user_total")).toMatchObject({ type: "Bytea" });
+  });
+
   it("includes the table identity", () => {
-    const descriptor = [{ name: "value", valueType: { tag: 8 } }];
+    const descriptor = [{ kind: "physical-column" as const, name: "value", valueType: { tag: 8 } }];
 
     expect(nativeRowFieldPlanCacheKey({ table: "first", descriptor })).not.toBe(
       nativeRowFieldPlanCacheKey({ table: "second", descriptor }),
@@ -108,12 +225,12 @@ describe("native row descriptor cache keys", () => {
     expect(
       nativeRowFieldPlanCacheKey({
         table: "events",
-        descriptor: [{ name: "event", valueType: payloadEnum }],
+        descriptor: [{ kind: "physical-column", name: "event", valueType: payloadEnum }],
       }),
     ).not.toBe(
       nativeRowFieldPlanCacheKey({
         table: "events",
-        descriptor: [{ name: "event", valueType: changedPayloadEnum }],
+        descriptor: [{ kind: "physical-column", name: "event", valueType: changedPayloadEnum }],
       }),
     );
   });
@@ -143,10 +260,18 @@ describe("native row descriptor cache keys", () => {
       { name: "ignored_fixed_field", valueType: { tag: 4 } },
     ];
     const firstDescriptor = [
-      { name: "child", valueType: { tag: 16, record: firstChildDescriptor } },
+      {
+        kind: "physical-column" as const,
+        name: "child",
+        valueType: { tag: 16, record: firstChildDescriptor },
+      },
     ];
     const secondDescriptor = [
-      { name: "child", valueType: { tag: 16, record: secondChildDescriptor } },
+      {
+        kind: "physical-column" as const,
+        name: "child",
+        valueType: { tag: 16, record: secondChildDescriptor },
+      },
     ];
     const childId = "00000000-0000-0000-0000-0000000000c1";
     const firstBatch = {

@@ -179,7 +179,7 @@ describe("installInspectorHost", () => {
         appId: "a",
         serverUrl: "http://server",
         jwtToken:
-          "header.eyJzdWIiOiJpbnNwZWN0b3ItdGVzdC11c2VyIiwiaXNzIjoidXJuOmpheno6bG9jYWwtZmlyc3QiLCJjbGFpbXMiOnsicm9sZSI6Imluc3BlY3Rvci10ZXN0In19.signature",
+          "header.eyJzdWIiOiJpbnNwZWN0b3ItdGVzdC11c2VyIiwiaXNzIjoidXJuOmpheno6bG9jYWwtZmlyc3QiLCJyb2xlIjoiaW5zcGVjdG9yLXRlc3QifQ.signature",
       }),
     });
 
@@ -187,7 +187,7 @@ describe("installInspectorHost", () => {
 
     expect((window as any)[INSPECTOR_HOST_GLOBAL].getConnectionConfig()).toMatchObject({
       jwtToken:
-        "header.eyJzdWIiOiJpbnNwZWN0b3ItdGVzdC11c2VyIiwiaXNzIjoidXJuOmpheno6bG9jYWwtZmlyc3QiLCJjbGFpbXMiOnsicm9sZSI6Imluc3BlY3Rvci10ZXN0In19.signature",
+        "header.eyJzdWIiOiJpbnNwZWN0b3ItdGVzdC11c2VyIiwiaXNzIjoidXJuOmpheno6bG9jYWwtZmlyc3QiLCJyb2xlIjoiaW5zcGVjdG9yLXRlc3QifQ.signature",
       runtimeSources: {
         browserWorkerSession: {
           issuer: "urn:jazz:local-first",

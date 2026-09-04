@@ -329,14 +329,12 @@ fn session_claims(
         .author_subject()
         .map_err(|error| error.to_string())?;
     let provider_claims = match session.claims {
-        serde_json::Value::Object(mut map) => {
+        serde_json::Value::Object(map) => {
             // Middleware exposes these convenient aliases to server handlers,
             // but they duplicate the verified transport identity. A relay
             // capability must use the one canonical binding vocabulary: the
             // shared admission constructor derives `claims.iss`/`claims.sub`,
             // `user`, and `authMode` from the verified AuthorSubject.
-            map.remove("issuer");
-            map.remove("subject");
             map.into_iter().collect()
         }
         _ => BTreeMap::new(),
@@ -1185,11 +1183,8 @@ mod tests {
                 "role": "writer",
                 "iss": "spoofed-issuer",
                 "sub": "spoofed-subject",
-                // These are middleware convenience aliases, not provider
-                // policy claims. They must not create a different relay
-                // capability than the JWT-derived browser binding.
-                "issuer": "middleware-issuer",
-                "subject": "middleware-subject",
+                "issuer": "application-issuer",
+                "subject": "application-subject",
                 "authMode": "spoofed-mode",
                 "score": 7
             }),
@@ -1215,8 +1210,14 @@ mod tests {
             claims.get("\0claims:authMode"),
             Some(&CoreValue::String("spoofed-mode".to_owned()))
         );
-        assert!(!claims.contains_key("\0claims:issuer"));
-        assert!(!claims.contains_key("\0claims:subject"));
+        assert_eq!(
+            claims.get("\0claims:issuer"),
+            Some(&CoreValue::String("application-issuer".to_owned()))
+        );
+        assert_eq!(
+            claims.get("\0claims:subject"),
+            Some(&CoreValue::String("application-subject".to_owned()))
+        );
         assert_eq!(
             claims.get("authMode"),
             Some(&CoreValue::String("external".to_owned()))

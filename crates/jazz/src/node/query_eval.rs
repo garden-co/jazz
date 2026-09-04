@@ -3993,6 +3993,9 @@ fn aggregate_current_row_from_record(
     }
     let descriptor = RecordDescriptor::new(fields);
     let raw = descriptor.create(&values)?;
+    // This synthetic descriptor deliberately uses `user_{column}` names for
+    // the grouped source column and aggregate outputs.  Those are physical
+    // CurrentRow slots, not public logical fields named `user_{column}`.
     Ok(CurrentRow::new(
         query.table.clone(),
         OwnedRecord::new(raw, descriptor),

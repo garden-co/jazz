@@ -70,17 +70,14 @@ export function canonicalAuthorSubject(issuer: string, subject: string): string 
  * control `iss`/`sub`, and the identity is derived from those exact values.
  *
  * @internal Public bindings expose the resulting `PublicSession`; applications
- * should read `session.user` instead of reproducing this encoding.
+ * should read `session.user` instead of reproducing this encoding. JWT claims
+ * remain inspectable metadata and never form a second identity path.
  */
 export function withCanonicalUser(session: Session): PublicSession {
   const existing = publicSessions.get(session);
   if (existing) return existing;
   const user = canonicalAuthorSubject(session.issuer, session.user_id);
-  const claims = cloneAndFreezeClaim({
-    ...session.claims,
-    iss: session.issuer,
-    sub: session.user_id,
-  }) as Readonly<Record<string, unknown>>;
+  const claims = cloneAndFreezeClaim(session.claims) as Readonly<Record<string, unknown>>;
   const published: PublicSession = Object.freeze({
     user,
     claims,

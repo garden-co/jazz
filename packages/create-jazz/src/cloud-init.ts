@@ -1,7 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { provisionHostedApp } from "./cloud-provision.js";
-import { writeHostedEnv } from "./cloud-env.js";
+import {
+  ProvisionHttpError,
+  ProvisionNetworkError,
+  ProvisionParseError,
+  provisionHostedApp,
+} from "./cloud-provision.js";
+import { replaceHostedEnv, writeHostedEnv } from "./cloud-env.js";
 
 export interface RunHostedInitOptions {
   /** Absolute path to the directory containing .env (typically the starter root). */
@@ -46,21 +51,58 @@ function readEnvValues(envPath: string): Record<string, string> {
   return values;
 }
 
+/**
+ * The CLI and deferred spinner logger share this boundary. Credentials belong
+ * in .env, never in terminal output (including a future diagnostic that
+ * accidentally interpolates a provision response).
+ */
+function redactHostedCredentials(message: string, credentials: readonly string[] = []): string {
+  let redacted = message;
+  for (const credential of credentials) {
+    if (credential) redacted = redacted.split(credential).join("[REDACTED]");
+  }
+  return redacted.replace(
+    /\b(?:JAZZ_ADMIN_SECRET|BACKEND_SECRET|adminSecret|backendSecret)\s*[:=]\s*[^\s,;]+/g,
+    (match) => `${match.slice(0, match.search(/[:=]/) + 1)}[REDACTED]`,
+  );
+}
+
+function provisioningDiagnostic(error: unknown): string {
+  // Do not stringify an error: network stacks and upstream responses can
+  // contain credentials. The type remains useful without exposing its text.
+  if (error instanceof ProvisionHttpError) return `HTTP ${error.status} provisioning error`;
+  if (error instanceof ProvisionNetworkError) return "network provisioning error";
+  if (error instanceof ProvisionParseError) return "invalid provisioning response";
+  return "unexpected provisioning error";
+}
+
 export async function runHostedInit(options: RunHostedInitOptions): Promise<void> {
   const { dir, cloudSyncUrl, envKeys, apiUrl, onStep, onLog } = options;
   const keys = [envKeys.appId, envKeys.serverUrl, envKeys.adminSecret, envKeys.backendSecret];
 
-  const emitInfo = (message: string) => {
-    if (onLog) onLog("info", message);
-    else console.log(message);
+  const emit = (kind: "info" | "warn", message: string, credentials?: readonly string[]) => {
+    const safeMessage = redactHostedCredentials(message, credentials);
+    if (onLog) onLog(kind, safeMessage);
+    else if (kind === "info") console.log(safeMessage);
+    else console.warn(safeMessage);
   };
-  const emitWarn = (message: string) => {
-    if (onLog) onLog("warn", message);
-    else console.warn(message);
-  };
+  const emitInfo = (message: string, credentials?: readonly string[]) =>
+    emit("info", message, credentials);
+  const emitWarn = (message: string, credentials?: readonly string[]) =>
+    emit("warn", message, credentials);
 
   const existing = readEnvValues(join(dir, ".env"));
-  if (keys.some((k) => existing[k] && existing[k].length > 0)) {
+  // A partial .env can be left by an interrupted write. It is not a completed
+  // configuration: provision again and replace the entire managed tuple from
+  // that one response. Non-managed values remain user-owned and untouched.
+  if (keys.every((key) => existing[key] && existing[key].length > 0)) {
+    try {
+      // This is normally a content no-op, but it tightens an older managed
+      // file's POSIX permissions through the same writer used for updates.
+      writeHostedEnv({ dir, values: existing, keys });
+    } catch {
+      emitWarn("[jazz] Could not secure existing hosted .env permissions.");
+    }
     return;
   }
 
@@ -71,9 +113,8 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
       onStep?.("Provisioning Jazz Cloud app");
       provisioned = await provisionHostedApp({ apiUrl });
     } catch (err) {
-      const name = err instanceof Error ? err.name : "Error";
       emitWarn(
-        `[jazz] Provisioning failed (${name}: ${err instanceof Error ? err.message : String(err)}). ` +
+        `[jazz] Provisioning failed (${provisioningDiagnostic(err)}). ` +
           `Writing placeholder .env — visit https://v2.dashboard.jazz.tools to provision manually.`,
       );
       writeHostedEnv({ dir, values: {}, keys });
@@ -82,7 +123,7 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
 
     const { appId, adminSecret, backendSecret } = provisioned;
 
-    writeHostedEnv({
+    replaceHostedEnv({
       dir,
       values: {
         [envKeys.appId]: appId,
@@ -98,17 +139,15 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
         "Jazz app provisioned successfully and written to .env:",
         `  ${envKeys.appId}=${appId}`,
         `  ${envKeys.serverUrl}=${cloudSyncUrl}`,
-        `  ${envKeys.adminSecret}=${adminSecret}`,
-        `  ${envKeys.backendSecret}=${backendSecret}`,
+        "  Admin and backend credentials were saved to .env and are not shown here.",
         "",
         "Claim this app in the dashboard within 14 days: https://v2.dashboard.jazz.tools",
         "Unclaimed apps are automatically deleted after 14 days.",
       ].join("\n"),
+      [adminSecret, backendSecret],
     );
   } catch (err) {
-    emitWarn(
-      `[jazz] init-env failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    emitWarn(`[jazz] init-env failed unexpectedly (${provisioningDiagnostic(err)}).`);
     try {
       writeHostedEnv({ dir, values: {}, keys });
     } catch {
