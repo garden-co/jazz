@@ -90,7 +90,7 @@ function createMockDb(
       session: session
         ? {
             user: JSON.stringify([session.issuer, session.user_id]),
-            claims: { ...session.claims, iss: session.issuer, sub: session.user_id },
+            claims: session.claims,
             authMode: session.authMode,
           }
         : null,
@@ -146,7 +146,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(client.db).toBe(db);
     expect(client.session).toEqual({
       user: canonicalAuthorSubject(session.issuer, session.user_id),
-      claims: { iss: session.issuer, sub: session.user_id },
+      claims: {},
       authMode: session.authMode,
     });
     expect("manager" in client).toBe(false);

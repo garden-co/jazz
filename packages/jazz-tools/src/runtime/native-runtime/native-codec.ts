@@ -27,8 +27,10 @@ export {
   readNativeRemovedRow,
   readNativeSubscriptionDelta,
   readDescriptor,
+  readNativeRowDescriptor,
   readValueType,
   writeDescriptor,
+  writeNativeRowDescriptor,
   writeValueType,
 } from "./native-row-codec.js";
 export type {
@@ -36,6 +38,7 @@ export type {
   NativeRemovedRow,
   NativeRow,
   NativeRowBatch,
+  NativeRowDescriptorField,
   NativeSubscriptionDelta,
   DescriptorField,
   ValueType,

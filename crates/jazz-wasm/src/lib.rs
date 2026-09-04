@@ -3983,10 +3983,15 @@ fn claims_from_js(
     let raw: serde_json::Value = serde_wasm_bindgen::from_value(claims).map_err(to_js_error)?;
     let claims = match raw {
         serde_json::Value::Null => BTreeMap::new(),
-        serde_json::Value::Object(map) => map
-            .into_iter()
-            .map(|(key, value)| Ok((key, claim_value_from_json(value)?)))
-            .collect::<Result<BTreeMap<_, _>, JsValue>>()?,
+        serde_json::Value::Object(map) => {
+            let mut projected = BTreeMap::new();
+            for (key, value) in map {
+                if let Some(value) = claim_value_from_json(value)? {
+                    projected.insert(key, value);
+                }
+            }
+            projected
+        }
         _ => return Err(JsValue::from_str("identity claims must be an object")),
     };
     Ok(admit_binding_claims(author, claims))
@@ -4005,28 +4010,12 @@ fn admit_binding_claims(
     jazz::tools::policy_claims::canonical_policy_binding_claims(&author, claims, Value::String)
 }
 
-fn claim_value_from_json(value: serde_json::Value) -> Result<Value, JsValue> {
-    Ok(match value {
-        serde_json::Value::Null => Value::Nullable(None),
-        serde_json::Value::Bool(value) => Value::Bool(value),
-        serde_json::Value::Number(value) => {
-            jazz::tools::policy_claims::json_number_to_policy_claim(
-                value,
-                jazz::tools::policy_claims::NumericClaimOrigin::JavaScript,
-            )
-            .map_err(to_js_error)?
-        }
-        serde_json::Value::String(value) => Value::String(value),
-        serde_json::Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(claim_value_from_json)
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        serde_json::Value::Object(_) => {
-            return Err(JsValue::from_str("nested object claims are not supported"));
-        }
-    })
+fn claim_value_from_json(value: serde_json::Value) -> Result<Option<Value>, JsValue> {
+    jazz::tools::policy_claims::json_value_to_policy_claim(
+        value,
+        jazz::tools::policy_claims::NumericClaimOrigin::JavaScript,
+    )
+    .map_err(to_js_error)
 }
 
 fn wasm_write_memory(
@@ -5244,32 +5233,41 @@ mod dynamic_schema_view_tests {
     #[test]
     fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
         assert_eq!(
-            claim_value_from_json(serde_json::json!(7)).unwrap(),
+            claim_value_from_json(serde_json::json!(7))
+                .unwrap()
+                .unwrap(),
             Value::U64(7)
         );
         assert_eq!(
-            claim_value_from_json(serde_json::json!(-7)).unwrap(),
+            claim_value_from_json(serde_json::json!(-7))
+                .unwrap()
+                .unwrap(),
             Value::I64(-7)
         );
         assert_eq!(
             claim_value_from_json(serde_json::Value::Number(
                 serde_json::Number::from_f64(7.0).unwrap()
             ))
+            .unwrap()
             .unwrap(),
             Value::U64(7),
             "WASM's f64 JS-number path must agree with integer JSON"
         );
         assert_eq!(
-            claim_value_from_json(serde_json::json!(7.5)).unwrap(),
+            claim_value_from_json(serde_json::json!(7.5))
+                .unwrap()
+                .unwrap(),
             Value::F64(7.5)
         );
         assert_eq!(
-            claim_value_from_json(serde_json::json!(9_007_199_254_740_992_u64)).unwrap(),
+            claim_value_from_json(serde_json::json!(9_007_199_254_740_992_u64)).unwrap().unwrap(),
             Value::F64(9_007_199_254_740_992.0),
             "integers beyond Number.MAX_SAFE_INTEGER must not participate in integer policy matching"
         );
         assert_eq!(
-            claim_value_from_json(serde_json::json!(-9_007_199_254_740_992_i64)).unwrap(),
+            claim_value_from_json(serde_json::json!(-9_007_199_254_740_992_i64))
+                .unwrap()
+                .unwrap(),
             Value::F64(-9_007_199_254_740_992.0)
         );
     }
@@ -5324,6 +5322,34 @@ mod dynamic_schema_view_tests {
         assert_eq!(
             claims.get(&jazz::query::provider_claim_key("role")),
             Some(&Value::String("editor".to_owned()))
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn wasm_claim_ingress_omits_recursive_json_but_keeps_scalar_prototype_names() {
+        let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let claims = claims_from_js(
+            author,
+            serde_wasm_bindgen::to_value(&serde_json::json!({
+                "profile": { "handler_only": true },
+                "mixed": ["editor", { "nested": true }],
+                "__proto__": "safe",
+                "constructor": "also-safe",
+            }))
+            .unwrap(),
+        )
+        .expect("recursive metadata must not reject WASM admission");
+
+        assert!(!claims.contains_key(&jazz::query::provider_claim_key("profile")));
+        assert!(!claims.contains_key(&jazz::query::provider_claim_key("mixed")));
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("__proto__")),
+            Some(&Value::String("safe".to_owned()))
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("constructor")),
+            Some(&Value::String("also-safe".to_owned()))
         );
     }
 

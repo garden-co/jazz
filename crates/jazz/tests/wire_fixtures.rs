@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
-    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
+    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, RowDescriptorField,
+    RowDescriptorFieldName, SubscriptionDeltaPayload,
 };
 use jazz::ids::{
     AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, MigrationLensId, NodeUuid,
@@ -1531,6 +1532,25 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     ]);
     let logical_descriptor =
         RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+    fn binding_descriptor<'a>(
+        descriptor: &'a RecordDescriptor,
+        logical: bool,
+    ) -> Vec<RowDescriptorField<'a>> {
+        descriptor
+            .fields()
+            .iter()
+            .map(|field| RowDescriptorField {
+                name: if logical {
+                    RowDescriptorFieldName::LogicalField(field.name.as_deref().expect("named"))
+                } else {
+                    RowDescriptorFieldName::PhysicalColumn(field.name.as_deref().expect("named"))
+                },
+                value_type: field.value_type.clone(),
+            })
+            .collect::<Vec<_>>()
+    }
+    let current_binding_descriptor = binding_descriptor(&current_descriptor, false);
+    let logical_binding_descriptor = binding_descriptor(&logical_descriptor, true);
     let todo_one_id = RowUuid::from_bytes([0x11; 16]);
     let todo_two_id = RowUuid::from_bytes([0x12; 16]);
     let note_id = RowUuid::from_bytes([0x21; 16]);
@@ -1569,7 +1589,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         rows: vec![
             RowBatch {
                 table: "todos",
-                descriptor: current_descriptor,
+                descriptor: current_binding_descriptor.clone(),
                 rows: vec![
                     Row {
                         row_id: todo_one_id,
@@ -1585,7 +1605,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             },
             RowBatch {
                 table: "notes",
-                descriptor: logical_descriptor,
+                descriptor: logical_binding_descriptor.clone(),
                 rows: vec![Row {
                     row_id: note_id,
                     deleted: false,
@@ -1596,7 +1616,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             // must create a new batch, even though its descriptor is identical.
             RowBatch {
                 table: "todos",
-                descriptor: current_descriptor,
+                descriptor: current_binding_descriptor.clone(),
                 rows: vec![Row {
                     row_id: deleted_todo_id,
                     deleted: true,
@@ -1615,7 +1635,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let delta = SubscriptionDeltaPayload {
         added: vec![RowBatch {
             table: "todos",
-            descriptor: current_descriptor,
+            descriptor: current_binding_descriptor,
             rows: vec![Row {
                 row_id: todo_one_id,
                 deleted: false,
@@ -1624,7 +1644,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         }],
         updated: vec![RowBatch {
             table: "notes",
-            descriptor: logical_descriptor,
+            descriptor: logical_binding_descriptor,
             rows: vec![Row {
                 row_id: note_id,
                 deleted: false,

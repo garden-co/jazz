@@ -6022,9 +6022,13 @@ pub(super) fn current_row_from_positional_cells(
         ));
     }
     let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
+    // This app-facing positional projection uses logical schema names, not
+    // private `user_{column}` storage carriers. Preserve that distinction for
+    // any later source re-encoding.
+    Ok(CurrentRow::new_with_binding_fields(
         table.name.clone(),
         OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingField::LogicalField,
     ))
 }
 

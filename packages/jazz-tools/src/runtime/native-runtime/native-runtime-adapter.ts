@@ -6056,10 +6056,22 @@ function nativeRowFieldPlans(
   const plans: NativeRowFieldPlan[] = [];
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
-    const fieldName = batch.descriptor[index]?.name;
-    if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
+    const field = batch.descriptor[index];
+    const fieldName = field?.name;
+    if (
+      !fieldName ||
+      isInternalField(fieldName) ||
+      (field?.kind === "physical-column" && isCurrentRowPhysicalField(fieldName))
+    ) {
+      continue;
+    }
 
-    const name = publicFieldName(fieldName);
+    // `user_` belongs to a private physical CurrentRow field only. A logical
+    // query/collector field preserves its public name even if it begins with
+    // `user_`. The tagged descriptor is authoritative; never infer from
+    // schema membership, since a hybrid collector can contain physical `check`
+    // and logical `user_check` in one record.
+    const name = field?.kind === "physical-column" ? publicPhysicalFieldName(fieldName) : fieldName;
     const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
     plans.push({
       name,
@@ -7072,8 +7084,17 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
-function publicFieldName(name: string): string {
-  return name.startsWith("user_") ? name.slice("user_".length) : name;
+/**
+ * Decode the private CurrentRow physical-field namespace exactly once at the
+ * native binding boundary. Logical descriptor fields are never normalized:
+ * a collector may intentionally expose a name that happens to use either
+ * private-looking prefix.
+ */
+function publicPhysicalFieldName(name: string): string {
+  const withoutUserPrefix = name.startsWith("user_") ? name.slice("user_".length) : name;
+  return withoutUserPrefix.startsWith("__jazz_aggregate_")
+    ? withoutUserPrefix.slice("__jazz_aggregate_".length)
+    : withoutUserPrefix;
 }
 
 function isInternalField(name?: string): boolean {

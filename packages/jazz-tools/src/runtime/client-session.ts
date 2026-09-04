@@ -1,5 +1,5 @@
 import type { PublicSession, Session } from "./context.js";
-import { isUsableSubject, withCanonicalUser } from "./author-id.js";
+import { attachPublicSessionClaims, isUsableSubject, withCanonicalUser } from "./author-id.js";
 
 export interface ClientSessionInput {
   appId: string;
@@ -89,6 +89,8 @@ export function isTrustedReservedSession(
 }
 
 export interface JwtPayload {
+  /** Application-defined flat JWT claims. Known transport claims below retain their types. */
+  [claim: string]: unknown;
   jazz_pub_key?: unknown;
   sub?: unknown;
   iss?: unknown;
@@ -97,56 +99,46 @@ export interface JwtPayload {
   exp?: unknown;
 }
 
+/** Preserve the complete verified JWT payload for the public session surface. */
+function claimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> | null {
+  // A null-prototype dictionary makes every JSON key a data property. In
+  // particular, assigning an untrusted `__proto__` key to `{}` would invoke
+  // Object.prototype's legacy setter instead of preserving the claim.
+  const claims: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const [name, value] of Object.entries(payload).sort(compareUtf8)) claims[name] = value;
+  return claims;
+}
+
 const REGISTERED_JWT_POLICY_FIELDS = new Set(["sub", "exp", "nbf", "iat", "iss", "aud", "jti"]);
 
+function isPolicyClaimValue(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  return Array.isArray(value) && value.every(isPolicyClaimValue);
+}
+
 /**
- * Mirror server JWT admission's supported policy-claim corpus.
- *
- * The server accepts both the conventional `claims` object and supported custom
- * top-level JWT fields. Iterating UTF-8 lexical names matches the server's
- * `BTreeMap` traversal: a top-level field after `claims` overwrites the nested
- * value of the same name, while an earlier one is overwritten by `claims`.
+ * Project verified JWT metadata into Groove's deliberately non-recursive
+ * policy corpus. This is kept separate from `PublicSession.claims`: registered
+ * transport/security fields are verified identity, not provider policy data;
+ * objects are handler metadata, not policy values.
  */
-function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> | null {
-  const claims: Record<string, unknown> = {};
+function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> {
+  const claims: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const [name, value] of Object.entries(payload).sort(compareUtf8)) {
-    if (REGISTERED_JWT_POLICY_FIELDS.has(name)) continue;
-    if (name === "claims") {
-      if (!isRecord(value)) return null;
-      for (const [nestedName, nestedValue] of Object.entries(value).sort(compareUtf8)) {
-        const admitted = supportedPolicyClaim(nestedValue);
-        // The server rejects a `claims` object containing unsupported nested
-        // values rather than silently dropping a policy input.
-        if (admitted === undefined) return null;
-        claims[nestedName] = admitted;
-      }
-      continue;
+    if (!REGISTERED_JWT_POLICY_FIELDS.has(name) && isPolicyClaimValue(value)) {
+      claims[name] = value;
     }
-    const admitted = supportedPolicyClaim(value);
-    // Unrelated nested JWT metadata is not a policy claim.
-    if (admitted !== undefined) claims[name] = admitted;
   }
   return claims;
 }
 
-function reservedPolicyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> | null {
+function reservedJwtPayloadWithoutProof(payload: JwtPayload): Record<string, unknown> {
   // `jazz_pub_key` is proof material for Jazz's reserved self-signed issuers,
-  // not an application-visible policy claim. Native admission verifies it and
-  // derives the subject from it before constructing the session. Keeping it
-  // in `Session.claims` would make every fresh anonymous proof look like a
-  // different authorization scope even though anonymous policy is shared.
+  // not application-visible metadata. Native admission verifies it and derives
+  // the subject from it before constructing the session.
   const { jazz_pub_key: _proofKey, ...policyPayload } = payload;
-  return policyClaimsFromJwtPayload(policyPayload);
-}
-
-function supportedPolicyClaim(value: unknown): unknown | undefined {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
-  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
-  if (Array.isArray(value)) {
-    const values = value.map(supportedPolicyClaim);
-    return values.some((entry) => entry === undefined) ? undefined : values;
-  }
-  return undefined;
+  return policyPayload;
 }
 
 function compareUtf8([left]: [string, unknown], [right]: [string, unknown]): number {
@@ -227,6 +219,8 @@ export function parseJwtPayload(jwtToken: string): JwtPayload | null {
   if (!payloadJson) return null;
 
   try {
+    // Session claims intentionally use ordinary host JSON semantics: in JS,
+    // JSON numbers become numbers rather than a lossless-number wrapper.
     const parsed = JSON.parse(payloadJson);
     return isRecord(parsed) ? (parsed as JwtPayload) : null;
   } catch {
@@ -245,34 +239,25 @@ export function internalSessionFromJwtPayload(payload: JwtPayload): Session | nu
   const issuer = asUsableSubjectString(payload.iss);
   if (!subject || !issuer || isReservedJazzIssuer(issuer)) return null;
 
-  const claims = policyClaimsFromJwtPayload(payload);
-  if (!claims) return null;
-
-  return {
-    issuer,
-    user_id: subject,
-    claims,
-    authMode: "external",
-  };
+  const publicClaims = claimsFromJwtPayload(payload);
+  if (!publicClaims) return null;
+  return attachPublicSessionClaims(
+    {
+      issuer,
+      user_id: subject,
+      claims: policyClaimsFromJwtPayload(payload),
+      authMode: "external",
+    },
+    publicClaims,
+  );
 }
 
 export function sessionFromVerifiedReservedJwtPayload(
   payload: JwtPayload,
   authMode: Extract<Session["authMode"], "local-first" | "anonymous">,
 ): PublicSession | null {
-  const subject = asUsableSubjectString(payload.sub);
-  const issuer = asUsableSubjectString(payload.iss);
-  const expectedIssuer = authMode === "local-first" ? LOCAL_FIRST_JWT_ISSUER : ANONYMOUS_JWT_ISSUER;
-  if (!subject || issuer !== expectedIssuer) return null;
-
-  const claims = reservedPolicyClaimsFromJwtPayload(payload);
-  if (!claims) return null;
-  const internal = markTrustedReservedSession({
-    issuer,
-    user_id: subject,
-    claims,
-    authMode,
-  });
+  const internal = internalSessionFromVerifiedReservedJwtPayload(payload, authMode);
+  if (!internal) return null;
   return withCanonicalUser(internal);
 }
 
@@ -285,9 +270,17 @@ export function internalSessionFromVerifiedReservedJwtPayload(
   const issuer = asUsableSubjectString(payload.iss);
   const expectedIssuer = authMode === "local-first" ? LOCAL_FIRST_JWT_ISSUER : ANONYMOUS_JWT_ISSUER;
   if (!subject || issuer !== expectedIssuer) return null;
-  const claims = reservedPolicyClaimsFromJwtPayload(payload);
-  if (!claims) return null;
-  return markTrustedReservedSession({ issuer, user_id: subject, claims, authMode });
+  const publicClaims = claimsFromJwtPayload(reservedJwtPayloadWithoutProof(payload));
+  if (!publicClaims) return null;
+  return attachPublicSessionClaims(
+    markTrustedReservedSession({
+      issuer,
+      user_id: subject,
+      claims: policyClaimsFromJwtPayload(reservedJwtPayloadWithoutProof(payload)),
+      authMode,
+    }),
+    publicClaims,
+  );
 }
 
 export function resolveJwtSession(jwtToken: string): PublicSession | null {

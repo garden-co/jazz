@@ -180,6 +180,124 @@ function parseXmlPlist(xml) {
   return plist;
 }
 
+function staticLibraryArchitectures(file) {
+  // Static libraries are archives rather than directly executable objects, so
+  // `file` alone cannot prove an npm package contains the intended ABI. Parse
+  // their object headers directly; this must work while validating an iOS
+  // package from the Linux assembly runner too.
+  const bytes = readFileSync(file);
+  const architectures = new Set();
+  const addElfArchitecture = (offset) => {
+    if (
+      offset + 20 > bytes.length ||
+      !bytes.subarray(offset, offset + 4).equals(Buffer.from("\x7fELF"))
+    )
+      return;
+    const machine = bytes.readUInt16LE(offset + 18);
+    if (machine === 183) architectures.add("arm64");
+    else if (machine === 40) architectures.add("armv7");
+    else if (machine === 3) architectures.add("x86");
+    else if (machine === 62) architectures.add("x86_64");
+  };
+  const addMachOArchitecture = (offset, end = bytes.length, expectedCpu) => {
+    if (offset + 8 > end || bytes.readUInt32LE(offset) !== 0xfeedfacf) return false;
+    const cpu = bytes.readUInt32LE(offset + 4);
+    if (expectedCpu !== undefined && cpu !== expectedCpu)
+      throw new Error(`fat Mach-O slice CPU does not match its payload in ${file}`);
+    if (cpu === 0x0100000c) architectures.add("arm64");
+    else if (cpu === 0x01000007) architectures.add("x86_64");
+    return true;
+  };
+  const addFatMachOArchitectures = (offset, end = bytes.length) => {
+    if (offset + 8 > end || bytes.readUInt32BE(offset) !== 0xcafebabe) return false;
+    const count = bytes.readUInt32BE(offset + 4);
+    if (count > Math.floor((end - offset - 8) / 20))
+      throw new Error(`malformed universal iOS static library ${file}`);
+    const tableEnd = offset + 8 + count * 20;
+    const slices = [];
+    for (let index = 0; index < count; index += 1) {
+      const cpu = bytes.readUInt32BE(offset + 8 + index * 20);
+      const sliceOffset = bytes.readUInt32BE(offset + 16 + index * 20);
+      const sliceSize = bytes.readUInt32BE(offset + 20 + index * 20);
+      if (sliceOffset < tableEnd || sliceSize === 0 || sliceOffset + sliceSize > end)
+        throw new Error(`malformed universal iOS static library ${file}`);
+      slices.push({ cpu, offset: sliceOffset, end: sliceOffset + sliceSize });
+    }
+    slices.sort((left, right) => left.offset - right.offset);
+    for (let index = 1; index < slices.length; index += 1)
+      if (slices[index - 1].end > slices[index].offset)
+        throw new Error(`overlapping universal iOS static-library slices ${file}`);
+    for (const slice of slices) {
+      if (bytes.subarray(slice.offset, slice.offset + 8).equals(Buffer.from("!<arch>\n")))
+        scanArchive(slice.offset, slice.end, slice.cpu);
+      else if (!addMachOArchitecture(slice.offset, slice.end, slice.cpu))
+        throw new Error(`fat Mach-O slice has no supported object payload in ${file}`);
+    }
+    return true;
+  };
+
+  const scanArchive = (start, end = bytes.length, expectedCpu) => {
+    if (bytes.subarray(start, start + 8).equals(Buffer.from("!<thin>\n")))
+      throw new Error(`thin static-library archives are unsupported: ${file}`);
+    if (!bytes.subarray(start, start + 8).equals(Buffer.from("!<arch>\n")))
+      throw new Error(`malformed static-library archive ${file}`);
+    let offset = start + 8;
+    let hasExpectedMachO = false;
+    while (offset + 60 <= end) {
+      const size = Number(
+        bytes
+          .subarray(offset + 48, offset + 58)
+          .toString("ascii")
+          .trim(),
+      );
+      if (!Number.isSafeInteger(size) || size < 0 || offset + 60 + size > end)
+        throw new Error(`malformed static-library archive ${file}`);
+      const payload = offset + 60;
+      // BSD ar archives prefix a member with a long filename (#1/<length>).
+      // GNU's /offset form has no payload prefix, so only skip the explicitly
+      // declared BSD bytes.
+      const memberName = bytes
+        .subarray(offset, offset + 16)
+        .toString("ascii")
+        .trim();
+      const bsdNameLength = /^#1\/(\d+)$/.exec(memberName)?.[1];
+      const object = bsdNameLength === undefined ? payload : payload + Number(bsdNameLength);
+      if (object > payload + size) throw new Error(`malformed BSD static-library member ${file}`);
+      addElfArchitecture(object);
+      if (addMachOArchitecture(object, payload + size, expectedCpu) && expectedCpu !== undefined)
+        hasExpectedMachO = true;
+      addFatMachOArchitectures(object, payload + size);
+      offset = payload + size + (size % 2);
+    }
+    if (offset !== end) throw new Error(`malformed static-library archive padding ${file}`);
+    if (expectedCpu !== undefined && !hasExpectedMachO)
+      throw new Error(`fat Mach-O slice has no supported object payload in ${file}`);
+  };
+
+  if (bytes.subarray(0, 8).equals(Buffer.from("!<thin>\n"))) {
+    throw new Error(`thin static-library archives are unsupported: ${file}`);
+  } else if (bytes.subarray(0, 8).equals(Buffer.from("!<arch>\n"))) {
+    scanArchive(0);
+  } else {
+    // `lipo -create` may emit a universal archive directly rather than an ar
+    // container. This is valid for the simulator library.
+    addFatMachOArchitectures(0);
+  }
+  if (architectures.size === 0)
+    throw new Error(`could not determine static-library architecture for ${file}`);
+  return architectures;
+}
+
+function requireArchitectures(file, expected, label) {
+  const actual = staticLibraryArchitectures(file);
+  for (const architecture of expected) {
+    if (!actual.has(architecture))
+      throw new Error(
+        `${label} is missing ${architecture}; found ${[...actual].sort().join(", ")}`,
+      );
+  }
+}
+
 function verifyIosSlices(expected) {
   const plist = parseXmlPlist(readFileSync(join(targets.ios.root, "Info.plist"), "utf8"));
   const slices = plist.AvailableLibraries;
@@ -189,6 +307,7 @@ function verifyIosSlices(expected) {
     ["device", false],
     ["simulator", false],
   ]);
+  const libraries = new Map();
   let libraryBasename;
   for (const slice of slices) {
     if (typeof slice !== "object" || slice === null || Array.isArray(slice))
@@ -208,6 +327,7 @@ function verifyIosSlices(expected) {
         `iOS ${role} XCFramework slice ${path} is absent from its manifest inventory`,
       );
     requiredRoles.set(role, true);
+    libraries.set(role, join(targets.ios.root, path));
     if (libraryBasename === undefined) libraryBasename = library;
     else if (library !== libraryBasename)
       throw new Error(
@@ -216,6 +336,12 @@ function verifyIosSlices(expected) {
   }
   for (const [role, present] of requiredRoles)
     if (!present) throw new Error(`iOS XCFramework is missing its ${role} static-library slice`);
+  requireArchitectures(libraries.get("device"), ["arm64"], "iOS device relay static library");
+  requireArchitectures(
+    libraries.get("simulator"),
+    ["arm64", "x86_64"],
+    "iOS simulator relay static library",
+  );
 }
 
 function filesUnder(root, directory = root) {
@@ -275,6 +401,15 @@ for (const requested of requestedTargets) {
       .digest("hex");
     if (actualHash !== hash)
       throw new Error(`${requested} relay artifact hash differs for ${file}`);
+  }
+  if (requested === "android") {
+    for (const [architecture, path] of [
+      ["arm64", "arm64-v8a/libjazz_native_relay.a"],
+      ["armv7", "armeabi-v7a/libjazz_native_relay.a"],
+      ["x86", "x86/libjazz_native_relay.a"],
+      ["x86_64", "x86_64/libjazz_native_relay.a"],
+    ])
+      requireArchitectures(join(target.root, path), [architecture], `Android ${path}`);
   }
   if (requested === "ios") verifyIosSlices(expected);
 }

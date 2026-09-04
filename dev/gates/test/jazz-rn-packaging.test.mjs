@@ -2216,6 +2216,70 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     "ios-arm64/libjazz_native_relay.a",
     "ios-arm64_x86_64-simulator/libjazz_native_relay.a",
   ];
+  const archive = (members) => {
+    const parts = [Buffer.from("!<arch>\n")];
+    for (const [name, bytes] of members) {
+      const header = Buffer.alloc(60, " ");
+      Buffer.from(`${name}/`).copy(header);
+      Buffer.from("0").copy(header, 16);
+      Buffer.from("0").copy(header, 28);
+      Buffer.from("0").copy(header, 34);
+      Buffer.from("100644").copy(header, 40);
+      Buffer.from(String(bytes.length)).copy(header, 48);
+      Buffer.from("`\n").copy(header, 58);
+      parts.push(header, bytes);
+      if (bytes.length % 2) parts.push(Buffer.from("\n"));
+    }
+    return Buffer.concat(parts);
+  };
+  const elfObject = (machine) => {
+    const bytes = Buffer.alloc(20);
+    Buffer.from("\x7fELF").copy(bytes);
+    bytes.writeUInt16LE(machine, 18);
+    return bytes;
+  };
+  const machObject = (cpu) => {
+    const bytes = Buffer.alloc(8);
+    bytes.writeUInt32LE(0xfeedfacf, 0);
+    bytes.writeUInt32LE(cpu, 4);
+    return bytes;
+  };
+  const fatMachO = (slices, mutate = () => {}) => {
+    const tableSize = 8 + slices.length * 20;
+    const bytes = Buffer.alloc(
+      tableSize + slices.reduce((size, slice) => size + slice.bytes.length, 0),
+    );
+    bytes.writeUInt32BE(0xcafebabe, 0);
+    bytes.writeUInt32BE(slices.length, 4);
+    let offset = tableSize;
+    for (const [index, slice] of slices.entries()) {
+      const entry = 8 + index * 20;
+      bytes.writeUInt32BE(slice.cpu, entry);
+      bytes.writeUInt32BE(offset, entry + 8);
+      bytes.writeUInt32BE(slice.bytes.length, entry + 12);
+      slice.bytes.copy(bytes, offset);
+      offset += slice.bytes.length;
+    }
+    mutate(bytes);
+    return bytes;
+  };
+  const artifactBytes = (file) => {
+    const androidMachine = {
+      "arm64-v8a/libjazz_native_relay.a": 183,
+      "armeabi-v7a/libjazz_native_relay.a": 40,
+      "x86/libjazz_native_relay.a": 3,
+      "x86_64/libjazz_native_relay.a": 62,
+    }[file];
+    if (androidMachine !== undefined) return archive([["object.o", elfObject(androidMachine)]]);
+    if (file === "ios-arm64/libjazz_native_relay.a")
+      return archive([["device.o", machObject(0x0100000c)]]);
+    if (file === "ios-arm64_x86_64-simulator/libjazz_native_relay.a")
+      return archive([
+        ["arm64.o", machObject(0x0100000c)],
+        ["x86_64.o", machObject(0x01000007)],
+      ]);
+    return `fixture:${file}\n`;
+  };
   const info = (
     includeDevice,
     simulatorLibrary = "libjazz_native_relay.a",
@@ -2233,7 +2297,7 @@ ${
     for (const file of files) {
       const destination = join(root, file);
       await mkdir(dirname(destination), { recursive: true });
-      await writeFile(destination, file === "Info.plist" ? info(true) : `fixture:${file}\n`);
+      await writeFile(destination, file === "Info.plist" ? info(true) : artifactBytes(file));
     }
   };
   const writeManifest = async (root, destination, extra = {}) => {
@@ -2334,6 +2398,102 @@ ${
     });
 
     const simulatorDirectory = join(iosRoot, "ios-arm64_x86_64-simulator");
+    const simulatorLibrary = join(simulatorDirectory, "libjazz_native_relay.a");
+    await writeFile(
+      simulatorLibrary,
+      fatMachO([
+        { cpu: 0x0100000c, bytes: machObject(0x0100000c) },
+        { cpu: 0x01000007, bytes: machObject(0x01000007) },
+      ]),
+    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    execFileSync(
+      process.execPath,
+      [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+      { env: environment, stdio: "pipe" },
+    );
+
+    await writeFile(
+      simulatorLibrary,
+      fatMachO(
+        [
+          { cpu: 0x0100000c, bytes: machObject(0x0100000c) },
+          { cpu: 0x01000007, bytes: machObject(0x01000007) },
+        ],
+        (bytes) => bytes.writeUInt32BE(bytes.length + 1, 16),
+      ),
+    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /malformed universal iOS static library/,
+      "a fat Mach-O slice table cannot point beyond the library",
+    );
+
+    await writeFile(
+      simulatorLibrary,
+      fatMachO([
+        { cpu: 0x0100000c, bytes: machObject(0x01000007) },
+        { cpu: 0x01000007, bytes: machObject(0x01000007) },
+      ]),
+    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /fat Mach-O slice CPU does not match its payload/,
+      "a fat Mach-O table cannot claim an architecture its payload lacks",
+    );
+
+    await writeFile(
+      simulatorLibrary,
+      fatMachO([
+        { cpu: 0x0100000c, bytes: archive([["object.o", elfObject(183)]]) },
+        { cpu: 0x01000007, bytes: machObject(0x01000007) },
+      ]),
+    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /fat Mach-O slice has no supported object payload/,
+      "a fat Mach-O slice cannot satisfy its table with an ar-wrapped ELF object",
+    );
+
+    await writeFile(join(iosRoot, "ios-arm64/libjazz_native_relay.a"), "!<thin>\n");
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /thin static-library archives are unsupported/,
+      "thin archives fail closed because their object paths are not sealed in the package",
+    );
+    await writeFile(
+      join(iosRoot, "ios-arm64/libjazz_native_relay.a"),
+      artifactBytes("ios-arm64/libjazz_native_relay.a"),
+    );
+    await writeFile(
+      simulatorLibrary,
+      artifactBytes("ios-arm64_x86_64-simulator/libjazz_native_relay.a"),
+    );
+
     await rm(join(simulatorDirectory, "libjazz_native_relay.a"));
     await writeFile(join(simulatorDirectory, "libjazz_native_relay_simulator.a"), "fixture\n");
     await writeFile(join(iosRoot, "Info.plist"), info(true, "libjazz_native_relay_simulator.a"));
@@ -2350,7 +2510,10 @@ ${
     );
 
     await rm(join(simulatorDirectory, "libjazz_native_relay_simulator.a"));
-    await writeFile(join(simulatorDirectory, "libjazz_native_relay.a"), "fixture\n");
+    await writeFile(
+      join(simulatorDirectory, "libjazz_native_relay.a"),
+      artifactBytes("ios-arm64_x86_64-simulator/libjazz_native_relay.a"),
+    );
 
     await writeFile(join(iosRoot, "Info.plist"), info(false));
     await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
