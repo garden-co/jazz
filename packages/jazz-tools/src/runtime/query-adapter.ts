@@ -841,7 +841,10 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
       OrderBy: {
         input: relation,
         terms: builder.orderBy.map(([column, direction]) => ({
-          column: relColumn(column),
+          column: relColumn(
+            stripQualifier(column),
+            hops.length > 0 ? `__hop_${hops.length - 1}` : relationTable,
+          ),
           direction: direction === "desc" ? "Desc" : "Asc",
         })),
       },
@@ -920,7 +923,7 @@ function toFlatConditions(
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
   const raw = JSON.parse(builderJson);
-  if (raw.union !== undefined) {
+  if (raw?.union !== undefined) {
     throw new Error("Public union queries are not supported by canonical query lowering yet.");
   }
   const builder = normalizeBuiltQuery(raw);

@@ -282,6 +282,21 @@ describe("translateQuery", () => {
       'Include builder for relation "project" does not support partial large-value selections.',
     );
   });
+  it("orders relation hops by the projected output scope", () => {
+    const translated = JSON.parse(
+      translateQuery(
+        app.todos.where({ done: false }).hopTo("owner").orderBy("name")._build(),
+        app.wasmSchema,
+      ),
+    );
+    const { input, terms } = translated.relation_ir.OrderBy;
+    const projectedName = input.Project.columns.find(
+      (column: { alias: string }) => column.alias === "name",
+    );
+    expect(terms).toEqual([{ column: projectedName.expr.Column, direction: "Asc" }]);
+    expect(terms[0].column).toEqual({ scope: "__hop_0", column: "name" });
+  });
+
   it("keeps native relation IR for relation traversal queries", () => {
     const translated = JSON.parse(
       translateQuery(app.todos.where({ done: false }).hopTo("owner")._build(), app.wasmSchema),
