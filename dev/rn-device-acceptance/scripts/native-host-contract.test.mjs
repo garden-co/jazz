@@ -371,10 +371,10 @@ function assertPublicClientRelayReadback(source) {
   const statements = fn.body.statements;
   assert.equal(
     statements.length,
-    2,
-    "relay readback function body must contain exactly client creation then try/finally",
+    3,
+    "relay readback function body must contain client creation, unsubscribe state, then try/finally",
   );
-  const [clientStatement, lifecycle] = statements;
+  const [clientStatement, unsubscribeStatement, lifecycle] = statements;
   assert.ok(
     ts.isVariableStatement(clientStatement) &&
       (clientStatement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
@@ -394,6 +394,12 @@ function assertPublicClientRelayReadback(source) {
       isIdentifier(create.arguments[0].arguments[0], "capability"),
     "relay readback must await createJazzClient(clientConfig(capability))",
   );
+  assert.ok(
+    ts.isVariableStatement(unsubscribeStatement) &&
+      (unsubscribeStatement.declarationList.flags & ts.NodeFlags.Let) !== 0 &&
+      variableDeclaration(unsubscribeStatement, "unsubscribe")?.initializer,
+    "relay readback must retain a subscription teardown before its lifecycle",
+  );
 
   assert.ok(
     ts.isTryStatement(lifecycle),
@@ -408,10 +414,54 @@ function assertPublicClientRelayReadback(source) {
   const tryStatements = lifecycle.tryBlock.statements;
   assert.equal(
     tryStatements.length,
-    2,
-    "relay readback try block must contain exactly public read then persisted-title assertion",
+    6,
+    "relay readback must subscribe, await initial publication, then read and assert",
   );
-  const [rowsStatement, assertionStatement] = tryStatements;
+  const [
+    titleStatement,
+    observedStatement,
+    subscribeStatement,
+    publicationStatement,
+    rowsStatement,
+    assertionStatement,
+  ] = tryStatements;
+  assert.ok(
+    ts.isVariableStatement(titleStatement) &&
+      variableDeclaration(titleStatement, "title")?.initializer &&
+      ts.isCallExpression(variableDeclaration(titleStatement, "title").initializer) &&
+      isIdentifier(
+        variableDeclaration(titleStatement, "title").initializer.expression,
+        "persistedTitleForRun",
+      ),
+    "relay readback must derive the exact run-bound title before subscribing",
+  );
+  assert.ok(
+    ts.isVariableStatement(observedStatement) &&
+      (observedStatement.declarationList.flags & ts.NodeFlags.Let) !== 0 &&
+      variableDeclaration(observedStatement, "observed")?.initializer?.kind ===
+        ts.SyntaxKind.FalseKeyword,
+    "relay readback must begin with an unobserved publication marker",
+  );
+  assert.ok(
+    ts.isExpressionStatement(subscribeStatement) &&
+      ts.isBinaryExpression(subscribeStatement.expression) &&
+      subscribeStatement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isIdentifier(subscribeStatement.expression.left, "unsubscribe") &&
+      ts.isCallExpression(subscribeStatement.expression.right) &&
+      ts.isPropertyAccessExpression(subscribeStatement.expression.right.expression) &&
+      subscribeStatement.expression.right.expression.name.text === "subscribe" &&
+      isPropertyAccess(subscribeStatement.expression.right.expression.expression, "client", "db"),
+    "relay readback must assign its public subscription teardown",
+  );
+  assert.match(
+    relayReadbackSlice(source),
+    /unsubscribe = client\.db\.subscribe\(app\.todos, \(todos\) => \{\s*observed \|\|= todos\.some\(\(todo\) => todo\.title === title\);\s*\}\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
+    "relay readback must await the exact run-bound subscription publication before reading",
+  );
+  assert.ok(
+    ts.isIfStatement(publicationStatement),
+    "relay readback must reject a missing bounded publication",
+  );
   assert.ok(
     ts.isVariableStatement(rowsStatement) &&
       (rowsStatement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
@@ -459,17 +509,27 @@ function assertPublicClientRelayReadback(source) {
 
   assert.equal(
     lifecycle.finallyBlock.statements.length,
-    1,
-    "relay readback finally must contain only client shutdown",
+    2,
+    "relay readback finally must unsubscribe before client shutdown",
   );
-  const [shutdown] = lifecycle.finallyBlock.statements;
+  const [unsubscribe, shutdown] = lifecycle.finallyBlock.statements;
+  assert.ok(
+    ts.isExpressionStatement(unsubscribe) &&
+      ts.isCallExpression(unsubscribe.expression) &&
+      isIdentifier(unsubscribe.expression.expression, "unsubscribe"),
+    "relay readback must unsubscribe before shutdown",
+  );
   assert.ok(
     ts.isExpressionStatement(shutdown) &&
       awaitCall(shutdown.expression)?.arguments.length === 0 &&
       isPropertyAccess(awaitCall(shutdown.expression)?.expression, "client", "shutdown"),
     "relay readback must await client.shutdown() in finally",
   );
-  assert.ok(client.pos < rows.pos, "public client creation must precede its public read");
+  assert.ok(
+    client.pos < subscribeStatement.pos,
+    "public client creation must precede subscription",
+  );
+  assert.ok(subscribeStatement.pos < rows.pos, "subscription publication must precede public read");
   assert.ok(rows.pos < assertion.pos, "public read must precede the persisted-title assertion");
   assert.ok(assertion.pos < shutdown.pos, "persisted-title assertion must precede final shutdown");
 }
@@ -943,7 +1003,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     );
     assert.throws(
       () => assertPublicClientRelayReadback(maskedReadback),
-      /client\.db\.all|try block must contain exactly/,
+      /client\.db\.all|subscribe, await initial publication, then read and assert/,
       `masked relay readback must not accept ${decoy}`,
     );
   }
@@ -961,7 +1021,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     );
     assert.throws(
       () => assertPublicClientRelayReadback(mutatedRows),
-      /try block must contain exactly/,
+      /subscribe, await initial publication, then read and assert/,
       `relay readback must reject an intervening rows mutation: ${mutation}`,
     );
   }
@@ -974,7 +1034,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   );
   assert.throws(
     () => assertPublicClientRelayReadback(preTryMutation),
-    /function body must contain exactly/,
+    /function body must contain client creation, unsubscribe state, then try\/finally/,
     "relay readback must reject a fake public-read mutation before try",
   );
   const postTryMutation = highLevelForeground.replace(
@@ -983,7 +1043,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   );
   assert.throws(
     () => assertPublicClientRelayReadback(postTryMutation),
-    /function body must contain exactly/,
+    /function body must contain client creation, unsubscribe state, then try\/finally/,
     "relay readback must reject even a post-try no-op",
   );
   const swallowedFailure = highLevelForeground.replace(

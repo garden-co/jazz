@@ -94,13 +94,23 @@ export async function proveHighLevelForegroundRelayReadback(
   runNonce: string,
 ): Promise<void> {
   const client = await createJazzClient(clientConfig(capability));
+  let unsubscribe = () => {};
   try {
+    const title = persistedTitleForRun(runNonce);
+    let observed = false;
+    unsubscribe = client.db.subscribe(app.todos, (todos) => {
+      observed ||= todos.some((todo) => todo.title === title);
+    });
+    if (!(await waitForPublication(() => observed))) {
+      throw new Error("fresh high-level React Native foreground did not hydrate the relay row");
+    }
     const rows = await client.db.all(app.todos);
     assertPersistedTitleForRun(
       rows.map((row) => row.title),
       runNonce,
     );
   } finally {
+    unsubscribe();
     await client.shutdown();
   }
 }
