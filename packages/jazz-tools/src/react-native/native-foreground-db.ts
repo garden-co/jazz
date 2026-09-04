@@ -1,6 +1,9 @@
 type ForegroundCommand =
   | "tick"
   | "close"
+  | { type: "disconnectNativeUpstream" }
+  | { type: "reconnectNativeUpstream" }
+  | { type: "nativeConnectionStatus" }
   | { type: "prepareQuery"; query: Uint8Array }
   | { type: "all"; query: number }
   | {
@@ -54,7 +57,15 @@ type ForegroundEvent =
   | { type: "rejected"; reason: string }
   | { type: "closed" };
 
+type NativeConnectionStatus = {
+  type: "nativeConnectionStatus";
+  configured: boolean;
+  explicitlyOffline: boolean;
+  connected: boolean;
+};
+
 type ForegroundResponse =
+  | NativeConnectionStatus
   | { type: "ticked" }
   | { type: "preparedQuery"; query: number }
   | { type: "rows"; rows: Uint8Array }
@@ -239,6 +250,25 @@ export class NativeForegroundDb {
       // platform logout revoked the capability just before this call).
       this.runtime.close();
     }
+  }
+
+  disconnectNativeUpstream(): void {
+    const response = this.execute({ type: "disconnectNativeUpstream" });
+    if (response.type !== "nativeConnectionStatus")
+      return unexpected("disconnectNativeUpstream", response.type);
+  }
+
+  reconnectNativeUpstream(): void {
+    const response = this.execute({ type: "reconnectNativeUpstream" });
+    if (response.type !== "nativeConnectionStatus")
+      return unexpected("reconnectNativeUpstream", response.type);
+  }
+
+  nativeConnectionStatus(): NativeConnectionStatus {
+    const response = this.execute({ type: "nativeConnectionStatus" });
+    if (response.type !== "nativeConnectionStatus")
+      return unexpected("nativeConnectionStatus", response.type);
+    return response;
   }
 
   rejectAuthUpdate(): never {

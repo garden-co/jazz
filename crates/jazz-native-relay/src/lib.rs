@@ -636,6 +636,7 @@ pub struct NativeRelayHost {
     /// foregrounds are only peer leases on that relay; opening a second root
     /// must never open a competing bearer socket for the same SQLite store.
     private_scope_workers: BTreeMap<RelayScope, PrivateScopeSocketWorker>,
+    explicitly_offline_scopes: BTreeSet<RelayScope>,
     relays: BTreeMap<u64, OpenedRelay>,
     clients: BTreeMap<u64, (u64, NativeRelayClient)>,
     /// Foreground aliases opened through the capability-only C ABI. Keeping
@@ -665,6 +666,7 @@ struct OpenedRelay {
 struct PrivateScopeSocketWorker {
     admitted_scope: AdmissionCapability,
     _worker: NativeRelaySocketWorker,
+    connected: Arc<AtomicBool>,
     /// A transient bridge/socket failure is observable to foreground calls
     /// until a new authenticated connection succeeds.  This prevents a
     /// background worker from silently turning an upstream failure into an
@@ -764,6 +766,7 @@ impl Default for NativeRelayHost {
             pending_private_sessions: BTreeMap::new(),
             private_socket_sessions: BTreeMap::new(),
             private_scope_workers: BTreeMap::new(),
+            explicitly_offline_scopes: BTreeSet::new(),
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
             foregrounds: BTreeMap::new(),
@@ -862,6 +865,9 @@ impl NativeRelayHost {
         relay: NativeRelay,
         peer_identity: jazz::ids::AuthorSubject,
     ) -> Result<(), JazzNativeRelayStatus> {
+        if self.explicitly_offline_scopes.contains(scope) {
+            return Ok(());
+        }
         let Some(session) = self.private_socket_sessions.get(&admitted_scope).cloned() else {
             return Ok(());
         };
@@ -876,6 +882,8 @@ impl NativeRelayHost {
         }
         let terminal_error = Arc::new(Mutex::new(None));
         let terminal_for_event = Arc::clone(&terminal_error);
+        let connected = Arc::new(AtomicBool::new(false));
+        let connected_for_event = Arc::clone(&connected);
         let worker = NativeRelaySocketWorker::start(
             relay,
             NativeRelaySocketConfig {
@@ -890,16 +898,20 @@ impl NativeRelayHost {
                 reconnect_delay: std::time::Duration::from_secs(1),
                 on_event: Arc::new(move |event| match event {
                     NativeRelaySocketEvent::Connected => {
+                        connected_for_event.store(true, Ordering::Release);
                         *terminal_for_event
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                     }
                     NativeRelaySocketEvent::TerminalError(error) => {
+                        connected_for_event.store(false, Ordering::Release);
                         *terminal_for_event
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
                     }
-                    NativeRelaySocketEvent::Reconnecting | NativeRelaySocketEvent::Stopped => {}
+                    NativeRelaySocketEvent::Reconnecting | NativeRelaySocketEvent::Stopped => {
+                        connected_for_event.store(false, Ordering::Release);
+                    }
                 }),
             },
         )
@@ -909,10 +921,68 @@ impl NativeRelayHost {
             PrivateScopeSocketWorker {
                 admitted_scope,
                 _worker: worker,
+                connected,
                 terminal_error,
             },
         );
         Ok(())
+    }
+
+    fn foreground_connectivity(
+        &mut self,
+        foreground: u64,
+        disconnect: Option<bool>,
+    ) -> Result<ForegroundDbCommandResponse, JazzNativeRelayStatus> {
+        let opened = self
+            .foregrounds
+            .get(&foreground)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        let scope = opened.scope.clone();
+        let relay = self
+            .relays
+            .get(&opened.relay)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        let capability = relay.admitted_scope;
+        let native_relay = relay.relay.clone();
+        let configured = self.private_socket_sessions.contains_key(&capability);
+        if disconnect.is_some() && !configured {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
+        match disconnect {
+            Some(true) => {
+                // Drop cancels and joins the native bearer socket. Only publish
+                // explicit offline after the real transport has stopped.
+                self.private_scope_workers.remove(&scope);
+                self.explicitly_offline_scopes.insert(scope.clone());
+            }
+            Some(false) => {
+                let author = self
+                    .admitted_scopes
+                    .get(&capability)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                    .config
+                    .identity
+                    .author;
+                let was_offline = self.explicitly_offline_scopes.remove(&scope);
+                if let Err(error) =
+                    self.ensure_private_scope_worker(capability, &scope, native_relay, author)
+                {
+                    if was_offline {
+                        self.explicitly_offline_scopes.insert(scope.clone());
+                    }
+                    return Err(error);
+                }
+            }
+            None => {}
+        }
+        Ok(ForegroundDbCommandResponse::NativeConnectionStatus {
+            configured,
+            explicitly_offline: self.explicitly_offline_scopes.contains(&scope),
+            connected: self
+                .private_scope_workers
+                .get(&scope)
+                .is_some_and(|worker| worker.connected.load(Ordering::Acquire)),
+        })
     }
 
     fn private_scope_terminal_error(&self, scope: &RelayScope) -> Option<String> {
@@ -1590,6 +1660,8 @@ impl NativeRelayHost {
         // provide a fresh bearer. Any opened worker is dropped below with its
         // relay alias, which synchronously cancels its socket thread.
         self.private_socket_sessions.remove(&admitted_scope);
+        self.explicitly_offline_scopes
+            .remove(&admitted.config.scope);
         // This is the scope worker's trusted lifetime boundary. Dropping it
         // synchronously cancels and joins its bearer socket before the
         // durable relay can be closed below.
@@ -2391,6 +2463,24 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         return JazzNativeRelayStatus::InvalidHandle;
     }
     let response = match command {
+        ForegroundDbCommandRequest::DisconnectNativeUpstream => {
+            match host.foreground_connectivity(foreground, Some(true)) {
+                Ok(response) => response,
+                Err(status) => return status,
+            }
+        }
+        ForegroundDbCommandRequest::ReconnectNativeUpstream => {
+            match host.foreground_connectivity(foreground, Some(false)) {
+                Ok(response) => response,
+                Err(status) => return status,
+            }
+        }
+        ForegroundDbCommandRequest::NativeConnectionStatus => {
+            match host.foreground_connectivity(foreground, None) {
+                Ok(response) => response,
+                Err(status) => return status,
+            }
+        }
         ForegroundDbCommandRequest::Probe => ForegroundDbCommandResponse::Probe {
             abi_version: NATIVE_RELAY_ABI_V1,
         },
@@ -2676,10 +2766,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         }
         // Each extension fails closed until its handler is installed. Keep this
         // list explicit so future vocabulary additions require dispatch review.
-        ForegroundDbCommandRequest::StageMutation { .. }
-        | ForegroundDbCommandRequest::DisconnectNativeUpstream
-        | ForegroundDbCommandRequest::ReconnectNativeUpstream
-        | ForegroundDbCommandRequest::NativeConnectionStatus => {
+        ForegroundDbCommandRequest::StageMutation { .. } => {
             ForegroundDbCommandResponse::OperationError {
                 reason: "foreground command handler is unavailable".to_owned(),
             }

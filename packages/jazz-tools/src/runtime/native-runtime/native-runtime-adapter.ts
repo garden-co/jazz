@@ -184,6 +184,13 @@ type NativeDb = {
   close?(): void | boolean | Promise<void | boolean>;
   /** Native foreground capabilities are bound to admission-time auth. */
   rejectAuthUpdate?(): never;
+  disconnectNativeUpstream?(): void;
+  reconnectNativeUpstream?(): void;
+  nativeConnectionStatus?(): {
+    configured: boolean;
+    explicitlyOffline: boolean;
+    connected: boolean;
+  };
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openTransactionId: string, kind: TransactionKind, author?: Uint8Array): void;
   beginTransactionAttributed?(openTransactionId: string, attribution: Uint8Array): void;
@@ -2199,6 +2206,12 @@ export class NativeRuntimeAdapter implements Runtime {
 
   connect(url: string, authJson: string): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
+    if (this.db?.reconnectNativeUpstream) {
+      // The admitted native host owns the endpoint and credentials. The JS
+      // connection manager controls lifecycle only, never a parallel socket.
+      this.db.reconnectNativeUpstream();
+      return;
+    }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
     // A new transport replaces the old one during a temporary reconnect. Server-tier
     // waits are still meaningful across that transition, so only an explicit runtime
@@ -2355,6 +2368,10 @@ export class NativeRuntimeAdapter implements Runtime {
     options: { rejectWaiters?: boolean; preservePreHelloRetry?: boolean } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
+    if (this.db?.disconnectNativeUpstream) {
+      this.db.disconnectNativeUpstream();
+      return;
+    }
     this.serverConnectionGeneration += 1;
     this.clearServerReconnectTimer();
     if (!options.preservePreHelloRetry) this.preHelloRetryCount = 0;

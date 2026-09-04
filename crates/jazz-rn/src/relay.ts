@@ -104,12 +104,16 @@ export type NativeForegroundCommand =
   | { type: 'commitTransaction'; transaction: number }
   | { type: 'rollbackTransaction'; transaction: number }
   | { type: 'subscribeWithOptions'; query: number; optionsJson: string }
-  | { type: 'waitForTransaction'; txId: Uint8Array; tier: string };
+  | { type: 'waitForTransaction'; txId: Uint8Array; tier: string }
+  | { type: 'disconnectNativeUpstream' }
+  | { type: 'reconnectNativeUpstream' }
+  | { type: 'nativeConnectionStatus' };
 
 /** The existing core transaction semantics selected by the foreground codec. */
 export type NativeForegroundTransactionKind = 'mergeable' | 'exclusive';
 
 export type NativeForegroundResponse =
+  | { type: 'nativeConnectionStatus'; configured: boolean; explicitlyOffline: boolean; connected: boolean }
   | { type: 'probe'; abiVersion: number }
   | { type: 'ticked' }
   | { type: 'preparedQuery'; query: number }
@@ -252,6 +256,9 @@ export function encodeNativeForegroundCommand(
   if (command === 'probe') return Uint8Array.of(0);
   if (command === 'tick') return Uint8Array.of(1);
   if (command === 'close') return Uint8Array.of(7);
+  if (command.type === 'disconnectNativeUpstream') return Uint8Array.of(23);
+  if (command.type === 'reconnectNativeUpstream') return Uint8Array.of(24);
+  if (command.type === 'nativeConnectionStatus') return Uint8Array.of(25);
   if (command.type === 'prepareQuery') {
     return concatForegroundBytes(
       Uint8Array.of(2),
@@ -434,6 +441,10 @@ export function decodeNativeForegroundResponse(
       txId: decodeForegroundId(bytes.subarray(1), 'committed txId'),
     };
   if (tag === 16) return { type: 'transactionSettled', txId: decodeForegroundId(bytes.subarray(1), 'settled txId') };
+
+  if (tag === 17 && bytes.length === 4 && bytes.subarray(1).every(value => value === 0 || value === 1)) {
+    return { type: 'nativeConnectionStatus', configured: bytes[1] === 1, explicitlyOffline: bytes[2] === 1, connected: bytes[3] === 1 };
+  }
   if (tag === 15 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
     return { type: 'transactionRolledBack', rolledBack: bytes[1] === 1 };
   }
