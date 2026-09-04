@@ -126,12 +126,12 @@ supplying claims (`INV-RLS-23`).
 #### External JWT claim shape
 
 External JWTs use the standard flat payload shape. `iss`, `sub`, `aud`, `exp`,
-`nbf`, `iat`, and `jti` are reserved registered transport/security claims and
-are not application metadata. The exact verified `iss` and `sub` determine
-`session.user`; no custom ID claim can replace either component, and neither is
-exposed through public `session.claims`. Every other top-level JSON claim is
-exposed by name in `session.claims`, including `null`, arrays, and objects. A
-top-level `claims` key is not special and remains
+`nbf`, `iat`, and `jti` are registered transport/security claims. The complete
+verified payload is exposed by name in public `session.claims`, including those
+registered claims plus custom claims, `null`, arrays, and objects. The exact
+verified `iss` and `sub` determine `session.user`; no claim can replace either
+component or create a second authorship identity. A top-level `claims` key is
+not special and remains
 `session.claims.claims`; Jazz neither requires it nor flattens it. Core policy
 evaluation projects only scalar values and arrays whose members are likewise
 representable. Objects, and arrays containing an object at any depth, remain
@@ -140,9 +140,10 @@ not reject authentication. Recursive object-policy values are not supported
 (`INV-RLS-25`).
 
 For the two self-signed issuers, the signed `jazz_pub_key` verifies the proof
-and derives `sub`; it is not copied into `session.claims` as an application
-policy input. The client and authority therefore bind the same empty claim map
-when no application claim exists, while issuer-scoped authorship remains exact.
+and derives `sub`; that proof material is not copied into `session.claims` as
+an application policy input. The client and authority therefore bind the same
+registered identity metadata when no custom application claim exists, while
+issuer-scoped authorship remains exact.
 This proof-versus-policy boundary was settled in
 [#2518](https://github.com/garden-co/jazz/issues/2518).
 
