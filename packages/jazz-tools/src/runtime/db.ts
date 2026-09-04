@@ -1492,6 +1492,7 @@ export class Db {
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly shutdownAbort = new AbortController();
   private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
@@ -1809,7 +1810,8 @@ export class Db {
   }
 
   protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    await this.connection.ensureReady(tier, signal);
+    await this.connection.ensureReady(tier, signal ?? this.shutdownAbort.signal);
+    this.assertOpen();
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
@@ -2910,6 +2912,7 @@ export class Db {
 
   private async runShutdown(): Promise<void> {
     this.isShuttingDown = true;
+    this.shutdownAbort.abort();
     if (this.localFirstRefreshTimer) {
       clearTimeout(this.localFirstRefreshTimer);
       this.localFirstRefreshTimer = null;

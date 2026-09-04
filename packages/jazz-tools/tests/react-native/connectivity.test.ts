@@ -59,6 +59,11 @@ it("disconnects before any query and reconnects using only native credentials", 
         expect(await db.all(app.notes, { tier: ReadTier.RemoteIfPossible })).toEqual([row]);
         await db.reconnect();
         expect(await db.all(app.notes, { tier: ReadTier.Remote })).toEqual([row]);
+        await db.disconnect();
+        const cancelledRead = db.all(app.notes, { tier: ReadTier.Remote });
+        const rejected = expect(cancelledRead).rejects.toThrow("shutting down or closed");
+        await db.shutdown();
+        await rejected;
       },
       {
         appId: server.appId,
