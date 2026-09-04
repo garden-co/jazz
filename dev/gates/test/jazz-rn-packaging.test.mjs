@@ -16,6 +16,14 @@ const packageJson = JSON.parse(
 );
 const withJazzRn = require("../../../crates/jazz-rn/app.plugin.js");
 const androidRelayArchitectures = "armeabi-v7a,arm64-v8a,x86_64";
+const npmPackMachineArgs = (...args) => [
+  "pack",
+  "--ignore-scripts",
+  "--json",
+  "--foreground-scripts=false",
+  "--loglevel=silent",
+  ...args,
+];
 
 function parseMachineJsonWithStructuredInfoPrelude(stdout, label) {
   // Tool commands normally write one JSON document. Expo and Bob can prefix
@@ -49,14 +57,6 @@ test("machine JSON accepts structured tool info but no arbitrary stdout", () => 
     ),
     { relay: "packed" },
   );
-  assert.deepEqual(
-    parseMachineJsonWithStructuredInfoPrelude(
-      'ℹ [typescript] compiling package sources\n[{"filename":"jazz-rn.tgz"}]\n',
-      "npm pack",
-    ),
-    [{ filename: "jazz-rn.tgz" }],
-    "Bob's TypeScript informational stdout must not hide npm pack's JSON receipt",
-  );
   assert.throws(
     () =>
       parseMachineJsonWithStructuredInfoPrelude(
@@ -80,6 +80,32 @@ test("machine JSON accepts structured tool info but no arbitrary stdout", () => 
       parseMachineJsonWithStructuredInfoPrelude('{"relay":"packed"}\ntrailing output\n', "Expo"),
     SyntaxError,
     "valid JSON must not permit non-whitespace trailing stdout",
+  );
+});
+
+test("npm pack JSON receipts suppress lifecycle chatter", () => {
+  assert.deepEqual(npmPackMachineArgs("--pack-destination", "receipt"), [
+    "pack",
+    "--ignore-scripts",
+    "--json",
+    "--foreground-scripts=false",
+    "--loglevel=silent",
+    "--pack-destination",
+    "receipt",
+  ]);
+  assert.throws(
+    () => JSON.parse('ℹ [typescript] compiling package sources\n[{"filename":"jazz-rn.tgz"}]\n'),
+    SyntaxError,
+    "the CI-observed Bob prelude must be suppressed, not parsed as npm machine JSON",
+  );
+  assert.throws(
+    () =>
+      assert.deepEqual(
+        npmPackMachineArgs().filter((arg) => arg !== "--foreground-scripts=false"),
+        npmPackMachineArgs(),
+      ),
+    /Expected values to be strictly deep-equal/,
+    "a lifecycle-enabled npm pack command must not be accepted as machine-only JSON",
   );
 });
 
@@ -778,16 +804,11 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
   ).pathname;
   try {
     await mkdir(packageDirectory, { recursive: true });
-    const packed = parseMachineJsonWithStructuredInfoPrelude(
-      execFileSync(
-        "npm",
-        ["pack", "--ignore-scripts", "--json", "--pack-destination", packageDirectory],
-        {
-          cwd: new URL("../../../crates/jazz-rn/", import.meta.url),
-          encoding: "utf8",
-        },
-      ),
-      "npm pack",
+    const packed = JSON.parse(
+      execFileSync("npm", npmPackMachineArgs("--pack-destination", packageDirectory), {
+        cwd: new URL("../../../crates/jazz-rn/", import.meta.url),
+        encoding: "utf8",
+      }),
     );
     assert.deepEqual(packed.length, 1, "packing jazz-rn must produce one npm tarball");
     const tarball = join(packageDirectory, packed[0].filename);
@@ -2057,12 +2078,11 @@ test("a dry package includes every staged native relay artifact class", async ()
       await mkdir(dirname(destination), { recursive: true });
       await writeFile(destination, "staged-native-artifact\n");
     }
-    const receipt = parseMachineJsonWithStructuredInfoPrelude(
-      execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+    const receipt = JSON.parse(
+      execFileSync("npm", npmPackMachineArgs("--dry-run"), {
         cwd: directory,
         encoding: "utf8",
       }),
-      "npm pack --dry-run",
     );
     const packed = new Set(receipt[0].files.map(({ path }) => path));
     for (const path of staged) {
