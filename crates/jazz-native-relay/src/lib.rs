@@ -3163,6 +3163,7 @@ impl NativeRelaySocketWorker {
             .name("jazz-native-relay-socket".to_owned())
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
                     .enable_time()
                     .build();
                 if let Ok(runtime) = runtime {
