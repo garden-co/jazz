@@ -2,13 +2,13 @@
 //! Commands contain binding data only; core owns mutation, upload, and fate semantics.
 use super::*;
 use jazz::db::{StreamingMutationKind, StreamingValueUpload, WriteHandle};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle<MemoryStorage>>>>>;
 
 pub(super) struct MutationHandles {
     pub(super) writes: Writes,
-    uploads: Rc<RefCell<BTreeMap<u64, StreamingMutation>>>,
+    uploads: Rc<RefCell<BTreeMap<u64, Rc<StreamingUploadSlot>>>>,
     errors: Rc<RefCell<Vec<jazz::db::MutationErrorEvent>>>,
 }
 
@@ -36,6 +36,11 @@ impl MutationHandles {
         self.errors.borrow_mut().clear();
         Ok(())
     }
+}
+
+struct StreamingUploadSlot {
+    pending: LocalMutex<Option<StreamingMutation>>,
+    closing: Cell<bool>,
 }
 
 struct StreamingMutation {
@@ -164,15 +169,18 @@ impl RelayWorker {
         let handle = Self::next_foreground_handle(client)?;
         client.mutations.uploads.borrow_mut().insert(
             handle,
-            StreamingMutation {
-                table,
-                row_id: RowUuid::from_bytes(row_id),
-                cells,
-                column,
-                mutation,
-                options,
-                upload,
-            },
+            Rc::new(StreamingUploadSlot {
+                closing: Cell::new(false),
+                pending: LocalMutex::new(Some(StreamingMutation {
+                    table,
+                    row_id: RowUuid::from_bytes(row_id),
+                    cells,
+                    column,
+                    mutation,
+                    options,
+                    upload,
+                })),
+            }),
         );
         Ok(handle)
     }
@@ -189,28 +197,28 @@ impl RelayWorker {
             ));
         }
         self.ensure_mutation_operation_capacity(client)?;
-        let (db, uploads, mut pending) = {
+        let (db, slot) = {
             let client = self.foreground_client_mut(client)?;
-            let pending = client
+            let slot = client
                 .mutations
                 .uploads
-                .borrow_mut()
-                .remove(&handle)
+                .borrow()
+                .get(&handle)
+                .cloned()
+                .filter(|slot| !slot.closing.get())
                 .ok_or_else(|| {
-                    RelayError::ForegroundCommand("streaming mutation is closed or busy".into())
+                    RelayError::ForegroundCommand("streaming mutation is closed".into())
                 })?;
-            (
-                Rc::clone(&client.db),
-                Rc::clone(&client.mutations.uploads),
-                pending,
-            )
+            (Rc::clone(&client.db), slot)
         };
         let future: ForegroundOperationFuture = Box::pin(async move {
-            let result = db
-                .push_streaming_value_upload(&mut pending.upload, &chunk)
-                .await;
-            uploads.borrow_mut().insert(handle, pending);
-            result.map_err(RelayError::Db)?;
+            let mut pending = slot.pending.lock().await;
+            let pending = pending.as_mut().ok_or_else(|| {
+                RelayError::ForegroundCommand("streaming mutation is closed".into())
+            })?;
+            db.push_streaming_value_upload(&mut pending.upload, &chunk)
+                .await
+                .map_err(RelayError::Db)?;
             Ok(ForegroundOperationResult::StreamingMutationPushed)
         });
         self.start_foreground_operation(client, None, future)
@@ -222,24 +230,30 @@ impl RelayWorker {
         handle: u64,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         self.ensure_mutation_operation_capacity(client)?;
-        let (db, writes, pending) = {
+        let (db, writes, uploads, slot) = {
             let client = self.foreground_client_mut(client)?;
-            let pending = client
+            let slot = client
                 .mutations
                 .uploads
-                .borrow_mut()
-                .remove(&handle)
+                .borrow()
+                .get(&handle)
+                .cloned()
+                .filter(|slot| !slot.closing.replace(true))
                 .ok_or_else(|| {
                     RelayError::ForegroundCommand("streaming mutation is closed".into())
                 })?;
             (
                 Rc::clone(&client.db),
                 Rc::clone(&client.mutations.writes),
-                pending,
+                Rc::clone(&client.mutations.uploads),
+                slot,
             )
         };
         let future: ForegroundOperationFuture = Box::pin(async move {
-            let write = db
+            let pending = slot.pending.lock().await.take().ok_or_else(|| {
+                RelayError::ForegroundCommand("streaming mutation is closed".into())
+            })?;
+            let result = db
                 .finish_streaming_value_upload(
                     pending.upload,
                     pending.mutation,
@@ -253,8 +267,9 @@ impl RelayWorker {
                     pending.options.base,
                     None,
                 )
-                .await
-                .map_err(RelayError::Db)?;
+                .await;
+            uploads.borrow_mut().remove(&handle);
+            let write = result.map_err(RelayError::Db)?;
             Ok(ForegroundOperationResult::TransactionCommitted(
                 register_write(&writes, write),
             ))
@@ -268,18 +283,32 @@ impl RelayWorker {
         handle: u64,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         self.ensure_mutation_operation_capacity(client)?;
-        let (db, pending) = {
+        let (db, uploads, slot) = {
             let client = self.foreground_client_mut(client)?;
-            let pending = client.mutations.uploads.borrow_mut().remove(&handle);
-            (Rc::clone(&client.db), pending)
+            let slot = client
+                .mutations
+                .uploads
+                .borrow()
+                .get(&handle)
+                .cloned()
+                .filter(|slot| !slot.closing.replace(true));
+            (
+                Rc::clone(&client.db),
+                Rc::clone(&client.mutations.uploads),
+                slot,
+            )
         };
         let future: ForegroundOperationFuture = Box::pin(async move {
-            let Some(pending) = pending else {
+            let Some(slot) = slot else {
                 return Ok(ForegroundOperationResult::StreamingMutationAborted(false));
             };
-            db.abort_streaming_value_upload(pending.upload)
-                .await
-                .map_err(RelayError::Db)?;
+            let pending = slot.pending.lock().await.take();
+            let result = match pending {
+                Some(pending) => db.abort_streaming_value_upload(pending.upload).await,
+                None => Ok(()),
+            };
+            uploads.borrow_mut().remove(&handle);
+            result.map_err(RelayError::Db)?;
             Ok(ForegroundOperationResult::StreamingMutationAborted(true))
         });
         self.start_foreground_operation(client, None, future)

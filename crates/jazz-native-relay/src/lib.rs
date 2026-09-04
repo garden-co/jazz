@@ -7359,6 +7359,160 @@ mod tests {
     // Cancellation has no public TypeScript one-shot API. This host-boundary
     // test uses the existing test-only owner suspension to make contention
     // deterministic, then observes successful cancellation and released pins.
+    // Internal scheduling receipt: JavaScript cannot deterministically suspend the
+    // semantic owner between native commands. All data and uploads still use core.
+    #[test]
+    fn streaming_push_yields_to_a_held_owner_and_close_cancels_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("upload-owner.sqlite"),
+            Some("upload"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x47; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let upload = relay
+            .run(move |worker| {
+                worker.begin_foreground_streaming_mutation(
+                    id,
+                    ForegroundMutationKind::Insert,
+                    "todos".into(),
+                    [0x49; 16],
+                    {
+                        let descriptor =
+                            RecordDescriptor::new(std::iter::empty::<(&str, ValueType)>());
+                        let raw = descriptor.create(&[]).unwrap();
+                        postcard::to_allocvec(&(descriptor, raw)).unwrap()
+                    },
+                    "title".into(),
+                    "{}".into(),
+                )
+            })
+            .unwrap();
+        let held = relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                worker.start_foreground_operation(
+                    id,
+                    None,
+                    Box::pin(async move {
+                        db.hold_node_owner_for_test().await;
+                        unreachable!()
+                    }),
+                )
+            })
+            .unwrap();
+        assert!(matches!(held, ForegroundOperationPoll::Pending { .. }));
+        let push = relay
+            .run(move |worker| {
+                worker.push_foreground_streaming_mutation(id, upload, vec![b'x'; 65536])
+            })
+            .unwrap();
+        assert!(matches!(push, ForegroundOperationPoll::Pending { .. }));
+        client
+            .close()
+            .expect("close must release the owner and unfinished upload");
+        relay
+            .pump()
+            .expect("relay remains usable after pending upload teardown");
+    }
+
+    // Internal scheduling receipt: JavaScript cannot deterministically suspend the
+    // semantic owner between native commands. All data and uploads still use core.
+    #[test]
+    fn streaming_abort_during_pending_push_cannot_resurrect_upload() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("upload-owner.sqlite"),
+            Some("upload"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x47; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let upload = relay
+            .run(move |worker| {
+                worker.begin_foreground_streaming_mutation(
+                    id,
+                    ForegroundMutationKind::Insert,
+                    "todos".into(),
+                    [0x49; 16],
+                    {
+                        let descriptor =
+                            RecordDescriptor::new(std::iter::empty::<(&str, ValueType)>());
+                        let raw = descriptor.create(&[]).unwrap();
+                        postcard::to_allocvec(&(descriptor, raw)).unwrap()
+                    },
+                    "title".into(),
+                    "{}".into(),
+                )
+            })
+            .unwrap();
+        let held = relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                worker.start_foreground_operation(
+                    id,
+                    None,
+                    Box::pin(async move {
+                        db.hold_node_owner_for_test().await;
+                        unreachable!()
+                    }),
+                )
+            })
+            .unwrap();
+        assert!(matches!(held, ForegroundOperationPoll::Pending { .. }));
+        let push = relay
+            .run(move |worker| {
+                worker.push_foreground_streaming_mutation(id, upload, vec![b'x'; 65536])
+            })
+            .unwrap();
+        assert!(matches!(push, ForegroundOperationPoll::Pending { .. }));
+        let abort = relay
+            .run(move |worker| worker.abort_foreground_streaming_mutation(id, upload))
+            .unwrap();
+        let ForegroundOperationPoll::Pending { operation: abort } = abort else {
+            panic!("abort must await in-flight push");
+        };
+        let ForegroundOperationPoll::Pending { operation: holder } = held else {
+            unreachable!()
+        };
+        assert!(client.cancel_foreground_operation(holder).unwrap());
+        let ForegroundOperationPoll::Pending { operation: push } = push else {
+            unreachable!()
+        };
+        for _ in 0..10 {
+            relay.pump().unwrap();
+            if matches!(
+                client.poll_foreground_operation(push).unwrap(),
+                ForegroundOperationPoll::Ready(_)
+            ) {
+                break;
+            }
+        }
+        assert!(matches!(
+            client.poll_foreground_operation(abort).unwrap(),
+            ForegroundOperationPoll::Ready(ForegroundOperationResult::StreamingMutationAborted(
+                true
+            ))
+        ));
+        assert!(
+            relay
+                .run(move |worker| worker.push_foreground_streaming_mutation(id, upload, vec![1]))
+                .is_err()
+        );
+        client.close().unwrap();
+    }
+
     #[test]
     fn cancelled_read_releases_coverage_after_contended_owner_resumes() {
         let directory = tempfile::tempdir().unwrap();
