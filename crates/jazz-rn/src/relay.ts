@@ -387,10 +387,12 @@ export function encodeNativeForegroundCommand(
       Uint8Array.of(15),
       encodeForegroundU64(command.transaction)
     );
-  return concatForegroundBytes(
-    Uint8Array.of(16),
-    encodeForegroundU64(command.transaction)
-  );
+  if (command.type === 'rollbackTransaction')
+    return concatForegroundBytes(
+      Uint8Array.of(16),
+      encodeForegroundU64(command.transaction)
+    );
+  throw new Error('Unsupported native foreground command');
 }
 
 /** Decode the first vertical-slice foreground NativeDb response vocabulary. */

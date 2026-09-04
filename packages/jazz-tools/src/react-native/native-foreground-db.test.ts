@@ -28,7 +28,7 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
             : command;
         if (type === "prepareQuery") return Uint8Array.of(0);
         if (type === "allWithOptions") return Uint8Array.of(1);
-        if (type === "subscribe") return Uint8Array.of(2);
+        if (type === "subscribeWithOptions") return Uint8Array.of(2);
         if (type === "drainSubscription") return Uint8Array.of(3);
         if (type === "poll") return Uint8Array.of(4);
         if (type === "close") return Uint8Array.of(5);
