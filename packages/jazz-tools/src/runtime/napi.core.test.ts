@@ -1026,36 +1026,48 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       return event;
     };
 
+    const observeSource = (source: object) =>
+      new Proxy(source, {
+        get(sourceTarget, sourceProperty) {
+          const sourceValue = Reflect.get(sourceTarget, sourceProperty, sourceTarget) as unknown;
+          if (sourceProperty === "readAll" && typeof sourceValue === "function") {
+            return () => {
+              const events = Reflect.apply(
+                sourceValue,
+                sourceTarget,
+                [],
+              ) as NapiSubscriptionEvent[];
+              rawEvents.push(...events);
+              return events;
+            };
+          }
+          return typeof sourceValue === "function" ? sourceValue.bind(sourceTarget) : sourceValue;
+        },
+      });
+    const observePending = (pending: object) =>
+      new Proxy(pending, {
+        get(target, property) {
+          const value = Reflect.get(target, property, target) as unknown;
+          if (property === "poll" && typeof value === "function") {
+            return () => {
+              const source = Reflect.apply(value, target, []) as object | null | undefined;
+              return source == null ? source : observeSource(source);
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
     const observeDb = (nativeDb: ReturnType<typeof NapiDb.openMemory>) =>
       new Proxy(nativeDb, {
         get(target, property) {
           const value = Reflect.get(target, property, target) as unknown;
-          if (property === "subscribe" && typeof value === "function") {
+          if (
+            (property === "subscribe" || property === "subscribeAsync") &&
+            typeof value === "function"
+          ) {
             return (...args: unknown[]) => {
               const source = Reflect.apply(value, target, args) as object;
-              return new Proxy(source, {
-                get(sourceTarget, sourceProperty) {
-                  const sourceValue = Reflect.get(
-                    sourceTarget,
-                    sourceProperty,
-                    sourceTarget,
-                  ) as unknown;
-                  if (sourceProperty === "readAll" && typeof sourceValue === "function") {
-                    return () => {
-                      const events = Reflect.apply(
-                        sourceValue,
-                        sourceTarget,
-                        [],
-                      ) as NapiSubscriptionEvent[];
-                      rawEvents.push(...events);
-                      return events;
-                    };
-                  }
-                  return typeof sourceValue === "function"
-                    ? sourceValue.bind(sourceTarget)
-                    : sourceValue;
-                },
-              });
+              return property === "subscribeAsync" ? observePending(source) : observeSource(source);
             };
           }
           return typeof value === "function" ? value.bind(target) : value;
