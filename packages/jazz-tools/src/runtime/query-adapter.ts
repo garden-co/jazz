@@ -21,7 +21,7 @@ import {
   type NormalizedIncludeEntry,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
-import { resolveSelectedColumns } from "./select-projection.js";
+import { resolveIncludeColumnNames, resolveSelectedColumns } from "./select-projection.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -301,6 +301,7 @@ function toArraySubqueries(
   const tableRels = relations.get(tableName) || [];
   const subqueries: object[] = [];
   const requireCurrentLevelIncludes = options?.requireIncludes === true;
+  const includeColumnNames = resolveIncludeColumnNames(tableName, Object.keys(includes), schema);
 
   for (const [relName, spec] of Object.entries(includes)) {
     const rel = tableRels.find((r) => r.name === relName);
@@ -326,6 +327,7 @@ function toArraySubqueries(
       requireIncludes: spec.requireIncludes,
     });
     const selectColumns = visibleFullSelectColumns(resolvedSelectColumns);
+    const outputColumnName = includeColumnNames.get(relName) ?? relName;
 
     // Build the subquery based on relation type
     if (rel.type === "forward") {
@@ -333,7 +335,7 @@ function toArraySubqueries(
       // We join from the FK column to the target table's id
       const requirement = includeRequirementForRelation(rel, requireCurrentLevelIncludes);
       subqueries.push({
-        column_name: relName,
+        column_name: outputColumnName,
         table: rel.toTable,
         inner_column: "id",
         outer_column: `${tableName}.${rel.fromColumn}`,
@@ -349,7 +351,7 @@ function toArraySubqueries(
       // Reverse relation: users -> todos via todos.owner_id
       // We join from the target table's FK column to our id
       subqueries.push({
-        column_name: relName,
+        column_name: outputColumnName,
         table: rel.toTable,
         inner_column: rel.toColumn,
         outer_column: `${tableName}.id`,
