@@ -26,12 +26,16 @@ export async function createNativeRelayFixture(
   const directory = await mkdtemp(join(tmpdir(), "jazz-rn-api-"));
   const nativeHost = createPlatformHost();
   const databases: Db[] = [];
+  let cleanupCapability: Uint8Array | undefined;
   let closePromise: Promise<void> | undefined;
   const close = () =>
     (closePromise ??= (async () => {
       const errors: unknown[] = [];
       for (const cleanup of [
         ...databases.map((db) => () => db.shutdown()),
+        () => {
+          if (cleanupCapability) nativeHost.revoke(cleanupCapability);
+        },
         () => {
           nativeHost.close();
         },
@@ -84,6 +88,7 @@ export async function createNativeRelayFixture(
             claims: session.claims,
           }),
         );
+    cleanupCapability = capability;
     const config: DbConfig = { appId, nativeRelay: { capability }, cookieSession: session };
     return {
       nativeHost,
