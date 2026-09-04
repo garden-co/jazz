@@ -2819,24 +2819,16 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     "the React Native validation label must not cause a package preview release",
   );
 
-  const regularPreviewPublish = previewBuild.slice(
-    previewBuild.indexOf("- name: Publish to pkg.pr.new"),
-    previewBuild.indexOf("- name: Publish jazz-rn to pkg.pr.new"),
+  assert.match(
+    previewBuild,
+    /PACKAGES\+=\('\.\/crates\/jazz-rn'\)/,
+    "the single preview publication must add jazz-rn only in RN preview mode",
   );
-  assert.doesNotMatch(
-    regularPreviewPublish,
-    /'\.\/crates\/jazz-rn'/,
-    "ordinary preview-build runs must neither download nor publish jazz-rn",
+  assert.equal(
+    (previewBuild.match(/pnpm exec pkg-pr-new publish/g) ?? []).length,
+    1,
+    "all selected preview packages must be published in one pkg-pr-new invocation",
   );
-  assert.throws(
-    () =>
-      assert.match(
-        regularPreviewPublish.replace("'./packages/create-jazz'", "'./crates/jazz-rn'"),
-        /ordinary preview-build runs must neither download nor publish jazz-rn/,
-      ),
-    /ordinary preview-build runs must neither download nor publish jazz-rn/,
-  );
-
   const previewMode = (labels, sameRepository) => ({
     runs:
       sameRepository && (labels.includes("preview-build") || labels.includes("rn-preview-release")),
