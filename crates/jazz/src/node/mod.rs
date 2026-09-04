@@ -1629,11 +1629,6 @@ impl CurrentRow {
         self.binding_fields.get(index).copied()
     }
 
-    fn binding_field_name_for_column(&self, table: &TableSchema, column: &str) -> Option<String> {
-        let index = self.application_column_index(table, column)?;
-        self.binding_field_names.get(index)?.clone()
-    }
-
     /// Encoded groove record backing this projected current row.
     pub fn encoded_record(&self) -> (&records::RecordDescriptor, &[u8]) {
         (self.record.descriptor(), self.record.raw())
@@ -1753,11 +1748,19 @@ impl CurrentRow {
                 Value::Nullable(cell.map(Box::new))
             };
             values.push(projected);
-            binding_fields.push(
-                self.binding_field_for_column(table, &column.name)
-                    .unwrap_or(CurrentRowBindingField::LogicalField),
-            );
-            binding_field_names.push(self.binding_field_name_for_column(table, &column.name));
+            let binding = self
+                .binding_field_for_column(table, &column.name)
+                .unwrap_or(CurrentRowBindingField::LogicalField);
+            binding_fields.push(binding);
+            // Projection always writes into the physical-looking
+            // `user_{column}` carrier above. Logical sources therefore need
+            // an explicit public name even when their input descriptor used
+            // the public name directly; otherwise the carrier spelling would
+            // become the logical identity after projection.
+            binding_field_names.push(match binding {
+                CurrentRowBindingField::PhysicalColumn => None,
+                CurrentRowBindingField::LogicalField => Some(column.name.clone()),
+            });
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));
