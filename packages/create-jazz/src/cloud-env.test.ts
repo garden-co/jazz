@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,6 +49,7 @@ describe("writeHostedEnv", () => {
       expect(content).toContain("BACKEND_SECRET=backend_secret");
       expect(content).not.toContain(TODO_COMMENT);
       expect(content.endsWith("\n")).toBe(true);
+      expect(readdirSync(dir).some((name) => name.startsWith(".env.create-jazz-"))).toBe(false);
     });
   });
 

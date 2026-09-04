@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const DEFAULT_HOSTED_KEYS = [
@@ -7,8 +8,6 @@ const DEFAULT_HOSTED_KEYS = [
   "JAZZ_ADMIN_SECRET",
   "BACKEND_SECRET",
 ] as const;
-
-type DefaultHostedKey = (typeof DEFAULT_HOSTED_KEYS)[number];
 
 const TODO_COMMENT = "# TODO: provision at https://v2.dashboard.jazz.tools";
 
@@ -22,6 +21,20 @@ function parseEnv(content: string): Map<string, string> {
     map.set(line.slice(0, eq), line.slice(eq + 1));
   }
   return map;
+}
+
+/** Write a complete replacement beside .env, then atomically install it. */
+function writeEnvAtomically(envPath: string, content: string): void {
+  const tempPath = `${envPath}.create-jazz-${randomUUID()}.tmp`;
+  try {
+    // Hosted credentials may be included in content; don't create a world-readable temp file.
+    writeFileSync(tempPath, content, { encoding: "utf8", mode: 0o600 });
+    // The source and destination share a directory, so rename is an atomic replacement.
+    renameSync(tempPath, envPath);
+  } catch (error) {
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+    throw error;
+  }
 }
 
 export function writeHostedEnv({
@@ -95,8 +108,8 @@ export function writeHostedEnv({
   }
 
   if (missing.length === 0) {
-    if (!base.endsWith("\n")) writeFileSync(envPath, base + "\n");
-    else if (base !== existing) writeFileSync(envPath, base);
+    if (!base.endsWith("\n")) writeEnvAtomically(envPath, base + "\n");
+    else if (base !== existing) writeEnvAtomically(envPath, base);
     return;
   }
 
@@ -107,5 +120,5 @@ export function writeHostedEnv({
     needsTodo && !base.includes(TODO_COMMENT)
       ? base + TODO_COMMENT + "\n" + additionBlock
       : base + additionBlock;
-  writeFileSync(envPath, content);
+  writeEnvAtomically(envPath, content);
 }

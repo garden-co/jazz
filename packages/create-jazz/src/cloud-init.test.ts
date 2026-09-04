@@ -215,7 +215,7 @@ describe("runHostedInit", () => {
   });
 
   describe("idempotency", () => {
-    it("short-circuits when appId key already has a value", async () => {
+    it("does not short-circuit when only appId is present", async () => {
       const provisionSpy = vi
         .spyOn(cloudProvision, "provisionHostedApp")
         .mockResolvedValue({ appId: "should-not-be-used", adminSecret: "x", backendSecret: "y" });
@@ -229,17 +229,28 @@ describe("runHostedInit", () => {
         apiUrl: API_URL,
       });
 
-      expect(provisionSpy).not.toHaveBeenCalled();
-      const content = readEnv(dir);
-      expect(content).toBe("NEXT_PUBLIC_JAZZ_APP_ID=existing-app-id\n");
+      expect(provisionSpy).toHaveBeenCalledOnce();
+      expect(parseEnv(readEnv(dir))).toMatchObject({
+        NEXT_PUBLIC_JAZZ_APP_ID: "existing-app-id",
+        NEXT_PUBLIC_JAZZ_SERVER_URL: CLOUD_SYNC_URL,
+        JAZZ_ADMIN_SECRET: "x",
+        BACKEND_SECRET: "y",
+      });
     });
 
-    it("short-circuits when any hosted key has a non-empty value", async () => {
+    it("short-circuits only when every hosted key has a non-empty value", async () => {
       const provisionSpy = vi
         .spyOn(cloudProvision, "provisionHostedApp")
         .mockResolvedValue({ appId: "should-not-be-used", adminSecret: "x", backendSecret: "y" });
 
-      writeFileSync(join(dir, ".env"), "JAZZ_ADMIN_SECRET=some-secret\n", "utf8");
+      writeFileSync(
+        join(dir, ".env"),
+        "NEXT_PUBLIC_JAZZ_APP_ID=existing-app\n" +
+          "NEXT_PUBLIC_JAZZ_SERVER_URL=https://existing.example.com\n" +
+          "JAZZ_ADMIN_SECRET=some-secret\n" +
+          "BACKEND_SECRET=some-backend-secret\n",
+        "utf8",
+      );
 
       await runHostedInit({
         dir,
@@ -298,6 +309,66 @@ describe("runHostedInit", () => {
       expect(values["NEXT_PUBLIC_JAZZ_SERVER_URL"]).toBe(CLOUD_SYNC_URL);
       expect(values["JAZZ_ADMIN_SECRET"]).toBe("retry-admin");
       expect(values["BACKEND_SECRET"]).toBe("retry-backend");
+    });
+
+    it("retries a partial write, preserves its explicit values, and fills missing credentials", async () => {
+      const abandonedAdminSecret = "admin-secret-in-interrupted-write";
+      const abandonedBackendSecret = "backend-secret-in-interrupted-write";
+      const retryAdminSecret = "admin-secret-after-retry";
+      const retryBackendSecret = "backend-secret-after-retry";
+      const provisionSpy = vi
+        .spyOn(cloudProvision, "provisionHostedApp")
+        .mockResolvedValueOnce({
+          appId: "app-written-before-interruption",
+          adminSecret: abandonedAdminSecret,
+          backendSecret: abandonedBackendSecret,
+        })
+        .mockResolvedValueOnce({
+          appId: "app-from-retry",
+          adminSecret: retryAdminSecret,
+          backendSecret: retryBackendSecret,
+        });
+      vi.spyOn(cloudEnv, "writeHostedEnv").mockImplementationOnce(() => {
+        // Plant the pre-atomic failure mode: content reaches .env, then the
+        // write fails before the credential lines are present.
+        writeFileSync(
+          join(dir, ".env"),
+          "NEXT_PUBLIC_JAZZ_APP_ID=user-kept-app\n" +
+            "NEXT_PUBLIC_JAZZ_SERVER_URL=https://user-kept.example.com\n",
+        );
+        throw new Error(`interrupted while writing BACKEND_SECRET=${abandonedBackendSecret}`);
+      });
+      const logs: string[] = [];
+      const options = {
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+        onLog: (_kind: "info" | "warn", message: string) => logs.push(message),
+      };
+
+      await runHostedInit(options);
+      expect(parseEnv(readEnv(dir))).toMatchObject({
+        NEXT_PUBLIC_JAZZ_APP_ID: "user-kept-app",
+        NEXT_PUBLIC_JAZZ_SERVER_URL: "https://user-kept.example.com",
+        JAZZ_ADMIN_SECRET: "",
+        BACKEND_SECRET: "",
+      });
+
+      await runHostedInit(options);
+
+      expect(provisionSpy).toHaveBeenCalledTimes(2);
+      expect(parseEnv(readEnv(dir))).toMatchObject({
+        NEXT_PUBLIC_JAZZ_APP_ID: "user-kept-app",
+        NEXT_PUBLIC_JAZZ_SERVER_URL: "https://user-kept.example.com",
+        JAZZ_ADMIN_SECRET: retryAdminSecret,
+        BACKEND_SECRET: retryBackendSecret,
+      });
+      const output = logs.join("\n");
+      expect(output).not.toContain(abandonedAdminSecret);
+      expect(output).not.toContain(abandonedBackendSecret);
+      expect(output).not.toContain(retryAdminSecret);
+      expect(output).not.toContain(retryBackendSecret);
     });
   });
 

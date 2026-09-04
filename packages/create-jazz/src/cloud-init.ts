@@ -92,7 +92,10 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
     emit("warn", message, credentials);
 
   const existing = readEnvValues(join(dir, ".env"));
-  if (keys.some((k) => existing[k] && existing[k].length > 0)) {
+  // A partial .env can be left by an interrupted legacy write. It is not a
+  // completed configuration: provision again so writeHostedEnv can fill only
+  // the missing/empty placeholders while retaining deliberate user values.
+  if (keys.every((key) => existing[key] && existing[key].length > 0)) {
     return;
   }
 
