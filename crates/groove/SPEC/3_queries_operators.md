@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-QUERY-10`: An inner `JoinOp` MUST NOT double-count pairs where both matching sides changed in the same logical tick.
 - `INV-QUERY-11`: Shared join arrangements MUST apply a given logical-time delta at most once per arrangement key/scope, even when multiple joins consume the arrangement.
 - `INV-QUERY-12`: `AntiJoin` MUST output left rows only when the total right-side multiplicity for the join key is zero.
-- `INV-QUERY-13`: `AntiJoin` MUST retract or restore visible left rows only when the right count crosses zero; changes that keep the right count nonzero MUST NOT emit anti-join deltas.
+- `INV-QUERY-13`: `AntiJoin` MUST retract or restore visible left rows only when the right-side count crosses zero; changes that keep the right count nonzero MUST NOT emit anti-join deltas.
 - `INV-QUERY-14`: Same-tick anti-join updates MUST suppress a left row that arrives with a matching right row and MUST emit a left row exactly once when it arrives in the same tick as the last blocker retracts.
 - `INV-QUERY-15`: SQL `plan_query` MUST reject query parameters; parameterized SQL MUST go through `plan_prepared_shape`/prepared binding flow.
 - `INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form `column = $parameter` or `$parameter = column` as binding predicates.
