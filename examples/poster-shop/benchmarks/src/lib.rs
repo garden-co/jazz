@@ -269,8 +269,16 @@ fn open_db() -> (BenchDb, TableSchema) {
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {
-    let write = block_on(db.insert_with_id_attributed(AuthorSubject::SYSTEM, table, id, cells))
-        .expect("seed PosterShop row");
+    let write = block_on(db.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(id),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .expect("seed PosterShop row");
     block_on(write.wait(DurabilityTier::Local)).expect("local fixture write");
 }
 fn row_id(kind: u8, index: usize) -> RowUuid {

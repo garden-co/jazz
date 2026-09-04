@@ -17,7 +17,8 @@ where
         self.open_transaction(
             id,
             OpenTransactionKind::Exclusive {
-                bound_author: Some(AuthorSubject::SYSTEM),
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: AuthorSubject::SYSTEM,
             },
             AuthorSubject::SYSTEM,
         )
@@ -39,10 +40,21 @@ where
         id: OpenTransactionId,
         made_by: AuthorSubject,
     ) -> Result<(), Error> {
+        self.open_exclusive_with_identity(id, made_by, made_by)
+            .await
+    }
+
+    pub(crate) async fn open_exclusive_with_identity(
+        &mut self,
+        id: OpenTransactionId,
+        made_by: AuthorSubject,
+        permission_subject: AuthorSubject,
+    ) -> Result<(), Error> {
         self.open_transaction(
             id,
             OpenTransactionKind::Exclusive {
-                bound_author: Some(made_by),
+                made_by,
+                permission_subject,
             },
             made_by,
         )
@@ -67,36 +79,32 @@ where
         .await
     }
 
-    /// Whether an open mergeable batch separates durable provenance from its
-    /// permission subject. Such batches are deliberately root-only until
+    /// Whether an open transaction separates durable provenance from its
+    /// permission subject. Such transactions are deliberately root-only until
     /// branch attribution has a complete representation.
-    pub(crate) fn mergeable_transaction_is_attributed(
-        &self,
-        id: OpenTransactionId,
-    ) -> Result<bool, Error> {
+    pub(crate) fn transaction_is_attributed(&self, id: OpenTransactionId) -> Result<bool, Error> {
         match self.open_tx(id)?.kind {
             OpenTransactionKind::Mergeable {
                 made_by,
                 permission_subject: Some(subject),
             } => Ok(subject != made_by),
-            OpenTransactionKind::Mergeable { .. } | OpenTransactionKind::Exclusive { .. } => {
-                Ok(false)
-            }
+            OpenTransactionKind::Exclusive {
+                made_by,
+                permission_subject,
+            } => Ok(permission_subject != made_by),
+            OpenTransactionKind::Mergeable { .. } => Ok(false),
         }
     }
 
-    /// Return the identity capability bound to an open exclusive transaction.
-    pub(crate) fn exclusive_transaction_bound_author(
+    /// Return the permission subject bound to an open exclusive transaction.
+    pub(crate) fn exclusive_transaction_permission_subject(
         &self,
         id: OpenTransactionId,
     ) -> Result<AuthorSubject, Error> {
         match self.open_tx(id)?.kind {
             OpenTransactionKind::Exclusive {
-                bound_author: Some(author),
-            } => Ok(author),
-            OpenTransactionKind::Exclusive { bound_author: None } => {
-                Ok(self.open_tx(id)?.provisional_author)
-            }
+                permission_subject, ..
+            } => Ok(permission_subject),
             OpenTransactionKind::Mergeable { .. } => Err(Error::InvalidMergeableCommit(
                 "open transaction is not exclusive",
             )),
@@ -875,13 +883,11 @@ where
         open_batch_id: OpenTransactionId,
         now_ms: u64,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let OpenTransactionKind::Exclusive {
-            bound_author: Some(author),
-        } = self.open_tx(open_batch_id)?.kind
+        let OpenTransactionKind::Exclusive { made_by, .. } = self.open_tx(open_batch_id)?.kind
         else {
             return Err(Error::OpenTransactionIdentityMismatch);
         };
-        self.commit_exclusive(open_batch_id, author, now_ms).await
+        self.commit_exclusive(open_batch_id, made_by, now_ms).await
     }
 
     /// Commit a bound exclusive transaction at a synchronously reserved local
@@ -891,15 +897,13 @@ where
         open_batch_id: OpenTransactionId,
         reserved: TxId,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let OpenTransactionKind::Exclusive {
-            bound_author: Some(author),
-        } = self.open_tx(open_batch_id)?.kind
+        let OpenTransactionKind::Exclusive { made_by, .. } = self.open_tx(open_batch_id)?.kind
         else {
             return Err(Error::OpenTransactionIdentityMismatch);
         };
         self.commit_exclusive_inner(
             open_batch_id,
-            author,
+            made_by,
             reserved.time.physical_ms(),
             Some(reserved),
         )
@@ -924,14 +928,15 @@ where
         now_ms: u64,
         reserved: Option<TxId>,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let made_by = match self.open_tx(open_batch_id)?.kind {
+        let (made_by, permission_subject) = match self.open_tx(open_batch_id)?.kind {
             OpenTransactionKind::Exclusive {
-                bound_author: Some(bound_author),
-            } if bound_author != made_by => return Err(Error::OpenTransactionIdentityMismatch),
+                made_by: bound_made_by,
+                permission_subject,
+            } if bound_made_by != made_by => return Err(Error::OpenTransactionIdentityMismatch),
             OpenTransactionKind::Exclusive {
-                bound_author: Some(bound_author),
-            } => bound_author,
-            OpenTransactionKind::Exclusive { bound_author: None } => made_by,
+                made_by,
+                permission_subject,
+            } => (made_by, permission_subject),
             OpenTransactionKind::Mergeable { .. } => {
                 return Err(Error::InvalidMergeableCommit(
                     "open transaction is not exclusive",
@@ -1064,11 +1069,9 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by,
-            // Exclusive writes carry their trusted open-session identity
-            // explicitly, just like immediate mergeable session writes. This
-            // keeps authority policy evaluation independent from the transport
-            // link's SYSTEM credential.
-            permission_subject: Some(made_by),
+            // Keep policy evaluation independent from durable provenance and
+            // from the transport link's SYSTEM credential.
+            permission_subject: Some(permission_subject),
             base_snapshot: Some(open_tx.base_snapshot),
             row_read_set: Some(open_tx.row_reads),
             absent_read_set: Some(open_tx.absent_reads),
@@ -1754,7 +1757,8 @@ pub(crate) enum TransactionBranchRowState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenTransactionKind {
     Exclusive {
-        bound_author: Option<AuthorSubject>,
+        made_by: AuthorSubject,
+        permission_subject: AuthorSubject,
     },
     Mergeable {
         made_by: AuthorSubject,

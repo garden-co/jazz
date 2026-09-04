@@ -171,6 +171,7 @@ struct CoreOpenDbIdentity {
 pub struct InsertOptions {
     pub row_id: Option<Uint8Array>,
     pub author: Option<Uint8Array>,
+    pub attribution: Option<Uint8Array>,
     pub branch: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
 }
@@ -178,6 +179,7 @@ pub struct InsertOptions {
 #[napi(object)]
 pub struct UpdateOptions {
     pub author: Option<Uint8Array>,
+    pub attribution: Option<Uint8Array>,
     pub head: Option<JsonValue>,
     pub base: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
@@ -186,6 +188,7 @@ pub struct UpdateOptions {
 #[napi(object)]
 pub struct UpsertOptions {
     pub author: Option<Uint8Array>,
+    pub attribution: Option<Uint8Array>,
     pub head: Option<JsonValue>,
     pub base: Option<JsonValue>,
     /// Parsed only to reject the removed JavaScript `{ branch }` upsert shape.
@@ -207,6 +210,7 @@ pub struct UpsertOptions {
 /// and parse this private representation from the raw JS object instead.
 struct ParsedUpsertOptions {
     author: Option<Uint8Array>,
+    attribution: Option<Uint8Array>,
     head: Option<JsonValue>,
     base: Option<JsonValue>,
     branch_present: bool,
@@ -216,6 +220,7 @@ struct ParsedUpsertOptions {
 #[napi(object)]
 pub struct DeleteOptions {
     pub author: Option<Uint8Array>,
+    pub attribution: Option<Uint8Array>,
     pub head: Option<JsonValue>,
     pub base: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
@@ -224,6 +229,7 @@ pub struct DeleteOptions {
 #[napi(object)]
 pub struct RestoreOptions {
     pub author: Option<Uint8Array>,
+    pub attribution: Option<Uint8Array>,
     pub branch: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
 }
@@ -1536,7 +1542,7 @@ pub struct NapiDb {
     trusted_backend: bool,
     /// Owner-wide marker carried into short-lived attached Tx handles so they
     /// can reject branch operations before staging any mutation.
-    attributed_mergeable_batches: Rc<RefCell<HashSet<CoreOpenTransactionId>>>,
+    attributed_transactions: Rc<RefCell<HashSet<CoreOpenTransactionId>>>,
 }
 
 /// Native bounded-memory sink used by the TypeScript async streaming-mutation
@@ -1550,8 +1556,7 @@ pub struct StreamingMutation {
     cells: Option<CoreRowCells>,
     column: String,
     mutation: CoreStreamingMutationKind,
-    identity: Option<CoreAuthorSubject>,
-    attribution: Option<CoreAuthorSubject>,
+    identity: jazz::db::WriteIdentity,
     updated_at_ms: Option<u64>,
     head: Option<CoreBranchSelector>,
     base: Option<CoreBranchViewBase>,
@@ -1609,7 +1614,6 @@ impl StreamingMutation {
                     self.updated_at_ms,
                     self.head.clone(),
                     self.base.clone(),
-                    self.attribution,
                 ))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -1626,7 +1630,6 @@ impl StreamingMutation {
                     self.updated_at_ms,
                     self.head.clone(),
                     self.base.clone(),
-                    self.attribution,
                 ))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -1954,198 +1957,6 @@ impl NapiDb {
         }
     }
 
-    /// Backend-only root mutation entrypoints. They deliberately do not take
-    /// branch selectors: attributed branch writes fail closed until #1881's
-    /// split transaction/branch representation is designed.
-    #[napi(js_name = "insertWithIdEncodedAttributed")]
-    pub fn insert_with_id_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        self.require_trusted_backend()?;
-        let row = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let options = jazz::db::InsertOptions {
-            row_id: Some(row),
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                let write = db
-                    .enqueue_insert(table, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                let write = db
-                    .enqueue_insert(table, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
-            }
-        }
-    }
-
-    #[napi(js_name = "updateEncodedAttributed")]
-    pub fn update_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        patch: Uint8Array,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        self.require_trusted_backend()?;
-        let row = core_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_core_cells(&patch)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let options = jazz::db::UpdateOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                let write = db
-                    .enqueue_update(table, row, patch, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                let write = db
-                    .enqueue_update(table, row, patch, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
-            }
-        }
-    }
-
-    #[napi(js_name = "upsertEncodedAttributed")]
-    pub fn upsert_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        self.require_trusted_backend()?;
-        let row = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let options = jazz::db::UpsertOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                let write = db
-                    .enqueue_upsert(table, row, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                let write = db
-                    .enqueue_upsert(table, row, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
-            }
-        }
-    }
-
-    #[napi(js_name = "deleteAttributed")]
-    pub fn delete_attributed(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        self.require_trusted_backend()?;
-        let row = core_row_uuid_from_bytes(&row_id)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let options = jazz::db::DeleteOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                let write = db
-                    .enqueue_delete(table, row, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                let write = db
-                    .enqueue_delete(table, row, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
-            }
-        }
-    }
-
-    #[napi(js_name = "restoreEncodedAttributed")]
-    pub fn restore_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        self.require_trusted_backend()?;
-        let row = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let options = jazz::db::RestoreOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                let write = db
-                    .enqueue_restore(table, row, Some(cells), options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                let write = db
-                    .enqueue_restore(table, row, Some(cells), options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
-            }
-        }
-    }
-
     #[napi(js_name = "beginStreamingMutationEncoded")]
     #[allow(clippy::too_many_arguments)] // Flat arguments are the generated NAPI ABI.
     pub fn begin_streaming_mutation_encoded(
@@ -2156,6 +1967,7 @@ impl NapiDb {
         column: String,
         mutation: Option<String>,
         author: Option<Uint8Array>,
+        attribution: Option<Uint8Array>,
         updated_at_ms: Option<f64>,
         head: Option<JsonValue>,
         base: Option<JsonValue>,
@@ -2173,10 +1985,20 @@ impl NapiDb {
                 ));
             }
         };
-        let identity = author
-            .as_ref()
-            .map(|author| core_author_id_from_bytes(author))
-            .transpose()?;
+        if author.is_some() && attribution.is_some() {
+            return Err(napi::Error::from_reason(
+                "streaming mutation identity cannot contain both author and attribution",
+            ));
+        }
+        if attribution.is_some() {
+            self.require_trusted_backend()?;
+            if head.is_some() || base.is_some() {
+                return Err(napi::Error::from_reason(
+                    "backend-attributed streaming mutations do not support branch writes",
+                ));
+            }
+        }
+        let identity = core_write_identity(author, attribution)?;
         let head = head.map(core_branch_selector_from_json).transpose()?;
         let base = core_branch_base_from_json(base)?;
         if base.is_some() && head.is_none() {
@@ -2209,7 +2031,6 @@ impl NapiDb {
             column,
             mutation,
             identity,
-            attribution: None,
             updated_at_ms: updated_at_ms
                 .map(|value| checked_u64(value, "updatedAtMs"))
                 .transpose()?,
@@ -2217,52 +2038,6 @@ impl NapiDb {
             base,
             upload: Some(upload),
         })
-    }
-
-    /// Trusted-backend streaming counterpart: SYSTEM remains the admission
-    /// identity and `attribution` is retained only for final row provenance.
-    /// Branch streaming is intentionally unsupported until its split state is
-    /// designed, so it fails closed rather than silently losing attribution.
-    #[napi(js_name = "beginStreamingMutationAttributedEncoded")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn begin_streaming_mutation_attributed_encoded(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        column: String,
-        mutation: Option<String>,
-        author: Option<Uint8Array>,
-        attribution: Uint8Array,
-        updated_at_ms: Option<f64>,
-        head: Option<JsonValue>,
-        base: Option<JsonValue>,
-    ) -> napi::Result<StreamingMutation> {
-        self.require_trusted_backend()?;
-        if author.is_some() {
-            return Err(napi::Error::from_reason(
-                "backend-attributed streaming mutations cannot override backend admission identity",
-            ));
-        }
-        if head.is_some() || base.is_some() {
-            return Err(napi::Error::from_reason(
-                "backend-attributed streaming mutations do not support branch writes",
-            ));
-        }
-        let attribution = core_author_id_from_bytes(&attribution)?;
-        let mut upload = self.begin_streaming_mutation_encoded(
-            table,
-            row_id,
-            cells,
-            column,
-            mutation,
-            None,
-            updated_at_ms,
-            None,
-            None,
-        )?;
-        upload.attribution = Some(attribution);
-        Ok(upload)
     }
 
     #[napi(factory, js_name = "openMemory")]
@@ -2282,7 +2057,7 @@ impl NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
             trusted_backend: false,
-            attributed_mergeable_batches: Rc::default(),
+            attributed_transactions: Rc::default(),
         })
     }
 
@@ -2305,7 +2080,7 @@ impl NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
             trusted_backend: true,
-            attributed_mergeable_batches: Rc::default(),
+            attributed_transactions: Rc::default(),
         })
     }
 
@@ -2341,7 +2116,7 @@ impl NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
             trusted_backend: false,
-            attributed_mergeable_batches: Rc::default(),
+            attributed_transactions: Rc::default(),
         })
     }
 
@@ -2361,7 +2136,7 @@ impl NapiDb {
             ))))),
             owns_runtime: true,
             trusted_backend: false,
-            attributed_mergeable_batches: Rc::default(),
+            attributed_transactions: Rc::default(),
         })
     }
 
@@ -2383,7 +2158,7 @@ impl NapiDb {
             ))))),
             owns_runtime: true,
             trusted_backend: true,
-            attributed_mergeable_batches: Rc::default(),
+            attributed_transactions: Rc::default(),
         })
     }
 
@@ -2411,7 +2186,7 @@ impl NapiDb {
             ))))),
             owns_runtime: true,
             trusted_backend: false,
-            attributed_mergeable_batches: Rc::default(),
+            attributed_transactions: Rc::default(),
         })
     }
 
@@ -2437,7 +2212,7 @@ impl NapiDb {
             inner: Rc::new(RefCell::new(Some(view))),
             owns_runtime: false,
             trusted_backend: self.trusted_backend,
-            attributed_mergeable_batches: Rc::clone(&self.attributed_mergeable_batches),
+            attributed_transactions: Rc::clone(&self.attributed_transactions),
         })
     }
 
@@ -2461,7 +2236,7 @@ impl NapiDb {
             open_tx: Some(open_transaction_id),
             owns_lifetime: false,
             attributed: self
-                .attributed_mergeable_batches
+                .attributed_transactions
                 .borrow()
                 .contains(&open_transaction_id),
         })
@@ -2485,22 +2260,16 @@ impl NapiDb {
             kind: NapiTxKind::Exclusive,
             open_tx: Some(open_transaction_id),
             owns_lifetime: false,
-            attributed: false,
+            attributed: self
+                .attributed_transactions
+                .borrow()
+                .contains(&open_transaction_id),
         })
     }
 
     /// Begin one owner-wide transaction without creating an owning per-schema Tx.
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(
-        &self,
-        open_transaction_id: String,
-        kind: String,
-        author: Option<Uint8Array>,
-    ) -> napi::Result<()> {
-        self.begin_transaction_inner(open_transaction_id, kind, author, None)
-    }
-
-    fn begin_transaction_inner(
         &self,
         open_transaction_id: String,
         kind: String,
@@ -2520,11 +2289,6 @@ impl NapiDb {
             .transpose()?;
         if attribution.is_some() {
             self.require_trusted_backend()?;
-            if kind != "mergeable" {
-                return Err(napi::Error::from_reason(
-                    "backend-attributed transactions currently require mergeable kind",
-                ));
-            }
             if author.is_some() {
                 return Err(napi::Error::from_reason(
                     "backend-attributed transactions cannot override backend admission identity",
@@ -2545,7 +2309,7 @@ impl NapiDb {
                 let result = if kind == "mergeable" {
                     $db.enqueue_begin_mergeable(open_transaction_id, author, attribution)
                 } else {
-                    $db.enqueue_begin_exclusive(open_transaction_id, author)
+                    $db.enqueue_begin_exclusive(open_transaction_id, author, attribution)
                 };
                 if result.is_ok() && $drive {
                     $db.drive_queued_mutation_once();
@@ -2559,28 +2323,11 @@ impl NapiDb {
         };
         result.map_err(|error| napi::Error::from_reason(error.to_string()))?;
         if attribution.is_some() {
-            self.attributed_mergeable_batches
+            self.attributed_transactions
                 .borrow_mut()
                 .insert(open_transaction_id);
         }
         Ok(())
-    }
-
-    /// Begin the only supported attributed transaction shape. Keeping this a
-    /// distinct native ABI makes an older binding fail closed rather than
-    /// silently treating provenance as ordinary SYSTEM authorship.
-    #[napi(js_name = "beginTransactionAttributed")]
-    pub fn begin_transaction_attributed(
-        &self,
-        open_transaction_id: String,
-        attribution: Uint8Array,
-    ) -> napi::Result<()> {
-        self.begin_transaction_inner(
-            open_transaction_id,
-            "mergeable".to_owned(),
-            None,
-            Some(attribution),
-        )
     }
 
     /// Commit an owner-wide transaction by id and optional kind.
@@ -2615,7 +2362,7 @@ impl NapiDb {
             ))),
         };
         if result.is_ok() {
-            self.attributed_mergeable_batches
+            self.attributed_transactions
                 .borrow_mut()
                 .remove(&open_transaction_id);
         }
@@ -2640,7 +2387,7 @@ impl NapiDb {
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()));
         if result.is_ok() {
-            self.attributed_mergeable_batches
+            self.attributed_transactions
                 .borrow_mut()
                 .remove(&open_transaction_id);
         }
@@ -4294,11 +4041,22 @@ fn core_branch_base_from_json(
         .transpose()
 }
 
-fn core_write_identity(author: Option<Uint8Array>) -> napi::Result<jazz::db::WriteIdentity> {
-    author
-        .map(|author| core_author_id_from_bytes(&author).map(jazz::db::WriteIdentity::Session))
-        .transpose()
-        .map(|identity| identity.unwrap_or_default())
+fn core_write_identity(
+    author: Option<Uint8Array>,
+    attribution: Option<Uint8Array>,
+) -> napi::Result<jazz::db::WriteIdentity> {
+    match (author, attribution) {
+        (Some(_), Some(_)) => Err(napi::Error::from_reason(
+            "write identity cannot contain both author and attribution",
+        )),
+        (Some(author), None) => {
+            core_author_id_from_bytes(&author).map(jazz::db::WriteIdentity::Session)
+        }
+        (None, Some(attribution)) => {
+            core_author_id_from_bytes(&attribution).map(jazz::db::WriteIdentity::Attribution)
+        }
+        (None, None) => Ok(jazz::db::WriteIdentity::Database),
+    }
 }
 
 fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db::InsertOptions> {
@@ -4310,7 +4068,7 @@ fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db:
             .row_id
             .map(|row_id| core_row_uuid_from_bytes(&row_id))
             .transpose()?,
-        identity: core_write_identity(options.author)?,
+        identity: core_write_identity(options.author, options.attribution)?,
         target: options
             .branch
             .map(core_branch_selector_from_json)
@@ -4341,7 +4099,7 @@ fn core_update_options(options: Option<UpdateOptions>) -> napi::Result<jazz::db:
         }
     };
     Ok(jazz::db::UpdateOptions {
-        identity: core_write_identity(options.author)?,
+        identity: core_write_identity(options.author, options.attribution)?,
         target,
         updated_at_ms: options
             .updated_at_ms
@@ -4365,6 +4123,7 @@ fn parse_upsert_options(options: Option<Unknown<'_>>) -> napi::Result<Option<Par
     let object = Object::from_raw(options.value().env, options.value().value);
     Ok(Some(ParsedUpsertOptions {
         author: object.get_named_property_unchecked("author")?,
+        attribution: object.get_named_property_unchecked("attribution")?,
         head: object.get_named_property_unchecked("head")?,
         base: object.get_named_property_unchecked("base")?,
         branch_present: object.has_named_property("branch")?,
@@ -4396,7 +4155,7 @@ fn core_upsert_options(
         }
     };
     Ok(jazz::db::UpsertOptions {
-        identity: core_write_identity(options.author)?,
+        identity: core_write_identity(options.author, options.attribution)?,
         target,
         updated_at_ms: options
             .updated_at_ms
@@ -4408,6 +4167,7 @@ fn core_upsert_options(
 fn core_delete_options(options: Option<DeleteOptions>) -> napi::Result<jazz::db::DeleteOptions> {
     let options = options.map(|options| UpdateOptions {
         author: options.author,
+        attribution: options.attribution,
         head: options.head,
         base: options.base,
         updated_at_ms: options.updated_at_ms,
@@ -4425,7 +4185,7 @@ fn core_restore_options(options: Option<RestoreOptions>) -> napi::Result<jazz::d
         return Ok(Default::default());
     };
     Ok(jazz::db::RestoreOptions {
-        identity: core_write_identity(options.author)?,
+        identity: core_write_identity(options.author, options.attribution)?,
         target: options
             .branch
             .map(core_branch_selector_from_json)
@@ -6253,22 +6013,32 @@ mod tests {
         )
         .unwrap();
         let write = backend
-            .insert_with_id_encoded_attributed(
+            .insert_encoded_with_options(
                 "items".to_owned(),
-                Uint8Array::from(vec![0xb4; 16]),
                 Uint8Array::from(cells.clone()),
-                Uint8Array::from(alice_bytes.clone()),
+                Some(InsertOptions {
+                    row_id: Some(Uint8Array::from(vec![0xb4; 16])),
+                    author: None,
+                    attribution: Some(Uint8Array::from(alice_bytes.clone())),
+                    branch: None,
+                    updated_at_ms: None,
+                }),
             )
             .expect("the explicit backend constructor mints attribution capability");
         assert_eq!(write.row_id, CoreRowUuid::from_bytes([0xb4; 16]));
 
         let ordinary =
             NapiDb::open_memory(Uint8Array::from(schema), Uint8Array::from(config)).unwrap();
-        let err = match ordinary.insert_with_id_encoded_attributed(
+        let err = match ordinary.insert_encoded_with_options(
             "items".to_owned(),
-            Uint8Array::from(vec![0xb4; 16]),
             Uint8Array::from(cells),
-            Uint8Array::from(alice_bytes.clone()),
+            Some(InsertOptions {
+                row_id: Some(Uint8Array::from(vec![0xb4; 16])),
+                author: None,
+                attribution: Some(Uint8Array::from(alice_bytes.clone())),
+                branch: None,
+                updated_at_ms: None,
+            }),
         ) {
             Ok(_) => panic!("a raw NAPI open must never gain attribution authority"),
             Err(err) => err,
@@ -6277,11 +6047,13 @@ mod tests {
 
         let attributed_batch = CoreOpenTransactionId::new().to_string();
         backend
-            .begin_transaction_attributed(
+            .begin_transaction(
                 attributed_batch.clone(),
-                Uint8Array::from(alice.canonical().as_bytes().to_vec()),
+                "mergeable".to_owned(),
+                None,
+                Some(Uint8Array::from(alice.canonical().as_bytes().to_vec())),
             )
-            .expect("an attributed mergeable batch is the supported transaction shape");
+            .expect("an attributed mergeable transaction is supported");
         let mut tx = backend
             .attach_mergeable_tx(attributed_batch.clone())
             .unwrap();
@@ -6291,6 +6063,7 @@ mod tests {
             Some(InsertOptions {
                 row_id: None,
                 author: None,
+                attribution: None,
                 branch: Some(json!({ "branch": "draft" })),
                 updated_at_ms: None,
             }),
@@ -6304,21 +6077,23 @@ mod tests {
         backend.rollback_transaction(attributed_batch).unwrap();
 
         let err = ordinary
-            .begin_transaction_attributed(
+            .begin_transaction(
                 CoreOpenTransactionId::new().to_string(),
-                Uint8Array::from(alice_bytes.clone()),
+                "mergeable".to_owned(),
+                None,
+                Some(Uint8Array::from(alice_bytes.clone())),
             )
             .expect_err("ordinary transactions cannot claim backend attribution");
         assert!(err.reason.contains("explicit backend runtime"));
 
-        let err = match backend.begin_streaming_mutation_attributed_encoded(
+        let err = match backend.begin_streaming_mutation_encoded(
             "items".to_owned(),
             Uint8Array::from(vec![0xb5; 16]),
             Uint8Array::from(Vec::new()),
             "label".to_owned(),
             None,
             Some(Uint8Array::from(alice_bytes)),
-            Uint8Array::from(alice.canonical().as_bytes().to_vec()),
+            Some(Uint8Array::from(alice.canonical().as_bytes().to_vec())),
             None,
             None,
             None,
@@ -6328,17 +6103,17 @@ mod tests {
         };
         assert!(
             err.reason
-                .contains("cannot override backend admission identity")
+                .contains("cannot contain both author and attribution")
         );
 
-        let err = match backend.begin_streaming_mutation_attributed_encoded(
+        let err = match backend.begin_streaming_mutation_encoded(
             "items".to_owned(),
             Uint8Array::from(vec![0xb6; 16]),
             Uint8Array::from(Vec::new()),
             "label".to_owned(),
             None,
             None,
-            Uint8Array::from(alice.canonical().as_bytes().to_vec()),
+            Some(Uint8Array::from(alice.canonical().as_bytes().to_vec())),
             None,
             Some(json!({})),
             None,
@@ -6407,6 +6182,7 @@ mod tests {
             core_insert_options(Some(InsertOptions {
                 row_id: None,
                 author: None,
+                attribution: None,
                 branch: None,
                 updated_at_ms: Some(1.5),
             }))
@@ -6415,6 +6191,7 @@ mod tests {
         assert!(
             core_update_options(Some(UpdateOptions {
                 author: None,
+                attribution: None,
                 head: None,
                 base: None,
                 updated_at_ms: Some(f64::NAN),
@@ -6424,6 +6201,7 @@ mod tests {
         assert!(
             core_upsert_options(Some(ParsedUpsertOptions {
                 author: None,
+                attribution: None,
                 head: None,
                 base: None,
                 branch_present: false,
@@ -6434,6 +6212,7 @@ mod tests {
         assert!(
             core_restore_options(Some(RestoreOptions {
                 author: None,
+                attribution: None,
                 branch: None,
                 updated_at_ms: Some((jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER + 1) as f64),
             }))
@@ -6445,6 +6224,7 @@ mod tests {
     fn javascript_upsert_rejects_removed_branch_property_by_presence() {
         let error = core_upsert_options(Some(ParsedUpsertOptions {
             author: None,
+            attribution: None,
             head: None,
             base: None,
             branch_present: true,
@@ -6464,6 +6244,7 @@ mod tests {
         .expect("branch selector serializes for the binding boundary");
         let parsed = core_upsert_options(Some(ParsedUpsertOptions {
             author: None,
+            attribution: None,
             head: Some(canonical_head),
             base: None,
             branch_present: false,
@@ -6974,7 +6755,7 @@ mod tests {
             ))))),
             owns_runtime: false,
             trusted_backend: false,
-            attributed_mergeable_batches: Rc::default(),
+            attributed_transactions: Rc::default(),
         };
         let alice = CoreAuthorSubject::for_test_bytes([0xa6; 16]);
         let bound = CoreOpenTransactionId::new();
@@ -6983,6 +6764,7 @@ mod tests {
                 bound.to_string(),
                 "exclusive".to_owned(),
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
+                None,
             )
             .unwrap();
         let query = PreparedQuery {
@@ -7000,7 +6782,7 @@ mod tests {
             ))))),
             owns_runtime: false,
             trusted_backend: false,
-            attributed_mergeable_batches: Rc::default(),
+            attributed_transactions: Rc::default(),
         };
         let view_query = PreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),

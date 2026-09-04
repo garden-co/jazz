@@ -194,8 +194,16 @@ fn schema() -> JazzSchema {
     .expect("RecordPlayer benchmark schema compiles")
 }
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {
-    let write = block_on(db.insert_with_id_attributed(AuthorSubject::SYSTEM, table, id, cells))
-        .expect("insert fixture row");
+    let write = block_on(db.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(id),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .expect("insert fixture row");
     block_on(write.wait(DurabilityTier::Local)).expect("fixture durable");
 }
 fn row_id(kind: u8, index: usize) -> RowUuid {

@@ -3104,6 +3104,17 @@ pub enum WriteIdentity {
     Attribution(AuthorSubject),
 }
 
+/// Resolved authorship and authorization roles for one write operation.
+///
+/// `made_by` is durable provenance. `permission_subject` is the identity
+/// explicitly carried for policy evaluation; `None` retains the ordinary
+/// database/link identity path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ResolvedWriteIdentity {
+    pub(super) made_by: AuthorSubject,
+    pub(super) permission_subject: Option<AuthorSubject>,
+}
+
 /// Exact branch selected by an insert or restore.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum ExactWriteTarget {

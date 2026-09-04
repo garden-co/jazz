@@ -35,24 +35,7 @@ export declare class NapiDb {
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
   deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
   restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
-  /**
-   * Backend-only root mutation entrypoints. They deliberately do not take
-   * branch selectors: attributed branch writes fail closed until #1881's
-   * split transaction/branch representation is designed.
-   */
-  insertWithIdEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
-  updateEncodedAttributed(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array): Write
-  upsertEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
-  deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): Write
-  restoreEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
-  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
-  /**
-   * Trusted-backend streaming counterpart: SYSTEM remains the admission
-   * identity and `attribution` is retained only for final row provenance.
-   * Branch streaming is intentionally unsupported until its split state is
-   * designed, so it fails closed rather than silently losing attribution.
-   */
-  beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
@@ -83,13 +66,7 @@ export declare class NapiDb {
   /** Attach a schema view to an existing owner-wide exclusive transaction. */
   attachExclusiveTx(openTransactionId: string): Tx
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
-  beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null): void
-  /**
-   * Begin the only supported attributed transaction shape. Keeping this a
-   * distinct native ABI makes an older binding fail closed rather than
-   * silently treating provenance as ordinary SYSTEM authorship.
-   */
-  beginTransactionAttributed(openTransactionId: string, attribution: Uint8Array): void
+  beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
@@ -271,6 +248,7 @@ export declare class Write {
 
 export interface DeleteOptions {
   author?: Uint8Array
+  attribution?: Uint8Array
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number
@@ -279,6 +257,7 @@ export interface DeleteOptions {
 export interface InsertOptions {
   rowId?: Uint8Array
   author?: Uint8Array
+  attribution?: Uint8Array
   branch?: JsonValue
   updatedAtMs?: number
 }
@@ -301,6 +280,7 @@ export declare function nativeArtifactFingerprint(): string
 
 export interface RestoreOptions {
   author?: Uint8Array
+  attribution?: Uint8Array
   branch?: JsonValue
   updatedAtMs?: number
 }
@@ -406,6 +386,7 @@ export interface SubscriptionUnsupportedShapeCapabilityReason {
 
 export interface UpdateOptions {
   author?: Uint8Array
+  attribution?: Uint8Array
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number
@@ -413,6 +394,7 @@ export interface UpdateOptions {
 
 export interface UpsertOptions {
   author?: Uint8Array
+  attribution?: Uint8Array
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number

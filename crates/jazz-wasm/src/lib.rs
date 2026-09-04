@@ -266,8 +266,7 @@ struct WasmStreamingMutationState {
     row_id: RowUuid,
     cells: RowCells,
     column: String,
-    identity: Option<AuthorSubject>,
-    attribution: Option<AuthorSubject>,
+    identity: jazz::db::WriteIdentity,
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
@@ -326,7 +325,6 @@ impl WasmStreamingMutation {
                         state.updated_at_ms,
                         state.head,
                         state.base,
-                        state.attribution,
                     )
                     .await
                     .map_err(to_js_error)?,
@@ -345,7 +343,6 @@ impl WasmStreamingMutation {
                         state.updated_at_ms,
                         state.head,
                         state.base,
-                        state.attribution,
                     )
                     .await
                     .map_err(to_js_error)?,
@@ -828,16 +825,17 @@ impl WasmDbInner {
         &self,
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
         match self {
             Self::Memory(db) => {
-                db.enqueue_begin_exclusive(id, author)?;
+                db.enqueue_begin_exclusive(id, author, attribution)?;
                 db.drive_queued_mutation_once();
                 Ok(())
             }
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => {
-                db.enqueue_begin_exclusive(id, author)?;
+                db.enqueue_begin_exclusive(id, author, attribution)?;
                 Ok(())
             }
             Self::Closed => panic!("WasmDb is closed"),
@@ -848,15 +846,16 @@ impl WasmDbInner {
         &self,
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
         match self {
             Self::Memory(db) => {
-                db.enqueue_begin_mergeable(id, author, None)?;
+                db.enqueue_begin_mergeable(id, author, attribution)?;
                 db.drive_queued_mutation_once();
                 Ok(())
             }
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.enqueue_begin_mergeable(id, author, None),
+            Self::Browser(db) => db.enqueue_begin_mergeable(id, author, attribution),
             Self::Closed => panic!("WasmDb is closed"),
         }
     }
@@ -1393,182 +1392,6 @@ impl WasmDb {
         }
     }
 
-    /// Backend-only root insert. Admission remains SYSTEM while `author` is
-    /// retained as row provenance; the public raw open cannot enable this.
-    #[wasm_bindgen(js_name = insertWithIdEncodedAttributed)]
-    pub fn insert_with_id_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::InsertOptions {
-            row_id: Some(row_id),
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_insert(table, cells, options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_insert(table, cells, options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = updateEncodedAttributed)]
-    pub fn update_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let patch = decode_cells(&patch)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::UpdateOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_update(table, row_id, patch, options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_update(table, row_id, patch, options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = upsertEncodedAttributed)]
-    pub fn upsert_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::UpsertOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_upsert(table, row_id, cells, options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_upsert(table, row_id, cells, options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = deleteAttributed)]
-    pub fn delete_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::DeleteOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_delete(table, row_id, options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_delete(table, row_id, options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = restoreEncodedAttributed)]
-    pub fn restore_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::RestoreOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_restore(table, row_id, Some(cells), options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_restore(table, row_id, Some(cells), options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
@@ -1758,54 +1581,34 @@ impl WasmDb {
         open_transaction_id: String,
         kind: String,
         author: Option<Vec<u8>>,
+        attribution: Option<Vec<u8>>,
     ) -> Result<(), JsValue> {
         let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         let author = author.as_deref().map(author_id_from_bytes).transpose()?;
+        let attribution = attribution
+            .as_deref()
+            .map(author_id_from_bytes)
+            .transpose()?;
+        if author.is_some() && attribution.is_some() {
+            return Err(JsValue::from_str(
+                "transaction identity cannot contain both author and attribution",
+            ));
+        }
+        if attribution.is_some() {
+            self.require_trusted_backend()?;
+        }
         let inner = self.open_inner()?;
         match kind.as_str() {
             "mergeable" => inner
-                .begin_mergeable(open_transaction_id, author)
+                .begin_mergeable(open_transaction_id, author, attribution)
                 .map_err(to_js_error),
             "exclusive" => inner
-                .begin_exclusive(open_transaction_id, author)
+                .begin_exclusive(open_transaction_id, author, attribution)
                 .map_err(to_js_error),
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
-    }
-
-    /// Begin the only supported attributed transaction shape.  It is distinct
-    /// from `beginTransaction` so an older binding fails closed rather than
-    /// silently converting external provenance into SYSTEM authorship.
-    #[wasm_bindgen(js_name = beginTransactionAttributed)]
-    pub fn begin_transaction_attributed(
-        &self,
-        open_transaction_id: String,
-        attribution: Vec<u8>,
-    ) -> Result<(), JsValue> {
-        self.require_trusted_backend()?;
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let attribution = author_id_from_bytes(&attribution)?;
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let result =
-                    db.enqueue_begin_mergeable(open_transaction_id, None, Some(attribution));
-                if result.is_ok() {
-                    db.drive_queued_mutation_once();
-                }
-                result
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => {
-                db.enqueue_begin_mergeable(open_transaction_id, None, Some(attribution))
-            }
-            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-        }
-        .map_err(to_js_error)
     }
 
     /// Commit an owner-wide mergeable transaction by id.
@@ -2319,71 +2122,51 @@ impl WasmDb {
         column: String,
         mutation: Option<String>,
         author: Option<Vec<u8>>,
+        attribution: Option<Vec<u8>>,
         updated_at_ms: Option<f64>,
         head: Option<JsValue>,
         base: Option<JsValue>,
     ) -> Result<WasmStreamingMutation, JsValue> {
-        self.begin_streaming_mutation_inner(
-            table,
-            row_id,
-            cells,
-            column,
-            mutation,
-            author,
-            None,
-            updated_at_ms,
-            head,
-            base,
-        )
-    }
-
-    /// Trusted-backend streaming counterpart.  SYSTEM remains the admission
-    /// identity; `attribution` is only final row provenance.  Branch streaming
-    /// remains intentionally unsupported until its state model is designed.
-    #[wasm_bindgen(js_name = beginStreamingMutationAttributedEncoded)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn begin_streaming_mutation_attributed_encoded(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        column: String,
-        mutation: Option<String>,
-        author: Option<Vec<u8>>,
-        attribution: Vec<u8>,
-        updated_at_ms: Option<f64>,
-        head: Option<JsValue>,
-        base: Option<JsValue>,
-    ) -> Result<WasmStreamingMutation, JsValue> {
-        self.require_trusted_backend()?;
-        if author.is_some() {
+        if author.is_some() && attribution.is_some() {
             return Err(JsValue::from_str(
-                "backend-attributed streaming mutations cannot override backend admission identity",
+                "streaming mutation identity cannot contain both author and attribution",
             ));
         }
-        if head
-            .as_ref()
-            .is_some_and(|value| !value.is_null() && !value.is_undefined())
-            || base
+        if attribution.is_some()
+            && (head
                 .as_ref()
                 .is_some_and(|value| !value.is_null() && !value.is_undefined())
+                || base
+                    .as_ref()
+                    .is_some_and(|value| !value.is_null() && !value.is_undefined()))
         {
             return Err(JsValue::from_str(
                 "backend-attributed streaming mutations do not support branch writes",
             ));
         }
-        let attribution = author_id_from_bytes(&attribution)?;
+        if attribution.is_some() {
+            self.require_trusted_backend()?;
+        }
+        let identity = match (author, attribution) {
+            (Some(author), None) => {
+                jazz::db::WriteIdentity::Session(author_id_from_bytes(&author)?)
+            }
+            (None, Some(attribution)) => {
+                jazz::db::WriteIdentity::Attribution(author_id_from_bytes(&attribution)?)
+            }
+            (None, None) => jazz::db::WriteIdentity::Database,
+            (Some(_), Some(_)) => unreachable!("checked above"),
+        };
         self.begin_streaming_mutation_inner(
             table,
             row_id,
             cells,
             column,
             mutation,
-            None,
-            Some(attribution),
+            identity,
             updated_at_ms,
-            None,
-            None,
+            head,
+            base,
         )
     }
 
@@ -2395,8 +2178,7 @@ impl WasmDb {
         cells: Vec<u8>,
         column: String,
         mutation: Option<String>,
-        author: Option<Vec<u8>>,
-        attribution: Option<AuthorSubject>,
+        identity: jazz::db::WriteIdentity,
         updated_at_ms: Option<f64>,
         head: Option<JsValue>,
         base: Option<JsValue>,
@@ -2409,7 +2191,6 @@ impl WasmDb {
             "upsert" => StreamingMutationKind::Upsert,
             _ => return Err(JsValue::from_str("unknown streaming mutation kind")),
         };
-        let identity = author.as_deref().map(author_id_from_bytes).transpose()?;
         let updated_at_ms = updated_at_ms
             .map(|value| checked_js_u64(value, "updatedAtMs"))
             .transpose()?;
@@ -2444,7 +2225,6 @@ impl WasmDb {
                 cells,
                 column,
                 identity,
-                attribution,
                 updated_at_ms,
                 head,
                 base,
@@ -2836,7 +2616,7 @@ impl WasmDb {
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         let db = self.open_inner()?;
-        db.begin_mergeable(open_transaction_id, None)
+        db.begin_mergeable(open_transaction_id, None, None)
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db,
@@ -2857,7 +2637,7 @@ impl WasmDb {
             .map_err(|error| JsValue::from_str(&error))?;
         let author = author_id_from_bytes(&author)?;
         let db = self.open_inner()?;
-        db.begin_mergeable(open_transaction_id, Some(author))
+        db.begin_mergeable(open_transaction_id, Some(author), None)
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db,
@@ -2873,7 +2653,7 @@ impl WasmDb {
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         let db = self.open_inner()?;
-        db.begin_exclusive(open_transaction_id, None)
+        db.begin_exclusive(open_transaction_id, None, None)
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db,
@@ -3372,13 +3152,20 @@ fn has_write_option(options: &JsValue, name: &str) -> Result<bool, JsValue> {
 }
 
 fn write_identity_option(options: &JsValue) -> Result<jazz::db::WriteIdentity, JsValue> {
-    write_option(options, "author")?
-        .map(|author| {
-            author_id_from_bytes(&js_sys::Uint8Array::new(&author).to_vec())
-                .map(jazz::db::WriteIdentity::Session)
-        })
-        .transpose()
-        .map(|identity| identity.unwrap_or_default())
+    let author = write_option(options, "author")?;
+    let attribution = write_option(options, "attribution")?;
+    match (author, attribution) {
+        (Some(_), Some(_)) => Err(JsValue::from_str(
+            "write identity cannot contain both author and attribution",
+        )),
+        (Some(author), None) => author_id_from_bytes(&js_sys::Uint8Array::new(&author).to_vec())
+            .map(jazz::db::WriteIdentity::Session),
+        (None, Some(attribution)) => {
+            author_id_from_bytes(&js_sys::Uint8Array::new(&attribution).to_vec())
+                .map(jazz::db::WriteIdentity::Attribution)
+        }
+        (None, None) => Ok(jazz::db::WriteIdentity::Database),
+    }
 }
 
 fn write_timestamp_option(options: &JsValue) -> Result<Option<u64>, JsValue> {

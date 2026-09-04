@@ -96,12 +96,8 @@ where
     /// foreign-function call. Rust callers that want RAII should use
     /// [`Db::mergeable_tx`] instead.
     pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.ensure_mutation_operation_admitted()?;
-        self.lock_for_transaction_open(id)
-            .await?
-            .open_mergeable(id, self.identity.author, None)
+        self.begin_mergeable_with_identity(id, WriteIdentity::Database)
             .await
-            .map_err(Into::into)
     }
 
     /// Open a mergeable transaction authored and permission-checked as `author`.
@@ -112,32 +108,23 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.ensure_mutation_operation_admitted()?;
-        self.lock_for_transaction_open(id)
-            .await?
-            .open_mergeable(id, author, Some(author))
+        self.begin_mergeable_with_identity(id, WriteIdentity::Session(author))
             .await
-            .map_err(Into::into)
     }
 
-    /// Open a mergeable transaction admitted as this Db while retaining an
-    /// external provenance author for every staged write.
-    #[doc(hidden)]
-    pub async fn begin_mergeable_attributed(
+    pub(crate) async fn begin_mergeable_with_identity(
         &self,
         id: OpenTransactionId,
-        made_by: AuthorSubject,
+        identity: WriteIdentity,
     ) -> Result<(), Error> {
         self.ensure_mutation_operation_admitted()?;
-        if made_by != self.identity.author && !self.backend_attribution {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                "attribution requires a trusted serving node",
-            ));
-        }
+        let ResolvedWriteIdentity {
+            made_by,
+            permission_subject,
+        } = self.resolve_write_identity(identity)?;
         self.lock_for_transaction_open(id)
             .await?
-            .open_mergeable(id, made_by, Some(self.identity.author))
+            .open_mergeable(id, made_by, permission_subject)
             .await
             .map_err(Into::into)
     }
@@ -156,25 +143,15 @@ where
                 "attributed transaction cannot override admission identity",
             ));
         }
-        if let Some(made_by) = attribution
-            && made_by != self.identity.author
-            && !self.backend_attribution
-        {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                "attribution requires a trusted serving node",
-            ));
-        }
+        let identity = match (author, attribution) {
+            (_, Some(attribution)) => WriteIdentity::Attribution(attribution),
+            (Some(author), None) => WriteIdentity::Session(author),
+            (None, None) => WriteIdentity::Database,
+        };
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
-            Box::pin(async move {
-                match (author, attribution) {
-                    (_, Some(attribution)) => db.begin_mergeable_attributed(id, attribution).await,
-                    (Some(author), None) => db.begin_mergeable_for_identity(id, author).await,
-                    (None, None) => db.begin_mergeable(id).await,
-                }
-            }),
+            Box::pin(async move { db.begin_mergeable_with_identity(id, identity).await }),
         )
     }
 
@@ -195,7 +172,7 @@ where
         if self
             .lock_for_transaction_operation(tx_id)
             .await?
-            .mergeable_transaction_is_attributed(tx_id)?
+            .transaction_is_attributed(tx_id)?
         {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -772,8 +749,8 @@ where
     /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
     /// [`Db::exclusive_tx`] instead.
     pub async fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.ensure_mutation_operation_admitted()?;
-        self.open_exclusive_handle(id).await
+        self.begin_exclusive_with_identity(id, WriteIdentity::Database)
+            .await
     }
 
     /// Open an exclusive transaction whose identity is fixed for its lifetime.
@@ -786,8 +763,25 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
+        self.begin_exclusive_with_identity(id, WriteIdentity::Session(author))
+            .await
+    }
+
+    pub(crate) async fn begin_exclusive_with_identity(
+        &self,
+        id: OpenTransactionId,
+        identity: WriteIdentity,
+    ) -> Result<(), Error> {
         self.ensure_mutation_operation_admitted()?;
-        self.open_exclusive_handle_for_identity(id, author).await
+        let ResolvedWriteIdentity {
+            made_by,
+            permission_subject,
+        } = self.resolve_write_identity(identity)?;
+        self.lock_for_transaction_open(id)
+            .await?
+            .open_exclusive_with_identity(id, made_by, permission_subject.unwrap_or(made_by))
+            .await
+            .map_err(Into::into)
     }
 
     /// Queue exclusive snapshot admission behind earlier owner operations.
@@ -796,16 +790,23 @@ where
         &self,
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<(), Error> {
+        if attribution.is_some() && author.is_some() {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "attributed transaction cannot override admission identity",
+            ));
+        }
+        let identity = match (author, attribution) {
+            (_, Some(attribution)) => WriteIdentity::Attribution(attribution),
+            (Some(author), None) => WriteIdentity::Session(author),
+            (None, None) => WriteIdentity::Database,
+        };
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
-            Box::pin(async move {
-                match author {
-                    Some(author) => db.begin_exclusive_for_identity(id, author).await,
-                    None => db.begin_exclusive(id).await,
-                }
-            }),
+            Box::pin(async move { db.begin_exclusive_with_identity(id, identity).await }),
         )
     }
 
@@ -1289,7 +1290,7 @@ where
         let identity = self
             .lock_for_transaction_operation(tx_id)
             .await?
-            .exclusive_transaction_bound_author(tx_id)?;
+            .exclusive_transaction_permission_subject(tx_id)?;
         let read_policy = self.table_schema(table)?.read_policy.clone();
         // This authoritative point read distinguishes a hidden target from a
         // genuinely absent one and records the exact snapshot/absence read for

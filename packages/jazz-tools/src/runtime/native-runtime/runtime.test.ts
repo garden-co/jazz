@@ -6309,9 +6309,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     const call = beginStreamingMutationEncoded.mock.calls[0] as unknown[];
     expect(call[4]).toBe("update");
     expect(call[5]).toBeInstanceOf(Uint8Array);
-    expect(call[6]).toBe(1234);
-    expect(call[7]).toEqual(head);
-    expect(call[8]).toEqual(base);
+    expect(call[6]).toBeUndefined();
+    expect(call[7]).toBe(1234);
+    expect(call[8]).toEqual(head);
+    expect(call[9]).toEqual(base);
   });
 
   it.each([
@@ -6382,15 +6383,16 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
   });
 
-  it("uses the explicit backend binding ABI for provenance without passing it as admission", async () => {
-    const insertWithIdEncodedAttributed = vi.fn(
-      (_table: string, _rowId: Uint8Array, _cells: Uint8Array, _author: Uint8Array) => fakeWrite(),
+  it("passes provenance separately from admission through the unified binding ABI", async () => {
+    const insertEncoded = vi.fn(
+      (
+        _table: string,
+        _cells: Uint8Array,
+        _options: { author?: Uint8Array; attribution?: Uint8Array },
+      ) => fakeWrite(),
     );
     const beginTransaction = vi.fn();
-    const beginTransactionAttributed = vi.fn(
-      (_openTransactionId: string, _author: Uint8Array) => undefined,
-    );
-    const beginStreamingMutationAttributedEncoded = vi.fn(
+    const beginStreamingMutationEncoded = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -6406,10 +6408,9 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       }),
     );
     const nativeDb = fakeDb({
-      insertWithIdEncodedAttributed,
+      insertEncoded,
       beginTransaction,
-      beginTransactionAttributed,
-      beginStreamingMutationAttributedEncoded,
+      beginStreamingMutationEncoded,
     });
     const runtime = new NativeRuntimeAdapter(
       {
@@ -6437,15 +6438,22 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       context,
       "00000000-0000-0000-0000-000000000123",
     );
-    const insertCall = insertWithIdEncodedAttributed.mock.calls[0];
+    const insertCall = insertEncoded.mock.calls[0];
     expect(insertCall?.[0]).toBe("todos");
-    expect(new TextDecoder().decode(insertCall?.[3])).toBe(attribution);
+    expect(insertCall?.[2].author).toBeUndefined();
+    expect(new TextDecoder().decode(insertCall?.[2].attribution!)).toBe(attribution);
 
     runtime.beginTransaction("mergeable", "attributed-batch" as never, context);
-    expect(beginTransaction).not.toHaveBeenCalled();
-    const transactionCall = beginTransactionAttributed.mock.calls[0];
+    const transactionCall = beginTransaction.mock.calls[0];
     expect(transactionCall?.[0]).toBe("attributed-batch");
-    expect(new TextDecoder().decode(transactionCall?.[1])).toBe(attribution);
+    expect(transactionCall?.[1]).toBe("mergeable");
+    expect(transactionCall?.[2]).toBeUndefined();
+    expect(new TextDecoder().decode(transactionCall?.[3])).toBe(attribution);
+
+    runtime.beginTransaction("exclusive", "attributed-exclusive" as never, context);
+    const exclusiveCall = beginTransaction.mock.calls[1];
+    expect(exclusiveCall?.[1]).toBe("exclusive");
+    expect(new TextDecoder().decode(exclusiveCall?.[3])).toBe(attribution);
 
     await runtime.streamingMutation(
       "insert",
@@ -6458,7 +6466,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       context,
       "00000000-0000-0000-0000-000000000125",
     );
-    const streamingCall = beginStreamingMutationAttributedEncoded.mock.calls[0];
+    const streamingCall = beginStreamingMutationEncoded.mock.calls[0];
     expect(streamingCall?.[0]).toBe("todos");
     expect(new TextDecoder().decode(streamingCall?.[6])).toBe(attribution);
 
@@ -6471,87 +6479,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "00000000-0000-0000-0000-000000000124",
       ),
     ).toThrow("do not support branch views");
-    expect(insertWithIdEncodedAttributed).toHaveBeenCalledTimes(1);
-  });
-
-  it("fails closed when a backend-attributed NAPI ABI method is absent", async () => {
-    const insertEncoded = vi.fn(() => fakeWrite());
-    const updateEncoded = vi.fn(() => fakeWrite());
-    const upsertEncoded = vi.fn(() => fakeWrite());
-    const deleteEncoded = vi.fn(() => fakeWrite());
-    const restoreEncoded = vi.fn(() => fakeWrite());
-    const beginStreamingMutationEncoded = vi.fn(() => ({
-      push: () => undefined,
-      finish: () => fakeWrite(),
-      abort: () => undefined,
-    }));
-    const beginTransaction = vi.fn();
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () => {
-          throw new Error("not used");
-        },
-        openMemoryAsBackend: () =>
-          fakeDb({
-            insertEncoded,
-            updateEncoded,
-            upsertEncoded,
-            deleteEncoded,
-            restoreEncoded,
-            beginStreamingMutationEncoded,
-            beginTransaction,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-      { backendMode: true, readAuthorizationHost: "trusted-serving" },
-    );
-    const context = JSON.stringify({
-      attribution: JSON.stringify(["https://issuer.example", "alice"]),
-    });
-    const id = "00000000-0000-0000-0000-000000000123";
-    const values = { title: { type: "Text", value: "must not become SYSTEM" } } as const;
-
-    expect(() => runtime.insert("todos", values, context, id)).toThrow("backend-attributed insert");
-    expect(() =>
-      runtime.insert("todos", { title: { type: "Boolean", value: false } } as never, context, id),
-    ).toThrow("backend-attributed insert");
-    expect(() => runtime.update("todos", id, values, context)).toThrow("backend-attributed update");
-    expect(() => runtime.upsert("todos", id, values, context)).toThrow("backend-attributed upsert");
-    expect(() => runtime.delete("todos", id, context)).toThrow("backend-attributed delete");
-    expect(() => runtime.restore("todos", id, values, context)).toThrow(
-      "backend-attributed restore",
-    );
-    await expect(
-      runtime.streamingMutation(
-        "insert",
-        "todos",
-        {},
-        "title",
-        (async function* () {
-          yield "must not begin";
-        })(),
-        context,
-        id,
-      ),
-    ).rejects.toThrow("backend-attributed streaming mutations");
-    expect(() => runtime.beginTransaction("mergeable", "missing-abi" as never, context)).toThrow(
-      "backend-attributed mergeable transactions",
-    );
-
-    expect(insertEncoded).not.toHaveBeenCalled();
-    expect(updateEncoded).not.toHaveBeenCalled();
-    expect(upsertEncoded).not.toHaveBeenCalled();
-    expect(deleteEncoded).not.toHaveBeenCalled();
-    expect(restoreEncoded).not.toHaveBeenCalled();
-    expect(beginStreamingMutationEncoded).not.toHaveBeenCalled();
-    expect(beginTransaction).not.toHaveBeenCalled();
+    expect(insertEncoded).toHaveBeenCalledTimes(1);
   });
 
   it("rejects malformed backend attribution instead of falling back to SYSTEM", () => {

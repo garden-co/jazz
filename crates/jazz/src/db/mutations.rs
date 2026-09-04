@@ -1429,7 +1429,10 @@ where
         validate_updated_at_ms(updated_at_ms)?;
         let supplied_row_id = row_id.is_some();
         let row = row_id.unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
-        let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
+        let ResolvedWriteIdentity {
+            made_by,
+            permission_subject,
+        } = self.resolve_write_identity(identity)?;
         let branch = target.branch();
 
         if supplied_row_id {
@@ -1457,28 +1460,6 @@ where
             updated_at_ms.unwrap_or_else(|| self.next_now_ms()),
             branch,
             None,
-        )
-        .await
-    }
-
-    /// Trusted-backend-only root insert retaining backend admission while
-    /// recording `made_by` as external provenance.
-    #[doc(hidden)]
-    pub async fn insert_with_id_attributed(
-        &self,
-        made_by: AuthorSubject,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.insert(
-            table,
-            cells,
-            InsertOptions {
-                row_id: Some(row),
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
         )
         .await
     }
@@ -1596,7 +1577,18 @@ where
         match result_rx.await {
             Ok(Ok(())) => {
                 self.finish_streaming_value_upload(
-                    upload, mutation, table, row, cells, column, identity, now_ms, head, base, None,
+                    upload,
+                    mutation,
+                    table,
+                    row,
+                    cells,
+                    column,
+                    identity
+                        .map(WriteIdentity::Session)
+                        .unwrap_or(WriteIdentity::Database),
+                    now_ms,
+                    head,
+                    base,
                 )
                 .await
             }
@@ -1722,32 +1714,28 @@ where
         row: RowUuid,
         cells: RowCells,
         column: &str,
-        identity: Option<AuthorSubject>,
+        identity: WriteIdentity,
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
-        attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_mutation_operation_admitted()?;
-        let attribution_rejection = match attribution {
-            Some(author) if author != self.identity.author && !self.backend_attribution => {
-                Some("attribution requires a trusted serving node")
-            }
-            Some(_) if identity.is_some() => Some(
-                "backend-attributed streaming mutations cannot override backend admission identity",
-            ),
-            Some(_) if head.is_some() || base.is_some() => {
-                Some("backend-attributed streaming mutations do not support branch targets")
-            }
-            _ => None,
-        };
-        if let Some(message) = attribution_rejection {
+        if let Err(error) =
+            self.reject_attributed_branch_target(identity, head.is_some() || base.is_some())
+        {
             self.abort_streaming_value_upload(upload).await?;
-            return Err(Error::new(ErrorCode::WriteRejected, message));
+            return Err(error);
         }
-        // Provenance is external, but trusted backend admission remains this
-        // Db's identity all the way through the final policy-bearing commit.
-        let identity = attribution.map(|_| self.identity.author).or(identity);
+        let ResolvedWriteIdentity {
+            made_by,
+            permission_subject,
+        } = match self.resolve_write_identity(identity) {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.abort_streaming_value_upload(upload).await?;
+                return Err(error);
+            }
+        };
         if !upload.initialized {
             self.node
                 .node
@@ -1833,11 +1821,11 @@ where
                 column,
                 staged,
                 nullable,
-                identity,
+                made_by,
+                permission_subject,
                 now_ms,
                 head,
                 base,
-                attribution,
             )
             .await;
         if published.is_err() {
@@ -1927,14 +1915,12 @@ where
         column: &str,
         staged: groove::large_values::StagedLargeValue,
         nullable: bool,
-        identity: Option<AuthorSubject>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
-        attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
-        let made_by = attribution.or(identity).unwrap_or(self.identity.author);
-        let permission_subject = identity;
         let branch = head.clone().unwrap_or_default();
         let (mut cells, parents, authored_columns, inserting) = match mutation {
             StreamingMutationKind::Insert => {
@@ -1942,8 +1928,12 @@ where
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?;
                 } else {
-                    self.ensure_row_absent(table, row, identity.unwrap_or(self.identity.author))
-                        .await?;
+                    self.ensure_row_absent(
+                        table,
+                        row,
+                        permission_subject.unwrap_or(self.identity.author),
+                    )
+                    .await?;
                 }
                 (cells, Vec::new(), None, true)
             }
@@ -1954,14 +1944,14 @@ where
                     .chain(std::iter::once(column.to_owned()))
                     .collect();
                 if let Some(head) = head.as_ref() {
-                    let visible_to_session = match identity {
-                        Some(identity) => Some(
+                    let visible_to_session = match permission_subject {
+                        Some(permission_subject) => Some(
                             self.visible_branch_view_cells_for_identity(
                                 table,
                                 head,
                                 base.as_ref(),
                                 row,
-                                identity,
+                                permission_subject,
                             )
                             .await?
                             .ok_or_else(|| read_for_write_denied("UPDATE", table))?,
@@ -2000,9 +1990,14 @@ where
                         (inherited, Vec::new(), Some(authored), true)
                     }
                 } else {
-                    let (merged, parent, _) = if let Some(identity) = identity {
-                        self.merge_existing_cells_for_identity(table, row, cells, identity)
-                            .await?
+                    let (merged, parent, _) = if let Some(permission_subject) = permission_subject {
+                        self.merge_existing_cells_for_identity(
+                            table,
+                            row,
+                            cells,
+                            permission_subject,
+                        )
+                        .await?
                     } else {
                         self.merge_existing_cells(table, row, cells).await?
                     };
@@ -2016,14 +2011,14 @@ where
                     .chain(std::iter::once(column.to_owned()))
                     .collect();
                 if let Some(head) = head.as_ref() {
-                    let visible_to_session = match identity {
-                        Some(identity) => {
+                    let visible_to_session = match permission_subject {
+                        Some(permission_subject) => {
                             self.visible_branch_view_cells_for_identity(
                                 table,
                                 head,
                                 base.as_ref(),
                                 row,
-                                identity,
+                                permission_subject,
                             )
                             .await?
                         }
@@ -2038,7 +2033,7 @@ where
                             .local_content_winner_tx_id_in_branch(table, head, row)
                             .await?;
                         drop(node);
-                        if identity.is_some() && visible_to_session.is_none() {
+                        if permission_subject.is_some() && visible_to_session.is_none() {
                             return Err(read_for_write_denied("UPSERT", table));
                         }
                         if let Some(visible_to_session) = visible_to_session {
@@ -2051,7 +2046,7 @@ where
                         .await?
                     {
                         drop(node);
-                        if identity.is_some() && visible_to_session.is_none() {
+                        if permission_subject.is_some() && visible_to_session.is_none() {
                             return Err(read_for_write_denied("UPSERT", table));
                         }
                         if let Some(visible_to_session) = visible_to_session {
@@ -2065,8 +2060,8 @@ where
                     }
                 } else {
                     self.ensure_row_not_deleted(table, row).await?;
-                    let exists = if let Some(identity) = identity {
-                        self.upsert_target_for_trusted_identity(table, row, identity)
+                    let exists = if let Some(permission_subject) = permission_subject {
+                        self.upsert_target_for_trusted_identity(table, row, permission_subject)
                             .await?
                             .is_some()
                     } else {
@@ -2075,12 +2070,18 @@ where
                             .is_some()
                     };
                     if exists {
-                        let (merged, parent, _) = if let Some(identity) = identity {
-                            self.merge_existing_cells_for_identity(table, row, cells, identity)
+                        let (merged, parent, _) =
+                            if let Some(permission_subject) = permission_subject {
+                                self.merge_existing_cells_for_identity(
+                                    table,
+                                    row,
+                                    cells,
+                                    permission_subject,
+                                )
                                 .await?
-                        } else {
-                            self.merge_existing_cells(table, row, cells).await?
-                        };
+                            } else {
+                                self.merge_existing_cells(table, row, cells).await?
+                            };
                         (merged, parent.into_iter().collect(), Some(authored), false)
                     } else {
                         (cells, Vec::new(), None, true)
@@ -2183,7 +2184,10 @@ where
             matches!(target, WriteTarget::BranchView { .. }),
         )?;
         validate_updated_at_ms(updated_at_ms)?;
-        let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
+        let ResolvedWriteIdentity {
+            made_by,
+            permission_subject,
+        } = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
         match target {
@@ -2309,26 +2313,6 @@ where
         }
     }
 
-    #[doc(hidden)]
-    pub async fn update_attributed(
-        &self,
-        made_by: AuthorSubject,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.update(
-            table,
-            row,
-            patch,
-            UpdateOptions {
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
-        )
-        .await
-    }
-
     /// Insert or update one row through a single implementation.
     pub async fn upsert(
         &self,
@@ -2348,7 +2332,10 @@ where
             matches!(target, WriteTarget::BranchView { .. }),
         )?;
         validate_updated_at_ms(updated_at_ms)?;
-        let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
+        let ResolvedWriteIdentity {
+            made_by,
+            permission_subject,
+        } = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
         let (branch, cells, parents, authored_columns, verified_inherited_cells) = match target {
@@ -2479,26 +2466,6 @@ where
         .await
     }
 
-    #[doc(hidden)]
-    pub async fn upsert_attributed(
-        &self,
-        made_by: AuthorSubject,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.upsert(
-            table,
-            row,
-            cells,
-            UpsertOptions {
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
-        )
-        .await
-    }
-
     /// Soft-delete one row, optionally through a branch view.
     pub async fn delete(
         &self,
@@ -2517,7 +2484,10 @@ where
             matches!(target, WriteTarget::BranchView { .. }),
         )?;
         validate_updated_at_ms(updated_at_ms)?;
-        let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
+        let ResolvedWriteIdentity {
+            made_by,
+            permission_subject,
+        } = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
         let (branch, parents) = match target {
@@ -2571,24 +2541,6 @@ where
             now_ms,
             branch,
             None,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn delete_attributed(
-        &self,
-        made_by: AuthorSubject,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.delete(
-            table,
-            row,
-            DeleteOptions {
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
         )
         .await
     }
@@ -2711,7 +2663,10 @@ where
             matches!(target, ExactWriteTarget::Branch(_)),
         )?;
         validate_updated_at_ms(updated_at_ms)?;
-        let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
+        let ResolvedWriteIdentity {
+            made_by,
+            permission_subject,
+        } = self.resolve_write_identity(identity)?;
         let branch = target.branch();
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = cells
@@ -2776,26 +2731,6 @@ where
             }
         };
         self.finish_published_write(row, published).await
-    }
-
-    #[doc(hidden)]
-    pub async fn restore_attributed(
-        &self,
-        made_by: AuthorSubject,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.restore(
-            table,
-            row,
-            Some(cells),
-            RestoreOptions {
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
-        )
-        .await
     }
 
     async fn write_mergeable_at_ms_with_authorship(
@@ -2999,17 +2934,26 @@ where
         })
     }
 
-    fn resolve_write_identity(
+    pub(super) fn resolve_write_identity(
         &self,
         identity: WriteIdentity,
-    ) -> Result<(AuthorSubject, Option<AuthorSubject>), Error> {
+    ) -> Result<ResolvedWriteIdentity, Error> {
         match identity {
-            WriteIdentity::Database => Ok((self.identity.author, None)),
-            WriteIdentity::Session(author) => Ok((author, Some(author))),
+            WriteIdentity::Database => Ok(ResolvedWriteIdentity {
+                made_by: self.identity.author,
+                permission_subject: None,
+            }),
+            WriteIdentity::Session(author) => Ok(ResolvedWriteIdentity {
+                made_by: author,
+                permission_subject: Some(author),
+            }),
             WriteIdentity::Attribution(author)
                 if author == self.identity.author || self.backend_attribution =>
             {
-                Ok((author, Some(self.identity.author)))
+                Ok(ResolvedWriteIdentity {
+                    made_by: author,
+                    permission_subject: Some(self.identity.author),
+                })
             }
             WriteIdentity::Attribution(_) => Err(Error::new(
                 ErrorCode::WriteRejected,

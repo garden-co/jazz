@@ -3080,7 +3080,8 @@ where
     ) -> Result<AuthorSubject, Error> {
         Ok(match self.open_tx(tx_id)?.kind {
             OpenTransactionKind::Exclusive {
-                bound_author: Some(bound_identity),
+                permission_subject: bound_identity,
+                ..
             } => {
                 if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
                     && identity != bound_identity
@@ -3091,7 +3092,6 @@ where
                 // ordinary and serving reads use the identity fixed at begin.
                 bound_identity
             }
-            OpenTransactionKind::Exclusive { bound_author: None } => identity,
             OpenTransactionKind::Mergeable {
                 permission_subject: Some(bound_identity),
                 ..

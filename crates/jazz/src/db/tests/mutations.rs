@@ -3160,15 +3160,18 @@ fn backend_attribution_separates_owner_policy_from_external_provenance() {
     .unwrap();
 
     let write = trusted_backend
-        .insert_with_id_attributed(
-            alice,
+        .insert(
             "todos",
-            row(0xb1),
             cells(
                 "admitted by backend, credited to alice",
                 false,
                 backend_author,
             ),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xb1)),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
         )
         .unwrap();
     let unit = trusted_backend
@@ -3210,7 +3213,7 @@ fn backend_attribution_separates_owner_policy_from_external_provenance() {
     assert!(prepared_read(&ordinary_runtime, &ordinary_runtime.table("todos")).is_empty());
 }
 
-/// Backend-attributed mergeable batches and resumable large-value uploads retain
+/// Backend-attributed transactions and resumable large-value uploads retain
 /// one external provenance subject for their final commit while each admission
 /// check remains the trusted backend's. Alice is never granted ownership of the
 /// backend-owned rows in this fixture.
@@ -3220,7 +3223,7 @@ fn backend_attribution_separates_owner_policy_from_external_provenance() {
 ///                                                       └──► committed made_by=alice
 /// ```
 #[test]
-fn backend_attribution_survives_mergeable_and_streaming_publication() {
+fn backend_attribution_survives_transactions_and_streaming_publication() {
     let schema = owner_write_schema();
     let backend_author = AuthorSubject::for_test_bytes([0xb6; 16]);
     let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
@@ -3240,7 +3243,10 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
     .unwrap();
 
     let batch = OpenTransactionId::new();
-    block_on(backend.begin_mergeable_attributed(batch, alice)).unwrap();
+    block_on(
+        backend.begin_mergeable_with_identity(batch, crate::db::WriteIdentity::Attribution(alice)),
+    )
+    .unwrap();
     block_on(backend.mergeable_tx_ref(batch).insert(
         "todos",
         cells("mergeable provenance", false, backend_author),
@@ -3261,6 +3267,35 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
         panic!("mergeable batch must publish a commit unit");
     };
     assert_eq!(tx.made_by, alice);
+    assert_eq!(tx.permission_subject, Some(backend_author));
+
+    let exclusive = OpenTransactionId::new();
+    block_on(
+        backend
+            .begin_exclusive_with_identity(exclusive, crate::db::WriteIdentity::Attribution(alice)),
+    )
+    .unwrap();
+    block_on(backend.exclusive_tx_ref(exclusive).insert(
+        "todos",
+        cells("exclusive provenance", false, backend_author),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xba)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let exclusive_tx = block_on(backend.commit_exclusive_handle(exclusive)).unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(exclusive_tx)
+        .unwrap()
+    else {
+        panic!("exclusive transaction must publish a commit unit");
+    };
+    assert_eq!(tx.made_by, alice);
+    assert_eq!(tx.permission_subject, Some(backend_author));
 
     // An empty attributed patch only checks whether the trusted backend may
     // observe the row. It must not reinterpret external provenance as the
@@ -3292,11 +3327,10 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
         row(0xb8),
         streaming_cells,
         "title",
+        crate::db::WriteIdentity::Attribution(alice),
         None,
         None,
         None,
-        None,
-        Some(alice),
     ))
     .unwrap();
     let SyncMessage::CommitUnit { tx, .. } = backend
@@ -3309,7 +3343,7 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
         panic!("streamed attributed write must publish a commit unit");
     };
     assert_eq!(tx.made_by, alice);
-    assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 2);
+    assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 3);
 
     let branch = BranchSelector::new([("draft", Value::String("alice".to_owned()))]);
     let attributed = crate::db::WriteIdentity::Attribution(alice);
@@ -3388,7 +3422,13 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
     }
 
     let transaction = OpenTransactionId::new();
-    block_on(backend.begin_mergeable_attributed(transaction, alice)).unwrap();
+    block_on(
+        backend.begin_mergeable_with_identity(
+            transaction,
+            crate::db::WriteIdentity::Attribution(alice),
+        ),
+    )
+    .unwrap();
     let err = match block_on(backend.mergeable_tx_ref(transaction).insert(
         "todos",
         BTreeMap::new(),
@@ -3417,41 +3457,16 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
         row(0xba),
         upload_cells,
         "title",
-        None,
+        crate::db::WriteIdentity::Attribution(alice),
         None,
         Some(branch),
         None,
-        Some(alice),
     )) {
         Ok(_) => panic!("attributed streaming branch targets must fail before final staging"),
         Err(err) => err,
     };
     assert_eq!(err.code, ErrorCode::WriteRejected);
 
-    let mixed_cells = BTreeMap::from([
-        ("done".to_owned(), Value::Bool(false)),
-        ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
-    ]);
-    let mixed_upload = backend
-        .begin_streaming_value_upload("todos", &mixed_cells, "title")
-        .unwrap();
-    let err = match block_on(backend.finish_streaming_value_upload(
-        mixed_upload,
-        crate::db::StreamingMutationKind::Insert,
-        "todos",
-        row(0xbb),
-        mixed_cells,
-        "title",
-        Some(backend_author),
-        None,
-        None,
-        None,
-        Some(alice),
-    )) {
-        Ok(_) => panic!("attributed streaming cannot mix an admission override"),
-        Err(err) => err,
-    };
-    assert_eq!(err.code, ErrorCode::WriteRejected);
     assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 2);
 }
 
@@ -3530,11 +3545,10 @@ fn attributed_streaming_uses_system_admission_without_losing_provenance() {
         row(0xac),
         cells,
         "title",
+        crate::db::WriteIdentity::Attribution(alice),
         None,
         None,
         None,
-        None,
-        Some(alice),
     ))
     .expect("SYSTEM must authorize the attributed streaming write");
     for _ in 0..8 {

@@ -27,7 +27,15 @@ fn foreground_local_attachment_waits_for_owner_delivery_not_authority() {
         let cached = row(0x72);
         if seed_cache {
             relay
-                .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+                .insert(
+                    "todos",
+                    cells("saved", false, author),
+                    crate::db::InsertOptions {
+                        row_id: Some(cached),
+                        identity: crate::db::WriteIdentity::Attribution(author),
+                        ..Default::default()
+                    },
+                )
                 .unwrap();
             relay.tick().unwrap();
         }
@@ -161,7 +169,15 @@ fn scope_relays_forward_new_rows_after_empty_subscription_settlement() {
     }
     let inserted = row(0x65);
     let write = alice_fg
-        .insert_with_id_attributed(alice, "todos", inserted, cells("new", false, alice))
+        .insert(
+            "todos",
+            cells("new", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(inserted),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
         .unwrap();
     drive();
     assert_eq!(
@@ -204,7 +220,15 @@ fn scope_relays_forward_new_rows_after_empty_subscription_settlement() {
     drive();
     let second = row(0x66);
     alice_fg
-        .insert_with_id_attributed(alice, "todos", second, cells("second", false, alice))
+        .insert(
+            "todos",
+            cells("second", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(second),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
         .unwrap();
     drive();
     for stream in &mut streams {
@@ -304,11 +328,14 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
     drive();
     let room = row(0x75);
     let write = alice_fg
-        .insert_with_id_attributed(
-            alice,
+        .insert(
             "rooms",
-            room,
             BTreeMap::from([("name".into(), Value::String("Owner room".into()))]),
+            crate::db::InsertOptions {
+                row_id: Some(room),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
         )
         .unwrap();
     drive();
@@ -325,14 +352,17 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
         }
     }
     let invite = alice_fg
-        .insert_with_id_attributed(
-            alice,
+        .insert(
             "members",
-            row(0x76),
             BTreeMap::from([
                 ("room".into(), Value::Uuid(room.0)),
                 ("author".into(), Value::String(bob.canonical().into())),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0x76)),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
         )
         .unwrap();
     drive();
@@ -1935,7 +1965,15 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
     let cached = row(0x67);
     if seed_cache {
         relay
-            .insert_with_id_attributed(author, "todos", cached, cells("cached", false, author))
+            .insert(
+                "todos",
+                cells("cached", false, author),
+                crate::db::InsertOptions {
+                    row_id: Some(cached),
+                    identity: crate::db::WriteIdentity::Attribution(author),
+                    ..Default::default()
+                },
+            )
             .unwrap();
     }
     let (relay_transport, core_transport) = duplex();
@@ -1991,7 +2029,15 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
     );
     if !seed_cache {
         relay
-            .insert_with_id_attributed(author, "todos", cached, cells("cached", false, author))
+            .insert(
+                "todos",
+                cells("cached", false, author),
+                crate::db::InsertOptions {
+                    row_id: Some(cached),
+                    identity: crate::db::WriteIdentity::Attribution(author),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         for _ in 0..16 {
             relay.tick().unwrap();

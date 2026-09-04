@@ -877,8 +877,7 @@ fn retained_streaming_uploads_cannot_mutate_storage_after_sibling_owner_close_st
         jazz::ids::RowUuid::from_bytes([0x7b; 16]),
         cells.clone(),
         "title",
-        None,
-        None,
+        jazz::db::WriteIdentity::Database,
         None,
         None,
         None,
@@ -1225,7 +1224,7 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     storage_control.evict_all();
     control.pause_on(TestStorageOperation::Get);
     control.pause_on(TestStorageOperation::ScanOpen);
-    db.enqueue_begin_exclusive(open_tx, None).unwrap();
+    db.enqueue_begin_exclusive(open_tx, None, None).unwrap();
     db.enqueue_transaction_update(
         open_tx,
         true,
@@ -1366,7 +1365,7 @@ fn queued_commit_uses_host_clock_before_staging_runs() {
         .unwrap();
         let open_tx = OpenTransactionId::new();
         if exclusive {
-            db.enqueue_begin_exclusive(open_tx, None).unwrap();
+            db.enqueue_begin_exclusive(open_tx, None, None).unwrap();
         } else {
             db.enqueue_begin_mergeable(open_tx, None, None).unwrap();
         }
