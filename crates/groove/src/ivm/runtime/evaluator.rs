@@ -90,14 +90,310 @@ mod collect_by_state_tests {
         prepared.groups.clear();
         assert!(!Rc::ptr_eq(&original.payload, &prepared.payload));
     }
+
+    #[test]
+    fn collect_by_group_stages_only_touched_occurrences() {
+        let first = (Vec::new(), Bytes::from_static(b"first"));
+        let second = (Vec::new(), Bytes::from_static(b"second"));
+        let mut live = CollectByGroup::default();
+        live.set(first.clone(), 1);
+        live.commit_overlay();
+
+        let mut staged = live.clone();
+        staged.set(second.clone(), 1);
+
+        assert_eq!(live.get(&second), None);
+        assert_eq!(staged.get(&first), Some(&1));
+        assert_eq!(staged.get(&second), Some(&1));
+        assert!(Rc::ptr_eq(&live.base, &staged.base));
+
+        // Installation removes the live state first, so folding the staged
+        // overlay updates the shared base without re-materializing it.
+        drop(live);
+        staged.commit_overlay();
+        assert!(staged.overlay.is_empty());
+        assert_eq!(staged.get(&first), Some(&1));
+        assert_eq!(staged.get(&second), Some(&1));
+    }
+
+    #[test]
+    fn sparse_groups_stage_one_group_without_cloning_the_outer_index() {
+        let first = b"first".to_vec();
+        let second = b"second".to_vec();
+        let order = (Vec::new(), Bytes::from_static(b"record"));
+        let changed_order = (Vec::new(), Bytes::from_static(b"changed-record"));
+        let mut live = SparseGroups::default();
+        live.get_or_default(first.clone()).set(order.clone(), 1);
+        live.get_or_default(second.clone()).set(order.clone(), 1);
+        live.commit_overlay();
+        let first_base = Rc::as_ptr(&live.get(&first).expect("installed first group").base);
+
+        let mut staged = live.clone();
+        staged
+            .get_or_default(first.clone())
+            .set(changed_order.clone(), 1);
+
+        // This is the scale canary: a tick changing one group must retain the
+        // installed outer map, rather than cloning every unrelated group.
+        assert!(Rc::ptr_eq(&live.base, &staged.base));
+        assert_eq!(live.keys(), BTreeSet::from([first.clone(), second.clone()]));
+        assert_eq!(
+            staged.keys(),
+            BTreeSet::from([first.clone(), second.clone()])
+        );
+        assert_eq!(
+            staged
+                .get(&first)
+                .and_then(|group| group.get(&changed_order)),
+            Some(&1)
+        );
+        assert!(staged.get(&second).is_some());
+
+        drop(live);
+        staged.commit_overlay();
+        assert!(staged.overlay.is_empty());
+        assert_eq!(staged.keys(), BTreeSet::from([first, second]));
+        assert_eq!(
+            Rc::as_ptr(&staged.get(b"first").expect("committed first group").base),
+            first_base,
+            "folding a changed group must not copy its untouched occurrences"
+        );
+    }
 }
 
 pub(super) type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
-type CollectByGroups = BTreeMap<Vec<u8>, BTreeMap<CollectByOrderKey, i64>>;
+type TopByGroups = SparseGroups;
+type CollectByGroups = SparseGroups;
+
+/// Copy-on-write ordered map for the outer window-group index.  Like
+/// [`CollectByGroup`], a speculative tick owns only its changed entries; the
+/// (potentially very large) untouched group index remains shared with the
+/// installed state until the successful install boundary.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SparseGroups {
+    base: Rc<BTreeMap<Vec<u8>, CollectByGroup>>,
+    overlay: Rc<BTreeMap<Vec<u8>, Option<CollectByGroup>>>,
+}
+
+impl SparseGroups {
+    pub(super) fn get(&self, key: &[u8]) -> Option<&CollectByGroup> {
+        self.overlay.get(key).and_then(Option::as_ref).or_else(|| {
+            (!self.overlay.contains_key(key))
+                .then(|| self.base.get(key))
+                .flatten()
+        })
+    }
+
+    pub(super) fn get_or_default(&mut self, key: Vec<u8>) -> &mut CollectByGroup {
+        let base = &self.base;
+        let overlay = Rc::make_mut(&mut self.overlay);
+        let group = match overlay.entry(key.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                // A previous retraction can leave a tombstone in the staged
+                // overlay. A later delta in the same tick must revive it.
+                if entry.get().is_none() {
+                    entry.insert(Some(base.get(&key).cloned().unwrap_or_default()));
+                }
+                entry.into_mut()
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(base.get(&key).cloned().unwrap_or_default()))
+            }
+        };
+        group.as_mut().expect("revived group is present")
+    }
+
+    pub(super) fn remove_empty_touched_groups<I>(&mut self, keys: I)
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        for key in keys {
+            if self.get(&key).is_some_and(CollectByGroup::is_empty) {
+                Rc::make_mut(&mut self.overlay).insert(key, None);
+            }
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.base = Rc::default();
+        self.overlay = Rc::default();
+    }
+
+    /// Rank a present group in the merged ordered map without constructing a
+    /// combined snapshot of all groups.
+    pub(super) fn count_before(&self, key: &[u8]) -> usize {
+        let retained_base = self
+            .base
+            .range(..key.to_vec())
+            .filter(|(candidate, _)| self.overlay.get(*candidate).is_none_or(Option::is_some))
+            .count();
+        let inserted_overlay = self
+            .overlay
+            .range(..key.to_vec())
+            .filter(|(candidate, group)| group.is_some() && !self.base.contains_key(*candidate))
+            .count();
+        retained_base + inserted_overlay
+    }
+
+    #[cfg(test)]
+    pub(super) fn keys(&self) -> BTreeSet<Vec<u8>> {
+        let mut keys = self.base.keys().cloned().collect::<BTreeSet<_>>();
+        for (key, value) in self.overlay.iter() {
+            if value.is_some() {
+                keys.insert(key.clone());
+            } else {
+                keys.remove(key);
+            }
+        }
+        keys
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.keys().len()
+    }
+
+    /// Fold after the installed state was removed.  Remove a replaced group
+    /// from the uniquely-owned outer map *before* folding its inner overlay:
+    /// the staged group shares that inner base with the old map entry, so
+    /// folding first would make `Rc::make_mut` clone every occurrence.
+    pub(super) fn commit_overlay(&mut self) {
+        if self.overlay.is_empty() {
+            return;
+        }
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|value| (*value).clone());
+        let mut base =
+            Rc::try_unwrap(std::mem::take(&mut self.base)).unwrap_or_else(|value| (*value).clone());
+        for (key, group) in overlay {
+            // Dropping the pre-image first makes an existing staged group's
+            // occurrence base uniquely owned on the successful install path.
+            base.remove(&key);
+            if let Some(mut group) = group {
+                group.commit_overlay();
+                base.insert(key, group);
+            }
+        }
+        self.base = Rc::new(base);
+    }
+}
+
+/// A collector group is copied between a live evaluator and its staged tick.
+/// Keep its long-lived occurrence map immutable and record only touched keys
+/// in the staged overlay.  A single child edit must not clone every child of a
+/// large parent collection merely because the tick later needs atomic commit.
+#[derive(Clone, Debug, Default)]
+pub(super) struct CollectByGroup {
+    base: Rc<BTreeMap<CollectByOrderKey, i64>>,
+    overlay: Rc<BTreeMap<CollectByOrderKey, Option<i64>>>,
+}
+
+impl CollectByGroup {
+    pub(super) fn get(&self, key: &CollectByOrderKey) -> Option<&i64> {
+        self.overlay.get(key).and_then(Option::as_ref).or_else(|| {
+            (!self.overlay.contains_key(key))
+                .then(|| self.base.get(key))
+                .flatten()
+        })
+    }
+
+    pub(super) fn set(&mut self, key: CollectByOrderKey, weight: i64) {
+        Rc::make_mut(&mut self.overlay).insert(key, (weight != 0).then_some(weight));
+    }
+
+    pub(super) fn count_before(&self, key: &CollectByOrderKey) -> usize {
+        self.iter()
+            .take_while(|(candidate, _)| *candidate < key)
+            .filter(|(_, weight)| **weight > 0)
+            .count()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+
+    pub(super) fn iter(&self) -> CollectByGroupIter<'_> {
+        CollectByGroupIter {
+            base: self.base.iter().peekable(),
+            overlay: self.overlay.iter().peekable(),
+        }
+    }
+
+    /// Fold this tick's sparse mutations only after the old live operator was
+    /// removed, making the common commit path uniquely own the base map.
+    pub(super) fn commit_overlay(&mut self) {
+        if self.overlay.is_empty() {
+            return;
+        }
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
+        let base = Rc::make_mut(&mut self.base);
+        for (key, weight) in overlay {
+            if let Some(weight) = weight {
+                base.insert(key, weight);
+            } else {
+                base.remove(&key);
+            }
+        }
+    }
+}
+
+pub(super) struct CollectByGroupIter<'a> {
+    base: std::iter::Peekable<std::collections::btree_map::Iter<'a, CollectByOrderKey, i64>>,
+    overlay:
+        std::iter::Peekable<std::collections::btree_map::Iter<'a, CollectByOrderKey, Option<i64>>>,
+}
+
+impl<'a> Iterator for CollectByGroupIter<'a> {
+    type Item = (&'a CollectByOrderKey, &'a i64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match (self.base.peek(), self.overlay.peek()) {
+                (Some((base_key, base_weight)), Some((overlay_key, overlay_weight))) => {
+                    match base_key.cmp(overlay_key) {
+                        std::cmp::Ordering::Less => {
+                            let item = (*base_key, *base_weight);
+                            self.base.next();
+                            return Some(item);
+                        }
+                        std::cmp::Ordering::Greater => {
+                            let item = (*overlay_key, *overlay_weight);
+                            self.overlay.next();
+                            if let (key, Some(weight)) = item {
+                                return Some((key, weight));
+                            }
+                        }
+                        std::cmp::Ordering::Equal => {
+                            self.base.next();
+                            let item = self.overlay.next().expect("overlay was peeked");
+                            if let (key, Some(weight)) = item {
+                                return Some((key, weight));
+                            }
+                        }
+                    }
+                }
+                (Some((key, weight)), None) => {
+                    let item = (*key, *weight);
+                    self.base.next();
+                    return Some(item);
+                }
+                (None, Some((key, weight))) => {
+                    let item = (*key, *weight);
+                    self.overlay.next();
+                    if let (key, Some(weight)) = item {
+                        return Some((key, weight));
+                    }
+                }
+                (None, None) => return None,
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct TopByIncrementalState {
-    groups: CollectByGroups,
+    groups: TopByGroups,
 }
 
 impl TopByIncrementalState {
@@ -108,10 +404,18 @@ impl TopByIncrementalState {
         I: IntoIterator<Item = Vec<u8>>,
     {
         for group in groups {
-            if self.groups.get(&group).is_some_and(BTreeMap::is_empty) {
-                self.groups.remove(&group);
+            if self
+                .groups
+                .get(&group)
+                .is_some_and(CollectByGroup::is_empty)
+            {
+                self.groups.remove_empty_touched_groups([group]);
             }
         }
+    }
+
+    pub(super) fn commit_overlays(&mut self) {
+        self.groups.commit_overlay();
     }
 
     #[cfg(test)]
@@ -1786,18 +2090,14 @@ impl TickEvaluator<'_> {
             let group = state
                 .value_mut()
                 .groups
-                .entry(group_prefix.clone())
-                .or_default();
+                .get_or_default(group_prefix.clone());
             for delta in group_deltas {
                 let order_key = (
                     top_by_sort_key(output_desc, delta.raw(), top_by)?,
                     delta.record.clone(),
                 );
-                let weight = group.entry(order_key.clone()).or_default();
-                *weight += delta.weight;
-                if *weight == 0 {
-                    group.remove(&order_key);
-                }
+                let weight = group.get(&order_key).copied().unwrap_or_default() + delta.weight;
+                group.set(order_key, weight);
             }
         }
         state

@@ -92,12 +92,14 @@ describe("startLocalJazzServer via JazzServer", () => {
       adminSecret: "admin-secret",
       inMemory: true,
     });
-
-    expect(handle.port).toBe(port);
     const healthResponse = await fetch(`${handle.url}/health`);
-    expect(healthResponse.ok).toBe(true);
+    expect(handle.port).toBe(port);
+    expect(healthResponse.status).toBe(503);
+    await expect(healthResponse.json()).resolves.toEqual({
+      status: "not_ready",
+      component: "runtime",
+    });
   }, 30_000);
-
   it("uses an isolated temp data dir by default and cleans it up on stop", async () => {
     let first: LocalJazzServerHandle | null = null;
     let second: LocalJazzServerHandle | null = null;

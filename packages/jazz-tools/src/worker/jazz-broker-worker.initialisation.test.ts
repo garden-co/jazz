@@ -846,6 +846,44 @@ describe("broker worker context initialization", () => {
     expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
   });
 
+  it("keeps an ordinarily idle realm probeable after releasing its physical owner", async () => {
+    const initOptions = options("idle-reopen-lease-handoff");
+    const first = await connect(initOptions, "first-tab");
+    await initializeFollower(first.port, 1);
+
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    first.port.emitMessage({ type: "close", id: 2, releaseContext: true });
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+
+    // A portless realm may be reclaimed by the browser, but an explicit
+    // close creates a same-name admission black hole between close request
+    // and actual realm destruction. Its next lease probe must therefore be
+    // answered by this still-live realm rather than waiting for a timeout.
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+    const successor = connectLeaseProbe();
+    const alive = successor.port.waitForLeaseProbeOutcome();
+    successor.port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "idle-reopen-lease-probe",
+    });
+    await expect(alive).resolves.toEqual({
+      type: "foreground-node-lease-worker-alive",
+      attemptId: "idle-reopen-lease-probe",
+    });
+
+    const allocated = successor.port.waitForLeaseOutcome();
+    successor.port.emitMessage({
+      type: "acquire-foreground-node-lease",
+      attemptId: "idle-reopen-lease-probe",
+      dbName: initOptions.dbName,
+      storageOwner: initOptions.storageOwner,
+    });
+    await expect(allocated).resolves.toEqual(
+      expect.objectContaining({ type: "foreground-node-lease-ready" }),
+    );
+  });
+
   it("retries only a classified external physical-owner conflict", async () => {
     const { BrowserPhysicalDatabaseBusyError } =
       await import("../runtime/browser-physical-database-epoch.js");

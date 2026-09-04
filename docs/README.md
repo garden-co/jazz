@@ -43,3 +43,23 @@ resources:
   features and API.
 - [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
 - [Fumadocs](https://fumadocs.dev) - learn about Fumadocs
+
+## Vercel deployment
+
+The `jazz2-docs` Vercel project is connected to this GitHub repository with
+Root Directory `docs`. Its checked-in Ignored Build Step consults GitHub's
+public pull-request API and builds only an open, trusted, same-repository pull
+request carrying the `docs` label. Branch deployments, forks, untrusted
+authors, unlabeled or closed pull requests, malformed metadata, and failed API
+lookups are skipped.
+
+Production is deliberately disabled: every production event, including a push
+to `main`, exits successfully from the Ignored Build Step and does not build.
+Enable production later only by changing the checked-in filter and its tests.
+The project-level fallback is also `exit 0`, so revisions without this checked-in
+configuration skip rather than deploying.
+
+The Vercel project's **Preview** environment must contain no sensitive values:
+applying `docs` is a maintainer trust decision that allows the pull request's
+code to run in Vercel's remote build environment. No Vercel access token or
+GitHub Actions secret is required for this deployment path.

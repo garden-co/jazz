@@ -1695,7 +1695,13 @@ function maybeCloseWorker(): void {
           recordWorkerLifecycle("owner-release-finished", dbName, null);
         }
         pendingWorkerClose = null;
-        workerGlobal.close?.();
+        // Do not explicitly terminate an ordinarily idle realm. A browser can
+        // attach a same-name SharedWorker to a realm after `close()` has been
+        // requested but before it is destroyed; that port can no longer
+        // receive the probe/closing receipt and waits until the foreground
+        // admission timeout. The physical owner has already been released,
+        // and the browser is free to reclaim a portless realm. Explicit
+        // inspector termination remains a generation-bearing handoff above.
       });
   }
 }
