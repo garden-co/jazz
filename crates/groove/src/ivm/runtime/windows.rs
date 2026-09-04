@@ -163,7 +163,7 @@ pub(super) fn top_by_window_from_records(
 }
 
 pub(super) fn top_by_window_from_ordered_group(
-    records: Option<&BTreeMap<CollectByOrderKey, i64>>,
+    records: Option<&CollectByGroup>,
     top_by: &TopByOp,
 ) -> Vec<WindowedRecord> {
     let mut window = Vec::new();
@@ -172,7 +172,7 @@ pub(super) fn top_by_window_from_ordered_group(
         TopByLimit::Finite(limit) => Some(limit),
         TopByLimit::Unbounded => None,
     };
-    for ((_, record), weight) in records.into_iter().flatten() {
+    for ((_, record), weight) in records.into_iter().flat_map(CollectByGroup::iter) {
         if remaining == Some(0) {
             break;
         }
@@ -288,9 +288,21 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
     // consumers and cancels transient insert/delete pairs within one batch.
     let deltas =
         canonical_collect_by_terminal_deltas(input_desc, collect_by, direct_tree_slot, deltas)?;
-    let root_groups_before = direct_tree_slot
-        .is_none()
-        .then(|| state.groups.keys().cloned().collect::<BTreeSet<_>>());
+    // Only a group named by this batch can enter or leave the terminal.  Do
+    // not snapshot every existing group just to discover that fact.
+    let touched_group_keys = deltas
+        .iter()
+        .map(|delta| {
+            encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let root_groups_before = direct_tree_slot.is_none().then(|| {
+        touched_group_keys
+            .iter()
+            .filter(|key| state.groups.get(key).is_some())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    });
     let mut operations = Vec::new();
     for delta in &deltas {
         let group_key =
@@ -368,20 +380,11 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             sort_directions,
         )?;
         let state_key = (sort_key, delta.record.clone());
-        let group = state.groups.entry(group_key.clone()).or_default();
+        let group = state.groups.get_or_default(group_key.clone());
         let before_weight = group.get(&state_key).copied().unwrap_or_default();
-        let before_index = (before_weight > 0).then(|| {
-            group
-                .range(..state_key.clone())
-                .filter(|(_, weight)| **weight > 0)
-                .count()
-        });
+        let before_index = (before_weight > 0).then(|| group.count_before(&state_key));
         let after_weight = before_weight + delta.weight;
-        if after_weight == 0 {
-            group.remove(&state_key);
-        } else {
-            group.insert(state_key.clone(), after_weight);
-        }
+        group.set(state_key.clone(), after_weight);
         if !emit || (before_weight > 0) == (after_weight > 0) {
             continue;
         }
@@ -411,10 +414,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         let child_key = encoded_record_key_part(child_descriptor, &child_record, &[0])?;
         let path = vec![TerminalPathSegment::Collection(collection_field.to_owned())];
         if after_weight > 0 {
-            let index = group
-                .range(..state_key)
-                .filter(|(_, weight)| **weight > 0)
-                .count();
+            let index = group.count_before(&state_key);
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
                 root_key: group_key,
@@ -435,9 +435,15 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             debug_assert!(before_index.is_some());
         }
     }
-    state.groups.retain(|_, group| !group.is_empty());
+    state
+        .groups
+        .remove_empty_touched_groups(touched_group_keys.iter().cloned());
     if let Some(root_groups_before) = root_groups_before {
-        let root_groups_after = state.groups.keys().cloned().collect::<BTreeSet<_>>();
+        let root_groups_after = touched_group_keys
+            .iter()
+            .filter(|key| state.groups.get(key).is_some())
+            .cloned()
+            .collect::<BTreeSet<_>>();
         operations.retain(|operation| {
             root_groups_before.contains(&operation.root_key)
                 && root_groups_after.contains(&operation.root_key)
@@ -468,7 +474,10 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                             "new collect root did not render a terminal row".to_owned(),
                         )
                     })?;
-            let index = root_groups_after.range(..root_key.clone()).count();
+            // Rank against the complete merged group index: untouched parents
+            // remain in the immutable base and still determine terminal
+            // insertion position.
+            let index = state.groups.count_before(root_key);
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
                 root_key: root_key.clone(),
@@ -590,15 +599,13 @@ fn update_collect_by_root_terminal_state(
         }
         let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
         let state_key = (sort_key, delta.record.clone());
-        let group = state.groups.entry(group_key.clone()).or_default();
+        let group = state.groups.get_or_default(group_key.clone());
         let weight = group.get(&state_key).copied().unwrap_or_default() + delta.weight;
-        if weight == 0 {
-            group.remove(&state_key);
-        } else {
-            group.insert(state_key, weight);
-        }
+        group.set(state_key, weight);
     }
-    state.groups.retain(|_, group| !group.is_empty());
+    state
+        .groups
+        .remove_empty_touched_groups(before.keys().cloned());
     if !emit {
         return Ok(Vec::new());
     }
@@ -822,9 +829,7 @@ fn update_collect_by_root_terminal_state(
     Ok(operations)
 }
 
-fn collect_by_root_order_key(
-    group: &BTreeMap<CollectByOrderKey, i64>,
-) -> Option<CollectByOrderKey> {
+fn collect_by_root_order_key(group: &CollectByGroup) -> Option<CollectByOrderKey> {
     group
         .iter()
         .find(|(_, weight)| **weight > 0)
@@ -1514,6 +1519,67 @@ mod root_terminal_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unbounded_collect_insert_keeps_global_parent_order() {
+        let input = record_descriptor();
+        let child = RecordDescriptor::new([("id", ValueType::Uuid)]);
+        let output = RecordDescriptor::new([
+            ("root", ValueType::Uuid),
+            ("joined", ValueType::Uuid),
+            ("rank", ValueType::String),
+            (
+                "children",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+            ),
+        ]);
+        let mut collect_by = collector();
+        collect_by.mode = CollectByMode::Collect;
+        collect_by.child_descriptor = child;
+        collect_by.child_fields = vec![CollectByProjection {
+            field: "root".to_owned(),
+            field_idx: 0,
+            output_name: "id".to_owned(),
+            unwrap_nullable: false,
+        }];
+        collect_by.collection_field = "children".to_owned();
+        collect_by.collection_field_index = 3;
+        let mut state = CollectByIncrementalState::default();
+
+        let opened = update_unbounded_collect_by_terminal_state(
+            input,
+            output,
+            &collect_by,
+            None,
+            &mut state,
+            &[delta(1, 1, "one", 1), delta(3, 3, "three", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(opened.iter().any(|operation| operation.path.is_empty()));
+
+        let inserted = update_unbounded_collect_by_terminal_state(
+            input,
+            output,
+            &collect_by,
+            None,
+            &mut state,
+            &[delta(2, 2, "two", 1)],
+            true,
+        )
+        .unwrap();
+        let inserted_roots = inserted
+            .iter()
+            .filter(|operation| operation.path.is_empty())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            inserted_roots.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Insert { index: 1, .. },
+                ..
+            }]
+        ));
     }
 
     #[test]

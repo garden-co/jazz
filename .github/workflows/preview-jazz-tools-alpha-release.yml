@@ -11,17 +11,16 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  actions: read
   contents: read
-  id-token: write
-  pull-requests: read
-  statuses: write
 
 jobs:
   mark-preview-pending:
     name: Mark release preview pending
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: startsWith(github.ref, 'refs/heads/changeset-release/')
+    permissions:
+      contents: read
+      statuses: write
     steps:
       - name: Set pending commit status
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -40,6 +39,14 @@ jobs:
   preview:
     name: Release preview build
     uses: ./.github/workflows/publish-jazz-tools-alpha.yml
+    # GitHub validates the full reusable-workflow permission graph before it
+    # evaluates dry-run guards. Match the publisher's maximum permission
+    # ceiling only on this job; dry-run never executes its write steps.
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      pull-requests: read
     with:
       mode: dry-run
     secrets: inherit
@@ -49,6 +56,9 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: always() && startsWith(github.ref, 'refs/heads/changeset-release/')
     needs: [mark-preview-pending, preview]
+    permissions:
+      contents: read
+      statuses: write
     steps:
       - name: Set final commit status
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
