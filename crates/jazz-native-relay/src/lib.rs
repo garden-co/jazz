@@ -172,6 +172,16 @@ struct PendingPrivateSession {
     scope: RelayScopeRequest,
     sqlite_path: String,
     identity: DbIdentity,
+    socket: PrivateRelaySocketSession,
+}
+
+/// Ephemeral native-only input retained only until trusted revocation. It is
+/// never part of an admitted scope, relay diagnostics, postcard, or SQLite.
+#[derive(Clone)]
+struct PrivateRelaySocketSession {
+    server_url: String,
+    app_id: String,
+    bearer: String,
 }
 
 /// JSON-shaped form accepted only by the platform-owned admission C entry
@@ -508,6 +518,7 @@ pub struct NativeRelayHost {
     registry: NativeRelayRegistry,
     admitted_scopes: BTreeMap<AdmissionCapability, AdmittedRelayScope>,
     pending_private_sessions: BTreeMap<AdmissionCapability, PendingPrivateSession>,
+    private_socket_sessions: BTreeMap<AdmissionCapability, PrivateRelaySocketSession>,
     relays: BTreeMap<u64, OpenedRelay>,
     clients: BTreeMap<u64, (u64, NativeRelayClient)>,
     /// Foreground aliases opened through the capability-only C ABI. Keeping
@@ -532,6 +543,7 @@ struct OpenedRelay {
     scope: RelayScope,
     admitted_scope: AdmissionCapability,
     relay: NativeRelay,
+    socket: Option<NativeRelaySocketWorker>,
 }
 
 struct OpenedForeground {
@@ -624,6 +636,7 @@ impl Default for NativeRelayHost {
             registry: NativeRelayRegistry::default(),
             admitted_scopes: BTreeMap::new(),
             pending_private_sessions: BTreeMap::new(),
+            private_socket_sessions: BTreeMap::new(),
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
             foregrounds: BTreeMap::new(),
@@ -740,7 +753,31 @@ impl NativeRelayHost {
                     .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
                 config.supported_abi = supported_abi;
                 let scope = config.scope.clone();
+                let peer_identity = config.identity.author;
                 let relay = self.registry.open(config).map_err(relay_status)?;
+                let socket = self
+                    .private_socket_sessions
+                    .get(&admitted_scope)
+                    .cloned()
+                    .map(|session| {
+                        NativeRelaySocketWorker::start(
+                            relay.clone(),
+                            NativeRelaySocketConfig {
+                                server_url: session.server_url,
+                                app_id: AppId::from_string(&session.app_id)
+                                    .unwrap_or_else(|_| AppId::from_name(&session.app_id)),
+                                peer_identity,
+                                auth: AuthConfig {
+                                    jwt_token: Some(session.bearer),
+                                    ..AuthConfig::default()
+                                },
+                                reconnect_delay: std::time::Duration::from_secs(1),
+                                on_event: Arc::new(|_| {}),
+                            },
+                        )
+                        .map_err(relay_status)
+                    })
+                    .transpose()?;
                 let handle = self
                     .allocate()
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
@@ -750,6 +787,7 @@ impl NativeRelayHost {
                         scope,
                         admitted_scope,
                         relay,
+                        socket,
                     },
                 );
                 Ok(RelayCommandResponse::Opened { relay: handle })
@@ -792,6 +830,9 @@ impl NativeRelayHost {
                 let Some(opened) = self.relays.remove(&relay) else {
                     return Ok(RelayCommandResponse::Closed { closed: false });
                 };
+                // Dropping the shared worker synchronously cancels its socket
+                // before the final relay alias can be closed or reused.
+                drop(opened.socket);
                 let scope = opened.scope;
                 let clients = self
                     .clients
@@ -916,6 +957,29 @@ impl NativeRelayHost {
         };
         let scope = config.scope.clone();
         let relay = self.registry.open(config).map_err(relay_status)?;
+        let socket = self
+            .private_socket_sessions
+            .get(&admitted_scope)
+            .cloned()
+            .map(|session| {
+                NativeRelaySocketWorker::start(
+                    relay.clone(),
+                    NativeRelaySocketConfig {
+                        server_url: session.server_url,
+                        app_id: AppId::from_string(&session.app_id)
+                            .unwrap_or_else(|_| AppId::from_name(&session.app_id)),
+                        peer_identity: author,
+                        auth: AuthConfig {
+                            jwt_token: Some(session.bearer),
+                            ..AuthConfig::default()
+                        },
+                        reconnect_delay: std::time::Duration::from_secs(1),
+                        on_event: Arc::new(|_| {}),
+                    },
+                )
+                .map_err(relay_status)
+            })
+            .transpose()?;
         let relay_handle = self
             .allocate()
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
@@ -925,6 +989,7 @@ impl NativeRelayHost {
                 scope: scope.clone(),
                 admitted_scope,
                 relay: relay.clone(),
+                socket,
             },
         );
         let client_handle = self
@@ -1317,6 +1382,11 @@ impl NativeRelayHost {
                     node: NodeUuid::from_bytes(node),
                     author,
                 },
+                socket: PrivateRelaySocketSession {
+                    server_url: request.server_url,
+                    app_id: request.app_id,
+                    bearer: request.jwt,
+                },
             },
         );
         Ok(capability)
@@ -1338,13 +1408,16 @@ impl NativeRelayHost {
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema_json =
             serde_json::to_string(&value).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        self.admit_scope(RelayScopeAdmissionRequest {
+        let socket = pending.socket;
+        let admitted = self.admit_scope(RelayScopeAdmissionRequest {
             scope: pending.scope,
             sqlite_path: pending.sqlite_path,
             schema_json,
             identity: pending.identity,
             claims: BTreeMap::new(),
-        })
+        })?;
+        self.private_socket_sessions.insert(admitted, socket);
+        Ok(admitted)
     }
 
     fn revoke_scope(
@@ -1354,6 +1427,10 @@ impl NativeRelayHost {
         if self.admitted_scopes.remove(&admitted_scope).is_none() {
             return Ok(false);
         }
+        // Removing the native-only session ensures a later re-admission must
+        // provide a fresh bearer. Any opened worker is dropped below with its
+        // relay alias, which synchronously cancels its socket thread.
+        self.private_socket_sessions.remove(&admitted_scope);
         let relay_handles = self
             .relays
             .iter()
@@ -4502,6 +4579,31 @@ mod tests {
             "a malformed schema consumes the setup capability"
         );
         assert!(host.admitted_scopes.is_empty());
+        let socket_setup = host
+            .begin_private_session(PrivateSessionSetupJson {
+                server_url: "https://edge.example".to_owned(),
+                app_id: "app-a".to_owned(),
+                jwt: format!(
+                    "x.{}.x",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(br#"{"iss":"https://issuer.example","sub":"alice"}"#)
+                ),
+                storage_root: root.path().display().to_string(),
+            })
+            .unwrap();
+        let admitted = host
+            .attach_canonical_schema(
+                socket_setup,
+                &serde_json::to_string(schema().public_schema()).unwrap(),
+            )
+            .unwrap();
+        assert!(host.admitted_scopes[&admitted].claims.is_empty());
+        assert_eq!(
+            host.private_socket_sessions[&admitted].bearer,
+            "x.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwic3ViIjoiYWxpY2UifQ.x"
+        );
+        assert!(host.revoke_scope(admitted).unwrap());
+        assert!(!host.private_socket_sessions.contains_key(&admitted));
         assert!(
             host.begin_private_session(PrivateSessionSetupJson {
                 server_url: "ftp://edge.example".to_owned(),

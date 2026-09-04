@@ -396,6 +396,22 @@ test("native relay reserves platform-owned storage roots before session wiring",
   assert.match(ios, /JazzRelayStorageRoot/);
 });
 
+test("both platform session wrappers delegate one authenticated socket owner to Rust", () => {
+  const android = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayBridge.kt"),
+    "utf8",
+  );
+  const ios = fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/ios/JazzRelay.mm"), "utf8");
+  const relay = fs.readFileSync(path.resolve(root, "../../crates/jazz-native-relay/src/lib.rs"), "utf8");
+  for (const wrapper of [android, ios]) {
+    assert.match(wrapper, /shared Rust socket worker/);
+    assert.doesNotMatch(wrapper, /WebSocketTransport|NativeWebSocketConnector/);
+  }
+  assert.match(relay, /NativeRelaySocketWorker::start\(/);
+  assert.match(relay, /native relay sockets require an ordinary non-SYSTEM bearer session/);
+  assert.match(relay, /private_socket_sessions\.remove/);
+});
+
 test("iOS fixture imports the public JazzRn pod header, not its private relay framework", () => {
   const podspec = fs.readFileSync(
     path.resolve(root, "../../crates/jazz-rn/JazzRn.podspec"),

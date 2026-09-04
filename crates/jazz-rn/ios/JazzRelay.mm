@@ -200,6 +200,9 @@ static NSURL *JazzRelayStorageRoot(void) {
 
 + (NSData *)attachCanonicalSchemaJSON:(NSData *)schema sessionCapability:(NSData *)session error:(NSError **)error {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
+  // The later capability-only Open command enters this same Rust host and
+  // starts its shared Rust socket worker. Objective-C owns neither reconnect nor a
+  // bearer-to-wire codec.
   if (session.length != 32) { if (error) *error = RelayLifecycleError(@"Jazz session capabilities are exactly 32 bytes"); return nil; }
   jazz_native_relay_bytes output = {0};
   jazz_native_relay_status status = jazz_native_relay_host_attach_canonical_schema_json(

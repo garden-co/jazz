@@ -113,6 +113,9 @@ internal object JazzRelayBridge {
   @Synchronized
   fun attachCanonicalSchema(session: ByteArray, schemaJson: String): ByteArray {
     check(session.size == 32) { "Jazz session capabilities are exactly 32 bytes" }
+    // The later capability-only Open command enters this same host and starts
+    // its shared Rust socket worker. Kotlin never owns a socket, reconnect
+    // loop, or bearer-to-wire codec.
     return nativeAttachCanonicalSchemaJson(ensureHost(), session, schemaJson.encodeToByteArray()).also {
       check(it.size == 32) { "Jazz native relay returned an invalid admission capability" }
       trustedCapabilities += Base64.encodeToString(it, Base64.NO_WRAP)
