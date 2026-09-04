@@ -153,3 +153,56 @@ it("distinguishes a live native foreground from a revoked native handle", async 
     }
   });
 });
+
+it("caller mutation cannot replace the native admission behind displayed identity", async () => {
+  await withNativeRelayFixture(app, async (fixture) => {
+    const supplied = fixture.capability.slice();
+    const first = await fixture.createDb({
+      ...fixture.config,
+      nativeRelay: { capability: supplied },
+    });
+    const second = fixture.nativeHost.admit(
+      JSON.stringify({
+        scope: {
+          app_namespace: fixture.config.appId,
+          storage_namespace: "default",
+          auth_scope: "review-second",
+        },
+        sqlite_path: join(fixture.directory, "review-second.sqlite"),
+        schema_json: serializeSchemaSource(app.wasmSchema),
+        identity: {
+          node: randomUUID(),
+          author: JSON.stringify(["https://auth.example", "review-second"]),
+        },
+        claims: {},
+      }),
+    );
+    try {
+      supplied.set(second);
+      await first
+        .insert(app.notes, { title: "belongs to first admission" })
+        .wait({ tier: "local" });
+      expect(first.getAuthState().session?.user).toBe(
+        JSON.stringify(["https://auth.example", "rn-api-test"]),
+      );
+      const other = await fixture.createDb({
+        ...fixture.config,
+        nativeRelay: { capability: second },
+      });
+      const original = await fixture.createDb();
+      await expect
+        .poll(async () => {
+          const firstRows = await original.all(app.notes, { tier: "local" });
+          const secondRows = await other.all(app.notes, { tier: "local" });
+          return firstRows.length + secondRows.length;
+        })
+        .toBe(1);
+      expect((await original.all(app.notes, { tier: "local" })).map((row) => row.title)).toEqual([
+        "belongs to first admission",
+      ]);
+      expect(await other.all(app.notes, { tier: "local" })).toEqual([]);
+    } finally {
+      fixture.nativeHost.revoke(second);
+    }
+  });
+});

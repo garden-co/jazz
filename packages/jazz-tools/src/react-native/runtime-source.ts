@@ -63,6 +63,7 @@ function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
   private admittedSession: Session | null = null;
+  private admittedCapability: Uint8Array | null = null;
   private foregroundModule: NativeForegroundModule | null = null;
   private foregroundFactory: NativeForegroundFactory | null = null;
 
@@ -72,11 +73,14 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     }
     if (shouldRequireSqliteDriver(config)) {
       if (config.nativeRelay) {
+        if (this.admittedCapability) return;
         assertNativeRelay(config.nativeRelay);
+        // Capture before the first await: caller-owned bytes must never select
+        // a different scope after native identity preflight.
+        const capability = new Uint8Array(config.nativeRelay.capability);
         const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         this.foregroundModule = foreground;
-        const capability = config.nativeRelay.capability.slice();
         const withForeground = <T>(run: (db: NativeForegroundDb) => T): T => {
           const db = new NativeForegroundDb(
             this.foregroundFactory!.openAttached(capability),
@@ -94,7 +98,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           reconnect: () => withForeground((db) => db.reconnectNativeUpstream()),
         };
         const opened = new NativeForegroundDb(
-          this.foregroundFactory.openAttached(config.nativeRelay.capability),
+          this.foregroundFactory.openAttached(capability),
           foreground,
         );
         try {
@@ -113,6 +117,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         } finally {
           opened.close();
         }
+        this.admittedCapability = capability;
         return;
       }
       // A ReactNativeSqliteStorageDriver cannot yet be installed into the v2
@@ -147,15 +152,15 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   }
 
   override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {
-    if (context.config.nativeRelay) {
+    if (this.admittedCapability) {
       const factory = this.foregroundFactory;
       const module = this.foregroundModule;
-      const relay = context.config.nativeRelay;
-      if (!factory || !module || !relay)
+      const capability = this.admittedCapability;
+      if (!factory || !module)
         throw new Error("React Native native foreground runtime is not loaded");
       const session = resolveNativeSession(context.config);
       const runtime = NativeRuntimeAdapter.fromDb(
-        new NativeForegroundDb(factory.openAttached(relay.capability), module),
+        new NativeForegroundDb(factory.openAttached(capability), module),
         context.schema,
         randomNativeNodeBytes(),
         authorBytesForSession(session),

@@ -396,7 +396,10 @@ Value foregroundResponse(Runtime &runtime, jazz_native_relay_bytes *response) {
   return uint8Array.callAsConstructor(runtime, std::move(arrayBuffer));
 }
 
-class ForegroundHandle final : public HostObject {
+// Extracted JS methods may outlive the HostObject wrapper. Every method retains
+// this shared handle, including its lease, closed state, and wake registration.
+class ForegroundHandle final : public HostObject,
+                               public std::enable_shared_from_this<ForegroundHandle> {
  public:
   ForegroundHandle(std::shared_ptr<ForegroundRuntimeLease> lease, uint64_t handle)
       : lease_(std::move(lease)),
@@ -412,15 +415,15 @@ class ForegroundHandle final : public HostObject {
     if (property == "isClosed") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "isClosed"), 0,
-          [this](Runtime &runtime, const Value &, const Value *, size_t) {
-            if (closed_) return Value(true);
-            auto lease_lock = lease_->lockIfActive();
+          [self = shared_from_this()](Runtime &runtime, const Value &, const Value *, size_t) {
+            if (self->closed_) return Value(true);
+            auto lease_lock = self->lease_->lockIfActive();
             if (!lease_lock.owns_lock()) return Value(true);
             // Probe is the canonical V1 unit command, discriminant zero.
             const uint8_t probe = 0;
             jazz_native_relay_bytes response{};
             const auto status = jazz_native_relay_host_lease_execute_foreground(
-                lease_->nativeLease(), handle_, &probe, 1, &response);
+                self->lease_->nativeLease(), self->handle_, &probe, 1, &response);
             jazz_native_relay_bytes_free(&response);
             if (status == JAZZ_NATIVE_RELAY_INVALID_HANDLE) return Value(true);
             if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "isClosed");
@@ -430,16 +433,16 @@ class ForegroundHandle final : public HostObject {
     if (property == "tick") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "tick"), 0,
-          [this](Runtime &runtime, const Value &, const Value *, size_t) {
-            if (closed_) {
+          [self = shared_from_this()](Runtime &runtime, const Value &, const Value *, size_t) {
+            if (self->closed_) {
               throw JSError(runtime, "Jazz native foreground runtime is closed");
             }
-            auto lease_lock = lease_->lockIfActive();
+            auto lease_lock = self->lease_->lockIfActive();
             if (!lease_lock.owns_lock()) {
               throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
             }
             const auto status = jazz_native_relay_host_lease_tick_attached_foreground(
-                lease_->nativeLease(), handle_);
+                self->lease_->nativeLease(), self->handle_);
             if (status != JAZZ_NATIVE_RELAY_OK) {
               throwStatus(runtime, status, "tick");
             }
@@ -449,15 +452,15 @@ class ForegroundHandle final : public HostObject {
     if (property == "close") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "close"), 0,
-          [this](Runtime &runtime, const Value &, const Value *, size_t) {
-            return Value(close(runtime));
+          [self = shared_from_this()](Runtime &runtime, const Value &, const Value *, size_t) {
+            return Value(self->close(runtime));
           });
     }
     if (property == "setTickScheduler") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "setTickScheduler"), 1,
-          [this](Runtime &runtime, const Value &, const Value *args, size_t count) {
-            if (closed_) {
+          [self = shared_from_this()](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (self->closed_) {
               throw JSError(runtime, "Jazz native foreground runtime is closed");
             }
             if (count != 1 || !args[0].isObject() ||
@@ -465,15 +468,15 @@ class ForegroundHandle final : public HostObject {
               throw JSError(runtime,
                            "Jazz native foreground tick scheduler requires a function");
             }
-            auto lease_lock = lease_->lockIfActive();
+            auto lease_lock = self->lease_->lockIfActive();
             if (!lease_lock.owns_lock()) {
               throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
             }
             auto callback = args[0].asObject(runtime).asFunction(runtime);
-            wake_->installCallback(runtime, std::move(callback));
-            const auto status = wake_->activateNative(lease_->nativeLease());
+            self->wake_->installCallback(runtime, std::move(callback));
+            const auto status = self->wake_->activateNative(self->lease_->nativeLease());
             if (status != JAZZ_NATIVE_RELAY_OK) {
-              wake_->removeCallback(runtime);
+              self->wake_->removeCallback(runtime);
               throwStatus(runtime, status, "setTickScheduler");
             }
             return Value::undefined();
@@ -482,21 +485,21 @@ class ForegroundHandle final : public HostObject {
     if (property == "execute") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "execute"), 1,
-          [this](Runtime &runtime, const Value &, const Value *args, size_t count) {
-            if (closed_) {
+          [self = shared_from_this()](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (self->closed_) {
               throw JSError(runtime, "Jazz native foreground runtime is closed");
             }
             if (count != 1) {
               throw JSError(runtime, "Jazz native foreground command requires a Uint8Array");
             }
-            auto lease_lock = lease_->lockIfActive();
+            auto lease_lock = self->lease_->lockIfActive();
             if (!lease_lock.owns_lock()) {
               throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
             }
             const auto request = copyForegroundCommand(runtime, args[0]);
             jazz_native_relay_bytes response{};
             const auto status = jazz_native_relay_host_lease_execute_foreground(
-                lease_->nativeLease(), handle_, request.data(), request.size(), &response);
+                self->lease_->nativeLease(), self->handle_, request.data(), request.size(), &response);
             if (status != JAZZ_NATIVE_RELAY_OK) {
               jazz_native_relay_bytes_free(&response);
               throwStatus(runtime, status, "execute");
