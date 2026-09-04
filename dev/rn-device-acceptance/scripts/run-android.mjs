@@ -113,7 +113,9 @@ try {
         }
       }
       if (Date.now() >= deadline)
-        throw new Error(androidAcceptanceFailure("timeout", phase, output));
+        throw new Error(
+          `${androidAcceptanceFailure("timeout", phase, output)}; Core observation control: ${control.diagnostic()}`,
+        );
       await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
   }

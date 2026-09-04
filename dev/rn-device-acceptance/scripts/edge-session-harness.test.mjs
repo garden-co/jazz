@@ -126,6 +126,11 @@ test("native acknowledgement checks every identity field and stays pending until
     for (const key of Object.keys(expected))
       assert.equal((await post({ ...expected, [key]: "foreign" })).status, 403);
     assert.equal(calls, 0, "foreign native identity must not enter the Core observation gate");
+    assert.equal(
+      control.diagnostic(),
+      "requests=4,identityRejected=4,coreWaitStarted=0,coreWaitSucceeded=0,coreWaitFailed=0",
+      "controller diagnostics expose only bounded request/outcome counts",
+    );
     let completed = false;
     const pending = post(expected).then((response) => {
       completed = true;
@@ -136,6 +141,10 @@ test("native acknowledgement checks every identity field and stays pending until
     release();
     assert.equal((await pending).status, 204);
     assert.equal(calls, 1);
+    assert.equal(
+      control.diagnostic(),
+      "requests=5,identityRejected=4,coreWaitStarted=1,coreWaitSucceeded=1,coreWaitFailed=0",
+    );
   } finally {
     release();
     await control.close();
@@ -163,6 +172,11 @@ test("missing Core observation cannot release the native foreground", async () =
     assert.equal(
       (await fetch(control.endpoint, { method: "POST", body: JSON.stringify(expected) })).status,
       503,
+    );
+    assert.equal(
+      control.diagnostic(),
+      "requests=1,identityRejected=0,coreWaitStarted=1,coreWaitSucceeded=0,coreWaitFailed=1",
+      "failed Core observation is observable without exposing request contents",
     );
   } finally {
     await control.close();
