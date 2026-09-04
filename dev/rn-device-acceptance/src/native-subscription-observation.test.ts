@@ -50,6 +50,19 @@ test("subscription observation inspects structured added and updated row identit
     ),
     false,
   );
+  // Stored public names and result names are distinct descriptor variants.
+  assert.equal(
+    nativeSubscriptionDeltaHasFieldBytes(encoded, "row_uuid", new Uint8Array(16).fill(0x11)),
+    true,
+  );
+  assert.equal(
+    nativeSubscriptionDeltaHasFieldBytes(
+      encoded,
+      "_app_title",
+      Uint8Array.from([2, ...new TextEncoder().encode("first")]),
+    ),
+    false,
+  );
   assert.deepEqual(
     nativeSubscriptionDeltaRowIds(encoded).map((rowId) => rowId[0]),
     [0x11, 0x21],
