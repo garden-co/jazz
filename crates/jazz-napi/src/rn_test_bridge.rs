@@ -78,6 +78,54 @@ impl RnTestHost {
         })
     }
 
+    pub fn begin_private_session(&self, config: String) -> Result<Uint8Array> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("RN fixture host is closed"))?;
+        bytes(|out| unsafe {
+            jazz_native_relay_host_begin_private_session_json(
+                inner.host,
+                config.as_ptr(),
+                config.len(),
+                out,
+            )
+        })
+    }
+    pub fn attach_canonical_schema(
+        &self,
+        capability: Uint8Array,
+        schema: String,
+    ) -> Result<Uint8Array> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("RN fixture host is closed"))?;
+        bytes(|out| unsafe {
+            jazz_native_relay_host_attach_canonical_schema_json(
+                inner.host,
+                capability.as_ptr(),
+                capability.len(),
+                schema.as_ptr(),
+                schema.len(),
+                out,
+            )
+        })
+    }
+    pub fn revoke(&self, capability: Uint8Array) -> Result<()> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("RN fixture host is closed"))?;
+        check(unsafe {
+            jazz_native_relay_host_revoke_scope_capability(
+                inner.host,
+                capability.as_ptr(),
+                capability.len(),
+            )
+        })
+    }
+
     pub fn open_attached(&self, capability: Uint8Array) -> Result<RnTestForeground> {
         let inner = self
             .inner
@@ -93,7 +141,7 @@ impl RnTestHost {
             )
         })?;
         Ok(RnTestForeground {
-            host: inner.clone(),
+            host: Some(inner.clone()),
             handle,
             closed: false,
             wake: None,
@@ -102,7 +150,7 @@ impl RnTestHost {
 }
 
 pub struct RnTestForeground {
-    host: Rc<Host>,
+    host: Option<Rc<Host>>,
     handle: u64,
     closed: bool,
     wake: Option<Box<WakeCallback>>,
@@ -122,10 +170,16 @@ unsafe extern "C" fn wake(context: *mut c_void, _foreground: u64, kind: u8, dela
 }
 
 impl RnTestForeground {
+    fn host(&self) -> Result<&Host> {
+        self.host
+            .as_deref()
+            .ok_or_else(|| Error::from_reason("RN foreground is closed"))
+    }
     pub fn execute(&self, command: Uint8Array) -> Result<Uint8Array> {
+        let host = self.host()?;
         bytes(|out| unsafe {
             jazz_native_relay_host_lease_execute_foreground(
-                self.host.lease,
+                host.lease,
                 self.handle,
                 command.as_ptr(),
                 command.len(),
@@ -135,17 +189,19 @@ impl RnTestForeground {
     }
 
     pub fn tick(&self) -> Result<()> {
+        let host = self.host()?;
         check(unsafe {
-            jazz_native_relay_host_lease_tick_attached_foreground(self.host.lease, self.handle)
+            jazz_native_relay_host_lease_tick_attached_foreground(host.lease, self.handle)
         })
     }
 
     pub fn set_tick_scheduler(&mut self, callback: WakeCallback) -> Result<()> {
+        let host = self.host()?;
         let mut callback = Box::new(callback);
         let context = (&mut *callback as *mut WakeCallback).cast();
         check(unsafe {
             jazz_native_relay_host_lease_set_foreground_wake_callback(
-                self.host.lease,
+                host.lease,
                 self.handle,
                 Some(wake),
                 context,
@@ -161,16 +217,18 @@ impl RnTestForeground {
         if self.closed {
             return Ok(false);
         }
+        let host = self.host()?;
         let mut closed = false;
         check(unsafe {
             jazz_native_relay_host_lease_close_attached_foreground(
-                self.host.lease,
+                host.lease,
                 self.handle,
                 &mut closed,
             )
         })?;
         self.closed = true;
         self.wake = None;
+        self.host = None;
         Ok(closed)
     }
 }
@@ -226,4 +284,24 @@ pub fn foreground_set_tick_scheduler(
 #[napi(js_name = "__testRnForegroundClose", skip_typescript)]
 pub fn foreground_close(foreground: &mut External<RnTestForeground>) -> Result<bool> {
     foreground.close()
+}
+
+#[napi(js_name = "__testRnHostBeginPrivateSession", skip_typescript)]
+pub fn host_begin_private_session(
+    host: &External<RnTestHost>,
+    config: String,
+) -> Result<Uint8Array> {
+    host.begin_private_session(config)
+}
+#[napi(js_name = "__testRnHostAttachCanonicalSchema", skip_typescript)]
+pub fn host_attach_canonical_schema(
+    host: &External<RnTestHost>,
+    capability: Uint8Array,
+    schema: String,
+) -> Result<Uint8Array> {
+    host.attach_canonical_schema(capability, schema)
+}
+#[napi(js_name = "__testRnHostRevoke", skip_typescript)]
+pub fn host_revoke(host: &External<RnTestHost>, capability: Uint8Array) -> Result<()> {
+    host.revoke(capability)
 }
