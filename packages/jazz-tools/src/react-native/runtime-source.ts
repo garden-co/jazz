@@ -2,6 +2,8 @@ import type { RuntimeClientContext } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
 import type { JazzClient } from "../runtime/client.js";
 import { JazzClient as JazzRuntimeClient } from "../runtime/client.js";
+import type { Session } from "../runtime/context.js";
+import { markTrustedReservedSession } from "../runtime/client-session.js";
 import type { AppContext } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
@@ -60,6 +62,7 @@ function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
 }
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
+  private admittedSession: Session | null = null;
   private foregroundModule: NativeForegroundModule | null = null;
   private foregroundFactory: NativeForegroundFactory | null = null;
 
@@ -70,10 +73,46 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     if (shouldRequireSqliteDriver(config)) {
       if (config.nativeRelay) {
         assertNativeRelay(config.nativeRelay);
-        resolveNativeSession(config);
         const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         this.foregroundModule = foreground;
+        const capability = config.nativeRelay.capability.slice();
+        const withForeground = <T>(run: (db: NativeForegroundDb) => T): T => {
+          const db = new NativeForegroundDb(
+            this.foregroundFactory!.openAttached(capability),
+            foreground,
+          );
+          try {
+            return run(db);
+          } finally {
+            db.close();
+          }
+        };
+        this.nativeConnection = {
+          configured: () => withForeground((db) => db.nativeConnectionStatus().configured),
+          disconnect: () => withForeground((db) => db.disconnectNativeUpstream()),
+          reconnect: () => withForeground((db) => db.reconnectNativeUpstream()),
+        };
+        const opened = new NativeForegroundDb(
+          this.foregroundFactory.openAttached(config.nativeRelay.capability),
+          foreground,
+        );
+        try {
+          const metadata = opened.nativeSessionMetadata();
+          this.admittedSession = markTrustedReservedSession({
+            issuer: metadata.issuer,
+            user_id: metadata.userId,
+            claims: {},
+            authMode:
+              metadata.issuer === "urn:jazz:local-first"
+                ? "local-first"
+                : metadata.issuer === "urn:jazz:anonymous"
+                  ? "anonymous"
+                  : "external",
+          });
+        } finally {
+          opened.close();
+        }
         return;
       }
       // A ReactNativeSqliteStorageDriver cannot yet be installed into the v2
@@ -88,6 +127,17 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     // implementation and imports the WASM runtime; Metro resolves that import
     // even for code paths that would never execute on a native device.
     throw new Error(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
+  }
+
+  override admitConfig(config: ReactNativeDbConfig): void {
+    if (!this.admittedSession) throw new Error("React Native native session is not admitted");
+    // Public identity is derived from the native admission. Caller metadata
+    // neither chooses authorization nor overrides the displayed identity.
+    delete config.jwtToken;
+    delete config.secret;
+    delete config.adminSecret;
+    config.cookieSession = this.admittedSession;
+    setTrustedReservedSession(config, this.admittedSession);
   }
 
   override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {

@@ -5,5 +5,9 @@ export { Db };
 export type DbConfig = ReactNativeDbConfig;
 
 export async function createDb(config: ReactNativeDbConfig): Promise<Db> {
-  return await createDbWithRuntimeSource(config, new ReactNativeRuntimeSource());
+  const source = new ReactNativeRuntimeSource();
+  const admitted = { ...config };
+  await source.load(admitted);
+  source.admitConfig(admitted);
+  return await createDbWithRuntimeSource(admitted, source);
 }

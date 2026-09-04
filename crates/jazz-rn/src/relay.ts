@@ -109,13 +109,15 @@ export type NativeForegroundCommand =
   | { type: 'reconnectNativeUpstream' }
   | { type: 'nativeConnectionStatus' }
   | { type: 'stageMutation'; transaction: number; mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore';
-      table: string; rowId?: Uint8Array; cells: Uint8Array; optionsJson: string };
+      table: string; rowId?: Uint8Array; cells: Uint8Array; optionsJson: string }
+  | { type: 'nativeSessionMetadata' };
 
 
 /** The existing core transaction semantics selected by the foreground codec. */
 export type NativeForegroundTransactionKind = 'mergeable' | 'exclusive';
 
 export type NativeForegroundResponse =
+  | { type: 'nativeSessionMetadata'; issuer: string; userId: string }
   | { type: 'nativeConnectionStatus'; configured: boolean; explicitlyOffline: boolean; connected: boolean }
   | { type: 'probe'; abiVersion: number }
   | { type: 'ticked' }
@@ -262,6 +264,7 @@ export function encodeNativeForegroundCommand(
   if (command.type === 'disconnectNativeUpstream') return Uint8Array.of(23);
   if (command.type === 'reconnectNativeUpstream') return Uint8Array.of(24);
   if (command.type === 'nativeConnectionStatus') return Uint8Array.of(25);
+  if (command.type === 'nativeSessionMetadata') return Uint8Array.of(26);
   if (command.type === 'prepareQuery') {
     return concatForegroundBytes(
       Uint8Array.of(2),
@@ -460,6 +463,17 @@ export function decodeNativeForegroundResponse(
       txId: decodeForegroundId(bytes.subarray(1), 'committed txId'),
     };
   if (tag === 16) return { type: 'transactionSettled', txId: decodeForegroundId(bytes.subarray(1), 'settled txId') };
+  if (tag === 18) {
+    // Postcard strings use canonical u64 lengths. Read the first bounded
+    // field, then require the second field to consume every remaining byte.
+    let end = 1;
+    while (end < bytes.length && (bytes[end]! & 0x80) !== 0) end++;
+    if (end >= bytes.length) throw new Error('Malformed native session metadata');
+    const length = decodeForegroundU64(bytes.subarray(1, end + 1), 'issuer length');
+    const next = end + 1 + length;
+    if (next > bytes.length) throw new Error('Malformed native session metadata');
+    return { type: 'nativeSessionMetadata', issuer: decodeForegroundUtf8(bytes, end + 1, length, 'issuer'), userId: decodeForegroundString(bytes.subarray(next), 'user id') };
+  }
 
   if (tag === 17 && bytes.length === 4 && bytes.subarray(1).every(value => value === 0 || value === 1)) {
     return { type: 'nativeConnectionStatus', configured: bytes[1] === 1, explicitlyOffline: bytes[2] === 1, connected: bytes[3] === 1 };

@@ -44,8 +44,10 @@ One admitted persistent scope owns exactly one authenticated upstream socket
 worker. Foregrounds are leases on that relay, not socket owners: opening a
 second foreground reuses the scope worker and cannot create a competing bearer
 connection to the same SQLite store. The worker stays alive across a clean
-foreground handoff and is stopped only by trusted scope revocation or host
-teardown. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
+foreground handoff. Explicit foreground disconnect synchronously cancels and
+joins that worker before publishing offline state; reconnect restarts it using
+the retained native admission. Trusted scope revocation and host teardown
+stop the worker and retire the admission. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
 accepted only for `localhost`, IP loopback, or the documented Android emulator
 host aliases (`10.0.2.2` and `10.0.3.2`). A failed connect, bridge, owner pump,
 or established transport is recorded as a scope terminal error and surfaced to

@@ -14,6 +14,7 @@ type ForegroundCommand =
   | { type: "disconnectNativeUpstream" }
   | { type: "reconnectNativeUpstream" }
   | { type: "nativeConnectionStatus" }
+  | { type: "nativeSessionMetadata" }
   | { type: "prepareQuery"; query: Uint8Array }
   | { type: "all"; query: number }
   | {
@@ -84,6 +85,7 @@ type NativeConnectionStatus = {
 };
 
 type ForegroundResponse =
+  | { type: "nativeSessionMetadata"; issuer: string; userId: string }
   | NativeConnectionStatus
   | { type: "ticked" }
   | { type: "preparedQuery"; query: number }
@@ -269,6 +271,13 @@ export class NativeForegroundDb {
       // platform logout revoked the capability just before this call).
       this.runtime.close();
     }
+  }
+
+  nativeSessionMetadata(): { issuer: string; userId: string } {
+    const response = this.execute({ type: "nativeSessionMetadata" });
+    if (response.type !== "nativeSessionMetadata")
+      return unexpected("nativeSessionMetadata", response.type);
+    return response;
   }
 
   disconnectNativeUpstream(): void {

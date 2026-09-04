@@ -484,6 +484,8 @@ pub enum ForegroundDbCommandRequest {
     DisconnectNativeUpstream,
     ReconnectNativeUpstream,
     NativeConnectionStatus,
+    /// Public admitted identity only, never bearer or arbitrary claims.
+    NativeSessionMetadata,
 }
 
 /// Frozen postcard mutation ordinals within the V1 StageMutation envelope.
@@ -564,6 +566,10 @@ pub enum ForegroundDbCommandResponse {
         configured: bool,
         explicitly_offline: bool,
         connected: bool,
+    },
+    NativeSessionMetadata {
+        issuer: String,
+        user_id: String,
     },
 }
 
@@ -2462,6 +2468,26 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         return JazzNativeRelayStatus::InvalidHandle;
     }
     let response = match command {
+        ForegroundDbCommandRequest::NativeSessionMetadata => {
+            let opened = match host.foregrounds.get(&foreground) {
+                Some(opened) => opened,
+                None => return JazzNativeRelayStatus::InvalidHandle,
+            };
+            let admitted = match host
+                .relays
+                .get(&opened.relay)
+                .and_then(|relay| host.admitted_scopes.get(&relay.admitted_scope))
+            {
+                Some(admitted) => admitted,
+                None => return JazzNativeRelayStatus::InvalidHandle,
+            };
+            let [issuer, user_id]: [String; 2] =
+                match serde_json::from_str(admitted.config.identity.author.canonical()) {
+                    Ok(subject) => subject,
+                    Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+                };
+            ForegroundDbCommandResponse::NativeSessionMetadata { issuer, user_id }
+        }
         ForegroundDbCommandRequest::DisconnectNativeUpstream => {
             match host.foreground_connectivity(foreground, Some(true)) {
                 Ok(response) => response,
