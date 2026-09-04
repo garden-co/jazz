@@ -369,6 +369,28 @@ test("native fingerprints agree across clean worktree locations", () => {
   assert.equal(nativeArtifactFingerprint(first, "napi"), nativeArtifactFingerprint(second, "napi"));
 });
 
+test("clean CRLF checkout retains the committed NAPI ABI identity", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+    const baseline = nativeArtifactFingerprint(root, "napi", "release");
+
+    git(root, ["config", "core.autocrlf", "true"]);
+    const source = join(root, "crates/jazz-napi/src/lib.rs");
+    rmSync(source);
+    git(root, ["checkout", "--", "crates/jazz-napi/src/lib.rs"]);
+    assert.match(readFileSync(source, "utf8"), /\r\n/);
+    assert.equal(nativeArtifactFingerprint(root, "napi", "release"), baseline);
+
+    writeFileSync(join(root, "crates/jazz-napi/src/lib.rs"), "// planted dirty source\r\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), baseline);
+    rmSync(root, { recursive: true, force: true });
+  }));
+
 test("tracked NAPI bootstrap changes invalidate sealed provenance and its ABI fingerprint", () => {
   const root = fixture();
   const bootstrap = join(root, "crates/jazz-napi/native-binding.cjs");

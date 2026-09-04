@@ -165,6 +165,48 @@ function trackedFiles(root, paths) {
   return found.sort();
 }
 
+// Git's clean tracked blobs are the portable source identity. In particular,
+// a Windows checkout may smudge those blobs to CRLF while macOS and Linux keep
+// LF; hashing working-tree bytes would make the same committed source appear
+// to have a different ABI. Dirty files remain working-tree inputs so local
+// edits still invalidate the provenance they produced.
+function trackedInputContents(root, paths) {
+  const dirty = spawnSync("git", ["diff", "--name-only", "-z", "HEAD", "--", ...paths], {
+    cwd: root,
+    encoding: "buffer",
+  });
+  if (dirty.status !== 0)
+    return new Map(paths.map((path) => [path, readFileSync(join(root, path))]));
+  const dirtyPaths = new Set(dirty.stdout.toString("utf8").split("\0").filter(Boolean));
+  const cleanPaths = paths.filter((path) => !dirtyPaths.has(path));
+  const objects = spawnSync("git", ["cat-file", "--batch"], {
+    cwd: root,
+    input: Buffer.from(cleanPaths.map((path) => `:${path}\n`).join("")),
+    encoding: "buffer",
+  });
+  if (objects.status !== 0)
+    return new Map(paths.map((path) => [path, readFileSync(join(root, path))]));
+
+  const contents = new Map();
+  let offset = 0;
+  for (const path of cleanPaths) {
+    const end = objects.stdout.indexOf(0x0a, offset);
+    const header = end === -1 ? "" : objects.stdout.subarray(offset, end).toString("utf8");
+    const match = /^[a-f0-9]+ blob (\d+)$/.exec(header);
+    if (!match) {
+      contents.set(path, readFileSync(join(root, path)));
+      offset = end === -1 ? objects.stdout.length : end + 1;
+      continue;
+    }
+    const size = Number(match[1]);
+    offset = end + 1;
+    contents.set(path, objects.stdout.subarray(offset, offset + size));
+    offset += size + 1;
+  }
+  for (const path of dirtyPaths) contents.set(path, readFileSync(join(root, path)));
+  return contents;
+}
+
 const sharedInputs = [
   "Cargo.toml",
   "Cargo.lock",
@@ -304,12 +346,10 @@ function packageInputsFingerprint(root, kind) {
     ...inputsFor[kind],
     ...workspaceDependencyInputs(root, kind),
   ]);
+  const contents = trackedInputContents(root, trackedInputs);
   const inputHash = createHash("sha256");
   for (const path of trackedInputs) {
-    inputHash
-      .update(`${path}\0`)
-      .update(readFileSync(join(root, path)))
-      .update("\0");
+    inputHash.update(`${path}\0`).update(contents.get(path)).update("\0");
   }
   return inputHash.digest("hex");
 }
@@ -382,10 +422,14 @@ export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
     kind === "napi"
       ? ["crates/jazz-napi/index.cjs", "crates/jazz-napi/index.mjs"]
       : ["packages/jazz-tools/src/types/jazz-wasm.d.ts"];
+  const surfaceContents = trackedInputContents(
+    root,
+    surface.filter((path) => existsSync(join(root, path))),
+  );
   const surfaceHash = createHash("sha256");
   for (const path of surface) {
     surfaceHash.update(`${path}\0`);
-    surfaceHash.update(existsSync(join(root, path)) ? readFileSync(join(root, path)) : "missing");
+    surfaceHash.update(surfaceContents.get(path) ?? "missing");
     surfaceHash.update("\0");
   }
   return sha256(`${packageInputs}\0${surfaceHash.digest("hex")}`);
