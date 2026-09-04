@@ -11,6 +11,13 @@ interface TestBinding {
   __testRnHostAdmit(host: NativeHandle, config: string): Uint8Array;
   __testRnHostOpenAttached(host: NativeHandle, capability: Uint8Array): NativeHandle;
   __testRnHostClose(host: NativeHandle): boolean;
+  __testRnHostBeginPrivateSession(host: NativeHandle, config: string): Uint8Array;
+  __testRnHostAttachCanonicalSchema(
+    host: NativeHandle,
+    capability: Uint8Array,
+    schema: string,
+  ): Uint8Array;
+  __testRnHostRevoke(host: NativeHandle, capability: Uint8Array): void;
   __testRnForegroundExecute(foreground: NativeHandle, command: Uint8Array): Uint8Array;
   __testRnForegroundTick(foreground: NativeHandle): void;
   __testRnForegroundSetTickScheduler(
@@ -27,24 +34,37 @@ if (typeof binding.__testRnHostNew !== "function")
   throw new Error("RN bridge missing: produce artifacts with JAZZ_RN_TEST_BRIDGE=1");
 if (binding.nativeArtifactFingerprint() !== process.env.JAZZ_CORRECTNESS_NAPI_FINGERPRINT)
   throw new Error("RN test bridge does not match the admitted artifact fingerprint");
-const nativeHost = binding.__testRnHostNew();
-export const host = {
-  abiVersion: binding.__testRnHostAbiVersion(nativeHost),
-  admit: (config: string) => binding.__testRnHostAdmit(nativeHost, config),
-  close: () => binding.__testRnHostClose(nativeHost),
-  openAttached(capability: Uint8Array): NativeForegroundRuntime {
-    const foreground = binding.__testRnHostOpenAttached(nativeHost, capability);
-    return {
-      execute: (command) => binding.__testRnForegroundExecute(foreground, command),
-      tick: () => binding.__testRnForegroundTick(foreground),
-      setTickScheduler: (callback) =>
-        binding.__testRnForegroundSetTickScheduler(foreground, callback),
-      close: () => binding.__testRnForegroundClose(foreground),
-    };
-  },
-};
-Object.defineProperty(globalThis, "__jazzNativeForegroundRuntimeV1", {
-  configurable: true,
-  value: host,
-});
-export default { getAbiVersion: () => host.abiVersion };
+const probe = binding.__testRnHostNew();
+const abiVersion = binding.__testRnHostAbiVersion(probe);
+binding.__testRnHostClose(probe);
+
+export function createPlatformHost() {
+  const nativeHost = binding.__testRnHostNew();
+  return {
+    abiVersion,
+    admit: (config: string) => binding.__testRnHostAdmit(nativeHost, config),
+    beginPrivateSession: (config: string) =>
+      binding.__testRnHostBeginPrivateSession(nativeHost, config),
+    attachCanonicalSchema: (capability: Uint8Array, schema: string) =>
+      binding.__testRnHostAttachCanonicalSchema(nativeHost, capability, schema),
+    revoke: (capability: Uint8Array) => binding.__testRnHostRevoke(nativeHost, capability),
+    close: () => binding.__testRnHostClose(nativeHost),
+    openAttached(capability: Uint8Array): NativeForegroundRuntime {
+      const foreground = binding.__testRnHostOpenAttached(nativeHost, capability);
+      return {
+        execute: (command) => binding.__testRnForegroundExecute(foreground, command),
+        tick: () => binding.__testRnForegroundTick(foreground),
+        setTickScheduler: (callback) =>
+          binding.__testRnForegroundSetTickScheduler(foreground, callback),
+        close: () => binding.__testRnForegroundClose(foreground),
+      };
+    },
+  };
+}
+export function installPlatformHost(host: ReturnType<typeof createPlatformHost>) {
+  Object.defineProperty(globalThis, "__jazzNativeForegroundRuntimeV1", {
+    configurable: true,
+    value: { abiVersion: host.abiVersion, openAttached: host.openAttached },
+  });
+}
+export default { getAbiVersion: () => abiVersion };
