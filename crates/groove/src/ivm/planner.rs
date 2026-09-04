@@ -1962,6 +1962,121 @@ mod tests {
             ))
         ));
     }
+
+    #[test]
+    fn preserves_hidden_binding_fields_through_cte_aliases() {
+        let cte = Cte::new(
+            "album_ids",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("id"))])
+                    .from([TableRef::named("albums")])
+                    .where_(Expr::binary(
+                        Expr::column("artist_id"),
+                        BinaryOp::Eq,
+                        Expr::parameter("artist"),
+                    )),
+            )),
+        )
+        .with_columns(["declared_id"]);
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(
+                Select::new([SelectItem::Wildcard]).from([TableRef::named("album_ids")]),
+            )),
+        )));
+
+        let planned = plan_prepared_shape(&query, &schema()).unwrap();
+
+        assert_eq!(planned.output_key_fields, vec!["artist"]);
+        assert_eq!(
+            planned
+                .public_output
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["declared_id"]
+        );
+        assert!(
+            planned
+                .planned
+                .logical
+                .fields()
+                .iter()
+                .any(|field| field.qualifier.as_deref() == Some(BINDING_QUALIFIER))
+        );
+    }
+
+    #[test]
+    fn rejects_public_parameter_name_collisions_after_a_preserved_cte_binding_field() {
+        let cte = Cte::new(
+            "filtered",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("artist_id"))])
+                    .from([TableRef::named("albums")])
+                    .where_(Expr::binary(
+                        Expr::column("title"),
+                        BinaryOp::Eq,
+                        Expr::parameter("name"),
+                    )),
+            )),
+        );
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([
+                TableRef::Join {
+                    left: Box::new(TableRef::named("filtered")),
+                    right: Box::new(TableRef::named("artists")),
+                    kind: JoinKind::Inner,
+                    constraint: JoinConstraint::On(Expr::binary(
+                        Expr::Column(ColumnRef::qualified(["filtered"], "artist_id")),
+                        BinaryOp::Eq,
+                        Expr::Column(ColumnRef::qualified(["artists"], "id")),
+                    )),
+                },
+            ]))),
+        )));
+
+        assert!(matches!(
+            plan_prepared_shape(&query, &schema()),
+            Err(PlannerError::UnsupportedQuery(
+                "projected output names must not collide with parameter names"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_the_reserved_prepared_binding_relation_name() {
+        let cte_query = Query::With(Box::new(WithQuery::new(
+            [Cte::new(
+                BINDING_QUALIFIER,
+                Query::Select(Box::new(
+                    Select::new([SelectItem::expr(Expr::column("id"))])
+                        .from([TableRef::named("albums")]),
+                )),
+            )],
+            Query::Select(Box::new(
+                Select::new([SelectItem::Wildcard]).from([TableRef::named(BINDING_QUALIFIER)]),
+            )),
+        )));
+        assert!(matches!(
+            plan_query(&cte_query, &schema()),
+            Err(PlannerError::UnsupportedQuery(
+                "relation name is reserved for prepared-query bindings"
+            ))
+        ));
+
+        let alias_query = Query::Select(Box::new(
+            Select::new([SelectItem::Wildcard])
+                .from([TableRef::named("albums").aliased(BINDING_QUALIFIER)]),
+        ));
+        assert!(matches!(
+            plan_query(&alias_query, &schema()),
+            Err(PlannerError::UnsupportedQuery(
+                "relation name is reserved for prepared-query bindings"
+            ))
+        ));
+    }
+
     #[test]
     fn resolves_positional_cte_and_reference_table_column_aliases() {
         let cte = Cte::new(
