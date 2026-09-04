@@ -1,16 +1,20 @@
 #!/usr/bin/env perl
-# One-time/maintenance converter from the former Markdown table to the
-# record-per-invariant registry. Kept so future imports can be mechanically
-# checked rather than retyped.
+# One-time/maintenance conversion of the former per-domain Markdown tables to
+# the one-line-per-record JSONL registry. JSON is emitted in one fixed field
+# order, so a semantic edit changes only that record's physical line.
 use strict;
 use warnings;
-use File::Path qw(make_path);
 use Digest::SHA qw(sha256_hex);
+use Encode qw(encode_utf8);
+use JSON::PP ();
+use open qw(:std :encoding(UTF-8));
 
-my ($source, $destination, $receipt_flag, $receipt_path) = @ARGV;
-die "usage: $0 OLD-INVARIANTS.md DESTINATION-DIR [--receipt PARITY.tsv]\n"
-    unless $source && $destination && (!$receipt_flag || ($receipt_flag eq '--receipt' && $receipt_path));
-open my $fh, '<', $source or die "cannot read $source: $!\n";
+my $json = JSON::PP->new->utf8(0);
+
+my ($jazz_source, $groove_source, $registry_path, $receipt_flag, $receipt_path) = @ARGV;
+die "usage: $0 JAZZ-INVARIANTS.md GROOVE-INVARIANTS.md REGISTRY.jsonl --receipt PARITY.tsv\n"
+    unless $jazz_source && $groove_source && $registry_path
+        && $receipt_flag eq '--receipt' && $receipt_path;
 
 sub trim { my ($value) = @_; $value =~ s/^\s+|\s+$//g; return $value; }
 sub split_row {
@@ -28,43 +32,47 @@ sub split_row {
     push @fields, trim($cell);
     return @fields;
 }
-
-my $in_rows = 0;
-my $count = 0;
-my %parity;
-while (my $line = <$fh>) {
-    chomp $line;
-    if (!$in_rows) {
-        $in_rows = 1 if $line =~ /^\|\s*id\s*\|/;
-        next;
+sub parse_table {
+    my ($domain, $source) = @_;
+    open my $fh, '<', $source or die "cannot read $source: $!\n";
+    my ($in_rows, @records) = (0);
+    while (my $line = <$fh>) {
+        chomp $line;
+        if (!$in_rows) { $in_rows = 1 if $line =~ /^\|\s*id\s*\|/; next; }
+        next if $line =~ /^\|\s*:?-{3,}/;
+        last if $line !~ /^\|/;
+        my @fields = split_row($line);
+        die "$source: malformed row\n" unless @fields == 6;
+        my ($id, $invariant, $tests, $implementation, $status, $coverage) = @fields;
+        die "$source: invalid id $id\n" unless $id =~ /^(?:G-)?INV-[A-Za-z0-9-]+$/;
+        for ($invariant, $tests, $implementation) { s/\s+/ /g; s/^\s+|\s+$//g; }
+        push @records, {
+            domain => $domain, id => $id, invariant => $invariant, tests => $tests,
+            implementation => $implementation, status => $status, coverage => $coverage,
+        };
     }
-    next if $line =~ /^\|\s*:?-{3,}/;
-    last if $line !~ /^\|/;
-    my @fields = split_row($line);
-    die "$source: malformed row\n" unless @fields == 6;
-    my ($id, $invariant, $tests, $impl, $status, $coverage) = @fields;
-    die "$source: invalid id $id\n" unless $id =~ /^(?:G-)?INV-[A-Za-z0-9-]+$/;
-    for ($invariant, $tests, $impl) { s/\s+/ /g; s/^\s+|\s+$//g; }
-    make_path($destination);
-    my $path = "$destination/$id.md";
-    die "$path already exists\n" if -e $path;
-    open my $out, '>', $path or die "cannot write $path: $!\n";
-    print {$out} "# $id\n\n";
-    print {$out} "- Status: $status\n";
-    print {$out} "- Coverage: $coverage\n\n";
-    print {$out} "## Invariant\n\n$invariant\n\n";
-    print {$out} "## Enforced by (tests)\n\n$tests\n\n";
-    print {$out} "## Implementation";
-    print {$out} length($impl) ? "\n\n$impl\n" : "\n";
-    close $out or die "cannot close $path: $!\n";
-    $parity{$id} = sha256_hex(join("\x1f", $id, $invariant, $tests, $impl, $status, $coverage));
-    $count++;
+    return @records;
 }
-if ($receipt_path) {
-    open my $receipt, '>', $receipt_path or die "cannot write $receipt_path: $!\n";
-    print {$receipt} "# Canonical normalized field hashes for the legacy-table migration.\n";
-    print {$receipt} "# Each hash covers id, invariant, tests, implementation, status, coverage.\n";
-    for my $id (sort keys %parity) { print {$receipt} "$id\t$parity{$id}\n"; }
-    close $receipt or die "cannot close $receipt_path: $!\n";
+sub canonical_line {
+    my ($record) = @_;
+    return '{' . join(',', map { $json->encode($_->[0]) . ':' . $json->encode($_->[1]) }
+        ['domain', $record->{domain}], ['id', $record->{id}],
+        ['invariant', $record->{invariant}], ['tests', $record->{tests}],
+        ['implementation', $record->{implementation}], ['status', $record->{status}],
+        ['coverage', $record->{coverage}]) . '}';
 }
-print "$source: wrote $count records to $destination\n";
+
+my @records = (parse_table('jazz', $jazz_source), parse_table('groove', $groove_source));
+@records = sort { $a->{id} cmp $b->{id} || $a->{domain} cmp $b->{domain} } @records;
+open my $registry, '>', $registry_path or die "cannot write $registry_path: $!\n";
+open my $receipt, '>', $receipt_path or die "cannot write $receipt_path: $!\n";
+print {$receipt} "# Canonical normalized legacy-table migration parity receipt.\n";
+print {$receipt} "# domain, id, and every invariant field are covered by each SHA-256.\n";
+for my $record (@records) {
+    print {$registry} canonical_line($record), "\n";
+    my $digest = sha256_hex(encode_utf8(join("\x1f", @{$record}{qw(domain id invariant tests implementation status coverage)})));
+    print {$receipt} join("\t", $record->{domain}, $record->{id}, $digest), "\n";
+}
+close $registry or die "cannot close $registry_path: $!\n";
+close $receipt or die "cannot close $receipt_path: $!\n";
+print "wrote ", scalar(@records), " JSONL invariant records\n";

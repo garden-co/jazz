@@ -7,10 +7,8 @@
 set +e
 set -u -o pipefail
 
-readonly JAZZ_REGISTRY="${JAZZ_INVARIANT_REGISTRY:-crates/jazz/SPEC/invariants}"
-readonly GROOVE_REGISTRY="${GROOVE_INVARIANT_REGISTRY:-crates/groove/SPEC/invariants}"
-readonly JAZZ_PARITY_RECEIPT="${JAZZ_INVARIANT_PARITY_RECEIPT:-crates/jazz/SPEC/invariant-registry-parity.tsv}"
-readonly GROOVE_PARITY_RECEIPT="${GROOVE_INVARIANT_PARITY_RECEIPT:-crates/groove/SPEC/invariant-registry-parity.tsv}"
+readonly REGISTRY="${INVARIANT_REGISTRY:-crates/invariant-registry.jsonl}"
+readonly PARITY_RECEIPT="${INVARIANT_PARITY_RECEIPT:-crates/invariant-registry-parity.tsv}"
 
 failures=0
 rows=0
@@ -32,53 +30,59 @@ require_command() {
     return 0
 }
 
-# Emits six unit-separator-delimited fields for each structurally valid
-# record. One file per invariant is the authoritative merge surface; its file
-# name and heading are both the stable id. Paragraph text is normalized only
-# for this gate's line-oriented citation checks, not as an encoding contract.
+# Emits seven unit-separator-delimited fields for every canonical JSONL
+# record. The single repository-wide registry is deliberately one physical
+# record per line: unrelated changes conflict only when they edit one ID.
 parse_registry() {
     local registry=$1 parsed_status
     PARSED_ROWS="$(perl - "$registry" <<'PERL'
 use strict;
 use warnings;
-use File::Basename qw(basename);
+use JSON::PP ();
+use open qw(:std :encoding(UTF-8));
 
 my ($path) = @ARGV;
-opendir my $dir, $path or die "cannot read $path: $!\n";
-my @all_files = sort grep { !/^\./ && -f "$path/$_" } readdir $dir;
-closedir $dir;
+open my $fh, '<', $path or die "cannot read $path: $!\n";
+my $json = JSON::PP->new->utf8(0);
+my @keys = qw(domain id invariant tests implementation status coverage);
 my $bad = 0;
-my @files;
-for my $file (@all_files) {
-    if ($file !~ /^((?:G-)?INV-[A-Za-z0-9-]+)\.md\z/) {
-        warn "$path/$file: invariant record files must be named INV-*.md\n";
+my $previous = '';
+my $line_number = 0;
+while (my $line = <$fh>) {
+    $line_number++;
+    chomp $line;
+    if ($line eq '') {
+        warn "$path:$line_number: blank lines are not records\n";
         $bad++;
         next;
     }
-    push @files, $file;
-}
-for my $file (@files) {
-    my $full_path = "$path/$file";
-    open my $fh, '<', $full_path or die "cannot read $full_path: $!\n";
-    local $/;
-    my $text = <$fh>;
-    close $fh;
-    my ($id, $status, $coverage, $invariant, $tests, $impl) = $text =~
-        /\A# ((?:G-)?INV-[A-Za-z0-9-]+)\n\n- Status: ([^\n]+)\n- Coverage: ([^\n]+)\n\n## Invariant\n\n(.*?)\n\n## Enforced by \(tests\)\n\n(.*?)\n\n## Implementation(?:\n\n(.*?))?\n?\z/s;
-    if (!defined $id) {
-        warn "$full_path: malformed invariant record\n";
+    my $record = eval { $json->decode($line) };
+    if (!$record || ref($record) ne 'HASH') {
+        warn "$path:$line_number: malformed JSON object\n";
         $bad++;
         next;
     }
-    my $file_id = basename($file, '.md');
-    if ($id ne $file_id) {
-        warn "$full_path: heading id $id does not match file name $file_id\n";
+    my @actual_keys = sort keys %$record;
+    if (join(',', @actual_keys) ne join(',', sort @keys)
+        || grep { !defined($record->{$_}) || ref($record->{$_}) } @keys) {
+        warn "$path:$line_number: record must contain exactly the seven scalar fields\n";
         $bad++;
         next;
     }
-    $impl //= '';
-    for ($invariant, $tests, $impl) { s/\s+/ /g; s/^\s+|\s+$//g; }
-    print join("\x1f", $id, $invariant, $tests, $impl, $status, $coverage), "\n";
+    my $canonical = '{' . join(',', map { $json->encode($_) . ':' . $json->encode($record->{$_}) } @keys) . '}';
+    if ($line ne $canonical) {
+        warn "$path:$line_number: non-canonical JSONL spelling or field order\n";
+        $bad++;
+        next;
+    }
+    my $sort_key = "$record->{id}\0$record->{domain}";
+    if ($previous ne '' && $sort_key le $previous) {
+        warn "$path:$line_number: records must be strictly sorted by id then domain\n";
+        $bad++;
+        next;
+    }
+    $previous = $sort_key;
+    print join("\x1f", @{$record}{@keys}), "\n";
 }
 exit($bad ? 1 : 0);
 PERL
@@ -199,7 +203,7 @@ check_test_citations() {
 # byte-identical after canonical whitespace normalization, while new records
 # may be added without editing a shared inventory/count file.
 check_migration_parity() {
-    local registry=$1 receipt=$2 row id expected actual_hash
+    local registry=$1 receipt=$2 row domain id expected actual_hash key
     local -A actual=()
     if [[ ! -f $receipt ]]; then
         fail "$registry: missing migration parity receipt $receipt"
@@ -207,56 +211,61 @@ check_migration_parity() {
     fi
     while IFS= read -r row; do
         [[ -n $row ]] || continue
-        id=${row%%$'\x1f'*}
-        actual[$id]="$(printf '%s' "$row" | sha256sum | awk '{print $1}')"
+        domain=${row%%$'\x1f'*}
+        id=${row#*$'\x1f'}; id=${id%%$'\x1f'*}
+        actual["$domain:$id"]="$(printf '%s' "$row" | sha256sum | awk '{print $1}')"
     done <<< "$PARSED_ROWS"
-    while IFS=$'\t' read -r id expected; do
-        [[ -z $id || $id == \#* ]] && continue
-        if [[ ! $id =~ ^(G-)?INV-[A-Za-z0-9-]+$ || ! $expected =~ ^[0-9a-f]{64}$ ]]; then
-            fail "$receipt: malformed parity row '$id'"
+    while IFS=$'\t' read -r domain id expected; do
+        [[ -z $domain || $domain == \#* ]] && continue
+        if [[ ! $domain =~ ^(jazz|groove)$ || ! $id =~ ^(G-)?INV-[A-Za-z0-9-]+$ || ! $expected =~ ^[0-9a-f]{64}$ ]]; then
+            fail "$receipt: malformed parity row '$domain:$id'"
             continue
         fi
-        actual_hash=${actual[$id]-}
+        actual_hash=${actual["$domain:$id"]-}
         if [[ -z $actual_hash ]]; then
-            fail "$registry: migrated invariant $id is missing"
+            fail "$registry: migrated invariant $domain:$id is missing"
         elif [[ $actual_hash != "$expected" ]]; then
-            fail "$registry: migrated invariant $id changed from its canonical legacy fields"
+            fail "$registry: migrated invariant $domain:$id changed from its canonical legacy fields"
         fi
     done < "$receipt"
 }
 
 check_registry() {
-    local registry=$1 receipt=$2 record id invariant tests impl status coverage registry_rows=0
+    local registry=$1 receipt=$2 record domain id invariant tests impl status coverage registry_rows=0
     local -A seen_ids=()
     parse_registry "$registry"
-    while IFS=$'\x1f' read -r id invariant tests impl status coverage; do
+    while IFS=$'\x1f' read -r domain id invariant tests impl status coverage; do
         [[ -n $id ]] || continue
-        if [[ ! $id =~ ^(G-)?INV-[A-Za-z0-9-]+$ ]]; then
-            fail "$registry: invalid invariant id '$id'"
+        if [[ ! $domain =~ ^(jazz|groove)$ ]]; then
+            fail "$registry: invalid invariant domain '$domain'"
             continue
         fi
-        if [[ -n ${seen_ids[$id]+present} ]]; then
-            fail "$registry: duplicate invariant id '$id'"
+        if [[ ! $id =~ ^(G-)?INV-[A-Za-z0-9-]+$ ]]; then
+            fail "$registry:$domain: invalid invariant id '$id'"
+            continue
+        fi
+        if [[ -n ${seen_ids["$domain:$id"]+present} ]]; then
+            fail "$registry: duplicate invariant id '$domain:$id'"
         else
-            seen_ids[$id]=1
+            seen_ids["$domain:$id"]=1
         fi
         if [[ -z $status || -z $coverage ]]; then
-            fail "$registry:$id: status and coverage must not be empty"
+            fail "$registry:$domain:$id: status and coverage must not be empty"
         fi
         case $status in
             now|target|next|planned|prov|open) ;;
-            *) fail "$registry:$id: unknown status '$status'" ;;
+            *) fail "$registry:$domain:$id: unknown status '$status'" ;;
         esac
         if [[ $coverage == '✓' \
             && ! $tests =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ \
             && ! $tests =~ packages/[A-Za-z0-9_./-]+\.test\.(ts|tsx) ]]; then
-            printf 'invariant-registry: covered without test: %s:%s\n' "$registry" "$id" >&2
+            printf 'invariant-registry: covered without test: %s:%s:%s\n' "$registry" "$domain" "$id" >&2
             uncited_covered=$((uncited_covered + 1))
             failures=$((failures + 1))
         fi
         if [[ $status == 'now' && $coverage == 'untested' ]]; then
             now_untested=$((now_untested + 1))
-            printf 'invariant-registry: documented debt (not failing): %s:%s is now + untested\n' "$registry" "$id" >&2
+            printf 'invariant-registry: documented debt (not failing): %s:%s:%s is now + untested\n' "$registry" "$domain" "$id" >&2
         fi
         check_test_citations "$registry" "$id" "$tests"
         registry_rows=$((registry_rows + 1))
@@ -270,8 +279,7 @@ require_command git || exit 1
 require_command perl || exit 1
 require_command sha256sum || exit 1
 index_test_functions
-check_registry "$JAZZ_REGISTRY" "$JAZZ_PARITY_RECEIPT"
-check_registry "$GROOVE_REGISTRY" "$GROOVE_PARITY_RECEIPT"
+check_registry "$REGISTRY" "$PARITY_RECEIPT"
 printf 'invariant-registry: summary: %d rows, %d missing test citations, %d covered rows without a test, %d now + untested (not failing)\n' \
     "$rows" "$missing_tests" "$uncited_covered" "$now_untested"
 
