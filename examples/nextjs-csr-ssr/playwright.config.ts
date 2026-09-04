@@ -3,6 +3,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 const WEB_PORT = Number(process.env.WEB_PORT ?? "3000");
 const testAppId = randomUUID();
+// Keep each test server independent of ambient credentials. An explicitly empty
+// backend secret is invalid; this fresh credential stays in the server process.
+const testBackendSecret = randomUUID();
 
 export default defineConfig({
   testDir: "./e2e",
@@ -29,8 +32,8 @@ export default defineConfig({
     env: {
       NEXT_PUBLIC_JAZZ_APP_ID: testAppId,
       NEXT_PUBLIC_JAZZ_SERVER_URL: "",
-      BACKEND_SECRET: "",
-      JAZZ_BACKEND_SECRET: "",
+      BACKEND_SECRET: testBackendSecret,
+      JAZZ_BACKEND_SECRET: testBackendSecret,
       ADMIN_SECRET: "",
       JAZZ_ADMIN_SECRET: "",
       JAZZ_E2E_IN_MEMORY: "1",
