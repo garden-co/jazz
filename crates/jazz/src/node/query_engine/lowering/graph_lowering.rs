@@ -3024,7 +3024,10 @@ fn lower_aggregate(
         }
     }
     for field in unwrap_fields {
-        graph = graph.unwrap_nullable(field);
+        graph = GraphBuilder::UnwrapNullable {
+            input: std::sync::Arc::new(graph),
+            field: FieldRef::stored_name(field),
+        };
     }
     let mut fields = group_cols.iter().cloned().collect::<BTreeSet<_>>();
     fields.extend(
@@ -3033,7 +3036,11 @@ fn lower_aggregate(
             .map(|aggregate| aggregate_output_field(&aggregate.output.name)),
     );
     Ok(LoweredRelationInput {
-        graph: GraphBuilder::aggregate(graph, group_cols, aggregates),
+        graph: GraphBuilder::Aggregate {
+            input: std::sync::Arc::new(graph),
+            group_cols: group_cols.into_iter().map(FieldRef::stored_name).collect(),
+            aggregates,
+        },
         root_source: Some(source.clone()),
         fields,
         nullable_fields: BTreeSet::new(),

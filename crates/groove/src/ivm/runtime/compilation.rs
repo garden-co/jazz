@@ -673,7 +673,17 @@ impl IvmRuntime {
                     .collect::<Result<Vec<_>, _>>()?;
                 let group_key = group_field_indices
                     .iter()
-                    .map(|field| Ok(PlanExpr::Field(field_name_at(&input_output, *field)?)))
+                    .map(|field| {
+                        let carrier = FieldRef::stored_name(field_name_at(&input_output, *field)?);
+                        if resolve_field_ref(&input_output, &carrier)? != *field {
+                            return Err(IvmRuntimeError::AmbiguousGraphFieldReference(
+                                carrier.display_name(),
+                            ));
+                        }
+                        // Aggregate evaluation still consumes PlanExpr names.
+                        // Only use a spelling that resolves back to this group slot.
+                        Ok(PlanExpr::Field(field_ref_name(&input_output, &carrier)?))
+                    })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 let aggregates = aggregates
                     .iter()

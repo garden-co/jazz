@@ -2850,7 +2850,7 @@ fn aggregate_public_values(
     columns
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
-            let idx = descriptor.field_index(&physical_column).ok_or_else(|| {
+            let idx = descriptor.fields().iter().position(|field| field.name.as_deref() == Some(physical_column.as_str())).ok_or_else(|| {
                 if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
@@ -5760,6 +5760,59 @@ mod tests {
                 Some(&Value::Text(expected.to_owned()))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn grouped_aggregate_preserves_declared_column_identity_with_carrier_collision() {
+        use crate::query::{OrderDirection, Query};
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .column("state", ColumnType::Text)
+                        .column("user_state", ColumnType::Integer),
+                )
+                .build(),
+        )
+        .await;
+        for (id, state) in [(1, "alpha"), (2, "beta"), (3, "alpha")] {
+            client
+                .upsert(
+                    "items",
+                    Uuid::from_u128(id),
+                    crate::row_input!("state" => state, "user_state" => 7_i32),
+                )
+                .unwrap();
+        }
+        let rows = client
+            .query_results(
+                Query::from("items")
+                    .count()
+                    .group_by("state")
+                    .order_by("state", OrderDirection::Asc),
+                Some(DurabilityTier::Local),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "state has two groups; user_state has only one"
+        );
+        assert_eq!(rows[0].get("state"), Some(&Value::Text("alpha".into())));
+        assert_eq!(rows[0].get("count"), Some(&Value::Timestamp(2)));
+        assert_eq!(rows[1].get("state"), Some(&Value::Text("beta".into())));
+        assert_eq!(rows[1].get("count"), Some(&Value::Timestamp(1)));
+        let rows = client
+            .query_results(
+                Query::from("items").count().group_by("user_state"),
+                Some(DurabilityTier::Local),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("user_state"), Some(&Value::Integer(7)));
+        assert_eq!(rows[0].get("count"), Some(&Value::Timestamp(3)));
     }
 
     #[tokio::test]

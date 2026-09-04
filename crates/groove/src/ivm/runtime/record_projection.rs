@@ -1160,8 +1160,10 @@ pub(super) fn aggregate_descriptor(
             .fields()
             .get(field_idx)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+        // A reference may use a logical spelling to avoid a carrier collision.
+        // The output still carries the selected source field's physical name.
         fields.push(
-            DescriptorField::new(field_ref_name(input, group_col)?, field.value_type.clone())
+            DescriptorField::new(field_name_at(input, field_idx)?, field.value_type.clone())
                 .with_identity(field.identity.clone().unwrap_or_else(|| {
                     crate::records::FieldIdentity::Name(
                         field

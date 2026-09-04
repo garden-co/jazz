@@ -3090,10 +3090,13 @@ fn aggregate_result_membership_fields(
         Value::String("aggregate_result".to_owned()),
     )];
     if let Some(group) = group_by.first() {
-        fields.push(ProjectField::renamed(
-            aggregate_source_field_name(group, source)?,
-            "synthetic_row",
-        ));
+        fields.push(ProjectField {
+            expression: groove::ivm::ProjectExpr::Field(FieldRef::stored_name(
+                aggregate_source_field_name(group, source)?,
+            )),
+            output_name: "synthetic_row".to_owned(),
+            output_identity: FieldIdentity::Name("synthetic_row".to_owned()),
+        });
     } else {
         fields.push(ProjectField::literal(
             "synthetic_row",
@@ -3116,7 +3119,19 @@ fn aggregate_result_membership_fields(
     }
     for group in group_by {
         let field = aggregate_source_field_name(group, source)?;
-        fields.push(ProjectField::named(field));
+        let identity = source
+            .row_shape
+            .descriptor
+            .fields()
+            .iter()
+            .find(|candidate| candidate.name.as_deref() == Some(field.as_str()))
+            .and_then(|candidate| candidate.identity.clone())
+            .unwrap_or_else(|| FieldIdentity::Name(field.clone()));
+        fields.push(ProjectField {
+            expression: groove::ivm::ProjectExpr::Field(FieldRef::stored_name(field.clone())),
+            output_name: field,
+            output_identity: identity,
+        });
     }
     fields.extend(
         outputs
@@ -3132,14 +3147,16 @@ fn aggregate_typed_group_field(
     source: &ResolvedSource,
 ) -> CapabilityResult<TypedOutputField> {
     let field = aggregate_source_field_name(value, source)?;
-    let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
-        Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Runtime(format!(
-                "aggregate group field {field:?} is missing from resolved descriptor"
-            ))],
-            explain: ExplainPlan::default(),
-        })
-    })?;
+    let value_type = aggregate_carrier_field_type(source, &field)
+        .cloned()
+        .ok_or_else(|| {
+            Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Runtime(format!(
+                    "aggregate group field {field:?} is missing from resolved descriptor"
+                ))],
+                explain: ExplainPlan::default(),
+            })
+        })?;
     Ok(TypedOutputField {
         name: field,
         ty: value_type,
@@ -3173,14 +3190,16 @@ fn aggregate_output_value_type(
                 })
             })?;
             let field = aggregate_source_field_name(input, source)?;
-            let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
-                Box::new(CapabilityReport {
-                    gaps: vec![UnsupportedReason::Runtime(format!(
-                        "aggregate input field {field:?} is missing from resolved descriptor"
-                    ))],
-                    explain: ExplainPlan::default(),
-                })
-            })?;
+            let value_type = aggregate_carrier_field_type(source, &field)
+                .cloned()
+                .ok_or_else(|| {
+                    Box::new(CapabilityReport {
+                        gaps: vec![UnsupportedReason::Runtime(format!(
+                            "aggregate input field {field:?} is missing from resolved descriptor"
+                        ))],
+                        explain: ExplainPlan::default(),
+                    })
+                })?;
             Ok(match value_type {
                 ValueType::Nullable(inner) => ValueType::Nullable(inner),
                 value_type => ValueType::Nullable(Box::new(value_type)),
@@ -3197,14 +3216,13 @@ fn aggregate_source_field_name(
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
-        } if value_source == &source.row_shape.source => {
-            require_source_field(source, &user_column_field(field)).map_err(|gap| {
+        } if value_source == &source.row_shape.source => require_source_field(source, field)
+            .map_err(|gap| {
                 Box::new(CapabilityReport {
                     gaps: vec![gap],
                     explain: ExplainPlan::default(),
                 })
-            })
-        }
+            }),
         NormalizedValueRef::RowId(RowIdRef::Source(value_source))
             if value_source == &source.row_shape.source =>
         {
@@ -3217,6 +3235,19 @@ fn aggregate_source_field_name(
             explain: ExplainPlan::default(),
         })),
     }
+}
+
+fn aggregate_carrier_field_type<'a>(
+    source: &'a ResolvedSource,
+    carrier: &str,
+) -> Option<&'a ValueType> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .find(|field| field.name.as_deref() == Some(carrier))
+        .map(|field| &field.value_type)
 }
 
 fn version_witness_fields_for_tagged_rows(
