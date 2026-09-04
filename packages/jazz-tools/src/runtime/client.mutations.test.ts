@@ -147,7 +147,7 @@ describe("JazzClient write attribution", () => {
   it("keeps public author out of serialized writes while retaining the trusted token", () => {
     const { client, insertCalls } = makeClient();
     const session = internalSessionFromVerifiedReservedJwtPayload(
-      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", claims: { role: "owner" } },
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", role: "owner" },
       "local-first",
     );
     expect(session).toMatchObject({ issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "alice" });
