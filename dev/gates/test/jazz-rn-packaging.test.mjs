@@ -2763,6 +2763,11 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     "the packaged RN consumer workflow must prepare the copied Expo fixture before isolated pnpm install",
   );
   assert.match(
+    packageBuild,
+    /nodeModules = fs\.realpathSync[\s\S]*installed\.startsWith\(`\$\{nodeModules\}\$\{path\.sep\}`\)/,
+    "the packaged consumer guard must compare canonical paths on macOS and Linux",
+  );
+  assert.match(
     fixturePreparation,
     /value\.startsWith\("catalog:"\)|value\.startsWith\("workspace:"\)/,
     "the shared fixture-preparation step must materialize workspace-only dependency specs",
