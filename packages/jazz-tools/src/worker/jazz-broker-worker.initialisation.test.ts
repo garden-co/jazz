@@ -1361,6 +1361,67 @@ describe("broker worker context initialization", () => {
     expect(mocks.runtimes[0]?.acceptPeerWhenIdle).toHaveBeenCalledOnce();
   });
 
+  it("keeps every tab attached after auth rejection so a sibling can refresh the session", async () => {
+    const initOptions = {
+      ...options("auth-recovery-owner"),
+      serverUrl: "ws://authority.example",
+    };
+    const first = await connect(initOptions, "first-tab");
+    const second = await connect(initOptions, "second-tab");
+    await initializeFollower(first.port, 1);
+    await initializeFollower(second.port, 2);
+
+    const runtime = mocks.runtimes[0]!;
+    const publishAuthFailure = runtime.onAuthFailure.mock.calls[0]![0] as (reason: string) => void;
+    runtime.updateAuth.mockImplementationOnce(async () => {
+      publishAuthFailure("invalid");
+      throw new Error("authentication rejected");
+    });
+    const firstFailure = first.port.waitForEvent((event) => event.type === "auth-failure");
+    const secondFailure = second.port.waitForEvent((event) => event.type === "auth-failure");
+    first.port.emitMessage({ type: "update-auth", authJson: "invalid", sessionClaims: {} });
+    await Promise.all([firstFailure, secondFailure]);
+
+    expect(first.port.close).not.toHaveBeenCalled();
+    expect(second.port.close).not.toHaveBeenCalled();
+
+    runtime.updateAuth.mockResolvedValueOnce(undefined);
+    const firstRestored = first.port.waitForEvent((event) => event.type === "auth-restored");
+    const secondRestored = second.port.waitForEvent((event) => event.type === "auth-restored");
+    second.port.emitMessage({ type: "update-auth", authJson: "valid", sessionClaims: {} });
+    await Promise.all([firstRestored, secondRestored]);
+
+    expect(runtime.updateAuth).toHaveBeenCalledTimes(2);
+    expect(first.port.close).not.toHaveBeenCalled();
+    expect(second.port.close).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake an earlier queued auth rejection for a later runtime failure", async () => {
+    const initOptions = { ...options("queued-auth-recovery"), serverUrl: "ws://authority.example" };
+    const first = await connect(initOptions, "first-tab");
+    const second = await connect(initOptions, "second-tab");
+    await initializeFollower(first.port, 1);
+    await initializeFollower(second.port, 2);
+    const runtime = mocks.runtimes[0]!;
+    const firstAttempt = deferred<void>();
+    runtime.updateAuth.mockImplementationOnce(() => firstAttempt.promise);
+    runtime.updateAuth.mockRejectedValueOnce(new Error("unrelated runtime failure"));
+    first.port.emitMessage({ type: "update-auth", authJson: "invalid", sessionClaims: {} });
+    await vi.waitFor(() => expect(runtime.updateAuth).toHaveBeenCalledTimes(1));
+    const secondError = second.port.waitForEvent((event) => event.type === "error");
+    second.port.emitMessage({ type: "update-auth", authJson: "replacement", sessionClaims: {} });
+
+    const publishAuthFailure = runtime.onAuthFailure.mock.calls[0]![0] as (reason: string) => void;
+    publishAuthFailure("invalid");
+    firstAttempt.reject(new Error("authentication rejected"));
+    await expect(secondError).resolves.toMatchObject({
+      type: "error",
+      error: { message: "unrelated runtime failure" },
+    });
+    expect(first.port.close).not.toHaveBeenCalled();
+    expect(second.port.close).toHaveBeenCalledOnce();
+  });
+
   it("rejects a second context with a different owner before it can reuse a live physical root", async () => {
     const alice = {
       ...options("shared-physical-root"),

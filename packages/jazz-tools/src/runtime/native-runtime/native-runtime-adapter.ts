@@ -429,7 +429,7 @@ type NativeDb = {
     descriptors: unknown,
     updatedAtMs?: number | null,
   ): Write;
-  connectUpstream(): Transport;
+  connectUpstream(): Transport | Promise<Transport>;
   connectUpstreamWithSession?(
     protocolVersion: number,
     features: number,
@@ -940,10 +940,10 @@ export class NativeRuntimeAdapter implements Runtime {
     }) as (error: Error | null, urgency: string) => void);
   }
 
-  connectUpstreamPeer(): Transport {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.connectUpstreamPeer();
+  async connectUpstreamPeer(): Promise<Transport> {
+    if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer();
     this.peerUpstreamAttached = true;
-    return this.db.connectUpstream();
+    return await this.db.connectUpstream();
   }
 
   onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
@@ -1236,17 +1236,18 @@ export class NativeRuntimeAdapter implements Runtime {
 
   async acceptPeerWhenIdle(claims: Record<string, unknown> = {}): Promise<Transport> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeerWhenIdle(claims);
-    await this.waitForCoreIdle();
-    // No await separates the idle check from admission, so another browser
-    // task cannot enter the evaluator and borrow the connection registry here.
-    return this.acceptPeer(claims);
+    return this.runWhenCoreIdle(() => this.acceptPeer(claims));
   }
 
-  private async waitForCoreIdle(): Promise<void> {
+  private async runWhenCoreIdle<T>(operation: () => T): Promise<T> {
     const owner = this.ownerRuntime;
     while (owner.coreTickRunning) {
       await owner.coreTickCompletion;
     }
+    // Run in the same continuation as the final idle check. Returning an
+    // "idle" promise first would let a queued tick acquire the node before
+    // the caller's continuation performs its synchronous operation.
+    return operation();
   }
 
   async waitForUpstreamServerConnection(): Promise<void> {
@@ -2299,7 +2300,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private async connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Promise<Transport> {
     const authority = negotiation.authority;
     const connectWithSession = this.db.connectUpstreamWithSession;
-    if (!authority || !connectWithSession) return this.db.connectUpstream();
+    if (!authority || !connectWithSession) return await this.db.connectUpstream();
     const localEpoch = this.nextServerConnectionEpoch++;
     return await connectWithSession.call(
       this.db,
@@ -2943,16 +2944,17 @@ export class NativeRuntimeAdapter implements Runtime {
     // Coverage registration and probes are synchronous node operations. A
     // storage-backed evaluator may hold that node across suspension, so enter
     // the same owner-wide idle boundary used for peer admission first.
-    await this.waitForCoreIdle();
-    if (this.closed) return;
     const opts = readOptions(tier, false, optionsJson);
     const readContext = this.nativeReadContext(session);
-    const attachment = this.attachQueryForContext(query, opts, readContext);
+    const attachment = await this.runWhenCoreIdle(() =>
+      this.closed ? undefined : this.attachQueryForContext(query, opts, readContext),
+    );
+    if (attachment === undefined) return;
     this.emitQueryCoverageTrace("attach");
-    // Local+Full has two independent axes: registering the attachment starts
-    // normal upstream propagation, but the public Local read is complete from
-    // current local knowledge and must not wait for that remote coverage.
-    if (tier === "local") return attachment;
+    // Durable Local reads returned above. A memory-only foreground must first
+    // receive its persistent owner's local answer, including an empty answer.
+    // The core attachment distinguishes that delivery from authority coverage:
+    // Local still completes while the owner is disconnected from edge/core.
     if (!this.db.queryAttachmentIsCovered) return attachment;
     const coverageKey = this.coverageKey(readContext, session);
     const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
@@ -2968,8 +2970,12 @@ export class NativeRuntimeAdapter implements Runtime {
     if (
       mayReusePeerConfirmation &&
       confirmedPeerActivityEpoch != null &&
-      this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
-      this.db.queryAttachmentIsCovered(attachment)
+      (await this.runWhenCoreIdle(
+        () =>
+          !this.closed &&
+          this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
+          this.db.queryAttachmentIsCovered!(attachment),
+      ))
     ) {
       return attachment;
     }
@@ -2991,10 +2997,13 @@ export class NativeRuntimeAdapter implements Runtime {
       pendingPeerActivityEpoch,
       mayReusePeerConfirmation && confirmedPeerActivityEpoch != null,
     );
-    if (this.nonDurableClient && this.db.queryAttachmentIsCovered(attachment)) {
-      const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
-      confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
-      this.peerCoveredQueries.set(query, confirmations);
+    if (this.nonDurableClient) {
+      await this.runWhenCoreIdle(() => {
+        if (this.closed || !this.db.queryAttachmentIsCovered!(attachment)) return;
+        const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
+        confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
+        this.peerCoveredQueries.set(query, confirmations);
+      });
     }
     this.emitQueryCoverageTrace("covered");
     return attachment;
@@ -3116,9 +3125,9 @@ export class NativeRuntimeAdapter implements Runtime {
       this.throwServerTransportErrorForTier(tier);
       await this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
-      await this.waitForCoreIdle();
-      if (this.closed) return;
-      if (this.db.queryAttachmentIsCovered) {
+      const covered = await this.runWhenCoreIdle(() => {
+        if (this.closed) return true;
+        if (!this.db.queryAttachmentIsCovered) return false;
         const peerActivityWasProcessed =
           minimumPeerActivityEpoch == null ||
           this.peerTransportProcessedActivityEpoch > minimumPeerActivityEpoch ||
@@ -3127,8 +3136,9 @@ export class NativeRuntimeAdapter implements Runtime {
             this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
           (pendingPeerActivityEpoch != null &&
             this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
-        if (peerActivityWasProcessed && this.db.queryAttachmentIsCovered(attachment)) return;
-      }
+        return peerActivityWasProcessed && this.db.queryAttachmentIsCovered(attachment);
+      });
+      if (covered) return;
       try {
         await this.readRowsForContextAsync(query, opts, context);
         if (!this.db.queryAttachmentIsCovered) return;

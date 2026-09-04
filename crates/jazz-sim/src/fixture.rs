@@ -485,6 +485,201 @@ where
     settle_outcome(node, outcome)
 }
 
+/// Install the receiving half of an ordinary direct-peer query subscription.
+/// Transport-driven Db fixtures must use their real subscribe handshake instead.
+/// Direct NodeState fixtures still need the exact shape, view, and claim scope
+/// before applying the peer's covered-input updates; a row bundle is not a
+/// substitute for that registration.
+pub fn register_query_receiver<S>(
+    node: &mut NodeState<S>,
+    shape: &jazz::query::ValidatedQuery,
+    binding: &jazz::query::Binding,
+    opts: jazz::protocol::RegisterShapeOptions,
+    session: jazz::protocol::DelegatedSessionBinding,
+) -> Result<jazz::protocol::SubscriptionKey, NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let subscription = jazz::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    register_query_receiver_for_subscription(node, subscription, shape, binding, opts, session)?;
+    Ok(subscription)
+}
+
+/// Register an explicit usage-site handle, keeping upstream and downstream
+/// registrations distinct when a direct fixture both receives and serves.
+pub fn register_query_receiver_for_subscription<S>(
+    node: &mut NodeState<S>,
+    subscription: jazz::protocol::SubscriptionKey,
+    shape: &jazz::query::ValidatedQuery,
+    binding: &jazz::query::Binding,
+    opts: jazz::protocol::RegisterShapeOptions,
+    session: jazz::protocol::DelegatedSessionBinding,
+) -> Result<(), NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    apply_sync_message_settled(
+        node,
+        SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: jazz::protocol::ShapeAst::from_validated(shape),
+            opts,
+        },
+    )?;
+    let values = shape
+        .params()
+        .keys()
+        .map(|name| binding.values()[name].clone())
+        .collect();
+    apply_sync_message_settled(
+        node,
+        SyncMessage::Subscribe(jazz::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values,
+            known_state: None,
+            delegated_session: Some(session),
+        }),
+    )?;
+    Ok(())
+}
+
+/// Query-control adapter for simulator transports that drive transaction
+/// admission separately. It serves the Db's real usage-site handles; commit
+/// units and other messages remain owned by the scenario's transport driver.
+pub struct DirectDbQueryServer {
+    session: jazz::protocol::DelegatedSessionBinding,
+    opened: std::collections::BTreeSet<jazz::protocol::SubscriptionKey>,
+    shapes: BTreeMap<
+        jazz::query::ShapeId,
+        (
+            jazz::query::ValidatedQuery,
+            jazz::protocol::RegisterShapeOptions,
+        ),
+    >,
+    subscriptions: BTreeMap<
+        jazz::protocol::SubscriptionKey,
+        (
+            jazz::query::ValidatedQuery,
+            jazz::query::Binding,
+            jazz::protocol::RegisterShapeOptions,
+        ),
+    >,
+}
+
+impl DirectDbQueryServer {
+    /// The session authenticated by the fixture's connection. Plain client
+    /// subscriptions need not carry an additional delegated-session field.
+    pub fn new(session: jazz::protocol::DelegatedSessionBinding) -> Self {
+        Self {
+            session,
+            opened: Default::default(),
+            shapes: Default::default(),
+            subscriptions: Default::default(),
+        }
+    }
+    /// Consume query controls only. Returning false leaves the message with
+    /// the caller; in particular a queued commit must never be discarded.
+    pub fn handle<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        peer: &mut PeerState,
+        schema: &jazz::schema::JazzSchema,
+        message: &SyncMessage,
+    ) -> Result<bool, NodeError>
+    where
+        S: OrderedKvStorage + ReopenableStorage,
+    {
+        match message {
+            SyncMessage::RegisterShape {
+                shape_id,
+                ast,
+                opts,
+            } => {
+                let query = ast.query().expect("scenario uses ordinary query ASTs");
+                let shape = query.validate(schema).expect("scenario query validates");
+                assert_eq!(*shape_id, shape.shape_id());
+                self.shapes.insert(*shape_id, (shape, opts.clone()));
+            }
+            SyncMessage::Subscribe(request) => {
+                let (shape, opts) = self
+                    .shapes
+                    .get(&request.shape_id)
+                    .expect("Db sends RegisterShape before Subscribe");
+                assert_eq!(shape.params().len(), request.values.len());
+                let binding = shape
+                    .bind(
+                        shape
+                            .params()
+                            .keys()
+                            .cloned()
+                            .zip(request.values.iter().cloned())
+                            .collect(),
+                    )
+                    .expect("Db binding matches its shape");
+                let session = request.delegated_session.as_ref().unwrap_or(&self.session);
+                peer.set_subscription_policy_binding(
+                    request.subscription,
+                    (session.identity, session.claims.clone()),
+                );
+                self.subscriptions
+                    .insert(request.subscription, (shape.clone(), binding, opts.clone()));
+            }
+            SyncMessage::Unsubscribe { subscription } => {
+                self.subscriptions.remove(subscription);
+                self.opened.remove(subscription);
+                peer.forget_subscription_with_node(node, *subscription);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Publish ordinary query updates after the upstream state has settled.
+    pub fn updates<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        peer: &mut PeerState,
+    ) -> Result<Vec<SyncMessage>, NodeError>
+    where
+        S: OrderedKvStorage + ReopenableStorage,
+    {
+        let updates: Vec<Option<SyncMessage>> = self
+            .subscriptions
+            .iter()
+            .map(|(subscription, (shape, binding, opts))| {
+                if self.opened.contains(subscription) {
+                    jazz::db::block_on(peer.query_update_for_subscription_with_opts(
+                        node,
+                        *subscription,
+                        shape,
+                        binding,
+                        opts.clone(),
+                    ))
+                } else {
+                    let update =
+                        jazz::db::block_on(peer.rehydrate_query_for_subscription_with_opts(
+                            node,
+                            *subscription,
+                            shape,
+                            binding,
+                            opts.clone(),
+                        ))?;
+                    if update.is_some() {
+                        self.opened.insert(*subscription);
+                    }
+                    Ok(update)
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(updates.into_iter().flatten().collect())
+    }
+}
+
 /// Ingest, persist, and settle one authority commit unit.
 pub fn ingest_commit_unit_settled<S>(
     node: &mut NodeState<S>,

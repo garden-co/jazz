@@ -416,7 +416,7 @@ async fn drive_upstream_wire(
         loop {
             let mut staged_semantic_input = false;
             while let Some(frame) = wire.try_recv_frame() {
-                match io.pump.route_incoming_wire_frame(frame, io.features).await {
+                match io.pump.route_incoming_wire_frame(frame).await {
                     Ok(Some(canonical)) => {
                         io.transport
                             .queues
@@ -460,11 +460,7 @@ async fn drive_upstream_wire(
             }
             if !transport_backpressured {
                 loop {
-                    let reservation = match io.pump.reserve_outbound_wire_frame(
-                        io.protocol_version,
-                        io.features,
-                        None,
-                    ) {
+                    let reservation = match io.pump.reserve_outbound_wire_frame() {
                         Ok(reservation) => reservation,
                         Err(error) => {
                             return ServerUpstreamTerminalReason::ProtocolFailed(error);
@@ -1327,7 +1323,12 @@ mod tests {
 
     fn encode_message(message: SyncMessage) -> Vec<u8> {
         let payload = encode_sync_message(&message).unwrap();
-        encode_frame(&WireFrame::Message(WireEnvelope::new(0, 0, payload))).unwrap()
+        encode_frame(&WireFrame::Message(WireEnvelope::new(
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            payload,
+        )))
+        .unwrap()
     }
 
     // This internal test is necessary because the terminal reason crosses the

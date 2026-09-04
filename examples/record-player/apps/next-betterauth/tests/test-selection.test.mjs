@@ -45,8 +45,8 @@ test("the topology browser project provides the complete Jazz server command con
   }
 });
 
-test("topology's browser server uses its registry-owned strict port", () => {
-  assert.match(browserConfig, /api:\s*\{\s*port:\s*63318,\s*strictPort:\s*true\s*\}/);
+test("topology's browser server can retry an occupied preferred port", () => {
+  assert.match(browserConfig, /api:\s*\{\s*port:\s*63318,\s*strictPort:\s*false\s*\}/);
 });
 
 test("selection checks remain data-only and never boot a Vitest browser server", () => {

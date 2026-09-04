@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+mod common;
+
 use futures::executor::block_on;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -318,7 +320,7 @@ fn fate_replay_repairs_partially_applied_state() {
 
         // The crash window: the unit is persisted but the fate was never applied.
         drop(worker);
-        let mut worker = reopen_node(&worker_dir, node(2), schema).await;
+        let mut worker = reopen_node(&worker_dir, node(2), schema.clone()).await;
         assert_eq!(
             worker.transaction_state(tx_id).await.unwrap().0,
             Fate::Pending,
@@ -329,10 +331,18 @@ fn fate_replay_repairs_partially_applied_state() {
         apply_message(&mut worker, fate.clone()).await;
         apply_message(&mut worker, fate).await;
         let mut core_to_worker = PeerState::new();
-        let update = core_to_worker
-            .current_rows_update(&mut core, "tasks")
-            .await
-            .unwrap();
+        common::register_direct_receiver(
+            &mut worker,
+            &schema,
+            "tasks",
+            jazz::protocol::DelegatedSessionBinding {
+                identity: AuthorSubject::SYSTEM,
+                claims: BTreeMap::new(),
+            },
+        )
+        .await;
+        let update =
+            common::direct_query_update(&mut core, &mut core_to_worker, &schema, "tasks").await;
         apply_message(&mut worker, update).await;
 
         assert_eq!(
