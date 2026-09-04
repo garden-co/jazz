@@ -627,6 +627,41 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
   }, 15_000);
 
+  it("admits concurrent reads and cancels a deferred subscription before native opening", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-concurrent-query-admission:node"),
+      testAuthorBytes("jazz-napi-concurrent-query-admission:alice"),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+    const inserted = runtime.insert("todos", {
+      title: { type: "Text", value: "concurrent admission" },
+      done: { type: "Boolean", value: false },
+    });
+    await runtime.waitForTransaction(await committedTxId(inserted), "local");
+    const query = JSON.stringify({ table: "todos" });
+    let cancelledCallbacks = 0;
+    const cancelled = runtime.subscribe(query);
+    runtime.executeSubscription(cancelled, () => {
+      cancelledCallbacks += 1;
+    });
+    runtime.unsubscribe(cancelled);
+    const reads = await Promise.all(Array.from({ length: 12 }, () => runtime.query(query)));
+    for (const rows of reads) expect(rows).toEqual([expect.objectContaining({ id: inserted.id })]);
+    expect(cancelledCallbacks).toBe(0);
+    const active = runtime.subscribe(query);
+    const opening = new Promise<unknown>((resolve) => runtime.executeSubscription(active, resolve));
+    await opening;
+    runtime.unsubscribe(active);
+    await expect(runtime.query(query)).resolves.toEqual([
+      expect.objectContaining({ id: inserted.id }),
+    ]);
+  });
+
   it("opens, mutates one row, and queries it through the native runtime payload shape", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(

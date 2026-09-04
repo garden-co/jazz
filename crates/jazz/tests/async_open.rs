@@ -507,3 +507,158 @@ fn db_close_and_late_stream_drop_share_one_terminal_retirement_boundary() {
         "terminal retirement must remove the live Groove subscription"
     );
 }
+
+/// Alice cancels queued preparation, coverage, and subscription opening while
+/// her cold read owns storage. None may leave work behind or block the next read.
+///
+/// alice/cold read ──hold owner──► cancelled waiters ──resume──► fresh read
+#[test]
+fn cancelled_query_admission_waiters_leave_no_subscription_or_coverage() {
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(config(storage.clone()))).unwrap();
+    block_on(db.insert(
+        "todos",
+        [("title".to_owned(), Value::String("alice".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap();
+    let table = db.table("todos");
+    let prepared = block_on(db.prepare_query_async(&table)).unwrap();
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    storage.evict_all();
+    control.pause();
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut first = Box::pin(db.all(&prepared, opts.clone()));
+    assert!(first.as_mut().poll(&mut cx).is_pending());
+    let mut preparation = Box::pin(db.prepare_query_async(&table));
+    let mut attachment =
+        Box::pin(db.attach_query_with_opts_async(&prepared, opts.clone(), None, None));
+    let mut subscription = Box::pin(db.subscribe(&prepared, opts.clone()));
+    assert!(preparation.as_mut().poll(&mut cx).is_pending());
+    assert!(attachment.as_mut().poll(&mut cx).is_pending());
+    assert!(subscription.as_mut().poll(&mut cx).is_pending());
+    drop(preparation);
+    drop(attachment);
+    drop(subscription);
+    control.resume();
+    assert_eq!(block_on(first).unwrap().len(), 1);
+    assert_eq!(db.query_coverage_attachment_counts_for_test(), (0, 0));
+    assert_eq!(db.active_groove_subscriptions_for_test(), 0);
+    let mut subscription = block_on(db.subscribe(&prepared, opts)).unwrap();
+    assert!(block_on(subscription.next_event()).is_some());
+    block_on(subscription.close()).unwrap();
+    assert_eq!(db.active_groove_subscriptions_for_test(), 0);
+}
+
+/// Alice opens two request scopes for the same subject, with different admitted
+/// team claims. Suspended read admission and subscription opening must retain
+/// each request's claims even when the live subject claims are changed.
+///
+/// alice/team A ──wait owner──┐
+/// alice/team B ──wait owner──┴──resume──► A sees A, B sees B
+#[test]
+fn prepared_request_claims_survive_owner_wait_and_same_subject_reentry() {
+    use jazz::tools::{PolicyExpr, TablePolicies};
+    let schema = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
+                        "title",
+                        vec!["claims".into(), "team".into()],
+                    ))),
+            )
+            .build(),
+    )
+    .unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x62; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let mut ids = Vec::new();
+    for title in ["team-a", "team-b"] {
+        ids.push(
+            block_on(db.insert(
+                "todos",
+                [("title".to_owned(), Value::String(title.into()))].into(),
+                Default::default(),
+            ))
+            .unwrap()
+            .row_uuid(),
+        );
+    }
+    let alice = AuthorSubject::for_test_bytes([0x63; 16]);
+    let claims = |team: &str| {
+        [(
+            jazz::query::provider_claim_key("team"),
+            Value::String(team.into()),
+        )]
+        .into()
+    };
+    let prepared = block_on(db.prepare_query_async(&db.table("todos"))).unwrap();
+    let a = prepared
+        .clone()
+        .with_identity_claims(alice, claims("team-a"));
+    let b = prepared.with_identity_claims(alice, claims("team-b"));
+    db.set_identity_claims(alice, claims("team-b"));
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut owner = Box::pin(db.hold_node_owner_for_test());
+    assert!(owner.as_mut().poll(&mut cx).is_pending());
+    let mut read_a = Box::pin(db.all_for_identity(&a, opts.clone(), alice));
+    let mut read_b = Box::pin(db.all_for_identity(&b, opts.clone(), alice));
+    let mut subscribe_a = Box::pin(db.subscribe_for_identity(&a, opts.clone(), alice));
+    assert!(read_a.as_mut().poll(&mut cx).is_pending());
+    assert!(read_b.as_mut().poll(&mut cx).is_pending());
+    assert!(subscribe_a.as_mut().poll(&mut cx).is_pending());
+    drop(owner);
+    assert_eq!(
+        block_on(read_a)
+            .unwrap()
+            .iter()
+            .map(|r| r.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![ids[0]]
+    );
+    assert_eq!(
+        block_on(read_b)
+            .unwrap()
+            .iter()
+            .map(|r| r.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![ids[1]]
+    );
+    let mut subscription = block_on(subscribe_a).unwrap();
+    let jazz::db::SubscriptionEvent::Delta { added, .. } =
+        block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected opening delta")
+    };
+    assert_eq!(
+        added.iter().map(|r| r.row_uuid()).collect::<Vec<_>>(),
+        vec![ids[0]]
+    );
+    let wrong_subject = AuthorSubject::for_test_bytes([0x64; 16]);
+    assert!(block_on(db.all_for_identity(&a, opts, wrong_subject)).is_err());
+    block_on(subscription.close()).unwrap();
+}
