@@ -50,6 +50,7 @@ function createTestPageStore() {
         started: () => void;
         wait: Promise<void>;
         release: () => void;
+        failAfterRelease: boolean;
       }
     | undefined;
 
@@ -70,6 +71,7 @@ function createTestPageStore() {
         pendingGate = undefined;
         gate.started();
         await gate.wait;
+        if (gate.failAfterRelease) throw new Error("injected page-store commit failure");
       }
       for (let index = 0; index < pageIds.length; index += 1) {
         pages.set(pageIds[index]!, new Uint8Array(pageBytes[index]!));
@@ -87,10 +89,15 @@ function createTestPageStore() {
 
   return {
     pageStore,
-    armCommitGate() {
+    armCommitGate(failAfterRelease = false) {
       const wait = deferredVoid();
       const started = deferredVoid();
-      pendingGate = { started: started.resolve, wait: wait.promise, release: wait.resolve };
+      pendingGate = {
+        started: started.resolve,
+        wait: wait.promise,
+        release: wait.resolve,
+        failAfterRelease,
+      };
       return { started: started.promise, release: wait.resolve };
     },
   };
@@ -194,7 +201,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
 
   it("hands failed in-flight push ownership to abort without retaining staged chunks", async () => {
     const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
-    const commitGate = pageStore.armCommitGate();
+    const commitGate = pageStore.armCommitGate(true);
     const upload = db.beginStreamingMutationEncoded(
       "todos",
       uuidBytes("00000000-0000-4000-8000-000000000130"),
@@ -205,9 +212,11 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
       "insert",
       author,
     );
-    const pushRejected = expect(upload.push(Uint8Array.of(0xff))).rejects.toThrow();
+    const pushRejected = expect(
+      upload.push(new TextEncoder().encode("failed push")),
+    ).rejects.toThrow(/injected page-store commit failure/);
     try {
-      await withWatchdog(commitGate.started, "invalid-text push entered storage");
+      await withWatchdog(commitGate.started, "failed push entered storage");
       const abort = upload.abort();
       commitGate.release();
       await pushRejected;
