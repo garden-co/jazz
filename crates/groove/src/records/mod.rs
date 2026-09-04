@@ -1704,6 +1704,8 @@ pub enum FieldIdentity {
     /// while Groove keeps the carrier generic and independent from display
     /// names.
     Slot(u64),
+    /// Stable slot identity paired with a distinct logical/public field name.
+    NamedSlot { name: String, slot: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
@@ -1731,6 +1733,7 @@ impl DescriptorField {
     pub fn logical_name(&self) -> Option<&str> {
         match self.identity.as_ref() {
             Some(FieldIdentity::Name(name)) => Some(name.as_str()),
+            Some(FieldIdentity::NamedSlot { name, .. }) => Some(name.as_str()),
             _ => self.name.as_deref(),
         }
     }

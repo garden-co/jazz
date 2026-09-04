@@ -20,7 +20,7 @@ use crate::{
 
 use super::{
     ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, SubTick, consolidate_deltas,
-    encode_key_part,
+    encode_key_part, record_projection::resolve_field_name,
 };
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
@@ -827,8 +827,7 @@ fn scalar_join_field_indices(
 ) -> Result<Option<Vec<usize>>, IvmRuntimeError> {
     let mut indices = Vec::with_capacity(fields.len());
     for field in fields {
-        let field_idx = descriptor
-            .field_index(field)
+        let field_idx = resolve_field_name(descriptor, field)
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
         let descriptor_field = descriptor
             .fields()
@@ -889,7 +888,9 @@ fn join_keys_with_comparison(
     comparison: ValueComparison,
 ) -> Result<Vec<JoinKey>, IvmRuntimeError> {
     if fields.len() == 1 {
-        let values = descriptor.get(record, &fields[0])?;
+        let field_idx = resolve_field_name(descriptor, &fields[0])
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(fields[0].clone()))?;
+        let values = descriptor.bind(record).get_idx(field_idx)?;
         let parts = join_key_parts(values);
         if parts.is_empty() {
             return Ok(Vec::new());
@@ -916,7 +917,9 @@ fn join_keys_with_comparison(
     let mut seen = HashSet::default();
 
     for field in fields {
-        let values = descriptor.get(record, field)?;
+        let field_idx = resolve_field_name(descriptor, field)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+        let values = descriptor.bind(record).get_idx(field_idx)?;
         let parts = join_key_parts(values);
 
         if parts.is_empty() {
@@ -1044,13 +1047,11 @@ pub(super) fn join_output_mapping(
                 .as_deref()
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
             if let Some(name) = name.strip_prefix("left.") {
-                let field_idx = left_descriptor
-                    .field_index(name)
+                let field_idx = resolve_field_name(left_descriptor, name)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
                 Ok((0, field_idx))
             } else if let Some(name) = name.strip_prefix("right.") {
-                let field_idx = right_descriptor
-                    .field_index(name)
+                let field_idx = resolve_field_name(right_descriptor, name)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
                 Ok((1, field_idx))
             } else {

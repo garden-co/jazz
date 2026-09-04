@@ -5625,9 +5625,7 @@ pub(crate) fn terminal_root_binding_field_names(
 ) -> Vec<Option<String>> {
     let mut names = vec![None; layout.root_descriptor.fields().len()];
     for field in &layout.public_fields {
-        if field.carrier == TerminalRootCarrier::Logical {
-            names[field.slot] = Some(field.name.clone());
-        }
+        names[field.slot] = Some(field.name.clone());
     }
     names
 }

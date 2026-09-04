@@ -8,6 +8,25 @@ use super::*;
 use crate::node::query_eval::coerce_prepared_binding_value;
 use groove::records::{DescriptorField, FieldIdentity};
 
+fn resolved_source_field_name(source: &ResolvedSource, field: &str) -> Option<String> {
+    source
+        .row_shape
+        .descriptor
+        .field_index(field)
+        .and_then(|index| source.row_shape.descriptor.fields().get(index))
+        .and_then(|field| field.name.clone())
+}
+
+fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<String> {
+    source
+        .row_shape
+        .descriptor
+        .field_index(field)
+        .and_then(|index| source.row_shape.descriptor.fields().get(index))
+        .and_then(crate::node::query_engine::descriptor_public_name)
+        .map(str::to_owned)
+}
+
 pub(super) fn lowered_terminals(
     graph: GraphBuilder,
     request: &QueryProgramRequest,
@@ -980,7 +999,7 @@ fn lower_collect_by_app_rows(
         &parameter_domain,
         available_fields,
     )?;
-    align_collect_root_window(&mut layout, plan)?;
+    align_collect_root_window(&mut layout, plan, root_source)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     if layout.slots.is_empty() {
         // A collect-all root preserves the source CurrentRow application-cell
@@ -1024,7 +1043,7 @@ fn lower_collect_by_app_rows(
                 )
             })
             .collect();
-        let anchor = collect_anchor_graph(visible_root, &layout)?;
+        let anchor = collect_anchor_graph(visible_root, root_source, &layout)?;
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
             steps
                 .iter()
@@ -1085,7 +1104,7 @@ fn lower_collect_by_app_rows(
             terminal: AppRowTerminal::RootCollector,
         });
     }
-    let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
+    let root_context = root_collect_context_graph(visible_root.clone(), root_source, &layout)?;
     let mut field_carriers = layout
         .root_fields
         .iter()
@@ -1144,7 +1163,7 @@ fn lower_collect_by_app_rows(
             request,
         )?);
     }
-    let anchor = collect_anchor_graph(visible_root, &layout)?;
+    let anchor = collect_anchor_graph(visible_root, root_source, &layout)?;
     let input = GraphBuilder::union(std::iter::once(anchor).chain(association_graphs));
     let descriptor = collect_output_descriptor(&layout)?;
     let root_group = layout
@@ -1301,6 +1320,7 @@ fn align_collect_join_key_types(
 fn align_collect_root_window(
     layout: &mut CollectLayout,
     plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
 ) -> CapabilityResult<()> {
     let steps = match plan {
         AnalyzedQueryPlan::Linear(linear) => linear.steps.iter().collect::<Vec<_>>(),
@@ -1315,6 +1335,9 @@ fn align_collect_root_window(
     for step in steps {
         match step {
             LinearStep::OrderBy(keys) => {
+                for key in keys {
+                    retain_collect_root_value(layout, &key.value, source)?;
+                }
                 layout.root_order_cols = keys
                     .iter()
                     .map(|key| {
@@ -1332,6 +1355,9 @@ fn align_collect_root_window(
                 tie_breaker,
                 ..
             } => {
+                for value in tie_breaker {
+                    retain_collect_root_value(layout, value, source)?;
+                }
                 layout.root_offset = u64::from(*offset);
                 layout.root_limit = limit
                     .map(|limit| TopByLimit::Finite(u64::from(limit)))
@@ -1368,6 +1394,48 @@ fn align_collect_root_window(
 /// Keep values used to order or slice a nested collector slot in its internal
 /// input row. They are deliberately not public payload fields: a path can
 /// order by provenance even when its projection selects only ordinary columns.
+fn retain_collect_root_value(
+    layout: &mut CollectLayout,
+    value: &NormalizedValueRef,
+    source: &ResolvedSource,
+) -> CapabilityResult<()> {
+    let Some(requested_field) = collect_source_field_for_value(value) else {
+        return Ok(());
+    };
+    let source_field = resolved_source_field_name(source, requested_field)
+        .unwrap_or_else(|| user_column_field(requested_field));
+    if layout
+        .root_fields
+        .iter()
+        .any(|field| field.source_field.as_deref() == Some(source_field.as_str()))
+    {
+        return Ok(());
+    }
+    let source_value_type = source_field_type(source, &source_field)
+        .cloned()
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "collector root source {:?} does not provide window key {requested_field:?}",
+                source.row_shape.source
+            )))
+        })?;
+    layout.root_fields.push(CollectFlatField {
+        input: format!("__collect_root_{source_field}"),
+        output: source_field.clone(),
+        value_type: source_value_type.clone(),
+        output_value_type: source_value_type,
+        source_public_name: resolved_source_public_name(source, &source_field),
+        source_field: Some(source_field),
+        is_row_id: false,
+        is_presence: false,
+        is_output: false,
+    });
+    Ok(())
+}
+
+/// Keep values used to order or slice a nested collector slot in its internal
+/// input row. They are deliberately not public payload fields: a path can
+/// order by provenance even when its projection selects only ordinary columns.
 fn retain_collect_slot_value(
     slot: &mut CollectSlotLayout,
     value: &NormalizedValueRef,
@@ -1376,16 +1444,8 @@ fn retain_collect_slot_value(
     let Some(requested_field) = collect_source_field_for_value(value) else {
         return Ok(());
     };
-    let source_field = if source
-        .row_shape
-        .descriptor
-        .field_index(requested_field)
-        .is_some()
-    {
-        requested_field.to_owned()
-    } else {
-        user_column_field(requested_field)
-    };
+    let source_field = resolved_source_field_name(source, requested_field)
+        .unwrap_or_else(|| user_column_field(requested_field));
     if slot
         .fields
         .iter()
@@ -1420,8 +1480,8 @@ fn retain_collect_slot_value(
         output: source_field.clone(),
         value_type,
         output_value_type: source_value_type,
+        source_public_name: resolved_source_public_name(source, &source_field),
         source_field: Some(source_field),
-        source_public_name: None,
         is_row_id: false,
         is_presence: false,
         is_output: false,

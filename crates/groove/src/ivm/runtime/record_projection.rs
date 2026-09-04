@@ -662,26 +662,30 @@ pub(super) fn project_record(
     let input = BorrowedRecord::new(input_record, input_desc);
     let mut values = Vec::with_capacity(expressions.len());
     for expr in expressions {
+        let resolved = |field: &String| -> Result<Value, IvmRuntimeError> {
+            let source_idx = resolve_field_name(input_desc, field)
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+            input
+                .get_idx(source_idx)
+                .map_err(IvmRuntimeError::RecordEncoding)
+        };
         values.push(match &expr.expression {
-            PlanExpr::Field(field) => input.get(field)?.clone(),
+            PlanExpr::Field(field) => resolved(field)?,
             PlanExpr::Literal(value) => value.to_value(),
             PlanExpr::Null(_) => Value::Nullable(None),
-            PlanExpr::Nullable(field) => Value::Nullable(Some(Box::new(input.get(field)?.clone()))),
+            PlanExpr::Nullable(field) => Value::Nullable(Some(Box::new(resolved(field)?))),
             PlanExpr::NullableFlat(field) => {
-                let value = input.get(field)?.clone();
+                let value = resolved(field)?;
                 if matches!(value, Value::Nullable(_)) {
                     value
                 } else {
                     Value::Nullable(Some(Box::new(value)))
                 }
             }
-            PlanExpr::EnumTagRemap { field, tags } => {
-                remap_enum_tag(input.get(field)?.clone(), tags)?
-            }
-            PlanExpr::EnumRemap { field, tags } => remap_enum(input.get(field)?.clone(), tags)?,
+            PlanExpr::EnumTagRemap { field, tags } => remap_enum_tag(resolved(field)?, tags)?,
+            PlanExpr::EnumRemap { field, tags } => remap_enum(resolved(field)?, tags)?,
             PlanExpr::RecursiveEnumRemap { field, remaps, .. } => {
-                let source_idx = input_desc
-                    .field_index(field)
+                let source_idx = resolve_field_name(input_desc, field)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
                 let output_idx = output_desc
                     .field_index(expr.output_name.as_deref().ok_or_else(|| {
@@ -689,7 +693,7 @@ pub(super) fn project_record(
                     })?)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
                 remap_recursive_enum_value(
-                    input.get(field)?.clone(),
+                    resolved(field)?,
                     &input_desc.fields()[source_idx].value_type,
                     &output_desc.fields()[output_idx].value_type,
                     remaps,
@@ -952,14 +956,11 @@ pub(super) fn raw_projection_fields(
         .expressions
         .iter()
         .map(|expr| match &expr.expression {
-            PlanExpr::Field(field) => input_desc
-                .field_index(field)
+            PlanExpr::Field(field) => resolve_field_name(input_desc, field)
                 .map(|source_idx| RawProjectionField::Copy { source_idx }),
-            PlanExpr::Nullable(field) => input_desc
-                .field_index(field)
+            PlanExpr::Nullable(field) => resolve_field_name(input_desc, field)
                 .map(|source_idx| RawProjectionField::WrapNullable { source_idx }),
-            PlanExpr::NullableFlat(field) => input_desc
-                .field_index(field)
+            PlanExpr::NullableFlat(field) => resolve_field_name(input_desc, field)
                 .map(|source_idx| RawProjectionField::FlattenNullable { source_idx }),
             PlanExpr::Null(_) => Some(RawProjectionField::Encoded {
                 bytes: encode_projection_field_value(
@@ -1009,8 +1010,7 @@ pub(super) fn resolve_field_ref(
     field: &FieldRef,
 ) -> Result<usize, IvmRuntimeError> {
     match field {
-        FieldRef::Name(name) => descriptor
-            .field_index(name)
+        FieldRef::Name(name) => resolve_field_name(descriptor, name)
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone())),
         FieldRef::Resolved(index) => {
             if *index < descriptor.fields().len() {
@@ -1020,6 +1020,15 @@ pub(super) fn resolve_field_ref(
             }
         }
     }
+}
+
+pub(super) fn resolve_field_name(descriptor: &RecordDescriptor, name: &str) -> Option<usize> {
+    descriptor.field_index(name).or_else(|| {
+        descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some(name))
+    })
 }
 
 pub(super) fn field_ref_name(
@@ -1202,8 +1211,7 @@ fn aggregate_expr_value_type(
         | PlanExpr::EnumTagRemap { field, .. }
         | PlanExpr::EnumRemap { field, .. }
         | PlanExpr::RecursiveEnumRemap { field, .. } => {
-            let field_idx = input
-                .field_index(field)
+            let field_idx = resolve_field_name(input, field)
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
             Ok(input
                 .fields()

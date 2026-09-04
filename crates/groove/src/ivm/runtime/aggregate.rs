@@ -46,8 +46,7 @@ pub(super) fn resolve_aggregate_expr(
 }
 
 fn resolve_field_name(input: &RecordDescriptor, field: &str) -> Result<String, IvmRuntimeError> {
-    let field_idx = input
-        .field_index(field)
+    let field_idx = super::record_projection::resolve_field_name(input, field)
         .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
     field_name_at(input, field_idx)
 }
@@ -351,10 +350,25 @@ fn evaluate_aggregate_expr(
 ) -> Result<Value, IvmRuntimeError> {
     match expr {
         PlanExpr::Field(field) | PlanExpr::Nullable(field) | PlanExpr::NullableFlat(field) => {
-            record.get(field).map_err(IvmRuntimeError::RecordEncoding)
+            let field_idx =
+                super::record_projection::resolve_field_name(&record.descriptor(), field)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+            record
+                .get_idx(field_idx)
+                .map_err(IvmRuntimeError::RecordEncoding)
         }
-        PlanExpr::EnumTagRemap { field, tags } => remap_enum_tag(record.get(field)?, tags),
-        PlanExpr::EnumRemap { field, tags } => remap_enum(record.get(field)?, tags),
+        PlanExpr::EnumTagRemap { field, tags } => {
+            let field_idx =
+                super::record_projection::resolve_field_name(&record.descriptor(), field)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+            remap_enum_tag(record.get_idx(field_idx)?, tags)
+        }
+        PlanExpr::EnumRemap { field, tags } => {
+            let field_idx =
+                super::record_projection::resolve_field_name(&record.descriptor(), field)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+            remap_enum(record.get_idx(field_idx)?, tags)
+        }
         // Aggregates do not carry an output descriptor, so there is no
         // well-defined target boundary for a recursive re-encoding.
         PlanExpr::RecursiveEnumRemap { .. } => Err(IvmRuntimeError::UnsupportedOperator),

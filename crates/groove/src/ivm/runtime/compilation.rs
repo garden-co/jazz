@@ -1462,8 +1462,7 @@ impl IvmRuntime {
             .columns
             .iter()
             .map(|column| {
-                table_descriptor
-                    .field_index(column)
+                super::record_projection::resolve_field_name(&table_descriptor, column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1475,8 +1474,7 @@ impl IvmRuntime {
             .columns
             .iter()
             .map(|column| {
-                table_descriptor
-                    .field_index(&column.column)
+                super::record_projection::resolve_field_name(&table_descriptor, &column.column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1514,8 +1512,7 @@ impl IvmRuntime {
             .columns
             .iter()
             .map(|column| {
-                table_descriptor
-                    .field_index(column)
+                super::record_projection::resolve_field_name(&table_descriptor, column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1527,8 +1524,7 @@ impl IvmRuntime {
             .columns
             .iter()
             .map(|column| {
-                table_descriptor
-                    .field_index(&column.column)
+                super::record_projection::resolve_field_name(&table_descriptor, &column.column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;

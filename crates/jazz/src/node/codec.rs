@@ -5981,22 +5981,30 @@ impl CurrentRowDescriptorCacheEntry {
 }
 
 fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
-    records::RecordDescriptor::new(
-        std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
-            .chain(table.columns.iter().map(|column| {
-                (
-                    user_column_field(&column.name),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
-                )
-            }))
-            .chain([
+    records::RecordDescriptor::new_with_fields(
+        std::iter::once(records::DescriptorField::new(
+            "row_uuid",
+            records::ValueType::Uuid,
+        ))
+        .chain(table.columns.iter().map(|column| {
+            records::DescriptorField::new(
+                user_column_field(&column.name),
+                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+            )
+            .with_identity(records::FieldIdentity::Name(column.name.clone()))
+        }))
+        .chain(
+            [
                 ("$createdBy".to_owned(), records::ValueType::String),
                 ("$createdAt".to_owned(), records::ValueType::U64),
                 ("$updatedBy".to_owned(), records::ValueType::String),
                 ("$updatedAt".to_owned(), records::ValueType::U64),
                 ("tx_time".to_owned(), records::ValueType::U64),
                 ("tx_node_id".to_owned(), records::ValueType::U64),
-            ]),
+            ]
+            .into_iter()
+            .map(|(name, value_type)| records::DescriptorField::new(name, value_type)),
+        ),
     )
 }
 

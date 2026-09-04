@@ -1249,9 +1249,9 @@ fn lower_linear_plan_steps_cached(
                         ))
                         .cloned()
                         .ok_or_else(|| {
-                            UnsupportedReason::Runtime(
-                                "join relation input was not lowered".to_owned(),
-                            )
+                            UnsupportedReason::Runtime(format!(
+                                "join relation input was not lowered at step {step_index}: right={right:#?}"
+                            ))
                         })?,
                     None => lower_relation_input(right, resolved_sources, request)?,
                 };
@@ -2878,14 +2878,25 @@ fn source_field_nullable_depth(source: &ResolvedSource, field: &str) -> usize {
     depth
 }
 
+pub(super) fn resolved_source_descriptor_index(
+    source: &ResolvedSource,
+    field: &str,
+) -> Option<usize> {
+    source.row_shape.descriptor.field_index(field).or_else(|| {
+        source
+            .row_shape
+            .descriptor
+            .fields()
+            .iter()
+            .position(|candidate| candidate.name.as_deref() == Some(field))
+    })
+}
+
 pub(super) fn source_field_type<'a>(
     source: &'a ResolvedSource,
     field: &str,
 ) -> Option<&'a ValueType> {
-    source
-        .row_shape
-        .descriptor
-        .field_index(field)
+    resolved_source_descriptor_index(source, field)
         .and_then(|index| source.row_shape.descriptor.fields().get(index))
         .map(|field| &field.value_type)
 }
@@ -3560,24 +3571,10 @@ fn lower_value_ref(
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
-        } if value_source == source_id => {
-            let user_field = user_column_field(field);
-            let field = if source
-                .row_shape
-                .descriptor
-                .field_index(&user_field)
-                .is_some()
-            {
-                user_field
-            } else if source.row_shape.descriptor.field_index(field).is_some() {
-                field.clone()
-            } else {
-                user_field
-            };
-            Ok(LoweredValueRef::Field(require_source_field(
-                source, &field,
-            )?))
-        }
+        } if value_source == source_id => Ok(LoweredValueRef::Field(
+            require_source_field(source, field)
+                .or_else(|_| require_source_field(source, &user_column_field(field)))?,
+        )),
         NormalizedValueRef::SourceField { source, .. } => Err(UnsupportedReason::Operator(
             format!("predicate references unsupported source {:?}", source),
         )),
@@ -3678,7 +3675,7 @@ pub(super) fn require_source_field(
     source: &ResolvedSource,
     field: &str,
 ) -> Result<String, UnsupportedReason> {
-    let Some(index) = source.row_shape.descriptor.field_index(field) else {
+    let Some(index) = resolved_source_descriptor_index(source, field) else {
         return Err(UnsupportedReason::Operator(format!(
             "resolved source {:?} does not provide field '{field}'",
             source.row_shape.source

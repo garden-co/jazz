@@ -1246,9 +1246,15 @@ impl TickEvaluator<'_> {
                             .cloned()
                             .collect::<Vec<_>>();
                         for field in plan_expr_fields(&expression_fields) {
-                            fields.push(input.descriptor.field_index(&field).ok_or_else(|| {
-                                IvmRuntimeError::GraphFieldNotFound(field.clone())
-                            })?);
+                            fields.push(
+                                super::record_projection::resolve_field_name(
+                                    &input.descriptor,
+                                    &field,
+                                )
+                                .ok_or_else(|| {
+                                    IvmRuntimeError::GraphFieldNotFound(field.clone())
+                                })?,
+                            );
                         }
                         fields.sort_unstable();
                         fields.dedup();
@@ -2607,13 +2613,11 @@ impl TickEvaluator<'_> {
                     .as_deref()
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
                 if let Some(name) = name.strip_prefix("left.") {
-                    let field_idx = left_descriptor
-                        .field_index(name)
+                    let field_idx = resolve_field_name(&left_descriptor, name)
                         .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
                     Ok((0, field_idx))
                 } else if let Some(name) = name.strip_prefix("right.") {
-                    let field_idx = right_descriptor
-                        .field_index(name)
+                    let field_idx = resolve_field_name(&right_descriptor, name)
                         .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
                     Ok((1, field_idx))
                 } else {
@@ -3055,9 +3059,7 @@ impl TickEvaluator<'_> {
         let indices = fields
             .iter()
             .map(|field| {
-                input
-                    .descriptor
-                    .field_index(field)
+                resolve_field_name(&input.descriptor, field)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;

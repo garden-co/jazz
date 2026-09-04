@@ -1802,6 +1802,7 @@ impl MaintainedTerminalSchemas {
 }
 
 fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
+    let mut descriptor_fields = rows.descriptor.fields().to_vec();
     let root_key_slot = rows
         .descriptor
         .field_index("row_uuid")
@@ -1852,10 +1853,17 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
             })
         })
         .collect::<Vec<_>>();
+    for field in &public_fields {
+        if let Some(descriptor_field) = descriptor_fields.get_mut(field.slot) {
+            descriptor_field.identity =
+                Some(groove::records::FieldIdentity::Name(field.name.clone()));
+        }
+    }
+    let root_descriptor = RecordDescriptor::new_with_fields(descriptor_fields);
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"jazz terminal root layout v1");
     hasher.update(
-        &encode_record_descriptor(&rows.descriptor)
+        &encode_record_descriptor(&root_descriptor)
             .expect("terminal layouts contain valid Groove record descriptors"),
     );
     hasher.update(&(root_key_slot as u64).to_le_bytes());
@@ -1876,7 +1884,7 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
     }
     TerminalRootLayout {
         id: format!("terminal:{}", hasher.finalize().to_hex()),
-        root_descriptor: rows.descriptor,
+        root_descriptor,
         root_key_slot,
         root_key_field_name: rows.descriptor.fields()[root_key_slot]
             .name

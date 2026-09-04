@@ -1184,7 +1184,13 @@ fn physical_descriptor_with_enum_registries(
             .zip(logical.fields())
             .map(|(name, field)| {
                 let identity = if let Some(id) = physical_user_slot(&name) {
-                    Some(records::FieldIdentity::Slot(id.0))
+                    Some(match field.logical_name() {
+                        Some(logical) if logical != name => records::FieldIdentity::NamedSlot {
+                            name: logical.to_owned(),
+                            slot: id.0,
+                        },
+                        _ => records::FieldIdentity::Slot(id.0),
+                    })
                 } else {
                     field.identity.clone()
                 };

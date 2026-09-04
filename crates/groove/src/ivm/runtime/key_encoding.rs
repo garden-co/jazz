@@ -2,6 +2,15 @@
 
 use super::*;
 
+fn resolved_record_value(
+    record: BorrowedRecord<'_>,
+    field: &str,
+) -> Result<Value, IvmRuntimeError> {
+    let index = super::record_projection::resolve_field_name(&record.descriptor(), field)
+        .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
+    record.get_idx(index).map_err(Into::into)
+}
+
 pub(crate) fn durable_index_key_prefix(table: &str, index: &str) -> Vec<u8> {
     let mut prefix = Vec::new();
     // NUL separators keep table/index names prefix-decodable without escaping.
@@ -220,7 +229,9 @@ pub(super) fn encode_record_field_key_part(
                 .name
                 .as_deref()
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            let value = descriptor.get(record, field_name)?;
+            let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
+            let value = descriptor.bind(record).get_idx(field_idx)?;
             encode_key_part(key, &value)
         }
     }
@@ -241,7 +252,9 @@ pub(super) fn record_field_key_parts(
                 .name
                 .as_deref()
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            let Value::Array(values) = descriptor.get(record, field_name)? else {
+            let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
+            let Value::Array(values) = descriptor.bind(record).get_idx(field_idx)? else {
                 return Err(IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()));
             };
             values
@@ -258,7 +271,9 @@ pub(super) fn record_field_key_parts(
                 .name
                 .as_deref()
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            match descriptor.get(record, field_name)? {
+            let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
+            match descriptor.bind(record).get_idx(field_idx)? {
                 Value::Nullable(None) => {
                     let mut key = Vec::new();
                     encode_key_part(&mut key, &Value::Nullable(None))?;
@@ -301,9 +316,7 @@ pub(super) fn compare_record_field(
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
     comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
-    let field_idx = record
-        .descriptor()
-        .field_index(field)
+    let field_idx = super::record_projection::resolve_field_name(&record.descriptor(), field)
         .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
     match record_field_literal_ordering(record, field_idx, value)? {
         FieldLiteralOrdering::Compared(ordering) => return Ok(predicate(ordering)),
@@ -311,7 +324,7 @@ pub(super) fn compare_record_field(
         FieldLiteralOrdering::Unsupported => {}
     }
     let value = value.to_value();
-    let actual = record.get(field)?;
+    let actual = resolved_record_value(record, field)?;
     Ok(compare_values_sql(&actual, &value, comparison).is_some_and(predicate))
 }
 
@@ -439,8 +452,8 @@ pub(super) fn compare_record_fields(
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
     comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
-    let left = record.get(field)?;
-    let right = record.get(value_field)?;
+    let left = resolved_record_value(record, field)?;
+    let right = resolved_record_value(record, value_field)?;
     Ok(compare_values_sql(&left, &right, comparison).is_some_and(predicate))
 }
 
@@ -451,7 +464,7 @@ pub(super) fn contains_record_field(
     comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let needle = value.to_value();
-    let haystack = record.get(field)?;
+    let haystack = resolved_record_value(record, field)?;
     Ok(value_contains_sql(&haystack, &needle, comparison))
 }
 
@@ -461,8 +474,8 @@ pub(super) fn contains_record_field_value(
     needle_field: &str,
     comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
-    let haystack = record.get(field)?;
-    let needle = record.get(needle_field)?;
+    let haystack = resolved_record_value(record, field)?;
+    let needle = resolved_record_value(record, needle_field)?;
     Ok(value_contains_sql(&haystack, &needle, comparison))
 }
 
@@ -701,9 +714,7 @@ pub(super) fn project_binding_source_deltas(
                 .name
                 .as_ref()
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            input
-                .descriptor
-                .field_index(name)
+            resolve_field_name(&input.descriptor, name)
                 .map(|index| (0, index))
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))
         })

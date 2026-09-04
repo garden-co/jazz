@@ -3259,10 +3259,7 @@ fn resolved_current_source_graph<S>(
 where
     S: OrderedKvStorage,
 {
-    let mut fields = current_row_fields(table)
-        .into_iter()
-        .map(ProjectField::named)
-        .collect::<Vec<_>>();
+    let mut fields = canonical_current_source_fields(table, false);
     let mut metadata = BTreeMap::new();
     let needs_version_witnesses = requirements
         .metadata
@@ -3469,12 +3466,12 @@ fn canonical_current_source_fields(
     include_version: bool,
 ) -> Vec<ProjectField> {
     let mut fields = std::iter::once(ProjectField::named("row_uuid"))
-        .chain(
-            table
-                .columns
-                .iter()
-                .map(|column| ProjectField::named(user_column_field(&column.name))),
-        )
+        .chain(table.columns.iter().map(|column| {
+            ProjectField::named_with_identity(
+                user_column_field(&column.name),
+                records::FieldIdentity::Name(column.name.clone()),
+            )
+        }))
         .chain([
             ProjectField::named("$createdBy"),
             ProjectField::named("$createdAt"),
@@ -3509,12 +3506,12 @@ fn storage_to_canonical_current_source_fields(
     include_settle_position: bool,
 ) -> Vec<ProjectField> {
     let mut fields = std::iter::once(ProjectField::named("row_uuid"))
-        .chain(
-            table
-                .columns
-                .iter()
-                .map(|column| ProjectField::named(user_column_field(&column.name))),
-        )
+        .chain(table.columns.iter().map(|column| {
+            ProjectField::named_with_identity(
+                user_column_field(&column.name),
+                records::FieldIdentity::Name(column.name.clone()),
+            )
+        }))
         .chain([
             ProjectField::renamed("created_by", "$createdBy"),
             ProjectField::renamed("created_at", "$createdAt"),
@@ -3560,12 +3557,16 @@ fn branch_view_storage_source_fields(
                 .map_err(|_| {
                     Error::InvalidBranchKey("invalid head branch value encoding".to_owned())
                 })?;
-            fields.push(ProjectField::literal(
+            fields.push(ProjectField::literal_with_identity(
                 user_column_field(&column.name),
                 value,
+                records::FieldIdentity::Name(column.name.clone()),
             ));
         } else {
-            fields.push(ProjectField::named(user_column_field(&column.name)));
+            fields.push(ProjectField::named_with_identity(
+                user_column_field(&column.name),
+                records::FieldIdentity::Name(column.name.clone()),
+            ));
         }
     }
     fields.extend([
@@ -3621,7 +3622,33 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
             .expect("compiler-owned current source descriptor fields are named");
         let (identity, value_type) = current_types
             .get(&name)
-            .map(|(identity, value_type)| (identity.clone(), value_type.clone()))
+            .map(|(identity, value_type)| {
+                let merged_identity = match (field.identity.clone(), identity.clone()) {
+                    (
+                        Some(records::FieldIdentity::Name(logical_name)),
+                        Some(records::FieldIdentity::Slot(slot)),
+                    ) => Some(records::FieldIdentity::NamedSlot {
+                        name: logical_name,
+                        slot,
+                    }),
+                    (
+                        Some(records::FieldIdentity::Name(logical_name)),
+                        Some(records::FieldIdentity::NamedSlot { slot, .. }),
+                    ) => Some(records::FieldIdentity::NamedSlot {
+                        name: logical_name,
+                        slot,
+                    }),
+                    (
+                        Some(records::FieldIdentity::Name(logical_name)),
+                        Some(records::FieldIdentity::Name(storage_name)),
+                    ) if storage_name == name && logical_name != storage_name => {
+                        Some(records::FieldIdentity::Name(logical_name))
+                    }
+                    (_, Some(storage_identity)) => Some(storage_identity),
+                    (logical_identity, None) => logical_identity,
+                };
+                (merged_identity, value_type.clone())
+            })
             .unwrap_or_else(|| (field.identity.clone(), field.value_type.clone()));
         records::DescriptorField {
             name: Some(name),

@@ -615,10 +615,12 @@ fn descriptor_codec_push_descriptor(
                 name: field.name.clone(),
                 identity_name: match field.identity.as_ref() {
                     Some(FieldIdentity::Name(name)) => Some(name.clone()),
+                    Some(FieldIdentity::NamedSlot { name, .. }) => Some(name.clone()),
                     _ => None,
                 },
                 identity_slot: match field.identity.as_ref() {
                     Some(FieldIdentity::Slot(slot)) => Some(*slot),
+                    Some(FieldIdentity::NamedSlot { slot, .. }) => Some(*slot),
                     _ => None,
                 },
                 registry_id: 0,
@@ -797,7 +799,10 @@ fn descriptor_codec_field_identity(
     node: &DescriptorCodecNode,
 ) -> Result<Option<FieldIdentity>, Error> {
     match (&node.identity_name, node.identity_slot) {
-        (Some(_), Some(_)) => Err(Error::NonCanonicalRecord),
+        (Some(name), Some(slot)) => Ok(Some(FieldIdentity::NamedSlot {
+            name: name.clone(),
+            slot,
+        })),
         (Some(name), None) => Ok(Some(FieldIdentity::Name(name.clone()))),
         (None, Some(slot)) => Ok(Some(FieldIdentity::Slot(slot))),
         (None, None) => Ok(None),

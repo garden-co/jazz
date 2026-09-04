@@ -1,5 +1,14 @@
 use super::*;
 
+fn resolved_source_field_index_by_name(source: &ResolvedSource, field: &str) -> Option<usize> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .position(|candidate| candidate.name.as_deref() == Some(field))
+}
+
 fn resolved_source_field_name(source: &ResolvedSource, field: &str) -> Option<String> {
     source
         .row_shape
@@ -311,6 +320,7 @@ fn collect_nested_projection_output_field(source: &ResolvedSource, field: &str) 
 
 pub(super) fn root_collect_context_graph(
     graph: GraphBuilder,
+    source: &ResolvedSource,
     layout: &CollectLayout,
 ) -> CapabilityResult<GraphBuilder> {
     let fields = layout
@@ -321,9 +331,11 @@ pub(super) fn root_collect_context_graph(
                 .source_field
                 .as_ref()
                 .expect("root collector fields retain their source field");
+            let source_idx = resolved_source_field_index_by_name(source, source_field)
+                .expect("root collector source fields are present in the root descriptor");
             [
-                ProjectField::named(source_field),
-                ProjectField::renamed(source_field, &field.input),
+                ProjectField::renamed_resolved(source_idx, source_field.clone()),
+                ProjectField::renamed_resolved(source_idx, &field.input),
             ]
         })
         .collect::<Vec<_>>();
@@ -332,9 +344,15 @@ pub(super) fn root_collect_context_graph(
 
 pub(super) fn collect_anchor_graph(
     graph: GraphBuilder,
+    root_source: &ResolvedSource,
     layout: &CollectLayout,
 ) -> CapabilityResult<GraphBuilder> {
-    Ok(graph.project_fields(collect_flat_projection(layout, None, &BTreeSet::new())?))
+    Ok(graph.project_fields(collect_flat_projection(
+        layout,
+        None,
+        &BTreeSet::new(),
+        Some(root_source),
+    )?))
 }
 
 pub(super) fn lower_collect_slot_graphs(
@@ -362,6 +380,7 @@ pub(super) fn lower_collect_slot_graphs(
         layout,
         Some(slot),
         inherited_flat_fields,
+        None,
     )?);
     let child_source = resolved_sources.get(&slot.path.child).ok_or_else(|| {
         single_gap_report(UnsupportedReason::Runtime(format!(
@@ -405,19 +424,23 @@ fn collect_flat_projection(
     layout: &CollectLayout,
     current_slot: Option<&CollectSlotLayout>,
     inherited_flat_fields: &BTreeSet<String>,
+    root_source: Option<&ResolvedSource>,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let mut fields = layout
         .root_fields
         .iter()
         .map(|field| match current_slot {
             Some(_) => ProjectField::renamed(left_field(&field.input), &field.input),
-            None => ProjectField::renamed(
-                field
+            None => {
+                let source = root_source.expect("root projection carries its source descriptor");
+                let source_field = field
                     .source_field
                     .as_ref()
-                    .expect("root collector fields retain their source field"),
-                &field.input,
-            ),
+                    .expect("root collector fields retain their source field");
+                let source_idx = resolved_source_field_index_by_name(source, source_field)
+                    .expect("root collector source fields are present in the root descriptor");
+                ProjectField::renamed_resolved(source_idx, &field.input)
+            }
         })
         .collect::<Vec<_>>();
     for slot in collect_all_slots(&layout.slots) {
@@ -484,6 +507,7 @@ fn collect_child_context_projection(
         layout,
         Some(current_slot),
         inherited_flat_fields,
+        None,
     )?);
     Ok(fields)
 }

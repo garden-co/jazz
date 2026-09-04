@@ -1128,6 +1128,15 @@ impl ProjectField {
         }
     }
 
+    pub fn named_with_identity(name: impl Into<String>, output_identity: FieldIdentity) -> Self {
+        let name = name.into();
+        Self {
+            expression: ProjectExpr::Field(FieldRef::name(name.clone())),
+            output_identity,
+            output_name: name,
+        }
+    }
+
     pub fn renamed(source_name: impl Into<String>, output_name: impl Into<String>) -> Self {
         let output_name = output_name.into();
         Self {
@@ -1141,6 +1150,15 @@ impl ProjectField {
         let output_name = output_name.into();
         Self {
             expression: ProjectExpr::Field(FieldRef::resolved(source_idx)),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
+        }
+    }
+
+    pub fn nullable_flat_resolved(source_idx: usize, output_name: impl Into<String>) -> Self {
+        let output_name = output_name.into();
+        Self {
+            expression: ProjectExpr::NullableFlat(FieldRef::resolved(source_idx)),
             output_identity: FieldIdentity::Name(output_name.clone()),
             output_name,
         }
@@ -1164,6 +1182,18 @@ impl ProjectField {
             expression: ProjectExpr::Literal(value.into()),
             output_identity: FieldIdentity::Name(output_name.clone()),
             output_name,
+        }
+    }
+
+    pub fn literal_with_identity(
+        output_name: impl Into<String>,
+        value: impl Into<LiteralValue>,
+        output_identity: FieldIdentity,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::Literal(value.into()),
+            output_name: output_name.into(),
+            output_identity,
         }
     }
 
