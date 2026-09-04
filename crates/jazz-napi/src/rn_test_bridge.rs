@@ -46,76 +46,82 @@ impl Drop for Host {
         }
     }
 }
-#[napi]
+
 pub struct RnTestHost {
-    inner: Rc<Host>,
+    inner: Option<Rc<Host>>,
 }
-#[napi]
+
 impl RnTestHost {
-    #[napi(constructor)]
     pub fn new() -> Self {
         let host = jazz_native_relay_host_new();
         let lease = unsafe { jazz_native_relay_host_retain(host, 1) };
         Self {
-            inner: Rc::new(Host { host, lease }),
+            inner: Some(Rc::new(Host { host, lease })),
         }
     }
-    #[napi(getter)]
+
+    pub fn close(&mut self) -> bool {
+        self.inner.take().is_some()
+    }
+
     pub fn abi_version(&self) -> u32 {
         jazz_native_relay_abi_version().into()
     }
     /// Fixture platform admission; intentionally absent from default builds.
-    #[napi]
     pub fn admit(&self, config: String) -> Result<Uint8Array> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("RN fixture host is closed"))?;
         bytes(|out| unsafe {
-            jazz_native_relay_host_admit_scope_json(
-                self.inner.host,
-                config.as_ptr(),
-                config.len(),
-                out,
-            )
+            jazz_native_relay_host_admit_scope_json(inner.host, config.as_ptr(), config.len(), out)
         })
     }
-    #[napi]
+
     pub fn open_attached(&self, capability: Uint8Array) -> Result<RnTestForeground> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("RN fixture host is closed"))?;
         let mut handle = 0;
         check(unsafe {
             jazz_native_relay_host_lease_open_attached_foreground(
-                self.inner.lease,
+                inner.lease,
                 capability.as_ptr(),
                 capability.len(),
                 &mut handle,
             )
         })?;
         Ok(RnTestForeground {
-            host: self.inner.clone(),
+            host: inner.clone(),
             handle,
             closed: false,
+            wake: None,
         })
     }
 }
-#[napi]
+
 pub struct RnTestForeground {
     host: Rc<Host>,
     handle: u64,
     closed: bool,
+    wake: Option<Box<WakeCallback>>,
 }
-unsafe extern "C" fn wake(context: *mut c_void, _foreground: u64, kind: u8, _delay: u64) {
-    let callback = context.cast::<ThreadsafeFunction<String, ()>>();
+type WakeCallback = ThreadsafeFunction<String, (), String, napi::Status, false>;
+unsafe extern "C" fn wake(context: *mut c_void, _foreground: u64, kind: u8, delay: u64) {
     if kind == 3 {
-        // C ABI guarantees no further calls and synchronizes in-flight wakes.
-        unsafe { drop(Box::from_raw(callback)) };
-    } else {
-        let urgency = if kind == 0 { "immediate" } else { "deferred" };
-        unsafe { &*callback }.call(
-            Ok(urgency.to_owned()),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
+        return;
     }
+    let urgency = match kind {
+        0 => "immediate".to_owned(),
+        1 => "deferred".to_owned(),
+        _ => format!("after:{delay}"),
+    };
+    unsafe { &*context.cast::<WakeCallback>() }
+        .call(urgency, ThreadsafeFunctionCallMode::NonBlocking);
 }
-#[napi]
+
 impl RnTestForeground {
-    #[napi]
     pub fn execute(&self, command: Uint8Array) -> Result<Uint8Array> {
         bytes(|out| unsafe {
             jazz_native_relay_host_lease_execute_foreground(
@@ -127,29 +133,30 @@ impl RnTestForeground {
             )
         })
     }
-    #[napi]
+
     pub fn tick(&self) -> Result<()> {
         check(unsafe {
             jazz_native_relay_host_lease_tick_attached_foreground(self.host.lease, self.handle)
         })
     }
-    #[napi]
-    pub fn set_tick_scheduler(&self, callback: ThreadsafeFunction<String, ()>) -> Result<()> {
-        let context = Box::into_raw(Box::new(callback));
-        let result = check(unsafe {
+
+    pub fn set_tick_scheduler(&mut self, callback: WakeCallback) -> Result<()> {
+        let mut callback = Box::new(callback);
+        let context = (&mut *callback as *mut WakeCallback).cast();
+        check(unsafe {
             jazz_native_relay_host_lease_set_foreground_wake_callback(
                 self.host.lease,
                 self.handle,
                 Some(wake),
-                context.cast(),
+                context,
             )
-        });
-        if result.is_err() {
-            unsafe { drop(Box::from_raw(context)) };
-        }
-        result
+        })?;
+        // Successful replacement synchronously inerts the old registration.
+        // The C ABI does not send CANCELLED for replacement: the carrier owns
+        // both boxes and releases the old one only after that boundary.
+        self.wake = Some(callback);
+        Ok(())
     }
-    #[napi]
     pub fn close(&mut self) -> Result<bool> {
         if self.closed {
             return Ok(false);
@@ -163,6 +170,7 @@ impl RnTestForeground {
             )
         })?;
         self.closed = true;
+        self.wake = None;
         Ok(closed)
     }
 }
@@ -170,4 +178,52 @@ impl Drop for RnTestForeground {
     fn drop(&mut self) {
         let _ = self.close();
     }
+}
+
+// Match the existing hidden NAPI test helpers. Externals carry Rust-owned
+// objects with finalizers, never raw pointer integers or public package types.
+#[napi(js_name = "__testRnHostNew", skip_typescript)]
+pub fn host_new() -> External<RnTestHost> {
+    External::new(RnTestHost::new())
+}
+#[napi(js_name = "__testRnHostAbiVersion", skip_typescript)]
+pub fn host_abi_version(host: &External<RnTestHost>) -> u32 {
+    host.abi_version()
+}
+#[napi(js_name = "__testRnHostAdmit", skip_typescript)]
+pub fn host_admit(host: &External<RnTestHost>, config: String) -> Result<Uint8Array> {
+    host.admit(config)
+}
+#[napi(js_name = "__testRnHostClose", skip_typescript)]
+pub fn host_close(host: &mut External<RnTestHost>) -> bool {
+    host.close()
+}
+#[napi(js_name = "__testRnHostOpenAttached", skip_typescript)]
+pub fn host_open_attached(
+    host: &External<RnTestHost>,
+    capability: Uint8Array,
+) -> Result<External<RnTestForeground>> {
+    host.open_attached(capability).map(External::new)
+}
+#[napi(js_name = "__testRnForegroundExecute", skip_typescript)]
+pub fn foreground_execute(
+    foreground: &External<RnTestForeground>,
+    command: Uint8Array,
+) -> Result<Uint8Array> {
+    foreground.execute(command)
+}
+#[napi(js_name = "__testRnForegroundTick", skip_typescript)]
+pub fn foreground_tick(foreground: &External<RnTestForeground>) -> Result<()> {
+    foreground.tick()
+}
+#[napi(js_name = "__testRnForegroundSetTickScheduler", skip_typescript)]
+pub fn foreground_set_tick_scheduler(
+    foreground: &mut External<RnTestForeground>,
+    callback: WakeCallback,
+) -> Result<()> {
+    foreground.set_tick_scheduler(callback)
+}
+#[napi(js_name = "__testRnForegroundClose", skip_typescript)]
+pub fn foreground_close(foreground: &mut External<RnTestForeground>) -> Result<bool> {
+    foreground.close()
 }

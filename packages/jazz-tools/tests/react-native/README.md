@@ -10,6 +10,7 @@ Produce and consume in the same checkout (the bridge is absent by default):
 
 ```sh
 JAZZ_RN_TEST_BRIDGE=1 pnpm build:correctness-artifacts
+pnpm --dir packages/jazz-tools exec tsc --project tests/react-native/tsconfig.json
 JAZZ_RN_TEST_BRIDGE=1 node dev/gates/run-correctness-consumer.mjs -- pnpm --dir packages/jazz-tools exec vitest run --config vitest.react-native.config.ts
 ```
 
