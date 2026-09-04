@@ -79,11 +79,7 @@ export function materializeJazzRnConsumerManifest(manifest, tarball, root = work
   nextManifest.dependencies["jazz-rn"] = `file:${tarball}`;
   delete nextManifest.dependencies["jazz-tools"];
   nextManifest.dependencies = resolveRecord(nextManifest.dependencies, root, workspaceConfig);
-  nextManifest.devDependencies = resolveRecord(
-    nextManifest.devDependencies,
-    root,
-    workspaceConfig,
-  );
+  nextManifest.devDependencies = resolveRecord(nextManifest.devDependencies, root, workspaceConfig);
   return nextManifest;
 }
 

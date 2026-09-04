@@ -2708,34 +2708,33 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     fixturePreparation,
     artifactScript,
     verifier,
-  ] =
-    await Promise.all([
-      readFile(
-        new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
-        "utf8",
-      ),
-      readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
-      readFile(
-        new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../dev/scripts/prepare-jazz-rn-consumer-fixture.mjs", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs", import.meta.url),
-        "utf8",
-      ),
-    ]);
+  ] = await Promise.all([
+    readFile(
+      new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../dev/scripts/prepare-jazz-rn-consumer-fixture.mjs", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs", import.meta.url),
+      "utf8",
+    ),
+  ]);
   const packageBuildWorkflow = parse(packageBuild);
   const previewBuildWorkflow = parse(previewBuild);
 
