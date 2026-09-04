@@ -3356,7 +3356,12 @@ describe("NativeRuntimeAdapter server transport", () => {
             },
             connectUpstream: () => new FakeTransport([]),
             prepareQuery: () => ({}),
-            attachQuery: (_query, _opts, _openTransactionId, author) => {
+            attachQuery: (
+              _query: unknown,
+              _opts: unknown,
+              _openTransactionId: string | undefined,
+              author: Uint8Array | undefined,
+            ) => {
               if (author) {
                 throw new Error("client coverage must not select an authority identity");
               }
@@ -3800,7 +3805,12 @@ describe("NativeRuntimeAdapter server transport", () => {
               all: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: (_query, _opts, _openTransactionId, author) => {
+              attachQuery: (
+                _query: unknown,
+                _opts: unknown,
+                _openTransactionId: string | undefined,
+                author: Uint8Array | undefined,
+              ) => {
                 if (!author) {
                   throw new Error("trusted-serving coverage must use an authority identity");
                 }
@@ -3885,7 +3895,12 @@ describe("NativeRuntimeAdapter server transport", () => {
               all: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: (_query, _opts, _openTransactionId, author) => {
+              attachQuery: (
+                _query: unknown,
+                _opts: unknown,
+                _openTransactionId: string | undefined,
+                author: Uint8Array | undefined,
+              ) => {
                 if (!author) {
                   throw new Error("trusted-serving coverage must use an authority identity");
                 }
@@ -3960,7 +3975,12 @@ describe("NativeRuntimeAdapter server transport", () => {
               all: () => new Uint8Array([0]),
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: (_query, _opts, _openTransactionId, author) => {
+              attachQuery: (
+                _query: unknown,
+                _opts: unknown,
+                _openTransactionId: string | undefined,
+                author: Uint8Array | undefined,
+              ) => {
                 if (!author) {
                   throw new Error("trusted-serving coverage must use an authority identity");
                 }

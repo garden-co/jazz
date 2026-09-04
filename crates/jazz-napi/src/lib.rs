@@ -5468,7 +5468,7 @@ mod tests {
                 storage,
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x47; 16]),
-                    author: author.clone(),
+                    author,
                 },
             )))
             .expect("controlled NAPI mutation fixture opens"),
@@ -5575,7 +5575,7 @@ mod tests {
                 CoreMemoryStorage::new(&families).expect("valid memory storage families"),
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x54; 16]),
-                    author: author.clone(),
+                    author,
                 },
             )))
             .expect("NAPI no-op write fixture opens"),
@@ -5707,7 +5707,7 @@ mod tests {
     fn identity_claim_ingress_namespaces_provider_values_and_derives_reserved_fields() {
         let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
         let claims = crate::core_claims_from_json(
-            author.clone(),
+            author,
             Some(json!({
                 "user": "forged-user",
                 "iss": "forged-issuer",
@@ -5781,9 +5781,8 @@ mod tests {
     fn identity_claim_ingress_derives_first_party_auth_mode_from_verified_author() {
         let author = CoreAuthorSubject::from_canonical(r#"["urn:jazz:local-first","alice"]"#)
             .expect("canonical first-party author");
-        let claims =
-            crate::core_claims_from_json(author.clone(), Some(json!({ "authMode": "external" })))
-                .expect("NAPI claims are scalar provider data");
+        let claims = crate::core_claims_from_json(author, Some(json!({ "authMode": "external" })))
+            .expect("NAPI claims are scalar provider data");
 
         assert_eq!(
             claims.get("user"),
@@ -6873,8 +6872,8 @@ mod tests {
         .unwrap();
         core_block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
 
-        // The public NAPI transaction surface binds Alice at begin. A later request
-        // cannot switch the transaction-local authorization subject to Bob.
+        // The public NAPI transaction surface binds Alice at begin and addresses
+        // subsequent reads through the owner-wide open transaction id.
         let binding = NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
                 &owner,
@@ -6892,13 +6891,14 @@ mod tests {
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
             )
             .unwrap();
-        let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
         let query = PreparedQuery {
             inner: owner.prepare_query(&owner.table("items")).unwrap(),
         };
         assert!(
-            binding.all_in_transaction(&query, &tx, None).is_ok(),
-            "planted positive: the bound capability reads successfully"
+            binding
+                .all(&query, None, Some(bound.to_string()), None)
+                .is_ok(),
+            "planted positive: the bound transaction reads successfully"
         );
         let view_binding = NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
@@ -6913,66 +6913,12 @@ mod tests {
         };
         assert!(
             view_binding
-                .all_in_transaction(&view_query, &tx, None)
+                .all(&view_query, None, Some(bound.to_string()), None)
                 .is_ok(),
             "a registered schema facade shares its owner's transaction runtime"
         );
-
-        let other_owner = Rc::new(
-            core_block_on(CoreDb::open(CoreDbConfig::new(
-                schema.clone(),
-                CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
-                CoreDbIdentity {
-                    node: CoreNodeUuid::from_bytes([0x46; 16]),
-                    author: CoreAuthorSubject::for_test_bytes([0xa6; 16]),
-                },
-            )))
-            .unwrap(),
-        );
-        let other_binding = NapiDb {
-            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
-                &other_owner,
-            ))))),
-            owns_runtime: false,
-            trusted_backend: false,
-            attributed_mergeable_batches: Rc::default(),
-        };
-        other_binding
-            .begin_transaction(
-                bound.to_string(),
-                "exclusive".to_owned(),
-                Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
-            )
-            .unwrap();
-        core_block_on(other_owner.exclusive_tx_ref(bound).insert(
-            "items",
-            BTreeMap::from([(
-                "label".to_owned(),
-                CoreValue::String("receiver-secret".to_owned()),
-            )]),
-            jazz::db::InsertOptions {
-                row_id: Some(CoreRowUuid::from_bytes([3; 16])),
-                ..Default::default()
-            },
-        ))
-        .unwrap();
-        let other_query = PreparedQuery {
-            inner: other_owner
-                .prepare_query(&other_owner.table("items"))
-                .unwrap(),
-        };
-        assert!(
-            matches!(
-                other_binding.all_in_transaction(&other_query, &tx, None),
-                Err(error) if error.reason.contains("different database runtime")
-            ),
-            "a foreign Tx with the same open id must not access receiver rows"
-        );
         binding
             .commit_transaction(bound.to_string(), Some("exclusive".to_owned()))
-            .unwrap();
-        other_binding
-            .rollback_transaction(bound.to_string())
             .unwrap();
     }
 }
