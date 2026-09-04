@@ -127,6 +127,7 @@ fn metric_aggregate(table: &str) -> GraphBuilder {
             expression: Some(PlanExpr::Field("score".to_owned())),
             distinct: false,
             output_name: Some("sum_score".to_owned()),
+            output_identity: None,
         }],
     )
 }

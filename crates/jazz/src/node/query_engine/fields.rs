@@ -43,10 +43,6 @@ pub(crate) fn current_row_field_names(table: &TableSchema) -> Vec<String> {
     fields
 }
 
-pub(crate) fn logical_user_column(field: &str) -> &str {
-    field.strip_prefix(USER_COLUMN_PREFIX).unwrap_or(field)
-}
-
 pub(crate) fn aggregate_output_field(output: &str) -> String {
     aggregate_output_column(output)
 }
