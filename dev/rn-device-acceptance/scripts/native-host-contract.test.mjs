@@ -143,7 +143,7 @@ function assertPackedJvmAdmissionWorkflowContract(workflow, packagingReceipt) {
   );
 }
 
-test("Android relay artifact contract retires 32-bit x86 consistently", () => {
+test("Android relay artifact contract keeps 32-bit x86 verifier-only", () => {
   const sources = new Map([
     [
       "artifact builder",
@@ -196,16 +196,24 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
     ],
   ]);
   for (const [name, source] of sources) {
+    if (name === "artifact verifier") continue;
     assert.doesNotMatch(
       source,
       /i686-linux-android|\[x86\]|"x86\/libjazz_native_relay\.a"|,x86,|x86,x86_64/,
-      `${name} must not revive the retired Android x86 slice`,
+      `${name} must not promote 32-bit Android x86 beyond verifier-only handling`,
     );
   }
   const builder = sources.get("artifact builder");
   assert.match(builder, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(builder, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(builder, /\[x86_64\]=x86_64-linux-android/);
+  const verifier = sources.get("artifact verifier");
+  assert.match(verifier, /\["x86", "x86\/libjazz_native_relay\.a"\]/);
+  assert.doesNotMatch(
+    builder,
+    /\[x86\]=i686-linux-android/,
+    "the build script must not compile a 32-bit Android x86 relay target",
+  );
   assertAndroidRelayAssemblyAbiContract(
     sources.get("Android relay library build"),
     sources.get("Android device workflow"),
