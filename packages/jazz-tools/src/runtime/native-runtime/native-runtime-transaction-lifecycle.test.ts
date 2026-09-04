@@ -3,14 +3,14 @@ import { PostcardWriter, createRecord, writeDescriptor } from "./native-codec.js
 import type { WasmSchema } from "../../drivers/types.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import {
-  createOpenBatchId,
-  type BatchId,
+  createOpenTransactionId,
+  type TxId,
   type MutationErrorEvent,
-  type OpenBatchId,
+  type OpenTransactionId,
 } from "../client.js";
 
-function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenBatchId {
-  const id = createOpenBatchId();
+function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenTransactionId {
+  const id = createOpenTransactionId();
   runtime.beginTransaction(
     "mergeable",
     id,
@@ -68,41 +68,46 @@ function fakeDb<T extends object>(
     tx?: TxForTest;
   };
   const implementation = db as T & {
-    mergeableTx?(openBatchId: string): TxForTest;
-    mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
-    exclusiveTx?(openBatchId: string): TxForTest;
+    mergeableTx?(openTransactionId: string): TxForTest;
+    mergeableTxForIdentity?(openTransactionId: string, author: Uint8Array): TxForTest;
+    exclusiveTx?(openTransactionId: string): TxForTest;
   };
   const openBatches = new Map<string, FakeOpenBatch>();
-  const attach = (openBatchId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
-    const batch = openBatches.get(openBatchId);
-    if (!batch || batch.kind !== kind) throw new Error(`unknown ${kind} batch ${openBatchId}`);
+  const attach = (openTransactionId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+    const batch = openBatches.get(openTransactionId);
+    if (!batch || batch.kind !== kind)
+      throw new Error(`unknown ${kind} batch ${openTransactionId}`);
     batch.tx ??=
       kind === "exclusive"
-        ? (implementation.exclusiveTx?.(openBatchId) ?? fakeTx())
+        ? (implementation.exclusiveTx?.(openTransactionId) ?? fakeTx())
         : batch.author && implementation.mergeableTxForIdentity
-          ? implementation.mergeableTxForIdentity(openBatchId, batch.author)
-          : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
+          ? implementation.mergeableTxForIdentity(openTransactionId, batch.author)
+          : (implementation.mergeableTx?.(openTransactionId) ?? fakeTx());
     return batch.tx;
   };
   return {
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
-    beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
-      openBatches.set(openBatchId, { kind, author });
+    beginTransaction: (
+      openTransactionId: string,
+      kind: FakeOpenBatch["kind"],
+      author?: Uint8Array,
+    ) => {
+      openBatches.set(openTransactionId, { kind, author });
     },
-    attachMergeableTx: (openBatchId: string) => attach(openBatchId, "mergeable"),
-    attachExclusiveTx: (openBatchId: string) => attach(openBatchId, "exclusive"),
-    commitTransaction: (openBatchId: string) => {
-      const batch = openBatches.get(openBatchId);
-      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
-      openBatches.delete(openBatchId);
+    attachMergeableTx: (openTransactionId: string) => attach(openTransactionId, "mergeable"),
+    attachExclusiveTx: (openTransactionId: string) => attach(openTransactionId, "exclusive"),
+    commitTransaction: (openTransactionId: string) => {
+      const batch = openBatches.get(openTransactionId);
+      if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
+      openBatches.delete(openTransactionId);
       return batch.tx?.commit() ?? fakeWrite();
     },
-    rollbackTransaction: (openBatchId: string) => {
-      const batch = openBatches.get(openBatchId);
-      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
+    rollbackTransaction: (openTransactionId: string) => {
+      const batch = openBatches.get(openTransactionId);
+      if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
       batch.tx?.rollback();
-      openBatches.delete(openBatchId);
+      openBatches.delete(openTransactionId);
     },
     ...db,
   };
@@ -123,7 +128,7 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
 
 function fakeWrite() {
   return {
-    batchId: "00000000000070008000000000000001",
+    txId: "00000000000070008000000000000001",
     payload: new Uint8Array(0),
     wait: async () => undefined,
     writeState: () => ({}),
@@ -133,6 +138,7 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
+  close?(): boolean;
   insertEncoded(
     table: string,
     cells: Uint8Array,
@@ -154,7 +160,7 @@ type TxForTest = {
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    options?: { branch?: unknown; updatedAtMs?: number },
+    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
   ): void;
   deleteEncoded(
     table: string,
@@ -162,6 +168,329 @@ type TxForTest = {
     options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
   ): void;
 };
+
+it("quiesces foreground mutation admission before capturing its final HLC", async () => {
+  const insertEncoded = vi.fn(() => ({ ...fakeWrite(), rowId: new Uint8Array(16) }));
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => 41n,
+          insertEncoded,
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const preexisting = beginTestBatch(runtime);
+  expect(await runtime.quiesceForegroundTxTimeHighWater()).toBe(41n);
+  // This is the P0 handoff ordering: an already-open batch cannot mint H+1
+  // after the high-water was captured, nor can a new synchronous batch start.
+  expect(() => runtime.commitTransaction(preexisting)).toThrow("native runtime is closed");
+  expect(() => beginTestBatch(runtime)).toThrow("native runtime is closed");
+  expect(() => runtime.insert("todos", { title: { type: "Text", value: "late" } })).toThrow(
+    "native runtime is closed",
+  );
+  expect(insertEncoded).not.toHaveBeenCalled();
+  await runtime.close();
+});
+
+it("drains an already admitted streaming mutation before returning its foreground HLC", async () => {
+  let highWater = 7n;
+  let releaseSource!: () => void;
+  const sourceGate = new Promise<void>((resolve) => {
+    releaseSource = resolve;
+  });
+  const beginStreamingMutationEncoded = vi.fn(() => ({
+    push: () => undefined,
+    finish: () => {
+      highWater = 42n;
+      return fakeWrite();
+    },
+    abort: () => true,
+  }));
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => highWater,
+          beginStreamingMutationEncoded,
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  const stream = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    (async function* () {
+      await sourceGate;
+      yield "late write";
+    })(),
+  );
+  await Promise.resolve();
+  expect(beginStreamingMutationEncoded).toHaveBeenCalledOnce();
+
+  let handoffResolved = false;
+  const handoff = runtime.quiesceForegroundTxTimeHighWater().then((value) => {
+    handoffResolved = true;
+    return value;
+  });
+  await Promise.resolve();
+  expect(handoffResolved).toBe(false);
+
+  releaseSource();
+  await stream;
+  expect(await handoff).toBe(42n);
+  await runtime.close();
+});
+
+it("waits for a failed stream's native abort before foreground handoff", async () => {
+  let releaseSource!: () => void;
+  const sourceGate = new Promise<void>((resolve) => {
+    releaseSource = resolve;
+  });
+  let releaseAbort!: () => void;
+  const abortGate = new Promise<boolean>((resolve) => {
+    releaseAbort = () => resolve(true);
+  });
+  const abort = vi.fn(() => abortGate);
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => 7n,
+          beginStreamingMutationEncoded: () => ({
+            push: () => undefined,
+            finish: () => fakeWrite(),
+            abort,
+          }),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  const stream = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    (async function* () {
+      await sourceGate;
+      yield "partial upload";
+      throw new Error("source cancelled");
+    })(),
+  );
+  await Promise.resolve();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  releaseSource();
+  await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+
+  let handoffResolved = false;
+  void handoff.then(() => {
+    handoffResolved = true;
+  });
+  await Promise.resolve();
+  expect(handoffResolved).toBe(false);
+
+  releaseAbort();
+  await expect(stream).rejects.toThrow("source cancelled");
+  await expect(handoff).resolves.toBe(7n);
+  await runtime.close();
+});
+
+it("does not let a concurrent close preempt foreground HLC capture", async () => {
+  const order: string[] = [];
+  let releaseSource!: () => void;
+  const sourceGate = new Promise<void>((resolve) => {
+    releaseSource = resolve;
+  });
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => {
+            order.push("high-water");
+            return 42n;
+          },
+          beginStreamingMutationEncoded: () => ({
+            push: () => undefined,
+            finish: () => fakeWrite(),
+            abort: () => true,
+          }),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+          close: () => {
+            order.push("close");
+          },
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  const stream = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    (async function* () {
+      await sourceGate;
+      yield "finish before close";
+    })(),
+  );
+  await Promise.resolve();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  const close = runtime.close();
+  releaseSource();
+  await stream;
+  await expect(handoff).resolves.toBe(42n);
+  await close;
+  expect(order).toEqual(["high-water", "close"]);
+});
+
+it("awaits the binding-owned native close promise", async () => {
+  let releaseClose!: () => void;
+  const closeGate = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => 0n,
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+          close: () => closeGate,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  let settled = false;
+  const close = runtime.close().then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  releaseClose();
+  await close;
+  expect(settled).toBe(true);
+});
+
+it("waits for every concurrently admitted stream before foreground handoff", async () => {
+  let highWater = 7n;
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const secondGate = new Promise<void>((resolve) => {
+    releaseSecond = resolve;
+  });
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => highWater,
+          beginStreamingMutationEncoded: () => ({
+            push: () => undefined,
+            finish: () => {
+              highWater += 1n;
+              return fakeWrite();
+            },
+            abort: () => true,
+          }),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const makeSource = (gate: Promise<void>, value: string) =>
+    (async function* () {
+      await gate;
+      yield value;
+    })();
+  const first = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    makeSource(firstGate, "one"),
+  );
+  const second = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    makeSource(secondGate, "two"),
+  );
+  await Promise.resolve();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  let handoffResolved = false;
+  void handoff.then(() => {
+    handoffResolved = true;
+  });
+
+  releaseFirst();
+  await first;
+  await Promise.resolve();
+  expect(handoffResolved).toBe(false);
+
+  releaseSecond();
+  await second;
+  await expect(handoff).resolves.toBe(9n);
+  await runtime.close();
+});
 
 function uuidBytes(value: string): Uint8Array {
   const hex = value.replaceAll("-", "");
@@ -273,7 +602,7 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
         fakeDb({
           all: () => encodeRows([]),
           allForIdentity: () => encodeRows([]),
-          mergeableTxForIdentity: (_openBatchId: string, author: Uint8Array) => {
+          mergeableTxForIdentity: (_openTransactionId: string, author: Uint8Array) => {
             authors.push(new TextDecoder().decode(author));
             return fakeTx({
               insertEncoded: (table, _cells, options) => {
@@ -302,7 +631,7 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
     "todos",
     { title: { type: "Text", value: "session tx" } },
     JSON.stringify({
-      batch_id: tx,
+      transaction_id: tx,
       session: { issuer: "https://issuer.example", user_id: alice },
     }),
     "00000000-0000-0000-0000-000000000001",
@@ -333,15 +662,15 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
           tick: () => undefined,
         }) as unknown as {
           beginTransaction(
-            openBatchId: string,
+            openTransactionId: string,
             kind: "mergeable" | "exclusive",
             author?: Uint8Array,
           ): void;
         };
         const begin = db.beginTransaction.bind(db);
-        db.beginTransaction = (openBatchId, kind, author) => {
+        db.beginTransaction = (openTransactionId, kind, author) => {
           beganAs.push(author === undefined ? "none" : new TextDecoder().decode(author));
-          begin(openBatchId, kind, author);
+          begin(openTransactionId, kind, author);
         };
         return db;
       },
@@ -357,12 +686,12 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
     { readAuthorizationHost: "trusted-serving" },
   );
 
-  const tx = createOpenBatchId();
+  const tx = createOpenTransactionId();
   runtime.beginTransaction("exclusive", tx, JSON.stringify({ issuer, user_id: alice }));
   runtime.insert(
     "todos",
     { title: { type: "Text", value: "session-scoped exclusive write" } },
-    JSON.stringify({ batch_id: tx, session: { issuer, user_id: alice } }),
+    JSON.stringify({ transaction_id: tx, session: { issuer, user_id: alice } }),
     "00000000-0000-0000-0000-000000000001",
   );
 
@@ -372,7 +701,7 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
       "todos",
       { title: { type: "Text", value: "wrong subject" } },
       JSON.stringify({
-        batch_id: tx,
+        transaction_id: tx,
         session: { issuer, user_id: "00000000-0000-0000-0000-0000000000b2" },
       }),
       "00000000-0000-0000-0000-000000000002",
@@ -390,8 +719,16 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
         fakeDb({
           all: () => encodeRows([]),
           allForIdentity: () => encodeRows([]),
-          allInTransaction: (_query: object, receivedTx: TxForTest) => {
+          allInTransaction: () => {
+            throw new Error("trusted-serving reads must not use the ambient transaction method");
+          },
+          allInTransactionForIdentity: (
+            _query: object,
+            receivedTx: TxForTest,
+            receivedIdentity: Uint8Array,
+          ) => {
             expect(receivedTx).toBe(tx);
+            expect(new TextDecoder().decode(receivedIdentity)).toBe(`["${issuer}","${alice}"]`);
             return encodeRows([
               {
                 table: "todos",
@@ -416,7 +753,7 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
     { readAuthorizationHost: "trusted-serving" },
   );
 
-  const transactionId = createOpenBatchId();
+  const transactionId = createOpenTransactionId();
   runtime.beginTransaction("exclusive", transactionId, JSON.stringify({ issuer, user_id: alice }));
 
   await expect(
@@ -424,7 +761,7 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
       JSON.stringify({ table: "todos" }),
       JSON.stringify({ issuer, user_id: "00000000-0000-0000-0000-0000000000b2" }),
       "local",
-      JSON.stringify({ transaction_batch_id: transactionId }),
+      JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
     {
@@ -435,7 +772,7 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
   ]);
 });
 
-it("rejects a duplicate live OpenBatchId without replacing its staged transaction", () => {
+it("rejects a duplicate live OpenTransactionId without replacing its staged transaction", () => {
   const stagedTransactions: string[][] = [];
   const runtime = new NativeRuntimeAdapter(
     {
@@ -462,12 +799,12 @@ it("rejects a duplicate live OpenBatchId without replacing its staged transactio
     1,
     true,
   );
-  const id = createOpenBatchId();
+  const id = createOpenTransactionId();
   runtime.beginTransaction("mergeable", id);
   runtime.insert(
     "todos",
     { title: { type: "Text", value: "first" } },
-    JSON.stringify({ batch_id: id }),
+    JSON.stringify({ transaction_id: id }),
   );
 
   expect(() => runtime.beginTransaction("mergeable", id)).toThrow(
@@ -476,7 +813,7 @@ it("rejects a duplicate live OpenBatchId without replacing its staged transactio
   runtime.insert(
     "todos",
     { title: { type: "Text", value: "second" } },
-    JSON.stringify({ batch_id: id }),
+    JSON.stringify({ transaction_id: id }),
   );
 
   expect(stagedTransactions).toEqual([["todos", "todos"]]);
@@ -496,19 +833,19 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
     1,
     true,
   );
-  const emptyMergeable = createOpenBatchId();
+  const emptyMergeable = createOpenTransactionId();
   runtime.beginTransaction("mergeable", emptyMergeable);
   expect(() => runtime.commitTransaction(emptyMergeable)).toThrow(
     "empty mergeable transaction has no committed unit; roll it back instead",
   );
   await runtime.rollbackTransaction(emptyMergeable);
 
-  const openBatchId = createOpenBatchId();
-  runtime.beginTransaction("exclusive", openBatchId);
-  const committed = await runtime.commitTransaction(openBatchId);
+  const openTransactionId = createOpenTransactionId();
+  runtime.beginTransaction("exclusive", openTransactionId);
+  const committed = await runtime.commitTransaction(openTransactionId);
   expect(committed).toBe("00000000000070008000000000000001");
   await expect(
-    runtime.waitForTransaction("00000000000070008000000000000002" as BatchId, "local"),
+    runtime.waitForTransaction("00000000000070008000000000000002" as TxId, "local"),
   ).rejects.toThrow(
     "Wait for transaction failed: unknown transaction 00000000000070008000000000000002",
   );
@@ -531,6 +868,75 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
   );
 });
 
+it("keeps an attached view alive through a failed commit, then releases it once on rollback", async () => {
+  const close = vi.fn(() => true);
+  const nativeRollback = vi.fn();
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          mergeableTx: () => fakeTx({ close }),
+          commitTransaction: () => {
+            throw new Error("injected commit failure");
+          },
+          rollbackTransaction: nativeRollback,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const openBatchId = beginTestBatch(runtime);
+  runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "rollback after failed commit" } },
+    JSON.stringify({ transaction_id: openBatchId }),
+  );
+
+  expect(() => runtime.commitTransaction(openBatchId)).toThrow("injected commit failure");
+  expect(close).not.toHaveBeenCalled();
+
+  await expect(runtime.rollbackTransaction(openBatchId)).resolves.toBe(true);
+  expect(nativeRollback).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it("closing a schema view releases only its attached transaction handle", () => {
+  const close = vi.fn(() => true);
+  const nativeDb = fakeDb({ mergeableTx: () => fakeTx({ close }) });
+  Object.assign(nativeDb, { registerSchema: () => nativeDb });
+  const owner = new NativeRuntimeAdapter(
+    {
+      openMemory: () => nativeDb,
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const view = owner.registerSchemaView(testSchema);
+  const openBatchId = beginTestBatch(view);
+  view.insert(
+    "todos",
+    { title: { type: "Text", value: "view closes before parent batch" } },
+    JSON.stringify({ transaction_id: openBatchId }),
+  );
+
+  void view.close();
+  expect(close).toHaveBeenCalledOnce();
+  expect(() => owner.commitTransaction(openBatchId)).not.toThrow();
+  expect(close).toHaveBeenCalledOnce();
+});
+
 it("binds the trusted-serving identity when an exclusive transaction begins", () => {
   const alice = "00000000-0000-0000-0000-0000000000a1";
   const observed: Array<{ phase: "begin" | "commit"; author?: string }> = [];
@@ -539,7 +945,7 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
       openMemory: () =>
         fakeDb({
           beginTransaction: (
-            _openBatchId: string,
+            _openTransactionId: string,
             _kind: "mergeable" | "exclusive",
             author?: Uint8Array,
           ) =>
@@ -549,7 +955,7 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
             }),
           attachExclusiveTx: () => fakeTx(),
           commitTransaction: (
-            _openBatchId: string,
+            _openTransactionId: string,
             _kind?: "mergeable" | "exclusive",
             author?: Uint8Array,
           ) => {
@@ -569,21 +975,21 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
     { readAuthorizationHost: "trusted-serving" },
   );
 
-  const openBatchId = createOpenBatchId();
+  const openTransactionId = createOpenTransactionId();
   runtime.beginTransaction(
     "exclusive",
-    openBatchId,
+    openTransactionId,
     JSON.stringify({ issuer: "https://issuer.example", user_id: alice }),
   );
   runtime.insert(
     "todos",
     { title: { type: "Text", value: "exclusive" } },
     JSON.stringify({
-      batch_id: openBatchId,
+      transaction_id: openTransactionId,
       session: { issuer: "https://issuer.example", user_id: alice },
     }),
   );
-  runtime.commitTransaction(openBatchId);
+  runtime.commitTransaction(openTransactionId);
 
   expect(observed).toEqual([
     { phase: "begin", author: `["https://issuer.example","${alice}"]` },
@@ -593,10 +999,10 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
 });
 
 it("emits an onMutationError event for an unawaited rejected write", async () => {
-  const batchId = "00000000000070008000000000000042" as BatchId;
+  const txId = "00000000000070008000000000000042" as TxId;
   let mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
   const write = {
-    batchId,
+    txId,
     payload: new Uint8Array(),
     wait: async () => undefined,
     writeState: () => ({}),
@@ -630,12 +1036,12 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
     code: "permission_denied",
     reason: "Write rejected by server authorization",
     transaction: {
-      transactionId: batchId,
+      transactionId: txId,
       kind: "mergeable",
       sealed: true,
       latestSettlement: {
         kind: "rejected",
-        transactionId: batchId,
+        transactionId: txId,
         code: "permission_denied",
         reason: "Write rejected by server authorization",
       },
@@ -647,12 +1053,12 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
     code: "permission_denied",
     reason: "Write rejected by server authorization",
     transaction: {
-      transactionId: batchId,
+      transactionId: txId,
       kind: "mergeable",
       sealed: true,
       latestSettlement: {
         kind: "rejected",
-        transactionId: batchId,
+        transactionId: txId,
         code: "permission_denied",
         reason: "Write rejected by server authorization",
       },
@@ -661,7 +1067,7 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
 });
 
 it("does not emit onMutationError when an active wait handles the rejection", async () => {
-  const batchId = "00000000000070008000000000000043" as BatchId;
+  const txId = "00000000000070008000000000000043" as TxId;
   let rejected = false;
   const stateChangeWaiters: Array<() => void> = [];
   const nextWriteStateChange = () =>
@@ -669,7 +1075,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
       stateChangeWaiters.push(resolve);
     });
   const write = {
-    batchId,
+    txId,
     payload: new Uint8Array(),
     wait: async () => {
       await nextWriteStateChange();
@@ -700,14 +1106,14 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     null,
     "00000000-0000-0000-0000-000000000043",
   );
-  const wait = runtime.waitForTransaction(batchId, "edge");
+  const wait = runtime.waitForTransaction(txId, "edge");
   await Promise.resolve();
   rejected = true;
   stateChangeWaiters.splice(0).forEach((resolve) => resolve());
 
   await expect(wait).rejects.toMatchObject({
     kind: "rejected",
-    transactionId: batchId,
+    transactionId: txId,
     code: "permission_denied",
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -753,7 +1159,7 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
   );
 
   const tx = beginTestBatch(runtime);
-  const context = JSON.stringify({ batch_id: tx, updated_at: updatedAt });
+  const context = JSON.stringify({ transaction_id: tx, updated_at: updatedAt });
   const rowId = "00000000-0000-0000-0000-000000000001";
   runtime.insert("todos", { title: { type: "Text", value: "inserted" } }, context, rowId);
   runtime.update("todos", rowId, { title: { type: "Text", value: "updated" } }, context);
@@ -768,6 +1174,46 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
     { op: "restore", updatedAtMs: expectedUpdatedAtMs },
     { op: "delete", updatedAtMs: expectedUpdatedAtMs },
   ]);
+});
+
+it("preserves the full branch view for staged mergeable upserts", () => {
+  let received: { head?: unknown; base?: unknown } | undefined;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          all: () => encodeRows([]),
+          mergeableTx: () =>
+            fakeTx({
+              upsertEncoded: (_table, _rowId, _cells, options) => {
+                received = options;
+              },
+            }),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const head = { values: { workspace: [15, 14] } };
+  const base = { Current: { values: { workspace: [15, 2] } } };
+  const tx = beginTestBatch(runtime);
+
+  runtime.upsert(
+    "todos",
+    "00000000-0000-0000-0000-000000000001",
+    { title: { type: "Text", value: "upserted" } },
+    JSON.stringify({ transaction_id: tx, branch_view: { head, base } }),
+  );
+
+  expect(received).toMatchObject({ head, base });
 });
 
 it("rejects mixed identities within one trusted-serving mergeable transaction", () => {
@@ -799,7 +1245,7 @@ it("rejects mixed identities within one trusted-serving mergeable transaction", 
     "todos",
     { title: { type: "Text", value: "one" } },
     JSON.stringify({
-      batch_id: tx,
+      transaction_id: tx,
       session: { issuer: "https://issuer.example", user_id: alice },
     }),
     "00000000-0000-0000-0000-000000000001",
@@ -810,7 +1256,7 @@ it("rejects mixed identities within one trusted-serving mergeable transaction", 
       "todos",
       { title: { type: "Text", value: "two" } },
       JSON.stringify({
-        batch_id: tx,
+        transaction_id: tx,
         session: {
           issuer: "https://issuer.example",
           user_id: "00000000-0000-0000-0000-0000000000b2",
@@ -864,7 +1310,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
     "todos",
     { title: { type: "Text", value: "alice pending" } },
     JSON.stringify({
-      batch_id: transactionId,
+      transaction_id: transactionId,
       session: {
         issuer: "https://issuer.example",
         user_id: "00000000-0000-0000-0000-0000000000a1",
@@ -881,7 +1327,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         user_id: "00000000-0000-0000-0000-0000000000b2",
       }),
       "local",
-      JSON.stringify({ transaction_batch_id: transactionId }),
+      JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
     {
@@ -898,7 +1344,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         user_id: "00000000-0000-0000-0000-0000000000a1",
       }),
       "local",
-      JSON.stringify({ transaction_batch_id: transactionId }),
+      JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
     {

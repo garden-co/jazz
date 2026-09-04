@@ -51,7 +51,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const missing = missingJazzToolsTestSurface();
   if (missing.length) {
     for (const path of missing) console.error(`jazz-tools public export is missing: ${path}`);
-    console.error("Fix: pnpm build:test-artifacts");
+    console.error("Fix: pnpm test:typescript-consumers");
     process.exitCode = 1;
   }
 }

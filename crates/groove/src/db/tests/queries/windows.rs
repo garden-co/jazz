@@ -541,6 +541,57 @@ async fn top_by_orders_nullable_sort_keys_null_first() {
 }
 
 #[futures_test::test]
+async fn top_by_rejects_record_array_sort_fields_before_evaluation() {
+    let child = RecordDescriptor::new([("rank", ValueType::U64)]);
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "ranked",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new(
+                "rank",
+                ColumnType::Array(Box::new(ColumnType::Record(Box::new(child)))),
+            ),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&["ranked"]).expect("valid memory storage families");
+    let mut database = Database::new(schema, storage).await.unwrap();
+
+    let mut batch = database.open_batch();
+    for (id, rank) in [(1, 2), (2, 1)] {
+        batch.insert(
+            "ranked",
+            vec![
+                Value::U64(id),
+                Value::Array(vec![Value::Record(crate::records::OwnedRecord::new(
+                    child.create(&[Value::U64(rank)]).unwrap(),
+                    child,
+                ))]),
+            ],
+        );
+    }
+    database.commit_batch(batch).await.unwrap();
+
+    let result = database
+        .subscribe_one_sink(GraphBuilder::top_by(
+            GraphBuilder::table("ranked"),
+            std::iter::empty::<&str>(),
+            [TopByOrder::asc("rank")],
+            ["id"],
+            0,
+            TopByLimit::Finite(1),
+        ))
+        .await;
+    let Err(error) = result else {
+        panic!("record-array TopBy sort field must be rejected");
+    };
+    assert_eq!(
+        error.to_string(),
+        "invalid top_by descriptor: sort field rank must be an orderable scalar"
+    );
+}
+
+#[futures_test::test]
 async fn top_by_uses_stable_tie_field() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"])
         .expect("valid memory storage families");

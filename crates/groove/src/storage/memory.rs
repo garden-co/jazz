@@ -6,15 +6,13 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
-
 use super::{
     ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage,
     ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, WriteManyOutcome,
-    key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
+const MEMORY_STORAGE_SNAPSHOT_MAGIC: &[u8; 4] = b"GMS1";
 
 type ColumnFamilies = BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>;
 type SharedColumnFamilies = Arc<Mutex<ColumnFamilies>>;
@@ -59,7 +57,7 @@ impl MemoryStorageCursor {
                     .collect(),
                 (ScanBounds::Prefix(prefix), ScanDirection::Reverse, None) => {
                     let start = Bound::Included(prefix.clone());
-                    let end = key_codec::prefix_upper_bound(prefix)
+                    let end = super::prefix_successor(prefix)
                         .map(Bound::Excluded)
                         .unwrap_or(Bound::Unbounded);
                     values
@@ -149,20 +147,133 @@ impl super::StorageCursor for MemoryStorageCursor {
 
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryStorageSnapshotError {
-    #[error("failed to encode memory storage snapshot: {0}")]
-    Encode(postcard::Error),
-    #[error("failed to decode memory storage snapshot: {0}")]
-    Decode(postcard::Error),
+    #[error("memory storage snapshot is invalid: {0}")]
+    Invalid(&'static str),
+    #[error("memory storage snapshot {field} exceeds v1 bounds")]
+    TooLarge { field: &'static str },
     #[error("unsupported memory storage snapshot version {found}; expected {expected}")]
     UnsupportedVersion { found: u16, expected: u16 },
     #[error("memory storage snapshot has an invalid physical column-family name: {0}")]
     InvalidColumnFamily(#[from] Error),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq)]
 struct MemoryStorageSnapshot {
     version: u16,
     column_families: ColumnFamilies,
+}
+
+// This snapshot crosses a process/restart boundary in tests, examples, and
+// WASM probes. It is deliberately a small explicit codec rather than serde:
+// declaration/map order, omitted fields, and trailing bytes must never become
+// an accidental persistence contract.
+//
+// `GMS1 | version:u16-be | family_count:u32-be | families...`, where each
+// family is `name_len:u16-be | UTF-8 name | entry_count:u32-be | entries...`
+// and each entry is `key_len:u32-be | key | value_len:u32-be | value`. Names
+// and entries are in their BTreeMap order. Decoding re-encodes exactly, so
+// alternate ordering and duplicate spellings fail closed as noncanonical.
+fn encode_snapshot(
+    snapshot: &MemoryStorageSnapshot,
+) -> Result<Vec<u8>, MemoryStorageSnapshotError> {
+    let mut bytes = Vec::from(*MEMORY_STORAGE_SNAPSHOT_MAGIC);
+    bytes.extend_from_slice(&snapshot.version.to_be_bytes());
+    put_snapshot_count(&mut bytes, snapshot.column_families.len(), "family count")?;
+    for (name, entries) in &snapshot.column_families {
+        put_snapshot_u16(&mut bytes, name.len(), "family name")?;
+        bytes.extend_from_slice(name.as_bytes());
+        put_snapshot_count(&mut bytes, entries.len(), "entry count")?;
+        for (key, value) in entries {
+            put_snapshot_count(&mut bytes, key.len(), "key")?;
+            bytes.extend_from_slice(key);
+            put_snapshot_count(&mut bytes, value.len(), "value")?;
+            bytes.extend_from_slice(value);
+        }
+    }
+    Ok(bytes)
+}
+
+fn decode_snapshot(bytes: &[u8]) -> Result<MemoryStorageSnapshot, MemoryStorageSnapshotError> {
+    let mut input = bytes;
+    if take_snapshot(&mut input, 4)? != MEMORY_STORAGE_SNAPSHOT_MAGIC {
+        return Err(MemoryStorageSnapshotError::Invalid("magic is invalid"));
+    }
+    let version = take_snapshot_u16(&mut input)?;
+    let family_count = take_snapshot_u32(&mut input)? as usize;
+    let mut column_families = BTreeMap::new();
+    for _ in 0..family_count {
+        let name_len = take_snapshot_u16(&mut input)? as usize;
+        let name = std::str::from_utf8(take_snapshot(&mut input, name_len)?)
+            .map_err(|_| MemoryStorageSnapshotError::Invalid("family name is not UTF-8"))?
+            .to_owned();
+        let entry_count = take_snapshot_u32(&mut input)? as usize;
+        let mut entries = BTreeMap::new();
+        for _ in 0..entry_count {
+            let key_len = take_snapshot_u32(&mut input)? as usize;
+            let key = take_snapshot(&mut input, key_len)?.to_vec();
+            let value_len = take_snapshot_u32(&mut input)? as usize;
+            let value = take_snapshot(&mut input, value_len)?.to_vec();
+            entries.insert(key, value);
+        }
+        column_families.insert(name, entries);
+    }
+    if !input.is_empty() {
+        return Err(MemoryStorageSnapshotError::Invalid("trailing bytes"));
+    }
+    let snapshot = MemoryStorageSnapshot {
+        version,
+        column_families,
+    };
+    if encode_snapshot(&snapshot)? != bytes {
+        return Err(MemoryStorageSnapshotError::Invalid("noncanonical bytes"));
+    }
+    Ok(snapshot)
+}
+
+fn put_snapshot_count(
+    output: &mut Vec<u8>,
+    value: usize,
+    field: &'static str,
+) -> Result<(), MemoryStorageSnapshotError> {
+    let value = u32::try_from(value).map_err(|_| MemoryStorageSnapshotError::TooLarge { field })?;
+    output.extend_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+fn put_snapshot_u16(
+    output: &mut Vec<u8>,
+    value: usize,
+    field: &'static str,
+) -> Result<(), MemoryStorageSnapshotError> {
+    let value = u16::try_from(value).map_err(|_| MemoryStorageSnapshotError::TooLarge { field })?;
+    output.extend_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+fn take_snapshot<'a>(
+    input: &mut &'a [u8],
+    count: usize,
+) -> Result<&'a [u8], MemoryStorageSnapshotError> {
+    if input.len() < count {
+        return Err(MemoryStorageSnapshotError::Invalid("truncated bytes"));
+    }
+    let (taken, remaining) = input.split_at(count);
+    *input = remaining;
+    Ok(taken)
+}
+
+fn take_snapshot_u16(input: &mut &[u8]) -> Result<u16, MemoryStorageSnapshotError> {
+    let bytes: [u8; 2] = take_snapshot(input, 2)?
+        .try_into()
+        .expect("snapshot reader returned exactly two bytes");
+    Ok(u16::from_be_bytes(bytes))
+}
+
+fn take_snapshot_u32(input: &mut &[u8]) -> Result<u32, MemoryStorageSnapshotError> {
+    let bytes: [u8; 4] = take_snapshot(input, 4)?
+        .try_into()
+        .expect("snapshot reader returned exactly four bytes");
+    Ok(u32::from_be_bytes(bytes))
 }
 
 /// Ordered in-memory storage for tests, examples, benches, and wasm probes.
@@ -210,7 +321,7 @@ impl MemoryStorage {
         self.scan_entries_materialized.swap(0, Ordering::Relaxed)
     }
 
-    /// Export the full in-memory contents as compact versioned bytes.
+    /// Export the full in-memory contents as canonical versioned snapshot bytes.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, MemoryStorageSnapshotError> {
         let snapshot = MemoryStorageSnapshot {
             version: MEMORY_STORAGE_SNAPSHOT_VERSION,
@@ -220,13 +331,12 @@ impl MemoryStorage {
                 .expect("memory storage mutex poisoned")
                 .clone(),
         };
-        postcard::to_allocvec(&snapshot).map_err(MemoryStorageSnapshotError::Encode)
+        encode_snapshot(&snapshot)
     }
 
     /// Replace the full in-memory contents from versioned snapshot bytes.
     pub fn import_snapshot(&self, bytes: &[u8]) -> Result<(), MemoryStorageSnapshotError> {
-        let snapshot: MemoryStorageSnapshot =
-            postcard::from_bytes(bytes).map_err(MemoryStorageSnapshotError::Decode)?;
+        let snapshot = decode_snapshot(bytes)?;
         if snapshot.version != MEMORY_STORAGE_SNAPSHOT_VERSION {
             return Err(MemoryStorageSnapshotError::UnsupportedVersion {
                 found: snapshot.version,
@@ -240,6 +350,10 @@ impl MemoryStorage {
 }
 
 impl OrderedKvStorage for MemoryStorage {
+    fn permits_eager_read_retry(&self) -> bool {
+        true
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move { self.with_cf(&cf, |values| values.get(&key).cloned()) })
     }
@@ -347,7 +461,7 @@ impl OrderedKvStorage for MemoryStorage {
     ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
         Box::pin(async move {
             self.with_cf(&cf, |values| {
-                if let Some(upper) = key_codec::prefix_upper_bound(&prefix) {
+                if let Some(upper) = super::prefix_successor(&prefix) {
                     values
                         .range(prefix..upper)
                         .next_back()
@@ -570,6 +684,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snapshot_v1_golden_bytes_are_exact_and_reject_alternate_encodings() {
+        let snapshot = MemoryStorageSnapshot {
+            version: MEMORY_STORAGE_SNAPSHOT_VERSION,
+            column_families: BTreeMap::from([
+                (
+                    "meta".to_owned(),
+                    BTreeMap::from([(b"schema".to_vec(), b"v1".to_vec())]),
+                ),
+                (
+                    "rows".to_owned(),
+                    BTreeMap::from([
+                        (b"a".to_vec(), b"one".to_vec()),
+                        (b"b".to_vec(), b"two".to_vec()),
+                    ]),
+                ),
+            ]),
+        };
+        let golden = b"GMS1\x00\x01\x00\x00\x00\x02\x00\x04meta\x00\x00\x00\x01\
+            \x00\x00\x00\x06schema\x00\x00\x00\x02v1\x00\x04rows\x00\x00\x00\x02\
+            \x00\x00\x00\x01a\x00\x00\x00\x03one\x00\x00\x00\x01b\x00\x00\x00\x03two";
+        assert_eq!(encode_snapshot(&snapshot).unwrap(), golden);
+        assert_eq!(decode_snapshot(golden).unwrap(), snapshot);
+
+        for malformed in [
+            Vec::new(),
+            b"BAD!\x00\x01\x00\x00\x00\x00".to_vec(),
+            golden[..golden.len() - 1].to_vec(),
+            [golden.as_slice(), &[0]].concat(),
+            // The same two families in the reverse order is semantically
+            // readable, but noncanonical physical bytes must not survive.
+            b"GMS1\x00\x01\x00\x00\x00\x02\x00\x04rows\x00\x00\x00\x00\
+                \x00\x04meta\x00\x00\x00\x00"
+                .to_vec(),
+        ] {
+            assert!(decode_snapshot(&malformed).is_err(), "{malformed:?}");
+        }
+    }
+
     #[futures_test::test]
     async fn import_snapshot_replaces_existing_contents() {
         let source = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
@@ -607,7 +760,7 @@ mod tests {
             version: MEMORY_STORAGE_SNAPSHOT_VERSION,
             column_families: BTreeMap::from([("rows\0evil".to_owned(), BTreeMap::new())]),
         };
-        let bytes = postcard::to_allocvec(&snapshot).unwrap();
+        let bytes = encode_snapshot(&snapshot).unwrap();
 
         assert!(matches!(
             storage.import_snapshot(&bytes),
@@ -616,6 +769,35 @@ mod tests {
         assert_eq!(
             storage.get("rows".into(), b"keep".to_vec()).await.unwrap(),
             Some(b"value".to_vec())
+        );
+    }
+
+    #[futures_test::test]
+    async fn import_snapshot_rejects_malformed_bytes_without_replacing_state() {
+        let source = MemoryStorage::new(&["rows"]).expect("valid source families");
+        source
+            .set("rows".into(), b"fresh".to_vec(), b"snapshot".to_vec())
+            .await
+            .unwrap();
+        let mut malformed = source.export_snapshot().unwrap();
+        malformed.push(0);
+
+        let target = MemoryStorage::new(&["rows"]).expect("valid target families");
+        target
+            .set("rows".into(), b"keep".to_vec(), b"resident".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            target.import_snapshot(&malformed),
+            Err(MemoryStorageSnapshotError::Invalid("trailing bytes"))
+        ));
+        assert_eq!(
+            target.get("rows".into(), b"keep".to_vec()).await.unwrap(),
+            Some(b"resident".to_vec())
+        );
+        assert_eq!(
+            target.get("rows".into(), b"fresh".to_vec()).await.unwrap(),
+            None
         );
     }
 

@@ -44,6 +44,7 @@ serde_bytes = "0.11"
 jsonschema = { version = "0.42", default-features = false }
 internment = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
+stacker = "0.1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"], optional = true }
 jsonwebtoken = { version = "10.4", default-features = false, features = [
@@ -54,17 +55,26 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [dev-dependencies]
+divan.workspace = true
 groove = { workspace = true, default-features = false, features = ["test"] }
 jazz-benchmark-guard = { path = "../benchmark-guard" }
 jazz-testkit = { path = "../jazz-testkit", default-features = false }
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
+tar = "0.4"
 libc = "0.2"
 criterion = "0.5"
+flate2 = "1"
+rusqlite = { version = "0.34", features = ["bundled"] }
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+  "zstd",
+] }
 insta = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 jazz-storage-rocksdb.workspace = true
+jazz-storage-sqlite.workspace = true
 futures = "0.3"
 tokio = { version = "1", features = [
   "macros",

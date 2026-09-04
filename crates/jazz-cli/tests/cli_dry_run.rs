@@ -30,8 +30,12 @@ use tungstenite::protocol::Message;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{WebSocket, connect};
 
+mod support;
+
+use support::cargo_binary;
+
 fn jazz_server_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_jazz-server"));
+    let mut command = Command::new(cargo_binary("jazz-server"));
     command
         .env_remove("JAZZ_SERVER_LISTEN")
         .env_remove("JAZZ_SERVER_PORT")
@@ -42,6 +46,8 @@ fn jazz_server_command() -> Command {
         .env_remove("JAZZ_ADMIN_SECRET")
         .env_remove("JAZZ_BACKEND_SECRET")
         .env_remove("JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM")
+        .env_remove("JAZZ_JWT_ISSUER")
+        .env_remove("JAZZ_JWT_AUDIENCE")
         .env_remove("JAZZ_ALLOW_LOCAL_FIRST_AUTH")
         .env_remove("JAZZ_UPSTREAM_URL")
         .env_remove("JAZZ_SERVER_ANONYMOUS_SUBJECT");
@@ -49,12 +55,15 @@ fn jazz_server_command() -> Command {
 }
 
 fn jazz_tools_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_jazz-tools"));
+    let mut command = Command::new(cargo_binary("jazz-tools"));
     command
         .env_remove("JAZZ_SERVER_PORT")
         .env_remove("JAZZ_SERVER_DATA_DIR")
         .env_remove("JAZZ_SERVER_IN_MEMORY")
         .env_remove("JAZZ_ADMIN_SECRET")
+        .env_remove("JAZZ_JWT_ISSUER")
+        .env_remove("JAZZ_JWT_AUDIENCE")
+        .env_remove("JAZZ_TRUST_PROXY")
         .env_remove("JAZZ_UPSTREAM_URL")
         .env_remove("JAZZ_BOUND_PORT_FILE");
     command
@@ -349,7 +358,7 @@ impl RunningServer {
                 "serve-loopback-websocket-schema",
                 &schema_hex(schema),
                 "--in-memory",
-                "--admin-secret",
+                "--auth-static-bearer",
                 "test-admin-secret",
             ])
             .stdin(Stdio::piped())
@@ -411,15 +420,16 @@ fn help_lists_dev_server_commands() {
             && line.contains("--in-memory")
             && line.contains("--memory")
             && line.contains("--auth-static-bearer <token>")
-            && line.contains("--admin-secret <token>")
             && line.contains("--auth-jwt-ed-public-key-pem <pem>")
+            && line.contains("--jwt-issuer <issuer>")
+            && line.contains("--jwt-audience <audience>")
     }));
     assert!(lines.iter().any(|line| {
         line.contains(" server <APP_ID>")
             && line.contains("--port <port>")
             && line.contains("--data-dir <dir>")
             && line.contains("--in-memory")
-            && line.contains("--admin-secret <token>")
+            && line.contains("--auth-static-bearer <token>")
     }));
     assert!(lines.iter().any(|line| {
         line.contains(" serve <schema-source-json-hex>")
@@ -450,12 +460,14 @@ fn help_lists_dev_server_commands() {
             .iter()
             .any(|line| line.contains("JAZZ_SERVER_AUTH_STATIC_BEARER"))
     );
-    assert!(lines.iter().any(|line| line.contains("JAZZ_ADMIN_SECRET")));
+    assert!(!lines.iter().any(|line| line.contains("JAZZ_ADMIN_SECRET")));
     assert!(
-        lines
+        !lines
             .iter()
             .any(|line| line.contains("JAZZ_BACKEND_SECRET"))
     );
+    assert!(lines.iter().any(|line| line.contains("JAZZ_JWT_ISSUER")));
+    assert!(lines.iter().any(|line| line.contains("JAZZ_JWT_AUDIENCE")));
     assert!(
         lines
             .iter()
@@ -504,7 +516,13 @@ fn server_command_reports_missing_app_id_with_usage() {
 #[test]
 fn server_command_reports_wired_loopback_shape() {
     let mut child = jazz_server_command()
-        .args(["server", "app-a", "--in-memory", "--admin-secret", "secret"])
+        .args([
+            "server",
+            "app-a",
+            "--in-memory",
+            "--auth-static-bearer",
+            "secret",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -586,7 +604,7 @@ fn server_command_defaults_to_data_dir_and_accepts_aliases() {
             data_dir.to_str().expect("temp path is utf-8"),
             "--ws-path",
             "/custom-ws",
-            "--admin-secret",
+            "--auth-static-bearer",
             "secret",
         ])
         .stdin(Stdio::piped())
@@ -938,19 +956,39 @@ fn dry_run_reads_alpha_env_and_cli_can_override_storage() {
 }
 
 #[test]
-fn dry_run_accepts_backend_secret_env_alias() {
+fn bug_306_rejects_privileged_secret_aliases_with_actionable_replacements() {
+    let cases = [
+        ("JAZZ_ADMIN_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
+        ("JAZZ_BACKEND_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
+    ];
+
+    for (secret_env, replacement) in cases {
+        let output = jazz_server_command()
+            .arg("dry-run")
+            .env(secret_env, "privileged-secret")
+            .output()
+            .expect("run jazz-server dry-run with privileged secret env");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{secret_env} must not become an ordinary bearer credential"
+        );
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).expect("dry-run stderr is utf-8");
+        assert!(stderr.contains(secret_env), "{stderr}");
+        assert!(stderr.contains(replacement), "{stderr}");
+    }
+
     let output = jazz_server_command()
-        .arg("dry-run")
-        .env("JAZZ_BACKEND_SECRET", "backend-secret")
+        .args(["dry-run", "--admin-secret", "privileged-secret"])
         .output()
-        .expect("run jazz-server dry-run with backend secret env");
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-
-    let stdout = String::from_utf8(output.stdout).expect("dry-run stdout is utf-8");
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert!(lines.contains(&"auth.mode=static-bearer"));
+        .expect("run jazz-server dry-run with admin secret flag");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("dry-run stderr is utf-8");
+    assert!(stderr.contains("--admin-secret"), "{stderr}");
+    assert!(stderr.contains("--auth-static-bearer"), "{stderr}");
 }
 
 #[test]
@@ -969,7 +1007,7 @@ fn dry_run_rejects_upstream_url_for_local_server_mode() {
 }
 
 #[test]
-fn dry_run_accepts_alpha_aliases() {
+fn dry_run_accepts_non_privileged_alpha_aliases() {
     let output = jazz_server_command()
         .args([
             "dry-run",
@@ -978,7 +1016,7 @@ fn dry_run_accepts_alpha_aliases() {
             "--dataDir=/tmp/jazz-server-alias-data",
             "--memory",
             "--ws-path=/alias-sync",
-            "--admin-secret=alias-secret",
+            "--static-bearer=alias-secret",
             "--allow-local-first-auth=true",
             "--anonymous-subject=alias-user",
         ])

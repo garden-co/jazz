@@ -5,9 +5,70 @@
 
 use super::peer_connection::{
     ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
-    mutation_error_event, take_pending_mutation_error_delivery,
+    coverage_group_subscription_key, mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
+use crate::time::TxTime;
+
+/// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
+/// close future drops the lease, rather than the accepted operation.
+struct QueuedMutationLease<'a> {
+    queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+    active_leases: &'a Cell<usize>,
+    operation: Option<QueuedMutationOperation>,
+}
+
+impl<'a> QueuedMutationLease<'a> {
+    fn new(
+        queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+        active_leases: &'a Cell<usize>,
+        operation: QueuedMutationOperation,
+    ) -> Self {
+        active_leases.set(
+            active_leases
+                .get()
+                .checked_add(1)
+                .expect("queued mutation lease count overflow"),
+        );
+        Self {
+            queue,
+            active_leases,
+            operation: Some(operation),
+        }
+    }
+
+    fn operation(&self) -> &QueuedMutationOperation {
+        self.operation
+            .as_ref()
+            .expect("queued mutation lease must retain its operation")
+    }
+
+    fn operation_mut(&mut self) -> &mut QueuedMutationOperation {
+        self.operation
+            .as_mut()
+            .expect("queued mutation lease must retain its operation")
+    }
+
+    fn take(&mut self) -> QueuedMutationOperation {
+        self.operation
+            .take()
+            .expect("queued mutation lease must retain its operation")
+    }
+}
+
+impl Drop for QueuedMutationLease<'_> {
+    fn drop(&mut self) {
+        if let Some(operation) = self.operation.take() {
+            self.queue.borrow_mut().push_front(operation);
+        }
+        self.active_leases.set(
+            self.active_leases
+                .get()
+                .checked_sub(1)
+                .expect("queued mutation lease count underflow"),
+        );
+    }
+}
 
 /// Node-owned participant surface for upstream and subscriber connections.
 pub struct Node<S>
@@ -15,14 +76,33 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
+    close_owner: futures::lock::Mutex<()>,
+    tx_time_reservation_clock: Rc<Cell<TxTime>>,
+    node_uuid: NodeUuid,
     receives_commits_as_local: bool,
     pub(super) subscriptions: SubscriptionList,
     pub(super) outbox: Outbox,
     pub(super) pending_local_publications: PendingLocalPublications,
-    pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
+    queued_mutations: RefCell<VecDeque<QueuedMutationOperation>>,
+    /// Operations temporarily popped by an owner future. They remain part of
+    /// FIFO shutdown work even while a cold await leaves the queue empty.
+    queued_mutation_active_leases: Cell<usize>,
+    transaction_wait_observers: RefCell<Vec<TransactionWaitObserver>>,
+    queued_mutation_failures: RefCell<BTreeMap<TxId, Error>>,
+    /// Rejections claimed by a waiter during the current owner turn. They
+    /// stay observable until every waiter that was woken by the same fate has
+    /// had one polling opportunity, then are discarded before the turn ends.
+    deferred_rejection_discards: RefCell<BTreeSet<TxId>>,
+    queued_open_transaction_failures: RefCell<BTreeMap<OpenTransactionId, Error>>,
+    reserved_mutations: RefCell<BTreeSet<TxId>>,
+    pub(super) pending_transaction_abandonments: TransactionAbandonmentTombstones,
+    transaction_abandonments_closed: Cell<bool>,
+    transaction_abandonment_shutdown_pending: Cell<bool>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
     subscription_finalizations_closed: Cell<bool>,
+    subscription_runtime_retired: Cell<bool>,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
     pub(super) upstream_coverage_refcounts: UpstreamCoverageRefCounts,
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
@@ -45,6 +125,12 @@ where
     pub(super) admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     pub(super) mutation_errors: SharedMutationErrors,
+    /// Transaction IDs restored from durable browser-relay storage after a
+    /// worker restart. These IDs were authored by an ephemeral foreground
+    /// node, so their rejection payload must never become worker-owned
+    /// durable state. The set exists only until its terminal authority fate is
+    /// observed in this runtime.
+    pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) next_write_state_waiter_id: Cell<u64>,
     pub(super) next_subscription_nonce: Cell<u64>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -60,6 +146,53 @@ impl<S> Node<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Test-only staging through the ordinary upstream inbound queue.
+    ///
+    /// A connection epoch is opaque to test callers and must identify exactly
+    /// one still-attached upstream. Refusing ambiguity makes a test fixture
+    /// state its intended authority link instead of accidentally exercising a
+    /// different parallel upstream.
+    #[cfg(feature = "testing")]
+    pub async fn stage_upstream_message_for_test(
+        &self,
+        connection_epoch: u64,
+        message: SyncMessage,
+    ) -> Result<bool, String> {
+        let connections = self.connections.borrow().clone();
+        let mut candidates = Vec::new();
+        for candidate in connections {
+            let connection = candidate.lock().await;
+            let selected = connection.connection_epoch == connection_epoch
+                && matches!(connection.link, ConnectionLink::Upstream(_));
+            drop(connection);
+            if selected {
+                candidates.push(candidate);
+            }
+        }
+        let [connection] = candidates.as_slice() else {
+            return Err(format!(
+                "test upstream handle selected {} live upstream connections for epoch {connection_epoch}",
+                candidates.len()
+            ));
+        };
+        // A test frame has the same receipt eligibility as a physical arrival
+        // on this link. In particular, a still-attached predecessor can be
+        // useful for exercising stale application, but must not manufacture
+        // durable authority disclosure after a successor replaced it.
+        let authority_receipt_eligible = self
+            .active_authority_view_receipts
+            .borrow()
+            .as_ref()
+            .is_some_and(|receipts| receipts.connection_epoch == connection_epoch);
+        let mut connection = connection.lock().await;
+        connection.staged_inbound.push_back(StagedInboundMessage {
+            message,
+            authority_receipt_eligible,
+        });
+        self.schedule_tick(TickUrgency::Immediate);
+        Ok(authority_receipt_eligible)
+    }
+
     /// Wrap a node for serving subscriber links.
     pub fn new(mut node: NodeState<S>) -> Self {
         // History completeness is a structural property of the opened node,
@@ -68,6 +201,8 @@ where
         let receives_commits_as_local = !node.is_history_complete();
         let chunk_resolver = PeerChunkResolver::default();
         let local_chunk_reader = node.local_chunk_reader_handle();
+        let tx_time_reservation_clock = node.tx_time_reservation_clock();
+        let node_uuid = node.node_uuid();
         node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
         let pending_mutation_errors = node
             .rejected_transactions()
@@ -79,14 +214,28 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
+            close_owner: futures::lock::Mutex::new(()),
+            tx_time_reservation_clock,
+            node_uuid,
             receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
-            local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
+            queued_mutations: RefCell::new(VecDeque::new()),
+            queued_mutation_active_leases: Cell::new(0),
+            transaction_wait_observers: RefCell::new(Vec::new()),
+            queued_mutation_failures: RefCell::new(BTreeMap::new()),
+            deferred_rejection_discards: RefCell::new(BTreeSet::new()),
+            queued_open_transaction_failures: RefCell::new(BTreeMap::new()),
+            reserved_mutations: RefCell::new(BTreeSet::new()),
+            pending_transaction_abandonments: Rc::new(RefCell::new(BTreeSet::new())),
+            transaction_abandonments_closed: Cell::new(false),
+            transaction_abandonment_shutdown_pending: Cell::new(false),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
             subscription_finalizations_closed: Cell::new(false),
+            subscription_runtime_retired: Cell::new(false),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
             awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
@@ -106,6 +255,7 @@ where
                 callback: None,
                 pending: pending_mutation_errors,
             })),
+            browser_relay_recovered_tx_ids: Rc::new(RefCell::new(BTreeSet::new())),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -120,6 +270,290 @@ where
             chunk_resolver,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
+        }
+    }
+
+    /// Reserve a definitive local transaction identity without borrowing the
+    /// async storage-owning node. The shared high-water mirror is advanced by
+    /// every ordinary mint and remote observation as well.
+    pub(super) fn reserve_transaction_id(&self, now_ms: u64) -> Result<TxId, Error> {
+        self.ensure_mutation_admission_open()?;
+        let made_at = TxTime::tick(self.tx_time_reservation_clock.get(), now_ms)
+            .map_err(crate::node::Error::from)
+            .map_err(Error::from)?;
+        self.tx_time_reservation_clock.set(made_at);
+        Ok(TxId::new(made_at, self.node_uuid))
+    }
+
+    pub(super) fn begin_mutation_shutdown(&self) {
+        self.mutation_owner_lifecycle
+            .set(MutationOwnerLifecycle::Closing);
+        // Wait observers may be parked on a state-change channel even when
+        // there is no queued mutation left to wake them. Closing is itself a
+        // terminal observation boundary, so wake every waiter to let it
+        // either observe its requested tier or report that the runtime closed
+        // first.
+        let waiters = std::mem::take(&mut *self.write_state_waiters.borrow_mut());
+        for (_, waiters) in waiters {
+            for waiter in waiters {
+                let WriteStateWaiterNotify::Future(sender) = waiter.notify;
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    /// Serialize shutdown drains while keeping admission closure outside the
+    /// await. Cancellation releases ownership so another close caller can
+    /// resume the same idempotent drain and finalization sequence.
+    pub(super) async fn lock_close_owner(&self) -> futures::lock::MutexGuard<'_, ()> {
+        self.close_owner.lock().await
+    }
+
+    pub(super) fn ensure_mutation_admission_open(&self) -> Result<(), Error> {
+        if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Open {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::WriteRejected,
+                "database mutation owner is closing",
+            ))
+        }
+    }
+
+    pub(super) fn ensure_subscription_finalization_open(&self) -> Result<(), Error> {
+        if self.subscription_finalizations_closed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "database subscription admission is closed",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn enqueue_mutation(
+        &self,
+        tx_id: TxId,
+        future: QueuedMutationFuture,
+    ) -> Rc<RefCell<QueuedMutationStatus>> {
+        let status = Rc::new(RefCell::new(QueuedMutationStatus::Pending));
+        self.reserved_mutations.borrow_mut().insert(tx_id);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: Some(tx_id),
+                open_tx_id: None,
+                future,
+                status: Some(Rc::clone(&status)),
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        status
+    }
+
+    pub(super) fn enqueue_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+        future: QueuedMutationFuture,
+    ) -> Result<(), Error> {
+        self.ensure_mutation_admission_open()?;
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: Some(open_tx_id),
+                future,
+                status: None,
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        Ok(())
+    }
+
+    /// Put a transaction-local read behind every already-admitted operation
+    /// for that transaction. The receiver owns the eventual result, while the
+    /// owner queue retains the cold storage future and its wake route.
+    pub(super) fn enqueue_transaction_read<T: 'static>(
+        &self,
+        open_tx_id: OpenTransactionId,
+        read: impl Future<Output = Result<T, Error>> + 'static,
+    ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        let sender = Rc::new(RefCell::new(Some(sender)));
+        let read_sender = Rc::clone(&sender);
+        let completion_sender = Rc::clone(&sender);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: Some(open_tx_id),
+                future: Box::pin(async move {
+                    let result = read.await;
+                    if let Some(sender) = read_sender.borrow_mut().take() {
+                        let _ = sender.send(result);
+                    }
+                    Ok(())
+                }),
+                status: None,
+                completion: Some(Box::new(move |outcome| {
+                    if let Err(error) = outcome
+                        && let Some(sender) = completion_sender.borrow_mut().take()
+                    {
+                        let _ = sender.send(Err(error));
+                    }
+                })),
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        receiver
+    }
+
+    pub(super) fn enqueue_transaction_commit(
+        &self,
+        open_tx_id: OpenTransactionId,
+        tx_id: TxId,
+        future: QueuedMutationFuture,
+    ) -> Rc<RefCell<QueuedMutationStatus>> {
+        let status = Rc::new(RefCell::new(QueuedMutationStatus::Pending));
+        self.reserved_mutations.borrow_mut().insert(tx_id);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: Some(tx_id),
+                open_tx_id: Some(open_tx_id),
+                future,
+                status: Some(Rc::clone(&status)),
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        status
+    }
+
+    pub(super) fn enqueue_transaction_cleanup(&self, future: QueuedMutationFuture) {
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: None,
+                future,
+                status: None,
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    /// Poll one FIFO owner-queue entry and report whether it retained its
+    /// continuation. A retained operation may still own [`NodeState`] across
+    /// a cold-storage or cooperative-evaluation await.
+    pub(super) fn poll_queued_mutation_once(&self) -> bool {
+        use std::task::{Context, Poll, Waker};
+
+        let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+            return false;
+        };
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
+            self.queued_open_transaction_failures
+                .borrow()
+                .get(&open_tx_id)
+                .cloned()
+        });
+        let outcome = match poisoned {
+            Some(error) => Poll::Ready(Err(error)),
+            None => operation.future.as_mut().poll(&mut context),
+        };
+        match outcome {
+            Poll::Pending => {
+                self.queued_mutations.borrow_mut().push_front(operation);
+                true
+            }
+            Poll::Ready(result) => {
+                self.finish_queued_mutation(operation, result);
+                false
+            }
+        }
+    }
+
+    fn finish_queued_mutation(
+        &self,
+        mut operation: QueuedMutationOperation,
+        result: Result<(), Error>,
+    ) {
+        if let Some(completion) = operation.completion.take() {
+            completion(result.clone());
+        }
+        if let Some(tx_id) = operation.tx_id {
+            self.reserved_mutations.borrow_mut().remove(&tx_id);
+        }
+        if let Err(error) = &result
+            && let Some(open_tx_id) = operation.open_tx_id
+        {
+            self.queued_open_transaction_failures
+                .borrow_mut()
+                .entry(open_tx_id)
+                .or_insert_with(|| error.clone());
+        }
+        if let (Some(tx_id), Some(status)) = (operation.tx_id, operation.status) {
+            let terminal_failed = result.is_err();
+            match result {
+                Ok(()) => *status.borrow_mut() = QueuedMutationStatus::Published,
+                Err(error) => {
+                    *status.borrow_mut() = QueuedMutationStatus::Failed(error.clone());
+                    self.queued_mutation_failures
+                        .borrow_mut()
+                        .insert(tx_id, error);
+                }
+            }
+            if let Some(waiters) = self.write_state_waiters.borrow_mut().remove(&tx_id) {
+                for waiter in waiters {
+                    let WriteStateWaiterNotify::Future(sender) = waiter.notify;
+                    let _ = sender.send(());
+                }
+            }
+            if terminal_failed && let Some(open_tx_id) = operation.open_tx_id {
+                let node = Rc::clone(&self.node);
+                self.enqueue_transaction_cleanup(Box::pin(async move {
+                    let mut node = node.lock().await;
+                    match node.abandon_tx(open_tx_id) {
+                        Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+                        Err(error) => Err(error.into()),
+                    }
+                }));
+            }
+        }
+        if operation.tx_id.is_some()
+            && let Some(open_tx_id) = operation.open_tx_id
+        {
+            self.queued_open_transaction_failures
+                .borrow_mut()
+                .remove(&open_tx_id);
+        }
+        if !self.queued_mutations.borrow().is_empty() {
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    pub(super) async fn drain_queued_mutations(&self) {
+        loop {
+            let Some(operation) = self.queued_mutations.borrow_mut().pop_front() else {
+                return;
+            };
+            let mut lease = QueuedMutationLease::new(
+                &self.queued_mutations,
+                &self.queued_mutation_active_leases,
+                operation,
+            );
+            let poisoned = lease.operation().open_tx_id.and_then(|open_tx_id| {
+                self.queued_open_transaction_failures
+                    .borrow()
+                    .get(&open_tx_id)
+                    .cloned()
+            });
+            let result = match poisoned {
+                Some(error) => Err(error),
+                None => lease.operation_mut().future.as_mut().await,
+            };
+            self.finish_queued_mutation(lease.take(), result);
         }
     }
 
@@ -148,6 +582,25 @@ where
         Rc::clone(&self.node)
     }
 
+    /// Test-only inspection of retry ownership. Rejected foreign transactions
+    /// must never acquire an originating node's retained payload.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
+        self.node.borrow().rejected_transaction(tx_id).is_some()
+    }
+
+    /// Test-only inspection of the process-local browser-relay recovery
+    /// marker. It is not durable retry ownership: every terminal fate must
+    /// consume it, including an accepted Global fate.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
+        self.browser_relay_recovered_tx_ids
+            .borrow()
+            .contains(&tx_id)
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large
     /// values. Groove persists timestamps and performs eviction, but does not
     /// choose these product limits.
@@ -174,8 +627,14 @@ where
         self.upstream_durability_floor.set(DurabilityTier::Local);
     }
 
-    pub(super) fn set_relay_authority_session_owner(&self) {
-        self.node.borrow_mut().set_relay_authority_session_owner();
+    pub(super) fn configure_scope_isolated_client_relay(
+        &self,
+        scope: crate::db::ClientRelayScope,
+    ) -> Result<(), Error> {
+        Ok(self
+            .node
+            .borrow_mut()
+            .configure_scope_isolated_client_relay(scope)?)
     }
 
     pub(super) fn set_deferred_local_persistence(&self, deferred: bool) {
@@ -207,40 +666,80 @@ where
         published: PublishedTransaction,
         upload_unit: Option<SyncMessage>,
     ) {
+        let published = Rc::new(published);
+        let settlement_publication = Rc::clone(&published);
+        let settlement_node = Rc::clone(&self.node);
+        let settlement = Box::pin(async move {
+            let tx_id = settlement_publication.tx_id();
+            let persistence = settlement_publication.persist().await;
+            settlement_node
+                .lock()
+                .await
+                .settle_published_transaction(tx_id, persistence)?;
+            Ok(tx_id)
+        });
         self.pending_local_publications
             .borrow_mut()
             .push_back(PendingLocalPublication {
-                published: Rc::new(published),
+                published,
                 upload_unit,
+                settlement,
             });
         self.schedule_tick(TickUrgency::Immediate);
     }
 
-    pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
-        let _settler = self.local_publication_settler.lock().await;
+    /// Whether a resident publication still needs its ordered durability turn.
+    /// This check is deliberately synchronous so a host's one bounded tick
+    /// does not spend its sole poll acquiring the publication-settler mutex
+    /// when there is no publication to advance.
+    pub(super) fn has_pending_local_publications(&self) -> bool {
+        !self.pending_local_publications.borrow().is_empty()
+    }
+
+    fn poll_local_publication_settlement(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        use std::task::Poll;
+
         loop {
-            let Some((published, upload_unit)) = self
-                .pending_local_publications
-                .borrow()
-                .front()
-                .map(|pending| (Rc::clone(&pending.published), pending.upload_unit.clone()))
-            else {
-                return Ok(());
+            let Some(mut pending) = self.pending_local_publications.borrow_mut().pop_front() else {
+                return Poll::Ready(Ok(()));
             };
-            let tx_id = published.tx_id();
-            let persistence = published.persist().await;
-            self.node
-                .lock()
-                .await
-                .settle_published_transaction(tx_id, persistence)?;
-            let settled = self
-                .pending_local_publications
-                .borrow_mut()
-                .pop_front()
-                .expect("settled local publication remains at queue front");
-            debug_assert_eq!(settled.published.tx_id(), tx_id);
-            self.queue_pending_upload(tx_id, upload_unit);
+            match pending.settlement.as_mut().poll(cx) {
+                Poll::Pending => {
+                    self.pending_local_publications
+                        .borrow_mut()
+                        .push_front(pending);
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(tx_id)) => {
+                    debug_assert_eq!(pending.published.tx_id(), tx_id);
+                    self.queue_pending_upload(tx_id, pending.upload_unit);
+                }
+            }
         }
+    }
+
+    /// Advance ordered local durability without keeping the host tick pending.
+    /// A retained mutation may own the node lock needed to finish settlement;
+    /// the tick must still poll that mutation. The runtime-owned waker requests
+    /// another owner turn when this retained settlement can make progress.
+    pub(super) fn poll_local_publication_settlement_once(&self) -> Result<bool, Error> {
+        use std::task::{Context, Poll, Waker};
+
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        match self.poll_local_publication_settlement(&mut context) {
+            Poll::Pending => Ok(true),
+            Poll::Ready(result) => result.map(|()| false),
+        }
+    }
+
+    pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
+        futures::future::poll_fn(|cx| self.poll_local_publication_settlement(cx)).await
     }
 
     /// Restore locally originated, unsettled durable writes into the
@@ -267,8 +766,31 @@ where
         let pending = node.pending_transaction_ids_for_author(author);
         let pending = crate::db::block_on(pending)?;
         drop(node);
+        self.browser_relay_recovered_tx_ids
+            .borrow_mut()
+            .extend(pending.iter().copied());
         for tx_id in pending {
             self.queue_pending_upload(tx_id, None);
+        }
+        Ok(())
+    }
+
+    /// Restore complete accepted authority publications, without waiting for
+    /// the originating clients to reconnect. Only an edge host calls this.
+    #[cfg(any(test, feature = "runtime"))]
+    pub(super) async fn restore_edge_authority_uploads(&self) -> Result<(), Error> {
+        let mut node = self.node.lock().await;
+        let pending = node.pending_edge_authority_transaction_ids().await?;
+        let mut covered = BTreeSet::new();
+        // Newer frontier publications already include their unsettled parents.
+        // Do not reconstruct one growing ancestry prefix per historical edit.
+        for tx_id in pending.into_iter().rev() {
+            if covered.contains(&tx_id) {
+                continue;
+            }
+            let publication = node.edge_authority_publication_for(tx_id).await?;
+            covered.extend(publication.commits.iter().map(|unit| unit.tx.tx_id));
+            self.queue_pending_upload(tx_id, Some(SyncMessage::AuthorityPublication(publication)));
         }
         Ok(())
     }
@@ -400,6 +922,200 @@ where
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker())
     }
+    /// Lock the node for opening a transaction while the database still owns
+    /// transaction admission.
+    ///
+    /// `owner_operation_admitted` is true only for an operation already
+    /// retained by the binding owner before shutdown. Those operations must
+    /// drain in FIFO order before the final sweep. Every direct caller checks
+    /// the gate both before and after waiting for the node mutex.
+    ///
+    /// The tombstone check closes the corresponding race with an
+    /// already-linearized handle abandonment.
+    pub(super) async fn lock_for_transaction_open(
+        &self,
+        open_tx_id: OpenTransactionId,
+        owner_operation_admitted: bool,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        if !owner_operation_admitted {
+            self.ensure_transaction_admission_open()?;
+        }
+        let mut node = self.node.lock().await;
+        if !owner_operation_admitted && let Err(error) = self.ensure_transaction_admission_open() {
+            self.finish_transaction_abandonment_shutdown_in(&mut node)?;
+            return Err(error);
+        }
+        self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
+        Ok(node)
+    }
+
+    /// Lock the node for an operation on an existing transaction.
+    ///
+    /// A handle drop records its tombstone without waiting for this mutex.
+    /// Therefore even an operation already queued ahead of the maintenance tick
+    /// observes and retires the tombstone before it can stage, read, or commit.
+    /// Binding-owner operations accepted before shutdown may finish draining;
+    /// direct callers observe the closed gate after acquiring ownership.
+    pub(super) async fn lock_for_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+        owner_operation_admitted: bool,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        let mut node = self.node.lock().await;
+        self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
+        if !owner_operation_admitted && let Err(error) = self.ensure_transaction_admission_open() {
+            self.finish_transaction_abandonment_shutdown_in(&mut node)?;
+            return Err(error);
+        }
+        Ok(node)
+    }
+
+    fn ensure_transaction_admission_open(&self) -> Result<(), Error> {
+        if self.transaction_abandonments_closed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "database transaction admission is closed",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_transaction_abandoned(&self, open_tx_id: OpenTransactionId) -> bool {
+        self.pending_transaction_abandonments
+            .borrow_mut()
+            .insert(open_tx_id)
+    }
+
+    pub(super) fn clear_transaction_abandonment(&self, open_tx_id: OpenTransactionId) {
+        self.pending_transaction_abandonments
+            .borrow_mut()
+            .remove(&open_tx_id);
+    }
+
+    fn reject_tombstoned_transaction_in(
+        &self,
+        node: &mut NodeState<S>,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if !self
+            .pending_transaction_abandonments
+            .borrow()
+            .contains(&open_tx_id)
+        {
+            return Ok(());
+        }
+        let retirement = Self::abandon_transaction_for_maintenance(node, open_tx_id);
+        if retirement.is_ok() {
+            self.clear_transaction_abandonment(open_tx_id);
+        }
+        retirement?;
+        Err(transaction_abandoned(open_tx_id))
+    }
+
+    /// Abandon an RAII-owned transaction immediately when the node is
+    /// uncontended, otherwise leave its deduplicated tombstone for the next
+    /// transaction operation or asynchronous owner turn.
+    ///
+    /// This is synchronous and never waits for the node mutex.
+    pub(super) fn abandon_or_enqueue_transaction(&self, open_tx_id: OpenTransactionId) {
+        if self.transaction_abandonments_closed.get() {
+            // Shutdown owns every still-open transaction after closing this
+            // gate, so a late Drop has no separate maintenance to admit.
+            return;
+        }
+        if !self.mark_transaction_abandoned(open_tx_id) {
+            return;
+        }
+        if let Some(mut node) = self.node.try_lock() {
+            if Self::abandon_transaction_for_maintenance(&mut node, open_tx_id).is_ok() {
+                self.clear_transaction_abandonment(open_tx_id);
+            } else {
+                self.schedule_tick(TickUrgency::Immediate);
+            }
+            return;
+        }
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    fn abandon_transaction_for_maintenance(
+        node: &mut NodeState<S>,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        match node.abandon_tx(open_tx_id) {
+            Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn drain_transaction_abandonments_in(&self, node: &mut NodeState<S>) -> Result<usize, Error> {
+        let abandonments = std::mem::take(&mut *self.pending_transaction_abandonments.borrow_mut());
+        let count = abandonments.len();
+        let mut first_error = None;
+        for open_tx_id in abandonments {
+            if let Err(error) = Self::abandon_transaction_for_maintenance(node, open_tx_id) {
+                self.pending_transaction_abandonments
+                    .borrow_mut()
+                    .insert(open_tx_id);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(count),
+        }
+    }
+
+    fn finish_transaction_abandonment_shutdown_in(
+        &self,
+        node: &mut NodeState<S>,
+    ) -> Result<usize, Error> {
+        let drain_result = self.drain_transaction_abandonments_in(node);
+        // Shutdown must not retire every open transaction until the FIFO owner
+        // has reached quiescence. A queued begin/stage/commit was admitted
+        // before close closed the gate, but may not have acquired the node
+        // lock yet. Sweeping it from an intervening ordinary tick would turn
+        // that accepted operation into a tombstoned transaction. Keep the
+        // shutdown sweep pending until its own queue has completely drained;
+        // a later owner turn or close will run this same idempotent sweep.
+        if self.transaction_abandonment_shutdown_pending.get()
+            && self.queued_mutations.borrow().is_empty()
+            && self.queued_mutation_active_leases.get() == 0
+        {
+            self.transaction_abandonment_shutdown_pending.set(false);
+            node.abandon_all_open_transactions();
+        }
+        drain_result
+    }
+
+    async fn drain_transaction_abandonments(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        self.finish_transaction_abandonment_shutdown_in(&mut node)
+    }
+
+    /// Close transaction admission and transfer the final open-transaction
+    /// sweep to the node tick owner before the close future can suspend.
+    ///
+    /// If the caller cancels `Db::close` while it is waiting for the node
+    /// mutex, the scheduled tick still drains tombstones and terminalizes every
+    /// open transaction. Repeated close attempts and tick passes are benign.
+    pub(super) fn begin_transaction_abandonment_shutdown(&self) {
+        if self.transaction_abandonments_closed.replace(true) {
+            return;
+        }
+        self.transaction_abandonment_shutdown_pending.set(true);
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    pub(super) async fn finish_transaction_abandonment_shutdown(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        self.finish_transaction_abandonment_shutdown_in(&mut node)
+    }
+
+    pub(super) fn transaction_abandonment_shutdown_is_pending(&self) -> bool {
+        self.transaction_abandonment_shutdown_pending.get()
+    }
 
     /// Enqueue a stream-finalization command without touching the async node
     /// mutex. This is the only operation a stream's `Drop` implementation may
@@ -410,13 +1126,14 @@ where
         mut command: PendingSubscriptionFinalization,
     ) {
         if self.subscription_finalizations_closed.get() {
-            // Db::close has synchronously retired every maintained view and
-            // connection before setting this gate. A late finalizer therefore
-            // owns no resident Groove or upstream state to clean up.
-            if let Some(acknowledgement) = command.acknowledgement.take() {
-                let _ = acknowledgement.send(());
+            if self.subscription_runtime_retired.get() {
+                // Terminal retirement already drained every maintained view
+                // and connection, so a late finalizer owns no resident work.
+                if let Some(acknowledgement) = command.acknowledgement.take() {
+                    let _ = acknowledgement.send(());
+                }
+                return;
             }
-            return;
         }
         self.pending_subscription_finalizations
             .borrow_mut()
@@ -469,6 +1186,12 @@ where
                     .remove(&handle.coverage);
                 drop(refcounts);
                 node.apply_unsubscribe(handle.subscription);
+                self.coverage_refresh_generations
+                    .borrow_mut()
+                    .remove(&handle.coverage);
+                if let Some(receipts) = self.active_authority_view_receipts.borrow_mut().as_mut() {
+                    receipts.subscriptions.remove(&handle.subscription);
+                }
                 self.latest_coverage_subscriptions
                     .borrow_mut()
                     .retain(|coverage, subscription| {
@@ -515,6 +1238,9 @@ where
                 acknowledgement: None,
             });
         }
+        // Once admission closes, an abandoned close future must not be the
+        // sole owner capable of retiring the captured streams.
+        self.schedule_tick(TickUrgency::Immediate);
     }
 
     /// Release all connection and subscription bookkeeping after its backing
@@ -522,6 +1248,7 @@ where
     /// view or upstream ownership behind: the retirement pass drained them
     /// before close, and this removes the now-unusable runtime shell.
     pub(super) fn retire_subscription_runtime_after_close(&self) {
+        self.subscription_runtime_retired.set(true);
         self.subscriptions.borrow_mut().clear();
         self.connections.borrow_mut().clear();
         self.upstream_subscriptions.borrow_mut().clear();
@@ -539,6 +1266,10 @@ where
             .clear();
     }
 
+    pub(super) fn subscription_finalization_shutdown_is_pending(&self) -> bool {
+        self.subscription_finalizations_closed.get() && !self.subscription_runtime_retired.get()
+    }
+
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
         let should_schedule = {
             let mut state = self.mutation_errors.borrow_mut();
@@ -550,21 +1281,73 @@ where
         }
     }
 
-    fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
+    async fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
         let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
         let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
         if retained {
-            crate::db::block_on(self.node.borrow_mut().discard_rejection(tx_id))?;
+            self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+            self.schedule_tick(TickUrgency::Immediate);
         }
         Ok(pending.is_some() || retained)
     }
 
-    pub(super) fn transaction_wait_outcome(
+    #[cfg(test)]
+    pub(super) fn defer_rejection_discard_for_test(&self, tx_id: TxId) {
+        self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+    }
+
+    /// Finish rejection acknowledgement after all wait observers woken by one
+    /// owner turn have had a chance to inspect the shared terminal state.
+    pub(super) async fn flush_deferred_rejection_discards(&self) -> Result<(), Error> {
+        let tx_ids = std::mem::take(&mut *self.deferred_rejection_discards.borrow_mut());
+        let mut first_error = None;
+        for tx_id in tx_ids {
+            if let Err(error) = self.node.lock().await.discard_rejection(tx_id).await {
+                self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            // A failed atomic Groove commit poisons this opened database. Do
+            // not convert its retained acknowledgement into an immediate tick
+            // loop: the caller must observe the error and reopen before this
+            // runtime can make durable progress again. Other errors are also
+            // retained, but have no generic retry-safety contract here, so a
+            // host may explicitly service a later owner turn without us
+            // spinning on an unknown storage failure.
+            if matches!(
+                error,
+                crate::node::Error::Groove(groove::db::Error::DatabasePoisoned)
+            ) {
+                tracing::error!(
+                    %error,
+                    "deferred mutation-error acknowledgement requires reopening the database"
+                );
+            } else {
+                tracing::warn!(
+                    %error,
+                    "deferred mutation-error acknowledgement retained for an explicit later retry"
+                );
+            }
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    pub(super) async fn transaction_wait_outcome(
         &self,
         tx_id: TxId,
         tier: DurabilityTier,
     ) -> Option<Result<TxId, Error>> {
-        let state = crate::db::block_on(self.node.borrow_mut().transaction_state(tx_id));
+        if let Some(error) = self.queued_mutation_failures.borrow().get(&tx_id) {
+            return Some(Err(error.clone()));
+        }
+        if self.reserved_mutations.borrow().contains(&tx_id) {
+            return None;
+        }
+        let state = self.node.lock().await.transaction_state(tx_id).await;
         let Some((fate, global_time, durability)) = state else {
             return Some(Err(Error::new(
                 ErrorCode::NotObserved,
@@ -574,7 +1357,7 @@ where
         let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
         match fate {
             Fate::Rejected(reason) => {
-                if let Err(error) = self.consume_mutation_error(tx_id) {
+                if let Err(error) = self.consume_mutation_error(tx_id).await {
                     tracing::warn!(?tx_id, %error, "failed to consume waited mutation error");
                 }
                 Some(Err(write_rejected(tx_id, reason)))
@@ -584,21 +1367,231 @@ where
         }
     }
 
+    /// Read a transaction's wait predicate without claiming its rejection.
+    ///
+    /// A queued empty update may use an existing transaction as its bounded
+    /// completion target. That public request must observe the target's state,
+    /// but it is not an additional owner of the target's mutation-error
+    /// delivery: the target's own waiter or mutation-error callback retains
+    /// that responsibility.
+    async fn completion_target_wait_outcome(
+        &self,
+        public_tx_id: TxId,
+        target_tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Option<Result<TxId, Error>> {
+        let state = self.node.lock().await.transaction_state(target_tx_id).await;
+        let Some((fate, global_time, durability)) = state else {
+            return Some(Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("completion target for transaction {public_tx_id:?} is not known locally"),
+            )));
+        };
+        let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
+        match fate {
+            Fate::Rejected(reason) => Some(Err(write_rejected(public_tx_id, reason))),
+            Fate::Pending | Fate::Accepted if satisfied => Some(Ok(public_tx_id)),
+            Fate::Pending | Fate::Accepted => None,
+        }
+    }
+
+    pub(super) fn queued_mutation_write_state(
+        &self,
+        tx_id: TxId,
+    ) -> Option<Result<WriteState, Error>> {
+        if let Some(error) = self.queued_mutation_failures.borrow().get(&tx_id) {
+            return Some(Err(error.clone()));
+        }
+        self.reserved_mutations
+            .borrow()
+            .contains(&tx_id)
+            .then_some(Ok(WriteState {
+                fate: Fate::Pending,
+                global_time: None,
+                durability: DurabilityTier::None,
+            }))
+    }
+
+    pub(super) fn take_queued_mutation_failure(&self, tx_id: TxId) -> Option<Error> {
+        self.queued_mutation_failures.borrow_mut().remove(&tx_id)
+    }
+
     pub(super) fn wait_for_transaction_with(
         self: &Rc<Self>,
         tx_id: TxId,
         tier: DurabilityTier,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
-        if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier) {
-            callback(outcome);
+        self.wait_for_write_with(tx_id, None, tier, callback);
+    }
+
+    /// Callback wait for a binding-owned write handle. A queued empty update
+    /// reserves a request id before it can asynchronously discover that the
+    /// update is a no-op; its handle-local alias then points at the existing
+    /// transaction whose state satisfies this wait. The alias is retained by
+    /// the caller, never by this runtime.
+    pub(super) fn wait_for_write_with(
+        self: &Rc<Self>,
+        tx_id: TxId,
+        alias: Option<QueuedMutationAlias>,
+        tier: DurabilityTier,
+        callback: Box<dyn FnOnce(Result<TxId, Error>)>,
+    ) {
+        if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing {
+            callback(Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("database is closed; transaction {tx_id:?} cannot be observed"),
+            )));
             return;
         }
         let node = Rc::clone(self);
-        self.register_write_state_callback(
-            tx_id,
-            Box::new(move || node.wait_for_transaction_with(tx_id, tier, callback)),
-        );
+        self.transaction_wait_observers
+            .borrow_mut()
+            .push(Box::pin(async move {
+                callback(node.wait_for_write(tx_id, alias, tier).await);
+            }));
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    async fn wait_for_write(
+        &self,
+        tx_id: TxId,
+        alias: Option<QueuedMutationAlias>,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        let Some(alias) = alias else {
+            return self.wait_for_transaction(tx_id, tier).await;
+        };
+        loop {
+            let target_tx_id = { *alias.borrow() };
+            if let Some(target_tx_id) = target_tx_id {
+                return self
+                    .wait_for_completion_target(tx_id, target_tx_id, tier)
+                    .await;
+            }
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
+            }
+            let state_change = self.register_write_state_waiter(tx_id);
+            let target_tx_id = { *alias.borrow() };
+            if let Some(target_tx_id) = target_tx_id {
+                drop(state_change);
+                return self
+                    .wait_for_completion_target(tx_id, target_tx_id, tier)
+                    .await;
+            }
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    async fn wait_for_completion_target(
+        &self,
+        public_tx_id: TxId,
+        target_tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self
+                .completion_target_wait_outcome(public_tx_id, target_tx_id, tier)
+                .await
+            {
+                return outcome;
+            }
+            let state_change = self.register_write_state_waiter(target_tx_id);
+            if let Some(outcome) = self
+                .completion_target_wait_outcome(public_tx_id, target_tx_id, tier)
+                .await
+            {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    pub(super) async fn wait_for_transaction(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
+            }
+            let state_change = self.register_write_state_waiter(tx_id);
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                drop(state_change);
+                return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                drop(state_change);
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
+            }
+            state_change.await;
+        }
+    }
+
+    pub(super) fn poll_transaction_wait_observers(&self) {
+        use std::task::{Context, Poll, Waker};
+
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        let mut observers = std::mem::take(&mut *self.transaction_wait_observers.borrow_mut());
+        observers.retain_mut(|observer| observer.as_mut().poll(&mut context) == Poll::Pending);
+        self.transaction_wait_observers
+            .borrow_mut()
+            .splice(0..0, observers);
+    }
+
+    #[cfg(test)]
+    pub(super) fn enqueue_transaction_wait_observer_for_test(
+        &self,
+        observer: TransactionWaitObserver,
+    ) {
+        self.transaction_wait_observers.borrow_mut().push(observer);
+    }
+
+    pub(super) async fn drain_transaction_wait_observers(&self) {
+        std::future::poll_fn(|context| {
+            let mut observers = std::mem::take(&mut *self.transaction_wait_observers.borrow_mut());
+            observers.retain_mut(|observer| observer.as_mut().poll(context) == Poll::Pending);
+            let empty = observers.is_empty();
+            self.transaction_wait_observers
+                .borrow_mut()
+                .splice(0..0, observers);
+            if empty {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     fn deliver_pending_mutation_errors(&self) {
@@ -624,9 +1617,13 @@ where
         self.permission_advice_waiters
             .borrow_mut()
             .insert(request_id, sender);
-        self.upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action });
+        self.upstream_subscriptions.borrow_mut().push(
+            PendingUpstreamCommand::AuthorizationScopeIntent {
+                request_id,
+                action,
+                session_claim_binding: None,
+            },
+        );
         self.schedule_tick(TickUrgency::Immediate);
         PermissionAdviceFuture {
             waiters: Rc::clone(&self.permission_advice_waiters),
@@ -682,20 +1679,7 @@ where
         }
     }
 
-    fn register_write_state_callback(&self, tx_id: TxId, callback: Box<dyn FnOnce()>) {
-        let waiter_id = self.next_write_state_waiter_id.get();
-        self.next_write_state_waiter_id
-            .set(waiter_id.wrapping_add(1).max(1));
-        self.write_state_waiters
-            .borrow_mut()
-            .entry(tx_id)
-            .or_default()
-            .push(WriteStateWaiter {
-                id: waiter_id,
-                notify: WriteStateWaiterNotify::Callback(callback),
-            });
-    }
-
+    #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
         let progress_waker = self.query_runtime_waker();
         refresh_subscriptions_in(
@@ -713,31 +1697,7 @@ where
     /// baseline. Keeping this path non-suspending ensures consumers observe
     /// the demotion before the replacement transport can publish anything.
     fn demote_authority_receipt_subscriptions(&self) {
-        let mut retained = Vec::new();
-        for weak in self.subscriptions.borrow().iter() {
-            let Some(state) = weak.upgrade() else {
-                continue;
-            };
-            {
-                let mut state = state.borrow_mut();
-                if state.propagates_upstream {
-                    state.requires_authority_receipt = true;
-                    if state.settled {
-                        state.settled = false;
-                        let event = subscription_delta_event(
-                            state.read_tier,
-                            false,
-                            &state.snapshot,
-                            &state.snapshot,
-                            state.terminal_rows,
-                        );
-                        let _ = state.sender.unbounded_send(event);
-                    }
-                }
-            }
-            retained.push(Rc::downgrade(&state));
-        }
-        *self.subscriptions.borrow_mut() = retained;
+        demote_authority_receipt_subscriptions(&self.subscriptions, &BTreeSet::new());
     }
 
     /// Attach this node to an upstream peer over a binding-supplied transport.
@@ -754,6 +1714,7 @@ where
         let confirmation_floor = node.committed_global_time();
         drop(node);
         let session_context = transport.connection_session_context();
+        let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
         let upstream_upload_destination =
             session_context.map(|context| UpstreamUploadDestination {
                 remote_node: *context.remote.node.as_bytes(),
@@ -890,6 +1851,7 @@ where
                             binding: binding.clone(),
                             opts,
                             identity: state.author,
+                            policy_binding: None,
                         },
                     ));
                 }
@@ -920,7 +1882,11 @@ where
                         .coverage_groups
                         .iter()
                         .filter_map(|(coverage, group)| {
-                            let owner = owners.get(&group.upstream_subscription)?;
+                            let owner = owners.get(&(
+                                group.upstream_subscription,
+                                connection.connection_epoch,
+                                coverage.opts.read_view_key(),
+                            ))?;
                             (group.upstream_opts.propagate_upstream
                                 && owner.downstream_connection_epoch == connection.connection_epoch
                                 && owner.coverage == *coverage)
@@ -929,7 +1895,13 @@ where
                                     shape: group.shape.clone(),
                                     binding: group.binding.clone(),
                                     opts: group.upstream_opts.clone(),
-                                    identity: subscriber.peer.link_identity(),
+                                    // This usage is forwarded under the
+                                    // subscription's topology-admitted
+                                    // policy binding, never the relay
+                                    // transport. A relay has no link
+                                    // permission subject to fall back to.
+                                    identity: group.policy_binding.0,
+                                    policy_binding: Some(group.policy_binding.clone()),
                                 })
                         })
                         .collect::<Vec<_>>()
@@ -969,7 +1941,10 @@ where
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
             mutation_errors: Rc::clone(&self.mutation_errors),
+            browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+            #[cfg(any(test, feature = "testing"))]
+            fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
             connection_epoch,
@@ -1001,6 +1976,7 @@ where
                 self.local_chunk_reader.clone(),
                 connection_epoch,
                 PeerIoPumpRole::Upstream,
+                wire_inbound_context,
             ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
@@ -1065,6 +2041,67 @@ where
         )
     }
 
+    /// Accept an authenticated relay transport. A relay has no policy subject;
+    /// requests needing policy composition must carry a separately admitted
+    /// delegated session binding.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn accept_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_relay_subscriber_internal(transport)
+    }
+
+    #[cfg(not(feature = "testing"))]
+    #[allow(dead_code)]
+    pub(crate) fn accept_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_relay_subscriber_internal(transport)
+    }
+
+    fn accept_relay_subscriber_internal(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_subscriber_with_peer(
+            transport,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::Relay,
+            BTreeMap::new(),
+            None,
+            PeerState::relay(),
+            false,
+        )
+    }
+
+    /// Admit the one immutable session selected during a scope-isolated relay
+    /// handshake. This is crate-private so a host must not turn application
+    /// claims or raw frames into a relay capability.
+    // The public serving shell reaches this from a runtime-selected backend;
+    // it is intentionally not a general Node API.
+    #[allow(dead_code)]
+    pub(crate) fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        self.accept_subscriber_with_peer(
+            transport,
+            identity,
+            CommitUnitTrust::Relay,
+            BTreeMap::new(),
+            None,
+            PeerState::scope_isolated_relay(identity, claims, admission_epoch),
+            false,
+        )
+    }
+
     /// Accept a subscriber connection with explicit auth claims and upload trust mode.
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
@@ -1103,10 +2140,13 @@ where
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         let peer = match trust {
-            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
+            CommitUnitTrust::TrustedBackend
+            | CommitUnitTrust::TrustedAuthority
+            | CommitUnitTrust::TrustedAdmin => {
                 PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
             CommitUnitTrust::Session => PeerState::edge_client(identity),
+            CommitUnitTrust::Relay => PeerState::relay(),
         };
         self.accept_subscriber_with_peer(transport, identity, trust, claims, None, peer, true)
     }
@@ -1135,15 +2175,19 @@ where
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        let peer = if self.receives_commits_as_local() {
-            PeerState::relay()
-        } else {
-            match trust {
-                CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
-                    PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
-                }
-                CommitUnitTrust::Session => PeerState::client_link(identity),
+        // Local/pending ingestion describes durability, not authorization.
+        // A scope-isolated worker receives foreground commits as local, but
+        // that downstream link still terminates one authenticated foreground
+        // session. Only the worker's *upstream* Relay transport is subjectless
+        // and therefore requires a per-request delegated binding.
+        let peer = match trust {
+            CommitUnitTrust::TrustedBackend
+            | CommitUnitTrust::TrustedAuthority
+            | CommitUnitTrust::TrustedAdmin => {
+                PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
+            CommitUnitTrust::Session => PeerState::client_link(identity),
+            CommitUnitTrust::Relay => PeerState::relay(),
         };
         self.accept_subscriber_with_peer(transport, identity, trust, claims, cursor, peer, false)
     }
@@ -1178,6 +2222,7 @@ where
                     identity,
                     trust,
                     edge_authority,
+                    admitted_write_authorization: false,
                 },
                 claims,
                 0,
@@ -1187,10 +2232,26 @@ where
             .connection_session_context()
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+        let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
         let downstream_fates = Rc::new(RefCell::new(Vec::new()));
-        let startup_error = local_receiver
-            .then(|| self.restore_local_subscriber(identity, &downstream_fates))
-            .and_then(Result::err);
+        let scope_mismatch = self
+            .node
+            .borrow()
+            .client_relay_scope()
+            .is_some_and(|scope| {
+                trust == CommitUnitTrust::Session && !scope.admits_session(identity)
+            })
+            .then(|| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    "foreground session is outside this scope-isolated relay ownership scope",
+                )
+            });
+        let startup_error = scope_mismatch.or_else(|| {
+            local_receiver
+                .then(|| self.restore_local_subscriber(identity, &downstream_fates))
+                .and_then(Result::err)
+        });
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
@@ -1219,7 +2280,10 @@ where
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates,
             mutation_errors: Rc::clone(&self.mutation_errors),
+            browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+            #[cfg(any(test, feature = "testing"))]
+            fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
             connection_epoch,
@@ -1239,7 +2303,7 @@ where
                 coverage_groups: BTreeMap::new(),
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
-                served_current_rows: BTreeMap::new(),
+                pending_catalogue_subscriptions: BTreeMap::new(),
                 scope_purposes: BTreeMap::new(),
                 scope_aggregates: BTreeMap::new(),
                 authority_scope_hydrations: BTreeMap::new(),
@@ -1252,6 +2316,7 @@ where
                 self.local_chunk_reader.clone(),
                 connection_epoch,
                 PeerIoPumpRole::Subscriber,
+                wire_inbound_context,
             ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
@@ -1273,6 +2338,8 @@ where
         let connection_epoch = connection_ref.connection_epoch;
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
+        let mut terminal_permission_advice = Vec::new();
+        let current_session_claims = self.node.borrow().session_claims_with_revisions();
         let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
             match &mut connection_ref.link {
                 ConnectionLink::Upstream(UpstreamConnectionState {
@@ -1289,21 +2356,67 @@ where
                     // coalesce under its fresh authority context and wire id.
                     let live_waiters = self.permission_advice_waiters.borrow();
                     let mut queued = BTreeSet::new();
+                    // The lease manager becomes authoritative as soon as it
+                    // captures a session binding, even if the matching
+                    // command is still retained after a backpressured send.
+                    // Visit it first so a command's initial `None` cannot
+                    // erase the request-owned snapshot during detach.
+                    for request in scope_lease_manager.requests.values() {
+                        for request_id in &request.waiters {
+                            if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
+                                let (identity, claims) = &request.session_claim_binding;
+                                let current_claims = current_session_claims
+                                    .iter()
+                                    .find_map(|(current_identity, current_claims, _)| {
+                                        (current_identity == identity).then_some(current_claims)
+                                    })
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if current_claims == *claims {
+                                    reconnect_permission_advice.push((
+                                        *request_id,
+                                        request.action.clone(),
+                                        Some(request.session_claim_binding.clone()),
+                                    ));
+                                } else {
+                                    // A successor can only prove its currently
+                                    // admitted session. Never send a B-scoped
+                                    // hydration to settle this A-owned request.
+                                    terminal_permission_advice.push(*request_id);
+                                }
+                            }
+                        }
+                    }
                     for command in pending.iter() {
-                        let PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } =
-                            command
+                        let PendingUpstreamCommand::AuthorizationScopeIntent {
+                            request_id,
+                            action,
+                            session_claim_binding,
+                        } = command
                         else {
                             continue;
                         };
                         if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                            reconnect_permission_advice.push((*request_id, action.clone()));
-                        }
-                    }
-                    for request in scope_lease_manager.requests.values() {
-                        for request_id in &request.waiters {
-                            if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                                reconnect_permission_advice
-                                    .push((*request_id, request.action.clone()));
+                            if session_claim_binding
+                                .as_ref()
+                                .is_none_or(|(identity, claims)| {
+                                    current_session_claims
+                                        .iter()
+                                        .find_map(|(current_identity, current_claims, _)| {
+                                            (current_identity == identity).then_some(current_claims)
+                                        })
+                                        .cloned()
+                                        .unwrap_or_default()
+                                        == *claims
+                                })
+                            {
+                                reconnect_permission_advice.push((
+                                    *request_id,
+                                    action.clone(),
+                                    session_claim_binding.clone(),
+                                ));
+                            } else {
+                                terminal_permission_advice.push(*request_id);
                             }
                         }
                     }
@@ -1321,6 +2434,7 @@ where
                     peer,
                     served,
                     coverage_groups,
+                    shape_registrations,
                     scope_purposes,
                     scope_aggregates,
                     authority_scope_hydrations,
@@ -1344,13 +2458,11 @@ where
                         }
                         peer.forget_subscription_with_node(
                             &mut node,
-                            SubscriptionKey {
-                                shape_id: coverage.shape_id,
-                                binding_id: coverage.binding_id,
-                                read_view: coverage.opts.read_view_key(),
-                            },
+                            coverage_group_subscription_key(&coverage),
                         );
                     }
+                    node.release_shapes_for_peer(connection_epoch);
+                    shape_registrations.clear();
                     scope_aggregates.clear();
                     authority_scope_hydrations.clear();
                     (None, None, None, retired)
@@ -1371,6 +2483,15 @@ where
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         drop(connections);
         let detached = true;
+        for request_id in terminal_permission_advice {
+            if let Some(waiter) = self
+                .permission_advice_waiters
+                .borrow_mut()
+                .remove(&request_id)
+            {
+                let _ = waiter.send(PermissionAdvice::Unknown);
+            }
+        }
         if !retired_relay_subscriptions.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
                 retired_relay_subscriptions
@@ -1381,14 +2502,15 @@ where
         }
         if !reconnect_permission_advice.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
-                reconnect_permission_advice
-                    .into_iter()
-                    .map(
-                        |(request_id, action)| PendingUpstreamCommand::AuthorizationScopeIntent {
+                reconnect_permission_advice.into_iter().map(
+                    |(request_id, action, session_claim_binding)| {
+                        PendingUpstreamCommand::AuthorizationScopeIntent {
                             request_id,
                             action,
-                        },
-                    ),
+                            session_claim_binding,
+                        }
+                    },
+                ),
             );
             self.schedule_tick(TickUrgency::Immediate);
         }
@@ -1522,6 +2644,7 @@ where
 
     /// Service every accepted subscriber connection once.
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
+        self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
@@ -1543,16 +2666,21 @@ where
         }
         let mut remote_sync_applied = false;
         let mut released_outbox_tx_ids = HashSet::new();
-        // A later subscriber can mutate Core state after an earlier peer link
-        // has already had its turn in this pass.  Remember that generation so
-        // the post-receive serve pass below reaches that earlier link too;
-        // websocket hosts are event-driven and need not provide unrelated
-        // follow-up traffic just to flush a freshly accepted row.
+        // A later connection can mutate Core state after an earlier subscriber
+        // has already had its turn in this pass. Remember that generation so
+        // every subscriber is served on a fresh owner turn below. In
+        // particular, do not recursively re-enter a just-admitted subscriber:
+        // its initial view can suspend on cold storage, while later inbound
+        // commit frames and their local fates must still get a turn.
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
         let connections = self.connections.borrow().clone();
         for connection in &connections {
             let mut connection = connection.lock().await;
-            let next = connection.tick().await?;
+            // `PeerConnection::tick` contains the subscriber admission state
+            // machine. Keep that future off the enclosing Db tick frame so a
+            // normal host/test thread cannot accumulate it across connection
+            // passes.
+            let next = Box::pin(connection.tick()).await?;
             released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
@@ -1561,17 +2689,30 @@ where
         let subscriber_state_changed =
             self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
         if remote_sync_applied || subscriber_state_changed {
-            for connection in &connections {
-                let should_tick = {
-                    let mut connection = connection.lock().await;
-                    connection.mark_subscriber_dirty() || subscriber_state_changed
-                };
-                if should_tick {
-                    let mut connection = connection.lock().await;
-                    let next = connection.tick().await?;
-                    released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
-                    stats.subscription_events += next.subscription_events;
-                    stats.remote_sync_applied += next.remote_sync_applied;
+            // A binding with a host scheduler can service this newly dirty
+            // subscriber on the next owner turn.  A bare `Db` intentionally
+            // permits manual driving without installing such a scheduler,
+            // though: dropping the wake in that mode would leave the
+            // subscriber dirty until unrelated inbound traffic happened to
+            // arrive. Preserve the former bounded second serve pass there.
+            if self.scheduler.borrow().is_some() {
+                for connection in &connections {
+                    connection.lock().await.mark_subscriber_dirty();
+                }
+                self.schedule_tick(TickUrgency::AfterCurrentTurn);
+            } else {
+                for connection in &connections {
+                    let should_tick = {
+                        let mut connection = connection.lock().await;
+                        connection.mark_subscriber_dirty() || subscriber_state_changed
+                    };
+                    if should_tick {
+                        let mut connection = connection.lock().await;
+                        let next = Box::pin(connection.tick()).await?;
+                        released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
+                        stats.subscription_events += next.subscription_events;
+                        stats.remote_sync_applied += next.remote_sync_applied;
+                    }
                 }
             }
         }
@@ -1595,7 +2736,7 @@ where
     fn release_outbox_uploads(&self, released_tx_ids: HashSet<TxId>) {
         let mut outbox = self.outbox.borrow_mut();
         let mut remaining = released_tx_ids.clone();
-        outbox.remove_released(&mut remaining);
+        let released_tx_ids = outbox.remove_released(&mut remaining);
         drop(outbox);
         for connection in self.connections.borrow().iter() {
             connection
@@ -1612,36 +2753,6 @@ where
                 !uploads.is_empty()
             });
     }
-}
-
-async fn optimistic_transaction_row_keys_for_query<S>(
-    node: &SharedNodeState<S>,
-    cache: &mut BTreeMap<AuthorSubject, BTreeSet<(String, RowUuid)>>,
-    shape: &ValidatedQuery,
-    author: AuthorSubject,
-) -> Result<BTreeSet<(String, RowUuid)>, Error>
-where
-    S: OrderedKvStorage,
-{
-    let row_keys = match cache.entry(author) {
-        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            let transactions = node
-                .lock()
-                .await
-                .unresolved_transaction_ids_for_author(author)
-                .await?;
-            let row_keys = node
-                .lock()
-                .await
-                .transaction_row_keys(&transactions)
-                .await?;
-            entry.insert(row_keys)
-        }
-    };
-    Ok(node
-        .borrow()
-        .transaction_row_keys_for_query(shape, row_keys))
 }
 
 /// Temporarily owns a maintained Groove handle while subscription refresh does
@@ -1697,6 +2808,28 @@ impl Drop for DetachedSubscriptionRefresh {
     }
 }
 
+/// Resolve a public stream's authority lifecycle from its own registered wire
+/// usage site. A canonical binding view is not sufficient here: two delegated
+/// sessions may legitimately share it while receiving independent resets.
+fn authority_result_key_for_stream<S>(
+    node: &NodeState<S>,
+    handles: &[UpstreamCoverageHandle],
+    binding_view: BindingViewKey,
+) -> Option<crate::protocol::AuthorityResultKey>
+where
+    S: OrderedKvStorage,
+{
+    let mut keys = handles
+        .iter()
+        .filter_map(|handle| {
+            node.authority_result_key_for_subscription(handle.subscription)
+                .ok()
+        })
+        .filter(|key| key.binding_view == binding_view);
+    let key = keys.next()?;
+    keys.all(|candidate| candidate == key).then_some(key)
+}
+
 /// Re-evaluate every live subscription against the node and push a delta event
 /// for any whose rows changed. Shared by local writes
 /// ([`Db::refresh_subscriptions`]) and by inbound sync application
@@ -1712,11 +2845,7 @@ where
 {
     let mut retained = Vec::new();
     let mut changed = 0;
-    let mut optimistic_row_keys_by_author = BTreeMap::new();
-    let pending_authoritative_resets = node
-        .lock()
-        .await
-        .take_pending_authoritative_reset_binding_views();
+    let pending_authoritative_resets = node.lock().await.take_pending_authoritative_resets();
     let mut consumed_authoritative_resets = BTreeSet::new();
     node.lock()
         .await
@@ -1735,6 +2864,7 @@ where
         }
         let (
             read_tier,
+            pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
             remote_propagate_upstream,
@@ -1744,10 +2874,12 @@ where
             author,
             authorization_mode,
             terminal_rows,
+            upstream_subscription_handles,
         ) = {
             let state = state.borrow();
             (
                 state.read_tier,
+                state.pending_overlay,
                 state.remote_read_tier,
                 state.requires_authority_receipt,
                 state.remote_propagate_upstream,
@@ -1757,10 +2889,18 @@ where
                 state.author,
                 state.authorization_mode,
                 state.terminal_rows,
+                state.upstream_subscription_handles.clone(),
             )
         };
         let groove_runtime_token = node.borrow().groove_runtime_token();
         if state.borrow().groove_runtime_token != groove_runtime_token {
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=reopen_runtime stale={} current={}",
+                    state.borrow().groove_runtime_token,
+                    groove_runtime_token,
+                );
+            }
             let (shape, binding) = {
                 let state = state.borrow();
                 match &state.kind {
@@ -1802,12 +2942,18 @@ where
                 .await?;
             let (previous_snapshot, previous_snapshot_index) = {
                 let state_ref = state.borrow();
-                (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
+                (
+                    materialized_subscription_snapshot(
+                        &state_ref.snapshot,
+                        &state_ref.snapshot_index,
+                    )?,
+                    state_ref.snapshot_index.clone(),
+                )
             };
             let (maintained, mut snapshot) = node
                 .lock()
                 .await
-                .open_maintained_view_subscription_in_authorization_mode(
+                .open_maintained_view_subscription_in_authorization_mode_with_waker(
                     &shape,
                     &binding,
                     author,
@@ -1815,6 +2961,8 @@ where
                     &read_view,
                     Some(prepared_plan),
                     authorization_mode,
+                    pending_overlay,
+                    progress_waker,
                 )
                 .await?;
             if state.borrow().closed.get() {
@@ -1860,164 +3008,93 @@ where
                 }
                 .read_view_key(),
             };
-            let pending_binding_view = pending_authoritative_resets
-                .contains(&delivered_binding_view)
-                .then_some(delivered_binding_view)
+            let delivered_authority_result = authority_result_key_for_stream(
+                &node.borrow(),
+                &upstream_subscription_handles,
+                delivered_binding_view,
+            );
+            let settled_authority_result = authority_result_key_for_stream(
+                &node.borrow(),
+                &upstream_subscription_handles,
+                settled_binding_view,
+            );
+            let pending_authority_result = delivered_authority_result
+                .as_ref()
+                .filter(|key| pending_authoritative_resets.contains(*key))
+                .cloned()
                 .or_else(|| {
-                    pending_authoritative_resets
-                        .contains(&settled_binding_view)
-                        .then_some(settled_binding_view)
+                    settled_authority_result
+                        .as_ref()
+                        .filter(|key| pending_authoritative_resets.contains(*key))
+                        .cloned()
                 });
-            let authoritative_binding_view = pending_binding_view.unwrap_or(settled_binding_view);
-            let local_overlay_row_keys = if authorization_mode
-                == QueryAuthorizationMode::ClientLocal
-                && read_tier == DurabilityTier::Local
-                && remote_read_tier.is_some_and(|tier| tier >= DurabilityTier::Edge)
-                && node.borrow().authored_commit_durability() == DurabilityTier::None
-                && active_authority_view_receipts.borrow().is_some()
-                && supports_pending_overlay_reconciliation(shape.query())
-            {
-                optimistic_transaction_row_keys_for_query(
-                    node,
-                    &mut optimistic_row_keys_by_author,
-                    &shape,
-                    author,
-                )
-                .await?
-            } else {
-                BTreeSet::new()
-            };
-            let has_conflicting_local_overlay = {
-                let state_ref = state.borrow();
-                let SubscriptionKind::Prepared {
-                    maintained_subscription,
-                    ..
-                } = &state_ref.kind;
-                maintained_subscription.as_ref().is_some_and(|maintained| {
-                    node.borrow()
-                        .local_maintained_authority_reconciliation_conflicts(
-                            maintained,
-                            authoritative_binding_view,
-                            &local_overlay_row_keys,
-                        )
-                })
-            };
-            if authorization_mode == QueryAuthorizationMode::ClientLocal
-                && remote_read_tier.is_some()
-                && shape.query().aggregate.is_none()
-            {
-                let mut state_ref = state.borrow_mut();
-                let SubscriptionKind::Prepared {
-                    maintained_subscription,
-                    ..
-                } = &mut state_ref.kind;
-                if let Some(maintained) = maintained_subscription.as_mut() {
-                    node.borrow()
-                        .seed_local_maintained_authoritative_generation(
-                            maintained,
-                            authoritative_binding_view,
-                        );
-                    if has_conflicting_local_overlay {
-                        node.borrow()
-                            .defer_local_maintained_authority_reconciliation(maintained);
-                    }
+            let local_overlay_row_keys = BTreeSet::new();
+            if let Some(authority_result_key) = pending_authority_result {
+                // A client receiver only ever advances from the exact
+                // CoveredInput closure into its own maintained terminal. A
+                // receipt with no compiler-owned source registry remains
+                // pending; authority result members and payloads are not an
+                // alternate result representation.
+                let mut maintained = {
+                    let mut state_ref = state.borrow_mut();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &mut state_ref.kind;
+                    maintained_subscription
+                        .take()
+                        .expect("replacement maintained subscription installed")
+                };
+                let drained = node
+                    .lock()
+                    .await
+                    .drain_local_maintained_view_subscription_preserving_rows_with_waker(
+                        &mut maintained,
+                        Some(authority_result_key.clone()),
+                        &local_overlay_row_keys,
+                        progress_waker,
+                    )
+                    .await;
+                {
+                    let mut state_ref = state.borrow_mut();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &mut state_ref.kind;
+                    *maintained_subscription = Some(maintained);
+                }
+                let (update, _) = drained?;
+                if let Some(update) = update {
+                    let state_ref = state.borrow();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &state_ref.kind;
+                    let terminal_layout = maintained_subscription
+                        .as_ref()
+                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
+                    let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
+                    let _ = apply_maintained_update_to_snapshot(
+                        &mut snapshot,
+                        &mut snapshot_index,
+                        update,
+                        shape.query().table.as_str(),
+                        read_tier,
+                        previous_settled,
+                        terminal_layout,
+                    )?;
+                    materialize_subscription_terminal_records(&mut snapshot, &snapshot_index)?;
+                    consumed_authoritative_resets.insert(authority_result_key);
                 }
             }
-            if let Some(binding_view) = pending_binding_view {
-                if has_conflicting_local_overlay {
-                    let mut maintained = {
-                        let mut state_ref = state.borrow_mut();
-                        let SubscriptionKind::Prepared {
-                            maintained_subscription,
-                            ..
-                        } = &mut state_ref.kind;
-                        maintained_subscription
-                            .take()
-                            .expect("replacement maintained subscription installed")
-                    };
-                    let drained = node
-                        .lock()
-                        .await
-                        .drain_local_maintained_view_subscription_preserving_rows(
-                            &mut maintained,
-                            Some(binding_view),
-                            &local_overlay_row_keys,
-                        )
-                        .await;
-                    {
-                        let mut state_ref = state.borrow_mut();
-                        let SubscriptionKind::Prepared {
-                            maintained_subscription,
-                            ..
-                        } = &mut state_ref.kind;
-                        *maintained_subscription = Some(maintained);
-                    }
-                    let (update, suppressed) = drained?;
-                    debug_assert!(suppressed);
-                    if let Some(update) = update {
-                        let state_ref = state.borrow();
-                        let SubscriptionKind::Prepared {
-                            maintained_subscription,
-                            ..
-                        } = &state_ref.kind;
-                        let terminal_layout = maintained_subscription
-                            .as_ref()
-                            .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
-                        let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
-                        let _ = apply_maintained_update_to_snapshot(
-                            &mut snapshot,
-                            &mut snapshot_index,
-                            update,
-                            shape.query().table.as_str(),
-                            read_tier,
-                            previous_settled,
-                            terminal_layout,
-                        )?;
-                    }
-                    consumed_authoritative_resets.insert(binding_view);
-                } else {
-                    let authoritative = node
-                        .lock()
-                        .await
-                        .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)
-                        .await?;
-                    if let Some(authoritative) = authoritative {
-                        let mut maintained = {
-                            let mut state_ref = state.borrow_mut();
-                            let SubscriptionKind::Prepared {
-                                maintained_subscription,
-                                ..
-                            } = &mut state_ref.kind;
-                            maintained_subscription
-                                .take()
-                                .expect("replacement maintained subscription installed")
-                        };
-                        let reset = node
-                            .lock()
-                            .await
-                            .reset_local_maintained_view_subscription_from_binding_view(
-                                &mut maintained,
-                                binding_view,
-                            )
-                            .await;
-                        {
-                            let mut state_ref = state.borrow_mut();
-                            let SubscriptionKind::Prepared {
-                                maintained_subscription,
-                                ..
-                            } = &mut state_ref.kind;
-                            *maintained_subscription = Some(maintained);
-                        }
-                        reset?;
-                        snapshot = authoritative;
-                        consumed_authoritative_resets.insert(binding_view);
-                    }
-                }
-            }
-            let root_occurrence_ids = if shape.query().aggregate.is_some() {
+            let root_occurrence_ids = if shape.query().aggregate.is_some() || terminal_rows {
+                // A fresh compiler-owned root collector has already produced
+                // this reset snapshot. Pair its roots directly rather than
+                // reconstructing positions from membership state.
                 snapshot
                     .rows
                     .iter()
+                    .take(snapshot.root_count)
                     .map(|row| {
                         crate::tools::OutputOccurrenceId::single_source(
                             crate::tools::ObjectId::from_uuid(row.row_uuid().0),
@@ -2045,6 +3122,7 @@ where
                 read_view.clone(),
                 remote_propagate_upstream,
                 requires_authority_receipt,
+                settled_authority_result.as_ref(),
             );
             let mut event = subscription_delta_event_with_reset(
                 read_tier,
@@ -2083,9 +3161,25 @@ where
                 .enumerate()
                 .map(|(index, occurrence)| (occurrence, index))
                 .collect();
+            let SubscriptionKind::Prepared {
+                maintained_subscription,
+                ..
+            } = &state_ref.kind;
+            state_ref.snapshot_index.terminal_records = maintained_subscription
+                .as_ref()
+                .map(LocalMaintainedViewSubscription::decoded_terminal_records)
+                .transpose()?
+                .unwrap_or_default();
             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
             state_ref.settled = settled;
-            if state_ref.sender.unbounded_send(event).is_ok() {
+            // A strict remote opening is intentionally absent until its
+            // exact covered closure has reached the receiver-local terminal.
+            // Do not enqueue that provisional frame merely for the stream
+            // facade to discard later: raw/poll consumers must not observe a
+            // stale empty opening before the authoritative reset.
+            if subscription_event_is_publishable(&event)
+                && state_ref.sender.unbounded_send(event).is_ok()
+            {
                 changed += 1;
             }
             drop(state_ref);
@@ -2094,27 +3188,12 @@ where
         }
         let (mut snapshot, mut snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut refresh = DetachedSubscriptionRefresh::new(&state);
-            let local_snapshot_is_empty =
-                refresh.snapshot.root_count == 0 && refresh.snapshot.edges.is_empty();
             let (shape, binding) = {
                 let state_ref = state.borrow();
                 let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
                 (shape.clone(), binding.clone())
             };
             let has_maintained_subscription = refresh.maintained.is_some();
-            let remote_settled_tier = remote_read_tier.filter(|tier| {
-                node.borrow().has_settled_result_set(BindingViewKey {
-                    shape_id: shape.shape_id(),
-                    binding_id: binding.binding_id(),
-                    read_view: RegisterShapeOptions {
-                        tier: *tier,
-                        read_view: read_view.clone(),
-                        propagate_upstream: remote_propagate_upstream,
-                        ..RegisterShapeOptions::default()
-                    }
-                    .read_view_key(),
-                })
-            });
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
@@ -2137,92 +3216,88 @@ where
                 }
                 .read_view_key(),
             };
-            let authoritative_reset_binding_view =
-                if pending_authoritative_resets.contains(&delivered_binding_view) {
-                    delivered_binding_view
-                } else {
-                    settled_binding_view
-                };
+            let delivered_authority_result = authority_result_key_for_stream(
+                &node.borrow(),
+                &upstream_subscription_handles,
+                delivered_binding_view,
+            );
+            let settled_authority_result = authority_result_key_for_stream(
+                &node.borrow(),
+                &upstream_subscription_handles,
+                settled_binding_view,
+            );
+            let remote_settled_tier = remote_read_tier.filter(|_| {
+                settled_authority_result
+                    .as_ref()
+                    .is_some_and(|key| node.borrow().has_settled_authority_result(key))
+            });
+            let authoritative_reset_result = delivered_authority_result
+                .as_ref()
+                .filter(|key| pending_authoritative_resets.contains(*key))
+                .cloned()
+                .or_else(|| {
+                    settled_authority_result
+                        .as_ref()
+                        .filter(|key| pending_authoritative_resets.contains(*key))
+                        .cloned()
+                });
+            // A propagation receipt is not a replacement input frontier for
+            // local-first. Its ordinary local graph observes synced storage
+            // changes, and must keep draining even when remote scope changes.
+            // Observation tier, not the caller's authorization host, decides
+            // whether the remote closure is this stream's input frontier. A
+            // trusted backend may still request Local: it evaluates its own
+            // storage-backed graph and merely propagates upstream, exactly
+            // like any other Local reader.
+            let authority_scoped = read_tier >= DurabilityTier::Edge;
             let authoritative_reset_pending =
-                pending_authoritative_resets.contains(&authoritative_reset_binding_view);
-            let authority_reconciliation_due = authoritative_reset_pending
-                || refresh.maintained.as_ref().is_some_and(|maintained| {
-                    node.borrow().local_maintained_authority_reconciliation_due(
-                        maintained,
-                        authoritative_reset_binding_view,
-                    )
-                });
-            let local_overlay_row_keys = if authorization_mode
-                == QueryAuthorizationMode::ClientLocal
-                && read_tier == DurabilityTier::Local
-                && remote_read_tier.is_some_and(|tier| tier >= DurabilityTier::Edge)
-                && node.borrow().authored_commit_durability() == DurabilityTier::None
-                && active_authority_view_receipts.borrow().is_some()
-                && supports_pending_overlay_reconciliation(shape.query())
-                && authority_reconciliation_due
+                authority_scoped && authoritative_reset_result.is_some();
+            // Optimistic local writes are represented as eligible local input
+            // records in the receiver graph. They are not reconciled against
+            // authority output membership at the facade boundary.
+            let local_overlay_row_keys = BTreeSet::new();
+            if settled_authority_result
+                .as_ref()
+                .is_some_and(|key| node.borrow().publication_deferred_for_authority_result(key))
             {
-                optimistic_transaction_row_keys_for_query(
-                    node,
-                    &mut optimistic_row_keys_by_author,
-                    &shape,
-                    author,
-                )
-                .await?
-            } else {
-                BTreeSet::new()
-            };
-            let has_conflicting_local_overlay =
-                refresh.maintained.as_ref().is_some_and(|maintained| {
-                    node.borrow()
-                        .local_maintained_authority_reconciliation_conflicts(
-                            maintained,
-                            authoritative_reset_binding_view,
-                            &local_overlay_row_keys,
-                        )
-                });
-            if authoritative_reset_pending {
-                consumed_authoritative_resets.insert(authoritative_reset_binding_view);
-            }
-            if node
-                .borrow()
-                .publication_deferred_for_binding_view(settled_binding_view)
-                || node
-                    .borrow()
-                    .publication_deferred_for_binding_view(delivered_binding_view)
-            {
-                if authoritative_reset_pending {
-                    node.borrow_mut()
-                        .defer_authoritative_reset_for_binding_view(
-                            authoritative_reset_binding_view,
-                        );
+                if let Some(key) = authoritative_reset_result.as_ref() {
+                    node.borrow_mut().defer_authoritative_reset(key);
                 }
                 retained.push(Rc::downgrade(&state));
                 continue;
             }
-            let peer_terminal_operations = node
-                .borrow_mut()
-                .take_pending_terminal_operations(delivered_binding_view);
             let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
-            // The browser worker owns the durable baseline, while the
-            // main Db owns the application subscription and its
-            // optimistic overlay. Reconcile a worker reset through the
-            // maintained view below so a delayed hydration snapshot
-            // cannot replace newer main-thread writes.
-            let reconciles_remote_authoritative_membership = authorization_mode
-                == QueryAuthorizationMode::ClientLocal
-                && remote_read_tier.is_some()
-                && supports_pending_overlay_reconciliation(shape.query())
-                && (has_conflicting_local_overlay
-                    || (remote_read_tier.is_some_and(|tier| tier < DurabilityTier::Edge)
-                        && node.borrow().authored_commit_durability() == DurabilityTier::None));
-            // Preserve the reset boundary unless it would overwrite
-            // an unsettled local row. A browser worker's Local handoff
-            // is an internal baseline update, while Edge/Global
-            // handoffs remain public authority boundaries.
-            let authoritative_reset = authoritative_reset_pending
-                && (!reconciles_remote_authoritative_membership
-                    || (local_snapshot_is_empty && !has_conflicting_local_overlay));
-            if authoritative_reset && terminal_rows {
+            let authoritative_reset = authoritative_reset_pending;
+            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=refresh terminal_rows={terminal_rows} covered={} reset_pending={authoritative_reset_pending} authoritative_reset={authoritative_reset} delivered={delivered_authority_result:?} settled={settled_authority_result:?}",
+                    refresh
+                        .maintained
+                        .as_ref()
+                        .is_some_and(LocalMaintainedViewSubscription::has_covered_input_sources),
+                );
+            }
+            if authoritative_reset
+                && terminal_rows
+                && refresh
+                    .maintained
+                    .as_ref()
+                    .is_none_or(|maintained| !maintained.has_covered_input_sources())
+            {
+                // A client receiver may only reset after it has installed the
+                // exact scoped covered-input closure. Reopening a fresh local
+                // terminal here would make the authority reset appear settled
+                // without that receipt, reviving the retired result-snapshot
+                // path indirectly.
+                if authorization_mode == QueryAuthorizationMode::ClientLocal
+                    && remote_read_tier.is_some()
+                {
+                    if let Some(key) = authoritative_reset_result.as_ref() {
+                        node.borrow_mut().defer_authoritative_reset(key);
+                    }
+                    retained.push(Rc::downgrade(&state));
+                    continue;
+                }
                 let Some(maintained) = refresh.maintained.as_mut() else {
                     return Err(Error::new(
                         ErrorCode::Protocol,
@@ -2238,7 +3313,7 @@ where
                 let (replacement, snapshot) = node
                     .lock()
                     .await
-                    .open_maintained_view_subscription_in_authorization_mode(
+                    .open_maintained_view_subscription_in_authorization_mode_with_waker(
                         &shape,
                         &binding,
                         author,
@@ -2246,6 +3321,8 @@ where
                         &read_view,
                         None,
                         authorization_mode,
+                        pending_overlay,
+                        progress_waker,
                     )
                     .await?;
                 let replacement_subscription_id = replacement.subscription_id();
@@ -2265,6 +3342,7 @@ where
                     read_view,
                     remote_propagate_upstream,
                     requires_authority_receipt,
+                    settled_authority_result.as_ref(),
                 );
                 (
                     snapshot,
@@ -2273,216 +3351,83 @@ where
                     snapshot_tier,
                     true,
                 )
-            } else if authoritative_reset {
-                let authoritative_snapshot = {
+            } else {
+                let (maintained_update, suppressed_authoritative_change) = if let Some(maintained) =
+                    refresh.maintained.as_mut()
+                {
                     let mut node_ref = node.lock().await;
+                    // Only a scope-bound source consumes authority inputs.
+                    // Local-first remains an ordinary storage-backed graph.
+                    let authoritative_result_key = (authorization_mode
+                        == QueryAuthorizationMode::ClientLocal
+                        && maintained.has_covered_input_sources())
+                    .then(|| settled_authority_result.clone())
+                    .flatten();
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=runtime_drain sources={} authority={authoritative_result_key:?}",
+                            maintained.has_covered_input_sources(),
+                        );
+                    }
                     match node_ref
-                        .authoritative_reset_snapshot_for_binding_view(
-                            &shape,
-                            authoritative_reset_binding_view,
+                        .drain_local_maintained_view_subscription_preserving_rows_with_waker(
+                            maintained,
+                            authoritative_result_key,
+                            &local_overlay_row_keys,
+                            progress_waker,
                         )
                         .await
                     {
-                        Ok(snapshot) => snapshot,
+                        Ok(update) => update,
                         Err(crate::node::Error::MissingTransaction(_)) => {
                             node_ref.record_authoritative_reset_missing_payload_fallback();
-                            node_ref.defer_authoritative_reset_for_binding_view(
-                                authoritative_reset_binding_view,
-                            );
-                            None
+                            if let Some(key) = authoritative_reset_result.as_ref() {
+                                node_ref.defer_authoritative_reset(key);
+                            }
+                            retained.push(Rc::downgrade(&state));
+                            continue;
                         }
                         Err(error) => return Err(error.into()),
                     }
-                };
-                let authoritative_snapshot_available = authoritative_snapshot.is_some();
-                let maintained_update = if let Some(maintained) = refresh.maintained.as_mut() {
-                    let mut node_ref = node.lock().await;
-                    if authoritative_snapshot_available {
-                        match node_ref
-                            .drain_local_maintained_view_subscription_state(maintained, None)
-                            .await
-                        {
-                            Ok(_) => {
-                                node_ref
-                                    .reset_local_maintained_view_subscription_from_binding_view(
-                                        maintained,
-                                        authoritative_reset_binding_view,
-                                    )
-                                    .await?;
-                                None
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                    } else {
-                        match node_ref
-                            .drain_local_maintained_view_subscription(maintained, None)
-                            .await
-                        {
-                            Ok(update) => update,
-                            Err(crate::node::Error::MissingTransaction(_)) => {
-                                node_ref.record_authoritative_reset_missing_payload_fallback();
-                                node_ref.defer_authoritative_reset_for_binding_view(
-                                    authoritative_reset_binding_view,
-                                );
-                                retained.push(Rc::downgrade(&state));
-                                continue;
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
                 } else {
-                    None
+                    (None, false)
                 };
-                let (mut snapshot, force_reset_event) =
-                    if let Some(snapshot) = authoritative_snapshot {
-                        (snapshot, true)
-                    } else {
-                        let fallback = {
-                            let mut node_ref = node.lock().await;
-                            match node_ref
-                                .subscription_snapshot_in_authorization_mode(
-                                    &shape,
-                                    &binding,
-                                    snapshot_tier,
-                                    author,
-                                    &read_view,
-                                    authorization_mode,
-                                )
-                                .await
-                            {
-                                Ok(snapshot) => snapshot,
-                                Err(crate::node::Error::MissingTransaction(_)) => {
-                                    node_ref.record_authoritative_reset_missing_payload_fallback();
-                                    node_ref.defer_authoritative_reset_for_binding_view(
-                                        authoritative_reset_binding_view,
-                                    );
-                                    retained.push(Rc::downgrade(&state));
-                                    continue;
-                                }
-                                Err(error) => return Err(error.into()),
-                            }
-                        };
-                        (fallback, false)
-                    };
-                if let Some(update) = maintained_update {
-                    let terminal_layout = refresh
-                        .maintained
-                        .as_ref()
-                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
-                    let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
-                    let _ = apply_maintained_update_to_snapshot(
-                        &mut snapshot,
-                        &mut snapshot_index,
-                        update,
-                        shape.query().table.as_str(),
-                        snapshot_tier,
-                        previous_settled,
-                        terminal_layout,
-                    )?;
-                }
-                let settled = subscription_is_settled(
-                    &node.borrow(),
-                    active_authority_view_receipts,
-                    &shape,
-                    &binding,
-                    settled_tier,
-                    read_view,
-                    remote_propagate_upstream,
-                    requires_authority_receipt,
-                );
-                (
-                    snapshot,
-                    SubscriptionSnapshotSource::LinkSnapshot,
-                    settled,
-                    snapshot_tier,
-                    force_reset_event,
-                )
-            } else {
-                if terminal_rows && !peer_terminal_operations.is_empty() {
-                    if let Some(maintained) = refresh.maintained.as_mut() {
-                        // The serving terminal is authoritative for
-                        // structural publication. Advance the local
-                        // Groove mirror for future resets without
-                        // publishing its redundant reconstruction.
-                        node.lock()
-                            .await
-                            .drain_local_maintained_view_subscription_state(maintained, None)
-                            .await?;
+                // A reset claims an authority successor, but it is publishable
+                // only after the receiver has installed that exact closure
+                // and drained the same local graph. `Pending` is not empty:
+                // retain the receipt until its ProgramSourceCoverage manifest
+                // is available, rather than emitting the graph's opening
+                // state as a strict remote answer.
+                if authoritative_reset
+                    && authorization_mode == QueryAuthorizationMode::ClientLocal
+                    && remote_read_tier.is_some()
+                    && let Some(authority_result_key) = authoritative_reset_result.as_ref()
+                {
+                    let closure_installed = refresh.maintained.as_ref().is_some_and(|maintained| {
+                        maintained.has_covered_input_sources()
+                            && node
+                                .borrow()
+                                .authority_source_closure_generation(authority_result_key)
+                                .is_some_and(|generation| {
+                                    maintained.has_installed_covered_closure(
+                                        authority_result_key,
+                                        generation,
+                                    )
+                                })
+                    });
+                    if !closure_installed {
+                        // Missing source descriptors and incomplete coverage
+                        // are both pending protocol state, never permission to
+                        // reuse the authority's result set or payload.
+                        node.borrow_mut()
+                            .defer_authoritative_reset(authority_result_key);
+                        retained.push(Rc::downgrade(&state));
+                        continue;
                     }
-                    let settled = subscription_is_settled(
-                        &node.borrow(),
-                        active_authority_view_receipts,
-                        &shape,
-                        &binding,
-                        settled_tier,
-                        read_view.clone(),
-                        remote_propagate_upstream,
-                        requires_authority_receipt,
-                    );
-                    let terminal_layout = refresh
-                        .maintained
-                        .as_ref()
-                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
-                        .ok_or_else(|| {
-                            Error::new(
-                                ErrorCode::Protocol,
-                                "terminal operation arrived without a prepared root layout",
-                            )
-                        })?;
-                    let event = apply_terminal_operations_to_subscription_snapshot(
-                        &mut refresh.snapshot,
-                        &mut refresh.snapshot_index,
-                        peer_terminal_operations,
-                        None,
-                        terminal_layout,
-                        shape.query().table.as_str(),
-                        snapshot_tier,
-                        settled,
-                    )?;
-                    refresh.settled = settled;
-                    retained.push(Rc::downgrade(&state));
-                    if refresh.sender.unbounded_send(event).is_ok() {
-                        changed += 1;
-                    }
-                    continue;
                 }
-                let (maintained_update, suppressed_authoritative_change) =
-                    if let Some(maintained) = refresh.maintained.as_mut() {
-                        let mut node_ref = node.lock().await;
-                        // Every client-local remote subscription must
-                        // drain against the authority's binding view. The
-                        // non-durable browser runtime additionally uses
-                        // that same view to preserve its local overlay;
-                        // restricting the view to only that runtime makes
-                        // ordinary Local clients miss a later authority
-                        // revoke until a further refresh.
-                        let authoritative_binding_view = (authorization_mode
-                            == QueryAuthorizationMode::ClientLocal
-                            && remote_read_tier.is_some()
-                            && shape.query().aggregate.is_none())
-                        .then_some(settled_binding_view);
-                        match node_ref
-                            .drain_local_maintained_view_subscription_preserving_rows(
-                                maintained,
-                                authoritative_binding_view,
-                                &local_overlay_row_keys,
-                            )
-                            .await
-                        {
-                            Ok(update) => update,
-                            Err(crate::node::Error::MissingTransaction(_)) => {
-                                node_ref.record_authoritative_reset_missing_payload_fallback();
-                                node_ref.defer_authoritative_reset_for_binding_view(
-                                    authoritative_reset_binding_view,
-                                );
-                                retained.push(Rc::downgrade(&state));
-                                continue;
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                    } else {
-                        (None, false)
-                    };
+                if let Some(key) = authoritative_reset_result.as_ref() {
+                    consumed_authoritative_resets.insert(key.clone());
+                }
                 if let Some(update) = maintained_update {
                     match update {
                         LocalMaintainedViewSubscriptionUpdate::Structured {
@@ -2498,6 +3443,7 @@ where
                                     read_view,
                                     remote_propagate_upstream,
                                     requires_authority_receipt,
+                                    settled_authority_result.as_ref(),
                                 );
                                 let terminal_layout = refresh
                                     .maintained
@@ -2509,6 +3455,20 @@ where
                                             "terminal operation arrived without a prepared root layout",
                                         )
                                     })?;
+                                let terminal_operation_count = terminal_operations.len();
+                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                    eprintln!(
+                                        "JAZZ_COVERED_INPUT_TRACE stage=terminal_ops count={terminal_operation_count} reset={authoritative_reset}"
+                                    );
+                                }
+                                let previous_snapshot = authoritative_reset
+                                    .then(|| {
+                                        materialized_subscription_snapshot(
+                                            &refresh.snapshot,
+                                            &refresh.snapshot_index,
+                                        )
+                                    })
+                                    .transpose()?;
                                 let event = apply_terminal_operations_to_subscription_snapshot(
                                     &mut refresh.snapshot,
                                     &mut refresh.snapshot_index,
@@ -2519,6 +3479,37 @@ where
                                     snapshot_tier,
                                     settled,
                                 )?;
+                                // A newly received authority closure is a
+                                // reset boundary.  Its complete value comes
+                                // from the same receiver-local terminal
+                                // reducer just advanced above, never from an
+                                // authority result snapshot or a re-run
+                                // query.  Later local/covered updates remain
+                                // incremental terminal operations.
+                                let event = if authoritative_reset {
+                                    materialize_subscription_terminal_records(
+                                        &mut refresh.snapshot,
+                                        &refresh.snapshot_index,
+                                    )?;
+                                    subscription_delta_event_with_reset(
+                                        snapshot_tier,
+                                        settled,
+                                        previous_snapshot
+                                            .as_ref()
+                                            .expect("reset snapshot captured above"),
+                                        &refresh.snapshot,
+                                        true,
+                                        terminal_rows,
+                                    )
+                                } else {
+                                    event
+                                };
+                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                    eprintln!(
+                                        "JAZZ_COVERED_INPUT_TRACE stage=publish_terminal ops={} roots={}",
+                                        terminal_operation_count, refresh.snapshot.root_count,
+                                    );
+                                }
                                 refresh.settled = settled;
                                 retained.push(Rc::downgrade(&state));
                                 if refresh.sender.unbounded_send(event).is_ok() {
@@ -2526,68 +3517,24 @@ where
                                 }
                                 continue;
                             }
-                            let Some(maintained) = refresh.maintained.as_ref() else {
-                                return Err(Error::new(
-                                    ErrorCode::Protocol,
-                                    "structured subscription lost its Groove terminal",
-                                ));
-                            };
-                            let materialized = node
-                                .lock()
-                                .await
-                                .materialize_local_maintained_relation_snapshot_with_occurrences(
-                                    maintained,
-                                )
-                                .await?;
-                            let snapshot = materialized.snapshot;
-                            let current_root_occurrences = materialized.root_occurrence_ids;
-                            let settled = subscription_is_settled(
-                                &node.borrow(),
-                                active_authority_view_receipts,
-                                &shape,
-                                &binding,
-                                settled_tier,
-                                read_view,
-                                remote_propagate_upstream,
-                                requires_authority_receipt,
-                            );
-                            let state_ref = &mut refresh;
-                            let previous_root_occurrences = snapshot_root_occurrences(
-                                &state_ref.snapshot,
-                                &state_ref.snapshot_index,
-                            )?;
-                            let event = subscription_terminal_delta_event(
-                                snapshot_tier,
-                                settled,
-                                &state_ref.snapshot,
-                                &previous_root_occurrences,
-                                &snapshot,
-                                &current_root_occurrences,
-                            )?;
-                            state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-                            state_ref.snapshot_index =
-                                relation_snapshot_index_with_root_occurrences(
-                                    &state_ref.snapshot,
-                                    &current_root_occurrences,
-                                )?;
-                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
-                            if state_ref.sender.unbounded_send(event).is_ok() {
-                                changed += 1;
-                            }
-                            continue;
+                            // No terminal delta means the receiver-local
+                            // collector state did not change. In particular,
+                            // do not materialize a replacement from Jazz
+                            // storage here: the only authority input is the
+                            // covered source closure above. The common reset
+                            // publication below handles an unchanged but
+                            // newly complete closure.
                         }
                         LocalMaintainedViewSubscriptionUpdate::Flat {
                             authoritative_membership_changed,
                             added,
                             removed,
-                            terminal_operations,
                         } => {
                             let state_ref = &mut refresh;
-                            let previous = authoritative_membership_changed.then(|| {
-                                (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
-                            });
+                            let previous_snapshot = materialized_subscription_snapshot(
+                                &state_ref.snapshot,
+                                &state_ref.snapshot_index,
+                            )?;
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
@@ -2595,42 +3542,12 @@ where
                                     authoritative_membership_changed,
                                     added,
                                     removed,
-                                    terminal_operations,
                                 },
                                 shape.query().table.as_str(),
                                 snapshot_tier,
                                 previous_settled,
                                 None,
                             )?;
-                            if authoritative_membership_changed {
-                                let (previous_snapshot, previous_snapshot_index) = previous.expect(
-                                    "authoritative membership changes retain prior snapshot",
-                                );
-                                order_maintained_snapshot_roots(
-                                    &node.borrow(),
-                                    &shape.query(),
-                                    &mut state_ref.snapshot,
-                                    &mut state_ref.snapshot_index,
-                                )?;
-                                // Authority reconciliation carries row
-                                // additions/removals without positions.
-                                // Re-publish the first changed ordered
-                                // suffix so consumers apply TopBy order.
-                                event = subscription_terminal_delta_event(
-                                    snapshot_tier,
-                                    previous_settled,
-                                    &previous_snapshot,
-                                    &snapshot_root_occurrences(
-                                        &previous_snapshot,
-                                        &previous_snapshot_index,
-                                    )?,
-                                    &state_ref.snapshot,
-                                    &snapshot_root_occurrences(
-                                        &state_ref.snapshot,
-                                        &state_ref.snapshot_index,
-                                    )?,
-                                )?;
-                            }
                             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                             let settled = subscription_is_settled(
                                 &node.borrow(),
@@ -2641,21 +3558,43 @@ where
                                 read_view,
                                 remote_propagate_upstream,
                                 requires_authority_receipt,
+                                settled_authority_result.as_ref(),
                             ) && node
                                 .borrow()
                                 .relation_snapshot_has_materialized_required_cells(
                                     shape.query(),
                                     &state_ref.snapshot,
                                 )?;
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
+                            if authoritative_reset {
+                                event = subscription_delta_event_with_reset(
+                                    snapshot_tier,
+                                    settled,
+                                    &previous_snapshot,
+                                    &state_ref.snapshot,
+                                    true,
+                                    terminal_rows,
+                                );
+                            }
                             if let SubscriptionEvent::Delta {
+                                reset,
+                                publishable,
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations: _,
                                 settled: event_settled,
                                 ..
                             } = &mut event
                             {
+                                *publishable = previous_settled != settled
+                                    || *reset
+                                    || !added.is_empty()
+                                    || !updated.is_empty()
+                                    || !removed.is_empty();
                                 *event_settled = settled;
                             }
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
                             if state_ref.sender.unbounded_send(event).is_ok() {
                                 changed += 1;
                             }
@@ -2663,103 +3602,126 @@ where
                         }
                     }
                 }
+                if authoritative_reset
+                    && refresh
+                        .maintained
+                        .as_ref()
+                        .is_some_and(LocalMaintainedViewSubscription::has_covered_input_sources)
+                {
+                    // Local-first may already have published the exact same
+                    // collector state from its provisional local input. The
+                    // first authority closure still becomes installed below,
+                    // but a no-op source handoff is not a user-visible reset.
+                    // Strict remote remains unsettled here and therefore
+                    // still publishes its first complete (including empty)
+                    // receiver-local reset.
+                    if refresh.settled {
+                        refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                        retained.push(Rc::downgrade(&state));
+                        continue;
+                    }
+                    // Aggregate fact terminals have no structural app-row
+                    // collector: their self-contained payload is the local
+                    // terminal state. Refresh the facade from that state
+                    // after the exact covered closure has quiesced, rather
+                    // than retaining the opening snapshot or consulting an
+                    // authority result payload.
+                    if shape.query().aggregate.is_some() {
+                        let materialized = {
+                            let maintained = refresh
+                                .maintained
+                                .as_ref()
+                                .expect("covered reset retained its maintained graph");
+                            node.lock()
+                                .await
+                                .materialize_local_maintained_relation_snapshot_with_occurrences(
+                                    maintained,
+                                )
+                                .await?
+                        };
+                        refresh.snapshot = materialized.snapshot;
+                    }
+                    let settled = subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view,
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
+                    // A complete closure can be observably unchanged (for
+                    // example an empty grouped aggregate). It is still the
+                    // exact authority boundary for this receiver and must
+                    // publish a reset from the collector state, not from a
+                    // result cache or a re-run query.
+                    let snapshot = materialized_subscription_snapshot(
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                    )?;
+                    let event = subscription_delta_event_with_reset(
+                        snapshot_tier,
+                        settled,
+                        &snapshot,
+                        &snapshot,
+                        true,
+                        terminal_rows,
+                    );
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=publish_covered_reset roots={} settled={settled}",
+                            snapshot.root_count,
+                        );
+                    }
+                    refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                    refresh.settled = settled;
+                    retained.push(Rc::downgrade(&state));
+                    let delivered = refresh.sender.unbounded_send(event).is_ok();
+                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        eprintln!(
+                            "JAZZ_COVERED_INPUT_TRACE stage=covered_reset_delivery delivered={delivered}"
+                        );
+                    }
+                    if delivered {
+                        changed += 1;
+                    }
+                    continue;
+                }
                 let preserve_local_overlay = suppressed_authoritative_change;
                 let (snapshot, snapshot_source) = if terminal_rows {
                     (
-                        refresh.snapshot.clone(),
+                        materialized_subscription_snapshot(
+                            &refresh.snapshot,
+                            &refresh.snapshot_index,
+                        )?,
                         SubscriptionSnapshotSource::LocalMaintained,
                     )
                 } else if preserve_local_overlay {
-                    (refresh.snapshot.clone(), previous_source)
+                    (
+                        materialized_subscription_snapshot(
+                            &refresh.snapshot,
+                            &refresh.snapshot_index,
+                        )?,
+                        previous_source,
+                    )
                 } else if remote_settled_tier.is_some() {
-                    let previous = refresh.snapshot.clone();
-                    if previous.root_count == 0
-                        && previous.edges.is_empty()
-                        && node
-                            .borrow()
-                            .has_settled_result_set(authoritative_reset_binding_view)
-                    {
-                        let authoritative_snapshot = {
-                            let mut node_ref = node.lock().await;
-                            match node_ref
-                                .authoritative_reset_snapshot_for_binding_view(
-                                    &shape,
-                                    authoritative_reset_binding_view,
-                                )
-                                .await
-                            {
-                                Ok(snapshot) => snapshot,
-                                Err(crate::node::Error::MissingTransaction(_)) => {
-                                    node_ref.record_authoritative_reset_missing_payload_fallback();
-                                    node_ref.defer_authoritative_reset_for_binding_view(
-                                        authoritative_reset_binding_view,
-                                    );
-                                    None
-                                }
-                                Err(error) => return Err(error.into()),
-                            }
-                        };
-                        if let Some(snapshot) = authoritative_snapshot {
-                            (snapshot, SubscriptionSnapshotSource::LinkSnapshot)
-                        } else {
-                            let fallback = {
-                                let mut node_ref = node.lock().await;
-                                match node_ref
-                                    .subscription_snapshot_in_authorization_mode(
-                                        &shape,
-                                        &binding,
-                                        snapshot_tier,
-                                        author,
-                                        &read_view,
-                                        authorization_mode,
-                                    )
-                                    .await
-                                {
-                                    Ok(snapshot) => snapshot,
-                                    Err(crate::node::Error::MissingTransaction(_)) => {
-                                        node_ref
-                                            .record_authoritative_reset_missing_payload_fallback();
-                                        node_ref.defer_authoritative_reset_for_binding_view(
-                                            authoritative_reset_binding_view,
-                                        );
-                                        retained.push(Rc::downgrade(&state));
-                                        continue;
-                                    }
-                                    Err(error) => return Err(error.into()),
-                                }
-                            };
-                            (fallback, SubscriptionSnapshotSource::LinkSnapshot)
-                        }
-                    } else {
-                        let remote_snapshot = {
-                            let mut node_ref = node.lock().await;
-                            match node_ref
-                                .subscription_snapshot_in_authorization_mode(
-                                    &shape,
-                                    &binding,
-                                    snapshot_tier,
-                                    author,
-                                    &read_view,
-                                    authorization_mode,
-                                )
-                                .await
-                            {
-                                Ok(snapshot) => snapshot,
-                                Err(crate::node::Error::MissingTransaction(_)) => {
-                                    node_ref.record_authoritative_reset_missing_payload_fallback();
-                                    node_ref.defer_authoritative_reset_for_binding_view(
-                                        authoritative_reset_binding_view,
-                                    );
-                                    retained.push(Rc::downgrade(&state));
-                                    continue;
-                                }
-                                Err(error) => return Err(error.into()),
-                            }
-                        };
-                        (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
-                    }
+                    // A remote receipt has already been staged through the
+                    // local collector above. Never rebuild a relation facade
+                    // from authority output or a second storage read here.
+                    (
+                        materialized_subscription_snapshot(
+                            &refresh.snapshot,
+                            &refresh.snapshot_index,
+                        )?,
+                        SubscriptionSnapshotSource::LocalMaintained,
+                    )
                 } else if has_maintained_subscription {
-                    let previous = refresh.snapshot.clone();
+                    let previous = materialized_subscription_snapshot(
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                    )?;
                     (previous.clone(), previous_source)
                 } else {
                     (
@@ -2786,6 +3748,7 @@ where
                     read_view,
                     remote_propagate_upstream,
                     requires_authority_receipt,
+                    settled_authority_result.as_ref(),
                 );
                 (
                     snapshot,
@@ -2799,7 +3762,7 @@ where
         let (previous, previous_source, has_maintained_flat_tuple_subscription) = {
             let state = state.borrow();
             (
-                state.snapshot.clone(),
+                materialized_subscription_snapshot(&state.snapshot, &state.snapshot_index)?,
                 state.snapshot_source,
                 matches!(
                     &state.kind,
@@ -2873,6 +3836,15 @@ where
                 &state.kind,
                 &state.snapshot,
             )?;
+            let SubscriptionKind::Prepared {
+                maintained_subscription,
+                ..
+            } = &state.kind;
+            state.snapshot_index.terminal_records = maintained_subscription
+                .as_ref()
+                .map(LocalMaintainedViewSubscription::decoded_terminal_records)
+                .transpose()?
+                .unwrap_or_default();
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -2882,8 +3854,7 @@ where
         retained.push(Rc::downgrade(&state));
     }
     for pending in pending_authoritative_resets.difference(&consumed_authoritative_resets) {
-        node.borrow_mut()
-            .defer_authoritative_reset_for_binding_view(*pending);
+        node.borrow_mut().defer_authoritative_reset(pending);
     }
     *subscriptions.borrow_mut() = retained;
     Ok(changed)
@@ -2919,10 +3890,8 @@ pub(super) fn unregister_upstream_subscription_owner(
     }
 }
 
-/// Retire one relay-owned upstream usage site only when it still belongs to
-/// the expected downstream connection and coverage group. The exact match is
-/// what keeps a stale unsubscribe/rejection from removing a sibling relay
-/// connection that happens to request identical coverage.
+/// Release the matching connection pin. Return an owner only when this was
+/// the final pin and the caller must retire the upstream stream itself.
 pub(super) fn retire_relay_upstream_subscription(
     owners: &RelayUpstreamSubscriptionOwners,
     subscription: SubscriptionKey,
@@ -2930,24 +3899,51 @@ pub(super) fn retire_relay_upstream_subscription(
     coverage: &CoverageKey,
 ) -> Option<RelayUpstreamSubscriptionOwner> {
     let mut owners = owners.borrow_mut();
-    let owner = owners.get(&subscription)?;
+    let key = (
+        subscription,
+        downstream_connection_epoch,
+        coverage.opts.read_view_key(),
+    );
+    let owner = owners.get(&key)?;
     if owner.downstream_connection_epoch != downstream_connection_epoch
         || owner.coverage != *coverage
     {
         return None;
     }
-    owners.remove(&subscription)
+    let removed = owners.remove(&key)?;
+    // The departing connection releases its pin, not another connection's
+    // shared stream. Only the last pin authorizes wire/local retirement.
+    (!owners
+        .keys()
+        .any(|(candidate, _, _)| *candidate == subscription))
+    .then_some(removed)
 }
 
 /// Retire a relay owner after its authority has terminally rejected the wire
 /// subscription. Unlike an ordinary unsubscribe there is no downstream link
 /// assertion here: the opaque upstream handle itself is the unforgeable owner
-/// token, and the returned record tells us exactly where to route the result.
+/// token, and all returned pins identify downstream recipients of the rejection.
+/// A RegisterShape rejection uses a nil binding marker and retires every pin
+/// for that exact shape/read-view registration. Callers admit the authority
+/// connection generation before using this registration-wide form.
 pub(super) fn take_relay_upstream_subscription_owner(
     owners: &RelayUpstreamSubscriptionOwners,
     subscription: SubscriptionKey,
-) -> Option<RelayUpstreamSubscriptionOwner> {
-    owners.borrow_mut().remove(&subscription)
+) -> Vec<(SubscriptionKey, RelayUpstreamSubscriptionOwner)> {
+    let mut owners = owners.borrow_mut();
+    let keys = owners
+        .keys()
+        .filter(|(candidate, _, _)| {
+            *candidate == subscription
+                || (subscription.binding_id == BindingId(uuid::Uuid::nil())
+                    && candidate.shape_id == subscription.shape_id
+                    && candidate.read_view == subscription.read_view)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    keys.into_iter()
+        .filter_map(|key| owners.remove(&key).map(|owner| (key.0, owner)))
+        .collect()
 }
 
 /// Take every propagated upstream owner for a disconnected downstream link.
@@ -2967,10 +3963,9 @@ pub(super) fn retire_relay_upstream_subscriptions_for_connection(
         .collect::<Vec<_>>();
     subscriptions
         .into_iter()
-        .filter_map(|subscription| {
-            owners
-                .remove(&subscription)
-                .map(|owner| (subscription, owner))
+        .filter_map(|key| {
+            let owner = owners.remove(&key)?;
+            (!owners.keys().any(|(candidate, _, _)| *candidate == key.0)).then_some((key.0, owner))
         })
         .collect()
 }
@@ -3049,10 +4044,23 @@ pub trait Transport {
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
 
+    /// Return the immutable wire admission context paired with this transport.
+    #[doc(hidden)]
+    fn wire_inbound_context(&self) -> Option<crate::wire::WireInboundContext> {
+        None
+    }
+
     /// Immutable endpoint facts accepted by authenticated session admission.
     /// Semantic messages never self-assert this context.
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
         None
+    }
+
+    /// Whether this upstream is an authenticated SYSTEM backend link that may
+    /// carry another session's policy binding. Ordinary session links must
+    /// always let the remote peer use the identity it authenticated itself.
+    fn permits_delegated_sessions(&self) -> bool {
+        false
     }
 }
 

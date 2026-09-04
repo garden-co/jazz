@@ -55,7 +55,10 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
             reads: QueryReadSet::primary(current_read_view_at(tier)),
             policy: system_policy_context(),
             input: row_set_input(tier as u8 + 0x30),
-            output: row_set_output(sync_facts()),
+            output: RowSetOutputRequest {
+                app_rows: None,
+                facts: sync_facts(),
+            },
         };
 
         assert_eq!(
@@ -65,7 +68,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 .source_current_tier(&source("todos", SourceRole::Root)),
             Some(tier)
         );
-        assert!(request.output.app_rows.is_some());
+        assert!(request.output.app_rows.is_none());
         assert!(
             request
                 .output
@@ -82,19 +85,28 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
             request
                 .output
                 .facts
-                .contains(&ProgramFactKey::SourceCoverage(program_scope()))
+                .contains(&ProgramFactKey::ProgramSourceCoverage(program_scope()))
         );
 
         let mut resolver = FakeSourceResolver::default();
         let program =
             lower_query_program(request, &mut resolver).expect("simple current root lowers");
-        assert_eq!(resolver.requests.len(), 1);
-        let source_request = &resolver.requests[0];
+        assert_eq!(resolver.requests.len(), 2);
+        let source_request = resolver
+            .requests
+            .iter()
+            .find(|request| request.visibility == RowVisibility::Visible)
+            .expect("visible source request");
+        let deletion_preimage_request = resolver
+            .requests
+            .iter()
+            .find(|request| request.visibility == RowVisibility::IncludeDeleted)
+            .expect("authorized deletion preimage request");
         assert_eq!(source_request.source, source("todos", SourceRole::Root));
         assert_eq!(source_request.visibility, RowVisibility::Visible);
         assert_eq!(
             source_request.requirements.app_fields,
-            FieldRequirement::All
+            FieldRequirement::None
         );
         assert!(
             source_request
@@ -108,17 +120,31 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 .metadata
                 .contains(&SourceMetadataRequirement::Coverage)
         );
-        let app_rows = &program
-            .lowered
-            .terminals
-            .first()
-            .expect("lowered terminal")
-            .graph;
-        assert_public_root_terminal(app_rows);
-        assert!(graph_any(app_rows, &|graph| matches!(
-            graph,
-            GraphBuilder::Table { table, .. } if table == "resolved_todos"
-        )));
+        assert!(
+            source_request
+                .requirements
+                .metadata
+                .contains(&SourceMetadataRequirement::DeletionMarkers)
+        );
+        assert_eq!(
+            deletion_preimage_request.source,
+            source("todos", SourceRole::Root)
+        );
+        assert_eq!(
+            deletion_preimage_request.requirements.app_fields,
+            FieldRequirement::None
+        );
+        assert!(
+            deletion_preimage_request.requirements.metadata.is_empty(),
+            "the IncludeDeleted sibling authorizes the deletion preimage only"
+        );
+        assert!(
+            program
+                .lowered
+                .terminals
+                .iter()
+                .all(|terminal| terminal.sink != "app_rows")
+        );
         assert_eq!(program.lowered.parameters, ParameterDomain::default());
         assert_eq!(
             program
@@ -130,19 +156,6 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
         );
 
         let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
-        assert_eq!(terminals.len(), 5);
-        assert!(terminals.iter().any(|terminal| {
-            matches!(
-                terminal,
-                OutputTerminalSchema::AppRows(AppRowSchema {
-                    descriptor,
-                    hidden_fields,
-                    carrier: AppRowCarrier::CurrentRow,
-                    ..
-                }) if descriptor.field_index("user_title").is_some()
-                    && hidden_fields.is_empty()
-            )
-        }));
         assert!(terminals.iter().any(|terminal| {
             matches!(
                 terminal,
@@ -160,9 +173,22 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
             matches!(
                 terminal,
                 OutputTerminalSchema::Fact(ProgramFactOutput {
-                    key: ProgramFactKey::SourceCoverage(CoverageScope::Program),
+                    key: ProgramFactKey::VersionWitnesses,
+                    terminal: ProgramFactTerminal::VersionWitnessDeletion,
+                    schema: ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
+                        deletion: Some(schema),
+                        ..
+                    }),
+                }) if schema.deletion_field == "_deletion"
+            )
+        }));
+        assert!(terminals.iter().any(|terminal| {
+            matches!(
+                terminal,
+                OutputTerminalSchema::Fact(ProgramFactOutput {
+                    key: ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
                     terminal: ProgramFactTerminal::Primary,
-                    schema: ProgramFactSchema::SourceCoverage(_),
+                    schema: ProgramFactSchema::ProgramSourceCoverage(_),
                 })
             )
         }));
@@ -174,19 +200,6 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                     terminal: ProgramFactTerminal::VersionWitnessContent,
                     schema: ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
                         content: Some(_),
-                        ..
-                    }),
-                })
-            )
-        }));
-        assert!(terminals.iter().any(|terminal| {
-            matches!(
-                terminal,
-                OutputTerminalSchema::Fact(ProgramFactOutput {
-                    key: ProgramFactKey::VersionWitnesses,
-                    terminal: ProgramFactTerminal::VersionWitnessDeletion,
-                    schema: ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
-                        deletion: Some(_),
                         ..
                     }),
                 })
@@ -292,6 +305,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -372,6 +386,59 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
     )));
 }
 
+/// A maintained current-source predicate must lower a bare UUID literal to
+/// the source field's declared nullable shape before Groove evaluates it.
+#[test]
+fn current_nullable_field_comparison_preserves_declared_literal_depth() {
+    let mut input = row_set_input(0x72);
+    let source = source("todos", SourceRole::Root);
+    let filter = RowSetNodeId("nullable-filter".to_owned());
+    input.shape.nodes.insert(
+        filter.clone(),
+        RowSetExpr::Filter {
+            input: input.shape.root.clone(),
+            predicate: PredicateExpr::Compare {
+                left: NormalizedValueRef::SourceField {
+                    source,
+                    field: "todo".to_owned(),
+                },
+                op: ComparisonOp::Eq,
+                right: NormalizedValueRef::Literal(
+                    postcard::to_allocvec(&Value::Uuid(row(0xa2).0)).unwrap(),
+                ),
+            },
+        },
+    );
+    input.shape.root = filter;
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: system_policy_context(),
+        input,
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([ProgramFactKey::ResultMembership]),
+        },
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("nullable field comparison lowers");
+    assert!(program.lowered.terminals.iter().any(|terminal| {
+        graph_any(&terminal.graph, &|graph| {
+            matches!(
+                graph,
+                GraphBuilder::Filter {
+                    predicate: groove::ivm::PredicateExpr::Eq { field, value },
+                    ..
+                } if field == "user_todo"
+                    && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
+                        groove::ivm::LiteralValue::Uuid(row(0xa2).0),
+                    )))
+            )
+        })
+    }));
+}
+
 #[test]
 fn current_join_via_lowers_as_left_deep_semijoin() {
     let root = RowSetNodeId("root".to_owned());
@@ -398,6 +465,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -522,7 +590,9 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                                 predicate,
                                                 groove::ivm::PredicateExpr::Eq { field, value }
                                                     if field == "user_tag"
-                                                        && value == &groove::ivm::LiteralValue::String("ship".to_owned())
+                                                        && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
+                                                            groove::ivm::LiteralValue::String("ship".to_owned()),
+                                                        )))
                                             )
                                     )
                         )
@@ -621,6 +691,7 @@ fn assert_current_join_via_union_relation_input(
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: {
                     let mut nodes = BTreeMap::from([
@@ -886,6 +957,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                         },
                     ]),
                 }],
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -1022,6 +1094,7 @@ fn join_contribution_membership_can_use_projected_bridge_fields() {
                         },
                     },
                 }],
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -1160,6 +1233,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -1381,6 +1455,7 @@ fn recursive_relation_seed_claim_lowers_from_policy_context() {
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (
@@ -1816,6 +1891,7 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (

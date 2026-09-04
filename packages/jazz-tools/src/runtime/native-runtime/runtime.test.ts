@@ -30,7 +30,7 @@ import { encodeSchema } from "./schema-codec.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
-import { type BatchId, type WriteReceipt } from "../client.js";
+import { type TxId, type WriteReceipt } from "../client.js";
 import {
   ANONYMOUS_JWT_ISSUER,
   LOCAL_FIRST_JWT_ISSUER,
@@ -46,9 +46,9 @@ type NativeDbForTest = ReturnType<
   NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
 >;
 
-async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+async function committedTxId(receipt: WriteReceipt): Promise<TxId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
-  return await receipt.batchId;
+  return await receipt.txId;
 }
 
 const previousWebSocket = globalThis.WebSocket;
@@ -242,6 +242,442 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it("moves a strict remote read from a stalled handshake to its auth-refresh replacement", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        // Leave the first carrier in its handshake. The second one uses the
+        // normal fake server response after the auth refresh replaces it.
+        if (sockets[0] === this) {
+          this.sent.push(data);
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            connectUpstream: () => new FakeTransport([]),
+            prepareQuery: () => ({}),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    let settled = false;
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge").then((rows) => {
+      settled = true;
+      return rows;
+    });
+    await waitForFakeWebSocketNegotiation();
+    expect(settled).toBe(false);
+
+    await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    await waitForFakeWebSocketNegotiation();
+
+    expect(sockets).toHaveLength(2);
+    await vi.waitFor(() => expect(settled).toBe(true));
+    await expect(read).resolves.toEqual([]);
+  });
+
+  it("normalizes direct backend transport auth on connect and refresh", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemoryAsBackend: () =>
+          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+        openMemory: () => {
+          throw new Error("ordinary open must not be selected for a backend runtime");
+        },
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+    const auth = JSON.stringify({ backend_secret: "backend", jwt_token: "incidental.jwt" });
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", auth);
+    await runtime.waitForUpstreamServerConnection();
+    await runtime.updateAuth(auth);
+    await runtime.waitForUpstreamServerConnection();
+
+    expect(sockets).toHaveLength(2);
+    for (const socket of sockets) {
+      const prelude = JSON.parse(socket.sent[0] as string) as {
+        peer_identity: string;
+        auth: Record<string, unknown>;
+      };
+      expect(prelude.peer_identity).toBe('["urn:jazz:system","system"]');
+      expect(prelude.auth).toEqual({ backend_secret: "backend", sub: "system" });
+    }
+  });
+
+  it("waits for server admission before running a strict relation query", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: (...args: unknown[]) => {
+              calls.push(args);
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await Promise.resolve();
+
+    expect(calls).toEqual([]);
+    await waitForFakeWebSocketNegotiation();
+    await expect(read).resolves.toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("retries a typed not-ready error before hello without failing strict reads", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        if (typeof data === "string") return super.send(data);
+        if (sockets.length === 1 && isClientHelloBatch(data)) {
+          this.sent.push(data);
+          queueMicrotask(() => {
+            this.emitMessage(
+              encodeWebSocketFrameBatch([encodeWireError(6, 3, "catalogue bootstrapping")]),
+            );
+          });
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: (...args: unknown[]) => {
+              calls.push(args);
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await vi.advanceTimersByTimeAsync(25);
+    await waitForFakeWebSocketNegotiation();
+
+    await expect(read).resolves.toEqual([]);
+    expect(sockets).toHaveLength(2);
+    expect(calls).toHaveLength(1);
+    await runtime.close();
+    vi.useRealTimers();
+  });
+
+  it("cancels a pending pre-hello retry on disconnect", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        if (typeof data === "string") return super.send(data);
+        if (isClientHelloBatch(data)) {
+          this.sent.push(data);
+          queueMicrotask(() => {
+            this.emitMessage(
+              encodeWebSocketFrameBatch([encodeWireError(6, 3, "catalogue bootstrapping")]),
+            );
+          });
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+    await runtime.disconnect();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(sockets).toHaveLength(1);
+    await runtime.close();
+    vi.useRealTimers();
+  });
+
+  it("runs a strict relation query normally after server admission", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: (...args: unknown[]) => {
+              calls.push(args);
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }), null, "edge"),
+    ).resolves.toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]).toEqual({ tier: "edge" });
+  });
+
+  it("moves a strict relation query from a stalled handshake to its auth-refresh replacement", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        if (sockets[0] === this) {
+          this.sent.push(data);
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    let relationQueries = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              relationQueries += 1;
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await waitForFakeWebSocketNegotiation();
+    expect(relationQueries).toBe(0);
+
+    await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    await waitForFakeWebSocketNegotiation();
+
+    expect(sockets).toHaveLength(2);
+    await expect(read).resolves.toEqual([]);
+    expect(relationQueries).toBe(1);
+  });
+
+  it("rejects a strict relation query when its pre-admission carrier terminates", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        this.sent.push(data);
+      }
+    } as unknown as typeof WebSocket;
+    let relationQueries = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              relationQueries += 1;
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await waitForFakeWebSocketNegotiation();
+    sockets[0]!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(3, 1, "pre-admission denied")]),
+    );
+
+    await expect(read).rejects.toThrow("pre-admission denied");
+    expect(relationQueries).toBe(0);
+  });
+
+  it("returns an empty result when closing during a strict relation query handshake", async () => {
+    globalThis.WebSocket = class extends FakeWebSocket {
+      override send(data: Uint8Array | string): void {
+        this.sent.push(data);
+      }
+    } as unknown as typeof WebSocket;
+    let relationQueries = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              relationQueries += 1;
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await waitForFakeWebSocketNegotiation();
+    expect(relationQueries).toBe(0);
+
+    await runtime.close();
+
+    await expect(read).resolves.toEqual([]);
+    expect(relationQueries).toBe(0);
+  });
+
   it("requires native db bindings to expose a tick scheduler", () => {
     expect(
       () =>
@@ -365,6 +801,54 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(sockets).toHaveLength(2);
     expect(upstreamConnections).toBe(1);
     expect(JSON.parse(sockets[1]!.sent[0] as string).jwt_token).toBe("fresh.jwt");
+  });
+
+  it("rejects a strict remote read when its pre-admission carrier terminates without replacement", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        // Hold the handshake so the remote read is waiting on this carrier
+        // when the authority sends its terminal pre-admission error.
+        this.sent.push(data);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            connectUpstream: () => new FakeTransport([]),
+            prepareQuery: () => ({}),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    await waitForFakeWebSocketNegotiation();
+
+    sockets[0]!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(3, 1, "pre-admission denied")]),
+    );
+
+    await expect(read).rejects.toThrow("pre-admission denied");
   });
 
   it("does not report non-auth websocket errors as auth failures", async () => {
@@ -674,7 +1158,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "00000000-0000-0000-0000-000000000001",
         {},
         descriptors,
-        JSON.stringify({ batch_id: "00000000000000000000000000000001" }),
+        JSON.stringify({ transaction_id: "00000000000000000000000000000001" }),
       ),
     ).toThrow("Update failed: WriteError");
     expect(() =>
@@ -816,6 +1300,10 @@ describe("NativeRuntimeAdapter server transport", () => {
               calls.push(["update", ...args]);
               return fakeWrite();
             },
+            upsertEncoded: (...args: unknown[]) => {
+              calls.push(["upsert", ...args]);
+              return fakeWrite();
+            },
           }),
         openBrowser: async () => {
           throw new Error("not used");
@@ -842,11 +1330,19 @@ describe("NativeRuntimeAdapter server transport", () => {
       { title: { type: "Text", value: "updated" } },
       JSON.stringify({ branch_view: { head, base } }),
     );
+    runtime.upsert(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      {},
+      JSON.stringify({ branch_view: { head, base } }),
+    );
 
     expect(calls[0]?.[0]).toBe("insert");
     expect(calls[0]?.at(-1)).toMatchObject({ branch: head });
     expect(calls[1]?.[0]).toBe("update");
     expect(calls[1]?.at(-1)).toMatchObject({ head, base });
+    expect(calls[2]?.[0]).toBe("upsert");
+    expect(calls[2]?.at(-1)).toMatchObject({ head, base });
   });
 
   it("runs scheduled core ticks before post-wait edge reads", async () => {
@@ -926,7 +1422,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    await runtime.waitForTransaction(await committedBatchId(inserted), "edge");
+    await runtime.waitForTransaction(await committedTxId(inserted), "edge");
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
       {
@@ -1111,6 +1607,80 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(advice).resolves.toBe("unknown");
     expect(cancellations).toBe(1);
     vi.useRealTimers();
+  });
+
+  it("fails closed for malformed direct and pollable native permission advice", async () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            requestInsertPermissionAdviceEncoded: () => "permit" as never,
+            requestReadPermissionAdvice: () => ({
+              poll: () => "permit",
+              cancel: () => {},
+            }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    Object.assign(runtime as object, { serverTransport: {}, serverCarrier: {} });
+
+    await expect(
+      runtime.requestInsertPermissionAdvice("todos", {
+        title: { type: "Text", value: "candidate" },
+      }),
+    ).resolves.toBe("unknown");
+    await expect(
+      runtime.requestReadPermissionAdvice("todos", "00000000-0000-0000-0000-000000000001"),
+    ).resolves.toBe("unknown");
+  });
+
+  it("cancels a pending pollable native permission request on runtime close", async () => {
+    let cancellations = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            requestDeletePermissionAdvice: () => ({
+              poll: () => null,
+              cancel: () => {
+                cancellations += 1;
+              },
+            }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    Object.assign(runtime as object, {
+      serverTransport: { tick: () => 0, recvWireFrames: () => [], close: () => true },
+      serverCarrier: { close: () => {} },
+    });
+
+    const advice = runtime.requestDeletePermissionAdvice(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await runtime.close();
+
+    await expect(advice).resolves.toBe("unknown");
+    expect(cancellations).toBe(1);
   });
 
   it("does not locally evaluate permission advice even on a serving-configured runtime", () => {
@@ -2497,6 +3067,146 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(detached).toEqual([]);
   });
 
+  it("selects one backend authority context for plain, relation, subscription, and transaction reads", async () => {
+    const calls: string[] = [];
+    const nativeDb = fakeDb({
+      prepareQuery: () => ({}),
+      all: () => {
+        throw new Error("backend read must not use client-local ABI");
+      },
+      allForBackend: () => {
+        calls.push("plain");
+        return encodeRows([]);
+      },
+      allRelationQueryForBackend: () => {
+        calls.push("relation");
+        return encodeRows([]);
+      },
+      allRelationSnapshotForBackend: () => {
+        calls.push("snapshot");
+        return encodeRelationSnapshot([]);
+      },
+      allRelationSnapshotInTransactionForBackend: () => {
+        calls.push("transaction-snapshot");
+        return encodeRelationSnapshot([]);
+      },
+      subscribeForBackend: () => {
+        calls.push("subscription");
+        return new ReadableStream();
+      },
+      subscribeRelationQueryForBackend: () => {
+        calls.push("relation-subscription");
+        return new ReadableStream();
+      },
+      allInTransactionForBackend: () => {
+        calls.push("transaction");
+        return encodeRows([]);
+      },
+      tick: () => undefined,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => {
+          throw new Error("ordinary open must not be selected for a backend runtime");
+        },
+        openMemoryAsBackend: () => nativeDb,
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+
+    await runtime.query(JSON.stringify({ table: "todos" }));
+    await runtime.query(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }));
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          {
+            column_name: "children",
+            table: "todos",
+            inner_column: "id",
+            outer_column: "todos.id",
+          },
+        ],
+      }),
+    );
+    runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    runtime.createSubscription(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }));
+    runtime.beginTransaction("mergeable", "backend-read-tx" as never);
+    await runtime.query(
+      JSON.stringify({ table: "todos" }),
+      null,
+      null,
+      JSON.stringify({ transaction_id: "backend-read-tx" }),
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          {
+            column_name: "children",
+            table: "todos",
+            inner_column: "id",
+            outer_column: "todos.id",
+          },
+        ],
+      }),
+      null,
+      null,
+      JSON.stringify({ transaction_id: "backend-read-tx" }),
+    );
+
+    expect(calls).toEqual([
+      "plain",
+      "relation",
+      "snapshot",
+      "subscription",
+      "relation-subscription",
+      "transaction",
+      "transaction-snapshot",
+    ]);
+  });
+
+  it("keeps backend authority when registering a schema view", async () => {
+    const allForBackend = vi.fn(() => encodeRows([]));
+    let nativeDb: ReturnType<typeof fakeDb>;
+    nativeDb = fakeDb({
+      prepareQuery: () => ({}),
+      allForBackend,
+      registerSchema: () => nativeDb,
+      tick: () => undefined,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemoryAsBackend: () => nativeDb,
+        openMemory: () => {
+          throw new Error("ordinary open must not be selected for a backend runtime");
+        },
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+
+    await runtime.registerSchemaView(testSchema).query(JSON.stringify({ table: "todos" }));
+
+    expect(allForBackend).toHaveBeenCalledOnce();
+  });
+
   it("hydrates broad Edge members through its attached Edge receipt, never a nested exact read", async () => {
     const attachments: unknown[] = [];
     const readOptions: unknown[] = [];
@@ -2962,6 +3672,65 @@ describe("NativeRuntimeAdapter server transport", () => {
       await vi.advanceTimersByTimeAsync(10);
       await second;
       expect(secondSettled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for the persistent owner's local answer without requiring a server", async () => {
+    vi.useFakeTimers();
+    try {
+      let ownerAnswered = false;
+      const attachedOptions: unknown[] = [];
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              all: () => new Uint8Array([0]),
+              connectUpstream: () => new FakeTransport([]),
+              prepareQuery: () => ({}),
+              attachQuery: (_query: unknown, opts: unknown) => {
+                attachedOptions.push(opts);
+                return {};
+              },
+              queryAttachmentIsCovered: () => ownerAnswered,
+              detachQuery: () => undefined,
+              setNonDurableClient: () => undefined,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.setNonDurableClient();
+      runtime.connectUpstreamPeer();
+      let settled = false;
+      const pending = runtime
+        .query(JSON.stringify({ table: "todos" }), null, "local")
+        .then((rows) => {
+          settled = true;
+          return rows;
+        });
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(false);
+      // An unrelated owner frame cannot acknowledge this exact query.
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(false);
+      ownerAnswered = true;
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(pending).resolves.toEqual([]);
+      expect(attachedOptions).toEqual([{ tier: "local" }]);
+      expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -3559,6 +4328,43 @@ describe("NativeRuntimeAdapter server transport", () => {
         "permission-introspection query",
       );
     }
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects JSON-only relation reads inside a transaction before ordinary relation APIs", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              calls.push("allRelationQuery");
+              return new Uint8Array();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const transactionId = "relation-read-batch" as never;
+    runtime.beginTransaction("mergeable", transactionId);
+    const opts = JSON.stringify({ transaction_id: transactionId });
+
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+        undefined,
+        undefined,
+        opts,
+      ),
+    ).rejects.toThrow("does not support relation reads inside a transaction");
     expect(calls).toEqual([]);
   });
 
@@ -5559,7 +6365,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
     const beginTransaction = vi.fn();
     const beginTransactionAttributed = vi.fn(
-      (_openBatchId: string, _author: Uint8Array) => undefined,
+      (_openTransactionId: string, _author: Uint8Array) => undefined,
     );
     const beginStreamingMutationAttributedEncoded = vi.fn(
       (
@@ -5783,7 +6589,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "todos",
         { title: { type: "Text", value: "must not lose provenance" } },
         JSON.stringify({
-          batch_id: id,
+          transaction_id: id,
           attribution: JSON.stringify(["https://issuer.example", "alice"]),
         }),
         "00000000-0000-0000-0000-000000000123",
@@ -6570,10 +7376,7 @@ function encodeWireServerHello(epoch: bigint = 1n): Uint8Array {
   writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
   writer.some((authority) => {
-    authority.bytes(
-      Uint8Array.from({ length: 16 }, () => 0x5e),
-      false,
-    );
+    authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e));
     authority.u64(epoch);
   });
   return writer.finish();
@@ -7132,42 +7935,51 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   const implementation = db as T & {
     connectUpstream?(): Transport;
     tick?(): void | Promise<void>;
-    mergeableTx?(openBatchId: string): TxForTest;
-    mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
-    exclusiveTx?(openBatchId: string): TxForTest;
+    mergeableTx?(openTransactionId: string): TxForTest;
+    mergeableTxForIdentity?(openTransactionId: string, author: Uint8Array): TxForTest;
+    exclusiveTx?(openTransactionId: string): TxForTest;
   };
   const openBatches = new Map<string, FakeOpenBatch>();
-  const attach = (openBatchId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
-    const batch = openBatches.get(openBatchId);
-    if (!batch || batch.kind !== kind) throw new Error(`unknown ${kind} batch ${openBatchId}`);
+  const attach = (openTransactionId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+    const batch = openBatches.get(openTransactionId);
+    if (!batch || batch.kind !== kind)
+      throw new Error(`unknown ${kind} batch ${openTransactionId}`);
     batch.tx ??=
       kind === "exclusive"
-        ? (implementation.exclusiveTx?.(openBatchId) ?? fakeTx())
+        ? (implementation.exclusiveTx?.(openTransactionId) ?? fakeTx())
         : batch.author && implementation.mergeableTxForIdentity
-          ? implementation.mergeableTxForIdentity(openBatchId, batch.author)
-          : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
+          ? implementation.mergeableTxForIdentity(openTransactionId, batch.author)
+          : (implementation.mergeableTx?.(openTransactionId) ?? fakeTx());
     return batch.tx;
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
+    // A real native binding always advertises the wire features compiled into
+    // it. Individual tests can still explicitly set this to `undefined` when
+    // exercising the missing-binding diagnostic.
+    wireFeatures: () => CLIENT_WIRE_FEATURES,
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
-    beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
-      openBatches.set(openBatchId, { kind, author });
+    beginTransaction: (
+      openTransactionId: string,
+      kind: FakeOpenBatch["kind"],
+      author?: Uint8Array,
+    ) => {
+      openBatches.set(openTransactionId, { kind, author });
     },
-    attachMergeableTx: (openBatchId: string) => attach(openBatchId, "mergeable"),
-    attachExclusiveTx: (openBatchId: string) => attach(openBatchId, "exclusive"),
-    commitTransaction: (openBatchId: string) => {
-      const batch = openBatches.get(openBatchId);
-      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
-      openBatches.delete(openBatchId);
+    attachMergeableTx: (openTransactionId: string) => attach(openTransactionId, "mergeable"),
+    attachExclusiveTx: (openTransactionId: string) => attach(openTransactionId, "exclusive"),
+    commitTransaction: (openTransactionId: string) => {
+      const batch = openBatches.get(openTransactionId);
+      if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
+      openBatches.delete(openTransactionId);
       return batch.tx?.commit() ?? fakeWrite();
     },
-    rollbackTransaction: (openBatchId: string) => {
-      const batch = openBatches.get(openBatchId);
-      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
+    rollbackTransaction: (openTransactionId: string) => {
+      const batch = openBatches.get(openTransactionId);
+      if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
       batch.tx?.rollback();
-      openBatches.delete(openBatchId);
+      openBatches.delete(openTransactionId);
     },
     ...db,
   };
@@ -7201,7 +8013,7 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
 
 function fakeWrite() {
   return {
-    batchId: "00000000000070008000000000000001",
+    txId: "00000000000070008000000000000001",
     payload: new Uint8Array(0),
     wait: async () => undefined,
     writeState: () => ({}),

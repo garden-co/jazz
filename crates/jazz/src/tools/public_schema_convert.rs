@@ -932,6 +932,10 @@ fn convert_policy_with_native_select_inherits(
     expr: &PolicyExpr,
     native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
+    // Do this before choosing a lowering path. In particular, an ExistsRel
+    // nested below a boolean operator must not escape this validation merely
+    // because that operator is rejected by a later lowering stage.
+    validate_exists_rel_policy_join_conditions(table, path, expr)?;
     match expr {
         PolicyExpr::And(exprs) => {
             if !exprs.iter().any(is_core_policy_clause) {
@@ -1417,11 +1421,82 @@ struct PendingReachable {
 }
 
 struct LoweredRel {
-    table: String,
+    /// Row-producing relations name their output table. Scalar-key gathers do
+    /// not: their projected `id` is consumed by the following access join.
+    table: Option<String>,
     filters: Vec<LoweredRelPredicate>,
     joins: Vec<JoinVia>,
     reachable: Vec<crate::query::ReachableVia>,
     pending_reachable: Option<PendingReachable>,
+}
+
+fn validate_exists_rel_join_conditions(
+    table: &TableName,
+    path: &str,
+    rel: &RelExpr,
+) -> Result<(), SchemaConversionError> {
+    match rel {
+        RelExpr::TableScan { .. } => Ok(()),
+        RelExpr::Filter { input, .. } | RelExpr::Project { input, .. } => {
+            validate_exists_rel_join_conditions(table, path, input)
+        }
+        RelExpr::Union { inputs } => {
+            for input in inputs {
+                validate_exists_rel_join_conditions(table, path, input)?;
+            }
+            Ok(())
+        }
+        RelExpr::Join {
+            left, right, on, ..
+        } => {
+            if on.len() > 1 {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel joins support exactly one column equality",
+                ));
+            }
+            validate_exists_rel_join_conditions(table, path, left)?;
+            validate_exists_rel_join_conditions(table, path, right)
+        }
+        RelExpr::Gather { seed, step, .. } => {
+            validate_exists_rel_join_conditions(table, path, seed)?;
+            validate_exists_rel_join_conditions(table, path, step)
+        }
+    }
+}
+
+fn validate_exists_rel_policy_join_conditions(
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::ExistsRel { rel } => validate_exists_rel_join_conditions(table, path, rel),
+        PolicyExpr::And(exprs) => {
+            for (index, expr) in exprs.iter().enumerate() {
+                validate_exists_rel_policy_join_conditions(
+                    table,
+                    &format!("{path}.And[{index}]"),
+                    expr,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Or(exprs) => {
+            for (index, expr) in exprs.iter().enumerate() {
+                validate_exists_rel_policy_join_conditions(
+                    table,
+                    &format!("{path}.Or[{index}]"),
+                    expr,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(expr) => {
+            validate_exists_rel_policy_join_conditions(table, &format!("{path}.Not"), expr)
+        }
+        _ => Ok(()),
+    }
 }
 
 fn append_exists_rel_policy_clause(
@@ -1515,6 +1590,13 @@ fn append_exists_rel_policy_clause(
         return Ok(query);
     }
 
+    let lowered_table = lowered.table.ok_or_else(|| {
+        err(
+            format!("$.{}.{}", table.as_str(), path),
+            "core schema scalar Gather output must be consumed by an access join",
+        )
+    })?;
+
     if !lowered.joins.is_empty() {
         // The relation's left-most scan is the row correlated to the
         // protected row. Its joins remain nested beneath that root; replacing
@@ -1554,7 +1636,7 @@ fn append_exists_rel_policy_clause(
             }
         }
         query.joins.push(JoinVia {
-            table: lowered.table,
+            table: lowered_table.clone(),
             on_column: correlation_column.clone(),
             target: if correlation_column == "id" {
                 JoinTarget::RowId
@@ -1577,14 +1659,14 @@ fn append_exists_rel_policy_clause(
         .collect::<Vec<_>>();
     if correlation_column == "id" {
         Ok(query.join_via_row_id_with_correlations(
-            lowered.table,
+            lowered_table,
             source_column,
             correlated_filters,
             filters,
         ))
     } else {
         Ok(query.join_via_column_with_correlations(
-            lowered.table,
+            lowered_table,
             correlation_column,
             source_column,
             correlated_filters,
@@ -1600,7 +1682,7 @@ fn lower_exists_rel(
 ) -> Result<LoweredRel, SchemaConversionError> {
     match rel {
         RelExpr::TableScan { table, .. } => Ok(LoweredRel {
-            table: table.as_str().to_owned(),
+            table: Some(table.as_str().to_owned()),
             filters: Vec::new(),
             joins: Vec::new(),
             reachable: Vec::new(),
@@ -1644,8 +1726,14 @@ fn lower_exists_rel(
                         "core schema ExistsRel reachable joins must join from reachable id",
                     ));
                 }
+                let right_table = right.table.clone().ok_or_else(|| {
+                    err(
+                        format!("$.{}.{}", table.as_str(), path),
+                        "core schema ExistsRel reachable access must be a row-producing relation",
+                    )
+                })?;
                 let mut reachable = crate::query::ReachableVia {
-                    access_table: right.table,
+                    access_table: right_table,
                     access_row_column: "__pending_outer_row".to_owned(),
                     access_team_column: on.right.column.clone(),
                     access_team_target: if on.right.column == "id" {
@@ -1698,8 +1786,14 @@ fn lower_exists_rel(
                     _ => Some(filter.predicate),
                 })
                 .collect();
+            let right_table = right.table.ok_or_else(|| {
+                err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel joins require a row-producing right relation",
+                )
+            })?;
             let join = JoinVia {
-                table: right.table,
+                table: right_table,
                 on_column: on.right.column.clone(),
                 target: if on.right.column == "id" {
                     JoinTarget::RowId
@@ -1733,7 +1827,7 @@ fn lower_gather_rel(
     let (from, seed) = lower_gather_seed(table, path, seed)?;
     let (edge_table, output_table, edge_member_column, edge_parent_column, edge_filters) =
         lower_gather_step(table, path, step)?;
-    let seed = if seed.table == output_table
+    let seed = if output_table.as_deref() == Some(seed.table.as_str())
         && seed.user_column.as_deref() == Some("id")
         && seed.team_column == "id"
         && seed.filters.is_empty()
@@ -1743,13 +1837,7 @@ fn lower_gather_rel(
         Some(seed)
     };
     let max_depth = match bound {
-        RelRecursionBound::MaxDepth(depth) if *depth > 0 => *depth,
-        RelRecursionBound::MaxDepth(_) => {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
-                "Gather relation policies require a positive MaxDepth",
-            ));
-        }
+        RelRecursionBound::MaxDepth(depth) => *depth,
         RelRecursionBound::Fixpoint => {
             return Err(err(
                 format!("$.{}.{}", table.as_str(), path),
@@ -1909,25 +1997,70 @@ fn lower_gather_step(
     table: &TableName,
     path: &str,
     step: &RelExpr,
-) -> Result<(String, String, String, String, Vec<Predicate>), SchemaConversionError> {
-    let RelExpr::Project { input, .. } = step else {
+) -> Result<(String, Option<String>, String, String, Vec<Predicate>), SchemaConversionError> {
+    let RelExpr::Project { input, columns } = step else {
         return Err(err(
             format!("$.{}.{}", table.as_str(), path),
             "Gather policies require projected recursive hops",
         ));
     };
-    let RelExpr::Join {
-        left, right, on, ..
-    } = input.as_ref()
-    else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather policies require recursive hop joins",
-        ));
-    };
-    let (edge_input, filters) = unwrap_rel_filter(left);
+
+    // General relation gathers return rows by joining the edge parent to an
+    // output table. Policy reachability instead carries only the projected
+    // parent key; accepting that canonical scalar form avoids requiring every
+    // reachable parent to have another row in the seed-membership table.
+    let (edge_rel, output_table, edge_parent_column, projected_scope) =
+        if let RelExpr::Join {
+            left, right, on, ..
+        } = input.as_ref()
+        {
+            let RelExpr::TableScan {
+                table: output_table,
+                ..
+            } = right.as_ref()
+            else {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "Gather recursive hop must join to the output table",
+                ));
+            };
+            let Some(on) = on.first() else {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "Gather recursive hop join requires a column equality",
+                ));
+            };
+            (
+                left.as_ref(),
+                Some(output_table.as_str().to_owned()),
+                on.left.column.clone(),
+                None,
+            )
+        } else {
+            let Some(projected) = columns.iter().find(|column| column.alias == "id") else {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "Gather scalar recursive hop must project its parent key as id",
+                ));
+            };
+            let RelProjectExpr::Column(projected) = &projected.expr else {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "Gather scalar recursive hop id must be a column projection",
+                ));
+            };
+            (
+                input.as_ref(),
+                None,
+                projected.column.clone(),
+                projected.scope.clone(),
+            )
+        };
+
+    let (edge_input, filters) = unwrap_rel_filter(edge_rel);
     let RelExpr::TableScan {
-        table: edge_table, ..
+        table: edge_table,
+        alias: edge_alias,
     } = edge_input
     else {
         return Err(err(
@@ -1935,16 +2068,17 @@ fn lower_gather_step(
             "Gather recursive hop must start from an edge table scan",
         ));
     };
-    let RelExpr::TableScan {
-        table: output_table,
-        ..
-    } = right.as_ref()
-    else {
+    let edge_scope = edge_alias.as_deref().unwrap_or_else(|| edge_table.as_str());
+    if projected_scope
+        .as_deref()
+        .is_some_and(|scope| scope != edge_scope)
+    {
         return Err(err(
             format!("$.{}.{}", table.as_str(), path),
-            "Gather recursive hop must join to the output table",
+            "Gather scalar recursive hop id must project an edge-table column",
         ));
-    };
+    }
+
     let lowered_filters = rel_predicates_to_policy(table, path, &filters)?;
     let frontier_index = lowered_filters
         .iter()
@@ -1962,12 +2096,6 @@ fn lower_gather_step(
             "Gather frontier equality must name an edge column",
         ));
     };
-    let Some(on) = on.first() else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather recursive hop join requires a column equality",
-        ));
-    };
     let edge_filters = lowered_filters
         .into_iter()
         .enumerate()
@@ -1975,9 +2103,9 @@ fn lower_gather_step(
         .collect();
     Ok((
         edge_table.as_str().to_owned(),
-        output_table.as_str().to_owned(),
+        output_table,
         edge_member_column,
-        on.left.column.clone(),
+        edge_parent_column,
         edge_filters,
     ))
 }
@@ -3080,6 +3208,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn converts_payload_enums_with_more_than_u8_cases_and_a_supported_scalar_default() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("events").column_with_default(
+                    "event",
+                    ColumnType::EnumPayload {
+                        cases: (0..257)
+                            .map(|ordinal| EnumCaseDescriptor {
+                                name: format!("case-{ordinal}"),
+                                fields: (ordinal == 256)
+                                    .then(|| vec![ColumnDescriptor::new("text", ColumnType::Text)])
+                                    .unwrap_or_default(),
+                            })
+                            .collect(),
+                    },
+                    Value::Enum {
+                        case: "case-256".to_owned(),
+                        values: vec![Value::Text("wide default".to_owned())],
+                    },
+                ),
+            )
+            .build();
+        let table = convert_public_schema(&schema)
+            .unwrap()
+            .into_runtime()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "events")
+            .unwrap();
+        let event = table
+            .columns
+            .iter()
+            .find(|column| column.name == "event")
+            .unwrap();
+        let GrooveColumnType::Enum(payload_enum) = &event.column_type else {
+            panic!("payload enum column expected");
+        };
+
+        assert_eq!(payload_enum.cases.len(), 257);
+        assert_eq!(payload_enum.tag("case-256").unwrap(), 256);
+        assert_eq!(
+            &payload_enum.cases[256].payload.fields()[0].value_type,
+            &GrooveColumnType::String
+        );
+        let Some(GrooveValue::Enum(default)) = &event.default else {
+            panic!("payload enum default expected");
+        };
+        assert_eq!(default.tag(), 256);
+        assert_eq!(
+            default.record().to_values().unwrap(),
+            vec![GrooveValue::String("wide default".to_owned())]
+        );
+    }
+
     // This is an internal converter test because public EnumPayload construction
     // is intentionally not exposed until the client facade can round-trip enum
     // values. It proves schema-default admission walks the selected case fields.
@@ -3181,7 +3364,7 @@ mod tests {
             ),
             (
                 ColumnDescriptor::new("nested", nested_payload_enum),
-                "must be scalar columns",
+                "nested enums are not supported",
             ),
         ];
 
@@ -5018,31 +5201,42 @@ mod tests {
                         rel: PublicRelExpr::Filter {
                             input: Box::new(PublicRelExpr::Join {
                                 left: Box::new(PublicRelExpr::Gather {
-                                    seed: Box::new(PublicRelExpr::Filter {
-                                        input: Box::new(PublicRelExpr::TableScan {
-                                            table: "teams".into(),
-                                            alias: None,
-                                        }),
-                                        predicate: RelPredicateExpr::Cmp {
-                                            left: RelColumnRef {
-                                                scope: Some("teams".to_owned()),
-                                                column: "identity_key".to_owned(),
+                                    seed: Box::new(PublicRelExpr::Project {
+                                        input: Box::new(PublicRelExpr::Filter {
+                                            input: Box::new(PublicRelExpr::TableScan {
+                                                table: "user_team_edges".into(),
+                                                alias: None,
+                                            }),
+                                            predicate: RelPredicateExpr::Cmp {
+                                                left: RelColumnRef {
+                                                    scope: Some("user_team_edges".to_owned()),
+                                                    column: "user_id".to_owned(),
+                                                },
+                                                op: RelPredicateCmpOp::Eq,
+                                                right: RelValueRef::SessionRef(vec![
+                                                    "claims".to_owned(),
+                                                    "sub".to_owned(),
+                                                ]),
                                             },
-                                            op: RelPredicateCmpOp::Eq,
-                                            right: RelValueRef::SessionRef(vec![
-                                                "claims".to_owned(),
-                                                "sub".to_owned(),
-                                            ]),
-                                        },
+                                        }),
+                                        columns: vec![
+                                            crate::tools::public_api::relation_ir::ProjectColumn {
+                                                alias: "id".to_owned(),
+                                                expr: RelProjectExpr::Column(RelColumnRef {
+                                                    scope: Some("user_team_edges".to_owned()),
+                                                    column: "team".to_owned(),
+                                                }),
+                                            },
+                                        ],
                                     }),
                                     step: Box::new(PublicRelExpr::Project {
-                                        input: Box::new(PublicRelExpr::Join {
-                                            left: Box::new(PublicRelExpr::Filter {
-                                                input: Box::new(PublicRelExpr::TableScan {
-                                                    table: "team_team_edges".into(),
-                                                    alias: None,
-                                                }),
-                                                predicate: RelPredicateExpr::Cmp {
+                                        input: Box::new(PublicRelExpr::Filter {
+                                            input: Box::new(PublicRelExpr::TableScan {
+                                                table: "team_team_edges".into(),
+                                                alias: None,
+                                            }),
+                                            predicate: RelPredicateExpr::And(vec![
+                                                RelPredicateExpr::Cmp {
                                                     left: RelColumnRef {
                                                         scope: Some("team_team_edges".to_owned()),
                                                         column: "child_team".to_owned(),
@@ -5052,24 +5246,27 @@ mod tests {
                                                         RelRowIdRef::Frontier,
                                                     ),
                                                 },
-                                            }),
-                                            right: Box::new(PublicRelExpr::TableScan {
-                                                table: "teams".into(),
-                                                alias: Some("__recursive_hop_0".to_owned()),
-                                            }),
-                                            on: vec![RelJoinCondition {
-                                                left: RelColumnRef {
+                                                RelPredicateExpr::Cmp {
+                                                    left: RelColumnRef {
+                                                        scope: Some("team_team_edges".to_owned()),
+                                                        column: "enabled".to_owned(),
+                                                    },
+                                                    op: RelPredicateCmpOp::Eq,
+                                                    right: RelValueRef::Literal(Value::Boolean(
+                                                        true,
+                                                    )),
+                                                },
+                                            ]),
+                                        }),
+                                        columns: vec![
+                                            crate::tools::public_api::relation_ir::ProjectColumn {
+                                                alias: "id".to_owned(),
+                                                expr: RelProjectExpr::Column(RelColumnRef {
                                                     scope: Some("team_team_edges".to_owned()),
                                                     column: "parent_team".to_owned(),
-                                                },
-                                                right: RelColumnRef {
-                                                    scope: Some("__recursive_hop_0".to_owned()),
-                                                    column: "id".to_owned(),
-                                                },
-                                            }],
-                                            join_kind: RelJoinKind::Inner,
-                                        }),
-                                        columns: Vec::new(),
+                                                }),
+                                            },
+                                        ],
                                     }),
                                     frontier_key: RelKeyRef::RowId(RelRowIdRef::Current),
                                     bound: RelRecursionBound::MaxDepth(8),
@@ -5112,11 +5309,17 @@ mod tests {
                         },
                     })),
             )
-            .table(TableSchemaBuilder::new("teams").column("identity_key", ColumnType::Text))
+            .table(TableSchemaBuilder::new("teams"))
+            .table(
+                TableSchemaBuilder::new("user_team_edges")
+                    .column("user_id", ColumnType::Uuid)
+                    .fk_column("team", "teams"),
+            )
             .table(
                 TableSchemaBuilder::new("team_team_edges")
                     .fk_column("child_team", "teams")
-                    .fk_column("parent_team", "teams"),
+                    .fk_column("parent_team", "teams")
+                    .column("enabled", ColumnType::Boolean),
             )
             .table(
                 TableSchemaBuilder::new("resource_access_edges")
@@ -5139,6 +5342,13 @@ mod tests {
         assert_eq!(reachable.edge_table, "team_team_edges");
         assert_eq!(reachable.edge_member_column, "child_team");
         assert_eq!(reachable.edge_parent_column, "parent_team");
+        assert_eq!(
+            reachable.edge_filters,
+            vec![Predicate::Eq(
+                Operand::Column("enabled".to_owned()),
+                Operand::Literal(crate::groove::records::Value::Bool(true)),
+            )]
+        );
         assert_eq!(reachable.bound, crate::query::RecursionBound::MaxDepth(8));
         assert_eq!(
             reachable.access_filters,
@@ -5148,9 +5358,9 @@ mod tests {
             )]
         );
         let seed = reachable.seed.as_ref().unwrap();
-        assert_eq!(seed.table, "teams");
-        assert_eq!(seed.user_column.as_deref(), Some("identity_key"));
+        assert_eq!(seed.table, "user_team_edges");
+        assert_eq!(seed.user_column.as_deref(), Some("user_id"));
         assert_eq!(seed.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
-        assert_eq!(seed.team_column, "id");
+        assert_eq!(seed.team_column, "team");
     }
 }

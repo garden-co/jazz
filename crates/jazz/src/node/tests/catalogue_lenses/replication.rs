@@ -7,6 +7,11 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
     let (_core_dir, mut core) = open_node_with_schema(node(0x33), base.clone());
     let (_client_dir, mut client) = open_node_with_schema(node(0x34), base.clone());
     let payload = SchemaVersion::new(evolved.clone());
+    // A lineage carries only descendant identities; receivers first learn the
+    // authority's permanent genesis manifest through its catalogue snapshot.
+    client
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
     let lens = MigrationLens::new(
         base.version_id(),
         payload.id,
@@ -18,16 +23,19 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
-    let publish = SyncMessage::PublishSchemaWithLens {
-        author: AuthorSubject::SYSTEM,
-        catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
+    ).expect("valid migration lens");
+    let publication = core
+        .author_schema_lineage_publication(
             payload.clone(),
             lens,
             Vec::<String>::new(),
             Vec::<String>::new(),
-        )),
+        )
+        .unwrap();
+    let publish = SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication),
     };
 
     let ack = core
@@ -83,14 +91,16 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    ).expect("valid migration lens");
 
-    let publication = SchemaLineagePublication::new(
-        target.clone(),
-        lens.clone(),
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    );
+    let publication = core
+        .author_schema_lineage_publication(
+            target.clone(),
+            lens.clone(),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
     let non_admin = core.apply_sync_message_settled(SyncMessage::PublishSchemaWithLens {
         author: user(7),
         catalogue_seq: 1,
@@ -102,7 +112,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
         source.id,
         SchemaVersionId::from_bytes([0x99; 16]),
         Vec::new(),
-    );
+    ).expect("valid migration lens");
     let unknown_result = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishLens {
         author: AuthorSubject::SYSTEM,
         lens: unknown,
@@ -156,13 +166,31 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     assert!(
         core.apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
-            versions,
+            versions: versions.clone(),
         })
         .unwrap()
         .is_empty()
     );
     assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
     assert!(core.query_transaction(tx.tx_id).unwrap().is_none());
+
+    // Parking an unavailable authored unit never decodes it as a normal
+    // transaction. A process restart therefore relies on the peer's canonical
+    // reconnect retransmission; receiving that same unit again before the
+    // lineage is active recreates the parked obligation rather than exposing
+    // an incomplete row.
+    drop(core);
+    let mut core = reopen_node_at(&core_dir, node(0x37), base.clone());
+    assert!(core.query_transaction(tx.tx_id).unwrap().is_none());
+    assert!(
+        core.apply_sync_message_settled(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: versions.clone(),
+        })
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
 
     let updates = publish_schema_lineage(
         &mut core,
@@ -178,7 +206,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -227,6 +255,25 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
             .collect::<BTreeMap<_, _>>()
             .get(&row(0x55)),
         Some(&evolved_cells)
+    );
+    // A reconnect can retransmit the exact authoritative unit after the
+    // catalogue activation that originally drained it. The public storage and
+    // projected read receipts remain singular: activation plus retry must not
+    // create a second history record or a second projected current row.
+    reopened
+        .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
+        .unwrap();
+    assert_eq!(reopened.query_table_versions("todos").unwrap().len(), 1);
+    assert_eq!(
+        reopened
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>()
+            .get(&row(0x55)),
+        Some(&evolved_cells),
+        "reconnect retry must preserve the one projected result"
     );
 }
 
@@ -290,7 +337,7 @@ fn catalogue_arrival_rejects_incomplete_row_claiming_evolved_schema() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -364,7 +411,7 @@ fn catalogue_arrival_drops_incomplete_relay_row_without_failing_publication() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -394,6 +441,22 @@ fn zero_column_version_claiming_schema(
     .unwrap()
 }
 
+/// Deliberately bypasses `VersionRecord::encode` to model an untrusted
+/// ViewUpdate whose deferred record cannot satisfy even the fixed row receipt.
+/// This stays an internal test because public APIs cannot construct malformed
+/// protocol bytes; the receiver boundary must still turn them into a typed
+/// error rather than reaching infallible accessors.
+fn empty_wire_version_claiming_schema(
+    schema: &JazzSchema,
+    version: &crate::protocol::VersionRecord,
+) -> crate::protocol::VersionRecord {
+    crate::protocol::VersionRecord::new(
+        version.table().to_owned(),
+        schema.version_id(),
+        OwnedRecord::new(Vec::new(), schema.tables[0].wire_record_descriptor()),
+    )
+}
+
 /// A non-reset ViewUpdate stages its history payload in a shared receiver
 /// batch. A malformed row descriptor must reject the frame before that batch
 /// writes either its transaction or version.
@@ -405,9 +468,24 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
         &mut core,
         MergeableCommit::new("todos", row(0x6c), 1_005).cells(title_cells("view payload")),
     );
-    let update = PeerState::new()
-        .current_rows_update(&mut core, "todos")
-        .unwrap();
+    // The first covered-input closure is a reset by contract. Advance the
+    // same publication once so this test exercises the intended incremental
+    // receiver-batch path rather than relying on the retired first-frame
+    // behavior.
+    let mut peer = PeerState::new();
+    let initial = peer.current_rows_update(&mut core, "todos").unwrap();
+    assert!(matches!(
+        initial,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            reset_result_set: true,
+            ..
+        })
+    ));
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x6d), 1_006).cells(title_cells("later payload")),
+    );
+    let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let mut bundles = version_bundles_for_update(&update);
     assert_eq!(bundles.len(), 1);
     let version = bundles[0].versions[0].clone();
@@ -419,7 +497,6 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -436,22 +513,20 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
             settled_through,
             defer_settlement: false,
             reset_result_set,
-            version_carriers: Vec::new(),
-            version_bundles: bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])
         .expect_err("malformed ViewUpdate must not stage a row");
     match error {
-        Error::MalformedViewUpdate(
-            "row version does not carry the complete descriptor of its authored schema",
-        ) => {}
+        Error::InvalidAuthoritySourceClosure { subscription: rejected, transition }
+            if rejected == subscription && transition == "authority source-closure payload failed validation: row version does not carry the complete descriptor of its authored schema" => {}
         other => panic!("expected malformed ViewUpdate, got {other:?}"),
     }
     assert!(reader.query_all_versions().unwrap().is_empty());
@@ -480,7 +555,6 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -495,18 +569,77 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
             subscription,
             settled_through,
             reset_result_set,
-            version_carriers: Vec::new(),
-            version_bundles: bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         })),
-        Err(Error::MalformedViewUpdate(
-            "row version does not carry the complete descriptor of its authored schema"
-        ))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: row version does not carry the complete descriptor of its authored schema"
+    ));
+    assert!(reader.query_all_versions().unwrap().is_empty());
+}
+
+/// Direct internal view ingress bypasses `SyncMessage` decoding. It must still
+/// reject a deferred record that would panic in `VersionRecord::row_uuid()`;
+/// malformed protocol input is a typed error and cannot leave history behind.
+#[test]
+fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
+    let base = schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x77), base.clone());
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x77), 1_011).cells(title_cells("bad receipt")),
+    );
+    let update = PeerState::new()
+        .current_rows_update(&mut core, "todos")
+        .unwrap();
+    let mut bundles = version_bundles_for_update(&update);
+    let version = bundles[0].versions[0].clone();
+    bundles[0].versions = vec![empty_wire_version_claiming_schema(&base, &version)];
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through,
+        reset_result_set,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    }) = update
+    else {
+        panic!("expected view update");
+    };
+
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x78), base);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reader
+            .apply_view_update(ViewUpdateParts {
+                subscription,
+                settled_through,
+                defer_settlement: false,
+                reset_result_set,
+                version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                    .expect("malformed receipts remain representable as carriers"),
+                peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                authorization_progress: None,
+                opening_pending: false,
+                result_member_adds,
+                result_member_removes,
+                program_fact_adds,
+                program_fact_removes,
+            })
+            .resolve()
+    }));
+    assert!(result.is_ok(), "malformed direct ingress must not panic");
+    assert!(matches!(
+        result.unwrap(),
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: malformed version receipt"
     ));
     assert!(reader.query_all_versions().unwrap().is_empty());
 }
@@ -568,7 +701,6 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -587,21 +719,19 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
             settled_through,
             defer_settlement: false,
             reset_result_set: true,
-            version_carriers: Vec::new(),
-            version_bundles: bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])
         .resolve(),
-        Err(Error::MalformedViewUpdate(
-            "row version does not carry the complete descriptor of its authored schema"
-        ))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: row version does not carry the complete descriptor of its authored schema"
     ));
     assert!(!reader.initial_sync_flush_active);
     assert!(!reader.initial_sync_flush_completed);
@@ -629,7 +759,7 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     let mut bundles = version_bundles_for_update(&update);
     assert_eq!(bundles.len(), 2, "one complete bundle per accepted write");
     let malformed = bundles[1].versions[0].clone();
-    bundles[1].versions = vec![zero_column_version_claiming_schema(&base, &malformed)];
+    bundles[1].versions = vec![empty_wire_version_claiming_schema(&base, &malformed)];
     let valid_tx_id = bundles[0].tx.tx_id;
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
@@ -637,7 +767,6 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
-        terminal_operations,
         program_fact_adds,
         program_fact_removes,
         ..
@@ -663,21 +792,19 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles: bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
             result_member_adds,
             result_member_removes,
-            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         }])
         .resolve(),
-        Err(Error::MalformedViewUpdate(
-            "row version does not carry the complete descriptor of its authored schema"
-        ))
+        Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
+            if rejected == subscription && transition == "authority source-closure payload failed validation: malformed version receipt"
     ));
     assert_eq!(
         (

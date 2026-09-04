@@ -18,5 +18,5 @@ type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 
 export type Todo = s.RowOf<typeof app.todos>;
-export type TodoQueryBuilder = typeof app.todos;
+export type TodoQueryBuilder = ReturnType<typeof app.todos.limit>;
 // #endregion schema-react

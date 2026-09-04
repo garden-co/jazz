@@ -2,6 +2,7 @@
 // generated loader. It gives a fresh checkout the same deterministic failure
 // as a rebuilt checkout.
 const { nativeBinding, expectedNativeArtifactFingerprint } = require("./native-binding.cjs");
+const { completePollableClose } = require("./close-pollable.cjs");
 
 if (typeof nativeBinding.nativeArtifactFingerprint !== "function") {
   throw new Error(
@@ -25,4 +26,21 @@ if (
       "Rebuild the monorepo binding or reinstall matching package versions.",
   );
 }
+
+const closePollable = nativeBinding.NapiDb.prototype.__closePollable;
+if (typeof closePollable !== "function") {
+  throw new Error(
+    "Jazz NAPI artifact is incomplete despite a matching fingerprint (missing NapiDb close operation). " +
+      "Rebuild the monorepo binding or reinstall matching package versions.",
+  );
+}
+Object.defineProperty(nativeBinding.NapiDb.prototype, "close", {
+  configurable: true,
+  writable: true,
+  value: async function close() {
+    const pending = closePollable.call(this);
+    if (pending instanceof Uint8Array) return undefined;
+    await completePollableClose(pending);
+  },
+});
 module.exports = nativeBinding;

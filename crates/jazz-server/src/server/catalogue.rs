@@ -418,12 +418,22 @@ impl CatalogueIndex {
                     // that must remain invisible to rehydration.
                     return Ok(());
                 }
-                let hash = entry
+                let declared_hash = entry
                     .metadata
                     .get(MetadataKey::SchemaHash.as_str())
                     .and_then(|raw| SchemaHash::from_hex(raw))
-                    .unwrap_or_else(|| SchemaHash::compute(&schema));
-                self.schemas.entry(hash).or_insert(schema);
+                    .ok_or_else(|| {
+                        corrupt_catalogue_entry(entry, "missing or invalid schema_hash metadata")
+                    })?;
+                let computed_hash = SchemaHash::compute(&schema);
+                if declared_hash != computed_hash || entry.object_id != computed_hash.to_object_id()
+                {
+                    return Err(corrupt_catalogue_entry(
+                        entry,
+                        "schema payload, schema_hash metadata, and object id must agree",
+                    ));
+                }
+                self.schemas.entry(computed_hash).or_insert(schema);
                 let published_at = entry
                     .metadata
                     .get(MetadataKey::PublishedAt.as_str())
@@ -436,7 +446,7 @@ impl CatalogueIndex {
                         )
                     })?;
                 self.schema_published_at
-                    .entry(hash)
+                    .entry(computed_hash)
                     .and_modify(|existing| *existing = (*existing).max(published_at))
                     .or_insert(published_at);
             }
@@ -459,6 +469,12 @@ impl CatalogueIndex {
                     corrupt_catalogue_entry(entry, format!("decode lens payload: {error}"))
                 })?;
                 let lens = Lens::new(source, target, transform);
+                if entry.object_id != lens.object_id() {
+                    return Err(corrupt_catalogue_entry(
+                        entry,
+                        "lens source/target hashes and object id must agree",
+                    ));
+                }
                 if !lens.is_draft() {
                     self.lens_edges.insert((source, target));
                 }

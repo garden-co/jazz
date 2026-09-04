@@ -12,6 +12,9 @@ import {
   writeDescriptor,
   writeValueType,
 } from "./native-row-codec.js";
+import { exactSignedI64 } from "./exact-integer.js";
+
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export {
   createRecord,
@@ -60,6 +63,10 @@ export type SubscriptionRejectedChunk = {
     | {
         type: "ServerFailure";
         code: string;
+      }
+    | {
+        type: "InvalidAuthoritySourceClosure";
+        transition: string;
       };
 };
 export type SubscriptionStreamChunk =
@@ -635,7 +642,7 @@ export class PostcardWriter {
   }
 
   i64(value: bigint | number): void {
-    const bigintValue = BigInt(value);
+    const bigintValue = exactSignedI64(value, "i64");
     const encoded = bigintValue < 0n ? (-bigintValue << 1n) - 1n : bigintValue << 1n;
     this.u64Big(encoded);
   }
@@ -651,6 +658,9 @@ export class PostcardWriter {
   }
 
   u32Le(value: number): void {
+    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+      throw new Error(`u32Le must be an unsigned 32-bit integer, got ${value}`);
+    }
     this.chunks.push(
       value & 0xff,
       (value >>> 8) & 0xff,
@@ -715,44 +725,42 @@ export class PostcardReader {
   constructor(private readonly bytesValue: Uint8Array) {}
 
   u64(): number {
-    let result = 0;
-    let shift = 0;
-    while (true) {
-      const byte = this.readByte();
-      result += (byte & 0x7f) * 2 ** shift;
-      if ((byte & 0x80) === 0) return result;
-      shift += 7;
+    const value = this.readCanonicalU64();
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`postcard u64 exceeds Number.MAX_SAFE_INTEGER: ${value}`);
     }
+    return Number(value);
   }
 
   u64BigInt(): bigint {
-    let result = 0n;
-    let shift = 0n;
-    while (true) {
-      const byte = this.readByte();
-      result += BigInt(byte & 0x7f) << shift;
-      if (result > 0xffff_ffff_ffff_ffffn) throw new Error("postcard u64 overflow");
-      if ((byte & 0x80) === 0) return result;
-      shift += 7n;
-      if (shift >= 64n) throw new Error("postcard u64 overflow");
-    }
+    return this.readCanonicalU64();
   }
 
   i64(): bigint {
+    const result = this.readCanonicalU64();
+    return (result & 1n) === 0n ? result >> 1n : -((result + 1n) >> 1n);
+  }
+
+  private readCanonicalU64(): bigint {
     let result = 0n;
-    let shift = 0n;
-    while (true) {
+    for (let byteIndex = 0; byteIndex < 10; byteIndex += 1) {
       const byte = this.readByte();
-      result += BigInt(byte & 0x7f) << shift;
+      const payload = BigInt(byte & 0x7f);
+      if (byteIndex === 9 && payload > 1n) throw new Error("postcard u64 overflow");
+
+      result |= payload << BigInt(byteIndex * 7);
       if ((byte & 0x80) === 0) {
-        return (result & 1n) === 0n ? result >> 1n : -((result + 1n) >> 1n);
+        if (byteIndex !== 0 && result < 1n << BigInt(byteIndex * 7)) {
+          throw new Error("postcard u64 is not minimally encoded");
+        }
+        return result;
       }
-      shift += 7n;
     }
+    throw new Error("postcard u64 overflow");
   }
 
   string(): string {
-    return new TextDecoder().decode(this.bytes());
+    return fatalUtf8Decoder.decode(this.bytes());
   }
 
   bool(): boolean {
@@ -769,6 +777,21 @@ export class PostcardReader {
 
   bytes(withLength = true): Uint8Array {
     const length = withLength ? this.u64() : 16;
+    return this.bytesOfLength(length);
+  }
+
+  /**
+   * Read a postcard byte string only after admitting its declared length.
+   *
+   * Protocol adapters use this before retaining attacker-controlled byte
+   * strings. `bytesOfLength` also verifies that the admitted length remains
+   * within the physical carrier.
+   */
+  bytesAtMost(maxLength: number, label: string): Uint8Array {
+    const length = this.u64();
+    if (length > maxLength) {
+      throw new Error(`${label} exceeds maximum length of ${maxLength} bytes`);
+    }
     return this.bytesOfLength(length);
   }
 

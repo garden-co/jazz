@@ -1308,6 +1308,16 @@ pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> imp
             )
                 .into_response();
         }
+        if state.topology.is_edge() && state.runtime_for_client().is_none() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "not_ready",
+                    "component": "runtime",
+                })),
+            )
+                .into_response();
+        }
         return Json(serde_json::json!({
             "status": "healthy"
         }))
@@ -1325,4 +1335,286 @@ pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> imp
         })),
     )
         .into_response()
+}
+#[cfg(test)]
+mod tests {
+    use super::super::create_router;
+    use crate::middleware::AuthConfig;
+    use crate::server::{
+        EdgeUpstreamHealth, ServerBuilder, ServerState, ServerTopology, StorageBackend,
+    };
+    use axum::body::{self, Body};
+    use axum::http::{Method, Request, StatusCode};
+    use jazz::tools::AppId;
+    use jazz::tools::public_schema::{ColumnType, Schema, SchemaBuilder, TableSchema};
+    use serde_json::Value as JsonValue;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn readiness_auth_config() -> AuthConfig {
+        AuthConfig {
+            admin_secret: Some("admin-secret".to_owned()),
+            ..Default::default()
+        }
+    }
+
+    fn readiness_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build()
+    }
+
+    async fn blank_dynamic_edge() -> Arc<ServerState> {
+        ServerBuilder::new(AppId::from_name("health-blank-edge"))
+            .with_auth_config(readiness_auth_config())
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build blank dynamic edge")
+            .state
+    }
+
+    async fn fixed_offline_edge() -> Arc<ServerState> {
+        ServerBuilder::new(AppId::from_name("health-fixed-edge"))
+            .with_auth_config(readiness_auth_config())
+            .with_schema(readiness_schema())
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build fixed offline edge")
+            .state
+    }
+
+    async fn health(state: Arc<ServerState>) -> (StatusCode, JsonValue) {
+        let response = create_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("health request"),
+            )
+            .await
+            .expect("health response");
+        let status = response.status();
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("health body");
+        (status, serde_json::from_slice(&body).expect("health json"))
+    }
+
+    /// Confirms that Alice's monitor sees her blank dynamic edge as unready
+    /// until that edge has a client-usable runtime.
+    ///
+    /// ```text
+    /// edge bootstrap ──no catalogue/runtime──► monitor: 503 not_ready
+    /// ```
+    #[tokio::test]
+    async fn blank_dynamic_edge_reports_runtime_not_ready() {
+        let state = blank_dynamic_edge().await;
+
+        assert!(state.runtime_for_client().is_none());
+        let (status, json) = health(state).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "status": "not_ready",
+                "component": "runtime",
+            })
+        );
+    }
+
+    /// Confirms that an operator's monitor sees Alice's edge connector's fatal
+    /// reason before the same edge's missing-runtime readiness state.
+    ///
+    /// ```text
+    /// edge connector ──fatal──► edge ──health──► monitor: unhealthy
+    /// ```
+    #[tokio::test]
+    async fn fatal_edge_upstream_failure_precedes_missing_runtime() {
+        let state = blank_dynamic_edge().await;
+        let reason = "authority rejected edge credentials";
+        state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
+            reason: reason.to_owned(),
+        });
+
+        let (status, json) = health(state).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "status": "unhealthy",
+                "component": "edge_upstream",
+                "reason": reason,
+            })
+        );
+    }
+
+    /// Confirms that an operator's monitor sees Alice's dynamic edge become
+    /// ready only after the authority catalogue is published and marked ready.
+    ///
+    /// ```text
+    /// authority ──catalogue──► edge shell ──ready mark──► monitor: healthy
+    /// ```
+    #[tokio::test]
+    async fn dynamic_edge_becomes_healthy_after_runtime_publication() {
+        let schema = readiness_schema();
+        let authority = ServerBuilder::new(AppId::from_name("health-authority"))
+            .with_auth_config(readiness_auth_config())
+            .with_schema(schema)
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority")
+            .state;
+        let snapshot = authority
+            .runtime()
+            .expect("authority runtime")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let edge = blank_dynamic_edge().await;
+
+        let (status, json) = health(edge.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "status": "not_ready",
+                "component": "runtime",
+            })
+        );
+
+        edge.start_dynamic_edge_shell(snapshot, None)
+            .expect("publish dynamic edge runtime");
+        assert!(
+            edge.runtime().is_some(),
+            "runtime publication precedes readiness"
+        );
+        assert!(
+            edge.runtime_for_client().is_none(),
+            "a published but unmarked generation remains gated"
+        );
+        edge.mark_dynamic_edge_catalogue_ready()
+            .expect("mark runtime ready");
+
+        let (status, json) = health(edge).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!({ "status": "healthy" }));
+    }
+
+    /// Confirms that an operator's monitor keeps Alice's fixed-schema edge
+    /// healthy while its upstream connector retries offline.
+    ///
+    /// ```text
+    /// upstream ──offline──► fixed edge ──health──► monitor: healthy
+    /// ```
+    #[tokio::test]
+    async fn fixed_schema_offline_edge_remains_healthy() {
+        let state = fixed_offline_edge().await;
+        assert_eq!(state.topology, ServerTopology::Edge);
+        state.set_edge_upstream_health(EdgeUpstreamHealth::Reconnecting {
+            reason: "upstream offline".to_owned(),
+        });
+
+        let (status, json) = health(state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!({ "status": "healthy" }));
+    }
+
+    /// Confirms that an operator's monitor still reports Alice's fixed-schema
+    /// edge unhealthy when its connector reaches a fatal terminal state.
+    ///
+    /// ```text
+    /// edge connector ──fatal──► fixed edge ──health──► monitor: unhealthy
+    /// ```
+    #[tokio::test]
+    async fn fatal_edge_upstream_failure_retains_unhealthy_health_response() {
+        let state = fixed_offline_edge().await;
+        let reason = "authority rejected edge credentials";
+        state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
+            reason: reason.to_owned(),
+        });
+
+        let (status, json) = health(state).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "status": "unhealthy",
+                "component": "edge_upstream",
+                "reason": reason,
+            })
+        );
+    }
+
+    /// Confirms that an operator's shutdown request takes precedence for Alice's
+    /// edge over both fatal-upstream and missing-runtime health states.
+    ///
+    /// ```text
+    /// operator ──shutdown──► edge ──health──► monitor: shutting_down
+    /// ```
+    #[tokio::test]
+    async fn shutdown_keeps_shutting_down_precedence_over_edge_readiness() {
+        let state = blank_dynamic_edge().await;
+        state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
+            reason: "fatal upstream".to_owned(),
+        });
+        let shutdown = create_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/internal/shutdown")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(Body::empty())
+                    .expect("shutdown request"),
+            )
+            .await
+            .expect("shutdown response");
+        assert_eq!(shutdown.status(), StatusCode::ACCEPTED);
+
+        let (status, json) = health(state).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "status": "shutting_down",
+                "phase": "shutting_down",
+            })
+        );
+    }
+
+    /// Confirms that an operator's monitor does not apply dynamic-edge runtime
+    /// readiness to Alice's core topology.
+    ///
+    /// ```text
+    /// core without edge shell ──health──► monitor: healthy
+    /// ```
+    #[tokio::test]
+    async fn core_topology_remains_healthy_without_a_runtime_shell() {
+        let state = ServerBuilder::new(AppId::from_name("health-core"))
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build core")
+            .state;
+        assert_eq!(state.topology, ServerTopology::Core);
+        assert!(state.runtime_for_client().is_none());
+
+        let (status, json) = health(state).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json, serde_json::json!({ "status": "healthy" }));
+    }
 }

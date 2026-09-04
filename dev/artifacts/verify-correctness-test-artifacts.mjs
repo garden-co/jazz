@@ -3,9 +3,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyManifest } from "./provenance.mjs";
 import { verifyWasmGlueAbi } from "./wasm-glue-abi.mjs";
-import { readCorrectnessArtifactSnapshot } from "./test-artifact-store.mjs";
+import {
+  verifyCorrectnessArtifactConsumerEnvironment,
+  verifyCorrectnessArtifactProducer,
+} from "./correctness-artifact-producer.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 
@@ -47,6 +49,35 @@ function methodParameters(body, method, error) {
   throw new Error(`unterminated WasmDb.${method} parameters`);
 }
 
+function hasProperty(body, property) {
+  return new RegExp(`(?:^|\\n)\\s*(?:readonly\\s+)?${property}\\s*(?::|\\()`, "m").test(body);
+}
+
+function hasGetter(body, property) {
+  return new RegExp(`(?:^|\\n)\\s*get\\s+${property}\\s*\\(`, "m").test(body);
+}
+
+function verifyWasmWriteSurface(generatedTypes, generatedGlue, failures) {
+  const generatedWriteTypes = classBody(generatedTypes, "WasmWrite");
+  const generatedWriteGlue = classBody(generatedGlue, "WasmWrite");
+  if (!hasProperty(generatedWriteTypes, "txId"))
+    failures.push("generated WASM WasmWrite declaration is missing txId");
+  if (hasProperty(generatedWriteTypes, "batchId"))
+    failures.push("generated WASM WasmWrite declaration still exposes batchId");
+  if (hasProperty(generatedWriteTypes, "transactionId"))
+    failures.push("generated WASM WasmWrite declaration still exposes transactionId");
+  if (!hasGetter(generatedWriteGlue, "txId"))
+    failures.push("generated WASM WasmWrite glue is missing txId");
+  if (hasGetter(generatedWriteGlue, "batchId"))
+    failures.push("generated WASM WasmWrite glue still exposes batchId");
+  if (hasGetter(generatedWriteGlue, "transactionId"))
+    failures.push("generated WASM WasmWrite glue still exposes transactionId");
+  if (!/\bwasmwrite_txId\b/.test(generatedTypes) || !/\bwasmwrite_txId\b/.test(generatedGlue))
+    failures.push("generated WASM write export is missing wasmwrite_txId");
+  if (/\bwasmwrite_batchId\b/.test(generatedTypes) || /\bwasmwrite_batchId\b/.test(generatedGlue))
+    failures.push("generated WASM write export still exposes wasmwrite_batchId");
+}
+
 // TypeScript parameter types may contain commas in generic, tuple, function,
 // or object types. Count only commas at the parameter-list top level, so an
 // ABI check measures runtime arguments rather than type syntax.
@@ -63,30 +94,23 @@ function parameterCount(parameters) {
   return count;
 }
 
-export function verifyCorrectnessTestArtifacts(rootDir = root) {
+export function verifyCorrectnessTestArtifacts(
+  rootDir = root,
+  { allowUnsealedFixture = false } = {},
+) {
   const failures = [];
   let snapshot;
   try {
-    snapshot = readCorrectnessArtifactSnapshot(rootDir);
-    if (!snapshot) failures.push("missing worktree-private correctness artifact snapshot");
+    snapshot = verifyCorrectnessArtifactProducer(rootDir).snapshot;
+    if (!allowUnsealedFixture && process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1")
+      verifyCorrectnessArtifactConsumerEnvironment(rootDir);
   } catch (error) {
     failures.push(error.message);
   }
-  // The fallback keeps this verifier useful for its deliberately minimal unit
-  // fixtures. Real correctness invocation is rejected above without a sealed
-  // snapshot, but still reports every independently detectable ABI defect.
+  // Only unit fixtures opt into the mutable fallback.  Every command-line
+  // correctness consumer is admitted through the producer manifest above.
+  if (!snapshot && !allowUnsealedFixture) return failures;
   const wasmPackage = snapshot?.wasmPackage ?? resolve(rootDir, "crates/jazz-wasm/pkg");
-  for (const [kind, profile] of [
-    ["wasm", "fast"],
-    ["napi", "release"],
-  ]) {
-    try {
-      const problem = verifyManifest(rootDir, kind, profile);
-      if (problem) failures.push(`STALE ${kind} ${profile}: ${problem}`);
-    } catch (error) {
-      failures.push(`STALE ${kind} ${profile}: ${error.message}`);
-    }
-  }
   try {
     const expected = classBody(
       text("packages/jazz-tools/src/types/jazz-wasm.d.ts", rootDir),
@@ -111,6 +135,11 @@ export function verifyCorrectnessTestArtifacts(rootDir = root) {
           `WASM ABI drift for WasmDb.${method}: consumer=${sourceArity}, d.ts=${typeArity}, glue=${glueArity}`,
         );
     }
+    verifyWasmWriteSurface(
+      readFileSync(resolve(wasmPackage, "jazz_wasm.d.ts"), "utf8"),
+      readFileSync(resolve(wasmPackage, "jazz_wasm.js"), "utf8"),
+      failures,
+    );
     const expectedTransport = classBody(
       text("packages/jazz-tools/src/types/jazz-wasm.d.ts", rootDir),
       "WasmTransport",
@@ -156,7 +185,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const failures = verifyCorrectnessTestArtifacts();
   if (failures.length) {
     for (const failure of failures) console.error(`correctness-artifacts: ${failure}`);
-    console.error("Fix: pnpm build:test-artifacts");
+    console.error("Fix: pnpm build:correctness-artifacts && pnpm test:typescript-consumers");
     process.exitCode = 1;
   } else console.log("correctness-artifacts: release NAPI + fast WASM binding surface is current");
 }

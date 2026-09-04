@@ -306,7 +306,7 @@ test("direct WASM publication acquires and releases the selected lock itself", (
   }
 });
 
-test("two independent fast/release producers serialize and publish one internally consistent generation", async () => {
+test("independent fast/release producers survive repeated lock handoffs and publish one internally consistent generation", async () => {
   const { root, pkg, lock } = fixture();
   const previous = process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH;
   process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH = lock;
@@ -326,9 +326,13 @@ test("two independent fast/release producers serialize and publish one internall
         });
         child.on("exit", (status) => resolveRun({ status, stderr }));
       });
-    const [one, two] = await Promise.all([run("fast"), run("release")]);
-    assert.equal(one.status, 0, one.stderr);
-    assert.equal(two.status, 0, two.stderr);
+    // More than one handoff makes the release-between-link-and-read race
+    // observable without weakening the producer contract: each child is a
+    // normal direct producer and must either own the receipt or wait for it.
+    const producers = await Promise.all(
+      ["fast", "release", "fast", "release", "fast", "release"].map(run),
+    );
+    for (const producer of producers) assert.equal(producer.status, 0, producer.stderr);
     const final = markers(pkg);
     const generation = final[0].split(":")[0];
     assert.ok(["fast", "release"].includes(generation));

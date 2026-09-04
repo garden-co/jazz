@@ -26,7 +26,7 @@ declare module "jazz-wasm" {
   }
 
   export class WasmWrite {
-    readonly batchId: string;
+    readonly txId: string;
     readonly payload: Uint8Array;
     readonly rowId: Uint8Array;
     writeState(): unknown;
@@ -66,12 +66,12 @@ declare module "jazz-wasm" {
     base?: unknown;
   };
 
-  export type UpsertOptions = WriteOptions & {
-    branch?: unknown;
-  };
+  export type UpsertOptions = UpdateOptions;
 
   export type DeleteOptions = UpdateOptions;
-  export type RestoreOptions = UpsertOptions;
+  export type RestoreOptions = WriteOptions & {
+    branch?: unknown;
+  };
 
   export class WasmTx {
     insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
@@ -109,7 +109,13 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmDb;
-    static openBrowser(pageStore: unknown, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
+    /** Host-only relay open; `storageOwner` is supplied by broker ownership admission. */
+    static openBrowser(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+      storageOwner: string,
+    ): Promise<WasmDb>;
     static openBrowserWithSelfSignedProof(
       pageStore: unknown,
       schema: Uint8Array,
@@ -117,6 +123,7 @@ declare module "jazz-wasm" {
       token: string,
       appId: string,
       claimedAuthor: string,
+      storageOwner: string,
     ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
@@ -210,15 +217,32 @@ declare module "jazz-wasm" {
       cells: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
-    beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | null): void;
-    beginTransactionAttributed(openBatchId: string, attribution: Uint8Array): void;
-    commitTransaction(openBatchId: string, kind?: string | null): WasmWrite;
-    rollbackTransaction(openBatchId: string): void;
-    attachMergeableTx(openBatchId: string): WasmTx;
-    attachExclusiveTx(openBatchId: string): WasmTx;
+    beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | null): void;
+    beginTransactionAttributed(openTransactionId: string, attribution: Uint8Array): void;
+    commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
+    rollbackTransaction(openTransactionId: string): void;
+    attachMergeableTx(openTransactionId: string): WasmTx;
+    attachExclusiveTx(openTransactionId: string): WasmTx;
 
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
+    /** All backend read entrypoints require openMemoryAsBackend. */
+    allForBackend(query: WasmPreparedQuery, opts: unknown): Promise<Uint8Array>;
+    allInTransactionForBackend(
+      query: WasmPreparedQuery,
+      tx: WasmTx,
+      opts: unknown,
+    ): Promise<Uint8Array>;
+    allRelationSnapshotForBackend(query: WasmPreparedQuery, opts: unknown): Promise<Uint8Array>;
+    allRelationSnapshotInTransactionForBackend(
+      query: WasmPreparedQuery,
+      tx: WasmTx,
+      opts: unknown,
+    ): Promise<Uint8Array>;
+    allRelationQueryForBackend(queryJson: string, opts: unknown): Promise<Uint8Array>;
+    attachQueryForBackend(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
+    subscribeForBackend(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
+    subscribeRelationQueryForBackend(queryJson: string, opts: unknown): ReadableStream<unknown>;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
     allRelationQuery(queryJson: string, opts: unknown): Promise<Uint8Array>;
@@ -288,9 +312,14 @@ declare module "jazz-wasm" {
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
-    setRelayAuthoritySessionOwner(): void;
+    /** @internal Foreground node-lease handoff only. */
+    foregroundTxTimeHighWater(): bigint;
+    /** @internal Foreground node-lease bootstrap only. */
+    seedForegroundTxTimeHighWater(highWater: bigint): void;
+    /** Exact wire features compiled into this WASM artifact. */
+    wireFeatures(): number;
     close(): Promise<boolean>;
-    connectUpstream(): WasmTransport;
+    connectUpstream(): Promise<WasmTransport>;
     connectUpstreamWithSession(
       protocolVersion: number,
       features: number,
@@ -306,8 +335,8 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmTransport;
-    mergeableTx(openBatchId: string): WasmTx;
-    mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;
-    exclusiveTx(openBatchId: string): WasmTx;
+    mergeableTx(openTransactionId: string): WasmTx;
+    mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): WasmTx;
+    exclusiveTx(openTransactionId: string): WasmTx;
   }
 }

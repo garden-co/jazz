@@ -234,6 +234,60 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
     ), "the predecessor remains independently pending");
 }
 
+/// INV-RLS-24 moves read-for-write authorization only for mergeable staging.
+/// Exclusive transactions retain their existing snapshot/read-set contract;
+/// the shared write-policy admission helper must not silently add the new
+/// mergeable prior-row read check to them.
+///
+/// This stays internal because the regression is the transaction-kind gate on
+/// the common authority helper, before exclusive conflict validation runs.
+#[test]
+fn authority_read_for_write_check_is_mergeable_only() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_select(PublicPolicyExpr::False)
+                    .with_insert(PublicPolicyExpr::True)
+                    .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x95);
+    let base = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", target, 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("before".to_owned()),
+        )])),
+    );
+    let (_, unit) = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 11)
+                .made_by(user(0xa5))
+                .parents(vec![base])
+                .cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("after".to_owned()),
+                )])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        versions,
+    } = unit
+    else {
+        panic!("commit helper must emit one commit unit");
+    };
+    tx.kind = TxKind::Exclusive;
+    assert!(
+        crate::db::block_on(core.commit_unit_satisfies_write_policies(&tx, &versions, None))
+            .unwrap(),
+        "exclusive admission keeps its pre-existing write-policy-only helper semantics"
+    );
+}
+
 /// This stays at the node boundary because admission evaluates policy-pinned
 /// inline rows before a public client receives a write outcome. It proves the
 /// provenance visible to that inline program matches the public milliseconds
@@ -617,9 +671,11 @@ fn owner_only_read_narrows_view_updates_per_peer_identity() {
 
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_a, BTreeSet::from([row(1)]));
+    register_whole_table_receiver(&mut reader_a, "todos");
     reader_a.apply_sync_message_settled(update_a).unwrap();
     let update_b = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_b, BTreeSet::from([row(2)]));
+    register_whole_table_receiver(&mut reader_b, "todos");
     reader_b.apply_sync_message_settled(update_b).unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
 
@@ -693,17 +749,19 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads, ..
             },
-        result_member_adds,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    assert_eq!(result_member_adds, &vec![(
-        groove::Intern::new("announcements".to_owned()),
-        announcement_row,
-        tx_id
-    )]);
+    assert_eq!(
+        canonical_view_update_rows(&update).0,
+        vec![(
+            groove::Intern::new("announcements".to_owned()),
+            announcement_row,
+            tx_id
+        )]
+    );
     assert!(complete_tx_payloads.is_empty());
     assert!(!bob_peer.shipped_complete_tx_payloads().contains(&tx_id));
     let shipped_rows = version_bundles
@@ -712,6 +770,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         .collect::<BTreeSet<_>>();
     assert_eq!(shipped_rows, BTreeSet::from([announcement_row]));
 
+    register_shape_binding(&mut bob_node, &shape, &binding);
     bob_node.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         bob_node
@@ -747,6 +806,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
 
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
+    register_whole_table_receiver(&mut reader_a, "todos");
     reader_a.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader_a
@@ -758,24 +818,21 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let tx_b = commit_core_owner_fixture(&mut core, row_uuid, author_b, "owned by B", 11);
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        version_bundles,
+        version_carriers,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs, ..
             },
-        result_member_adds,
-        result_member_removes,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    assert!(version_bundles.is_empty());
+    assert!(version_carriers.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(result_member_adds.is_empty());
     assert_eq!(
-        result_member_removes,
-        &vec![("todos".to_owned().into(), row_uuid, tx_a)]
+        canonical_view_update_rows(&update),
+        (vec![], vec![("todos".to_owned().into(), row_uuid, tx_a)])
     );
     reader_a.apply_sync_message_settled(update).unwrap();
     assert!(
@@ -794,6 +851,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let mut link_b = PeerState::client_link(author_b);
     let update = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
+    register_whole_table_receiver(&mut reader_b, "todos");
     reader_b.apply_sync_message_settled(update).unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     assert_eq!(
@@ -914,7 +972,10 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let invited_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    invited_reader.apply_sync_message_settled(invited_update).unwrap();
+    register_whole_table_receiver(&mut invited_reader, "canvases");
+    invited_reader
+        .apply_sync_message_settled(invited_update)
+        .unwrap();
     assert_eq!(
         invited_reader
             .subscription_current_rows("canvases", DurabilityTier::Global)
@@ -947,6 +1008,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let uninvited_update = uninvited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
+    register_whole_table_receiver(&mut uninvited_reader, "canvases");
     uninvited_reader
         .apply_sync_message_settled(uninvited_update)
         .unwrap();
@@ -972,15 +1034,9 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let revoked_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_removes, ..
-    }) = &revoked_update
-    else {
-        panic!("expected view update");
-    };
     assert_eq!(
-        result_member_removes,
-        &vec![("canvases".to_owned().into(), canvas_row, accepted_id)]
+        canonical_view_update_rows(&revoked_update),
+        (vec![], vec![("canvases".to_owned().into(), canvas_row, accepted_id)])
     );
     invited_reader.apply_sync_message_settled(revoked_update).unwrap();
     assert!(
@@ -1428,6 +1484,134 @@ fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
     assert!(error
         .to_string()
         .contains("nested outer correlation must use its join key"));
+}
+
+#[test]
+fn exists_rel_rejects_compound_joins_in_every_policy_context_before_lowering() {
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    // The unsupported compound equality is deliberately below a nested join
+    // with aliases. This verifies that admission walks the full relation tree
+    // before the lowering implementation can select (and silently retain only)
+    // the first equality.
+    let policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("membership".to_owned()),
+                    }),
+                    right: Box::new(PublicRelExpr::TableScan {
+                        table: "grants".into(),
+                        alias: Some("grant".to_owned()),
+                    }),
+                    on: vec![
+                        PublicRelJoinCondition {
+                            left: column("membership", "workspace"),
+                            right: column("grant", "workspace"),
+                        },
+                        PublicRelJoinCondition {
+                            left: column("membership", "subject"),
+                            right: column("grant", "subject"),
+                        },
+                    ],
+                    join_kind: PublicRelJoinKind::Inner,
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("membership", "workspace"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: column("blocks", "id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped("block")),
+            },
+        },
+    };
+    let schema_with = |policies: PublicTablePolicies| {
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("workspaces"))
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("workspace", "workspaces")
+                    .column("subject", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("grants")
+                    .fk_column("workspace", "workspaces")
+                    .column("subject", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("blocks")
+                    .fk_column("workspace", "workspaces")
+                    .column("owner", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .fk_column("block", "blocks")
+                    .policies(policies),
+            )
+            .build()
+    };
+
+    // Read and each write clause use distinct schema-conversion paths. The
+    // boolean forms prove that compound joins cannot be hidden in And, Or, or
+    // Not before runtime policy evaluation.
+    for (context, policies, expected_path) in [
+        (
+            "read query",
+            PublicTablePolicies::new().with_select(PublicPolicyExpr::And(vec![
+                PublicPolicyExpr::True,
+                policy.clone(),
+            ])),
+            "policies.select.using.And[1]",
+        ),
+        (
+            "insert check",
+            PublicTablePolicies::new().with_insert(PublicPolicyExpr::Or(vec![
+                PublicPolicyExpr::False,
+                policy.clone(),
+            ])),
+            "policies.insert.with_check.Or[1]",
+        ),
+        (
+            "update using",
+            PublicTablePolicies::new().with_update(
+                Some(PublicPolicyExpr::Not(Box::new(policy.clone()))),
+                PublicPolicyExpr::True,
+            ),
+            "policies.update.using.Not",
+        ),
+        (
+            "update check",
+            PublicTablePolicies::new().with_update(None, policy.clone()),
+            "policies.update.with_check",
+        ),
+        (
+            "delete using",
+            PublicTablePolicies::new().with_delete(policy.clone()),
+            "policies.delete.using",
+        ),
+    ] {
+        let error = crate::schema::JazzSchema::new(&schema_with(policies))
+            .expect_err("compound equality must fail closed before runtime evaluation");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "$.tasks.{expected_path}: core schema ExistsRel joins support exactly one column equality"
+            ),
+            "{context} must reject the compound join at schema admission",
+        );
+    }
 }
 
 #[test]

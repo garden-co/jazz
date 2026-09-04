@@ -2,6 +2,7 @@ import type { RuntimeSourcesConfig } from "./context.js";
 import type { DbConfig } from "./db.js";
 import { resolveClientInternalSessionSync } from "./client-session.js";
 import { getTrustedReservedSession } from "./db-internal-session.js";
+import { canonicalAuthorSubject } from "./author-id.js";
 import {
   resolveConfiguredUrl,
   resolveRuntimeConfigBrokerWorkerUrl,
@@ -12,7 +13,7 @@ import {
 const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v1";
 // Coupled to IndexedDbPageStore's durable epoch. Keeping it in the database
 // scope prevents an old worker from opening incompatible root metadata.
-const BROWSER_STORAGE_FORMAT_VERSION = "idbtree-v2";
+const BROWSER_STORAGE_FORMAT_VERSION = "idbtree-v1";
 const inMemoryWasmAssetIds = new WeakMap<object, string>();
 
 /** Resolve the exact script URL that identifies the origin-wide SharedWorker. */
@@ -130,23 +131,112 @@ export function createBrowserWorkerFingerprint(
   });
 }
 
-/** Stable, non-secret namespace for one browser authentication session. */
+/**
+ * Exact, non-secret authentication scope carried by browser worker and
+ * durable-owner metadata.
+ *
+ * This deliberately names the authenticated principal rather than hashing it:
+ * the identifier is already the canonical public `session.user` encoding
+ * (`[issuer, subject]`), and a collision here could give two accounts the same
+ * worker or physical store. Tokens, secrets, claims, expiry and other
+ * credentials are never included. Anonymous callers intentionally share their
+ * app/environment scope; a browser persistent worker never admits a backend,
+ * but `system` keeps this representation total for defensive callers.
+ */
+type BrowserAuthScope =
+  | { kind: "anonymous" }
+  | { kind: "system" }
+  | {
+      kind: "principal";
+      authMode: "external" | "local-first";
+      user: string;
+    };
+
+function browserAuthScope(config: DbConfig): BrowserAuthScope {
+  if (config.adminSecret) return { kind: "system" };
+
+  const session = resolveClientInternalSessionSync({
+    appId: config.appId,
+    jwtToken: config.jwtToken,
+    cookieSession: config.cookieSession,
+    trustedReservedSession: getTrustedReservedSession(config),
+  });
+  if (!session || session.authMode === "anonymous") return { kind: "anonymous" };
+
+  return {
+    kind: "principal",
+    authMode: session.authMode,
+    // Reuse the public/session and row-authorship identity codec. JSON array
+    // encoding preserves exact issuer + subject boundaries and spelling.
+    user: canonicalAuthorSubject(session.issuer, session.user_id),
+  };
+}
+
+/** Stable, non-secret exact namespace for one browser authentication scope. */
 export function createBrowserAuthSessionKey(config: DbConfig): string {
-  // Authentication sessions are scoped to a Jazz app/environment. Two apps
-  // may both be anonymous (or use the same subject string) without sharing a
-  // relay, storage lifecycle, WebSocket, or evaluator. Tabs in the same app
-  // and auth session still resolve to one SharedWorker.
-  const value = `${config.appId}:${config.env ?? "dev"}:${resolveAuthClass(config)}`;
-  let hash = 0x811c9dc5;
-  let output = "";
-  for (let round = 0; round < 4; round += 1) {
-    for (let index = 0; index < value.length; index += 1) {
-      hash ^= value.charCodeAt(index) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    output += (hash >>> 0).toString(16).padStart(8, "0");
+  // Authentication scopes are also app/environment-scoped. Two apps may use
+  // the same external provider subject without sharing a relay lifecycle.
+  return JSON.stringify({
+    version: 1,
+    appId: config.appId,
+    env: config.env ?? "dev",
+    auth: browserAuthScope(config),
+  });
+}
+
+/**
+ * Stable, non-secret owner identity for a physical browser persistence root.
+ * This is intentionally separate from the IDB name (physical location) and
+ * from the foreground replica/node identity. An explicitly supplied name is
+ * therefore still safe: it is permanently bound to one app/environment/auth
+ * scope until the caller explicitly destroys that database.
+ */
+export function createBrowserStorageOwner(config: DbConfig): string {
+  // This is the exact durable value stored under
+  // INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY. Keep it canonical JSON: changing its
+  // shape is a deliberate browser-owner-marker schema migration, not a hash
+  // implementation detail. The marker contains only app/environment and the
+  // auth scope above, never a credential or arbitrary claims.
+  return JSON.stringify({
+    version: 1,
+    appId: config.appId,
+    env: config.env ?? "dev",
+    auth: browserAuthScope(config),
+  });
+}
+
+/**
+ * A persistent browser root is durably bound to its opening principal. Token
+ * refresh for that principal is safe; changing principal in a live runtime is
+ * not. Callers must shut down and reopen (or explicitly reset) instead of
+ * briefly exposing the old root under the new session.
+ */
+export function assertBrowserStorageOwnerUnchanged(current: DbConfig, next: DbConfig): void {
+  if (createBrowserStorageOwner(current) !== createBrowserStorageOwner(next)) {
+    throw new Error(
+      "Cannot change the authenticated user of a live persistent browser Db; shut it down and reopen for the new user, or explicitly reset its storage",
+    );
   }
-  return output;
+}
+
+/**
+ * Derive the physical IndexedDB/SharedWorker namespace from a caller-selected
+ * logical base and its complete, non-secret browser storage scope.
+ *
+ * `driver.dbName` and `config.dbName` are deliberately bases, not physical
+ * roots. This lets a shared device retain caches for Alice and Bob under the
+ * same application-selected base while routing each open back to the right
+ * account. The durable owner marker remains an independent backstop if a
+ * caller or future derivation ever reaches the wrong physical root.
+ */
+export function createBrowserPhysicalDatabaseName(config: DbConfig, baseName: string): string {
+  const scope = JSON.stringify({
+    version: 1,
+    appId: config.appId,
+    env: config.env ?? "dev",
+    auth: browserAuthScope(config),
+  });
+  return `${baseName}::jazz-browser-v1::${encodeURIComponent(scope)}`;
 }
 
 function resolveAuthClass(config: DbConfig): string {

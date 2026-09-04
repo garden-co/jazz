@@ -20,13 +20,15 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::publish_allow_all_permissions;
+use support::{cargo_binary, publish_allow_all_permissions};
 
 const APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
 const ADMIN_SECRET: &str = "admin-secret-for-integration-tests";
 const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
+const JWT_ISSUER: &str = "https://issuer.jazz.test";
+const JWT_AUDIENCE: &str = APP_ID_STR;
 
 async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
     JazzClient::connect_with_native_transport(
@@ -40,6 +42,7 @@ async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> 
 struct JwtClaims {
     sub: String,
     iss: String,
+    aud: String,
     claims: JsonValue,
     exp: u64,
 }
@@ -97,7 +100,7 @@ struct ServerProcess {
 impl ServerProcess {
     async fn start(port: u16, data_dir: &Path, jwks_endpoint: &str) -> Self {
         let bound_port_file = data_dir.join("bound-port");
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-tools"));
+        let mut cmd = Command::new(cargo_binary("jazz-tools"));
         cmd.args([
             "server",
             APP_ID_STR,
@@ -107,6 +110,8 @@ impl ServerProcess {
             data_dir.to_str().expect("data dir path"),
         ])
         .env("JAZZ_JWKS_URL", jwks_endpoint)
+        .env("JAZZ_JWT_ISSUER", JWT_ISSUER)
+        .env("JAZZ_JWT_AUDIENCE", JWT_AUDIENCE)
         .env("JAZZ_BACKEND_SECRET", BACKEND_SECRET)
         .env("JAZZ_ADMIN_SECRET", ADMIN_SECRET)
         .env("JAZZ_BOUND_PORT_FILE", &bound_port_file)
@@ -229,7 +234,8 @@ fn take_pipe_text<T: Read>(pipe: &mut Option<T>) -> String {
 fn make_jwt(sub: &str) -> String {
     let claims = JwtClaims {
         sub: sub.to_string(),
-        iss: "https://issuer.jazz.test".to_owned(),
+        iss: JWT_ISSUER.to_owned(),
+        aud: JWT_AUDIENCE.to_owned(),
         claims: json!({"role": "user"}),
         exp: SystemTime::now()
             .duration_since(UNIX_EPOCH)

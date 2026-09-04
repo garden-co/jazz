@@ -22,8 +22,9 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::protocol::SyncMessage;
 use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_len};
 use jazz::schema::JazzSchema;
+use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::wire::{TransportError, decode_sync_message, encode_sync_message};
-use jazz_storage_sqlite::SqliteStorage;
+use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
 use thiserror::Error;
 
 /// Increment this only for a breaking change to the native command/wire ABI.
@@ -1315,9 +1316,16 @@ impl RelayWorker {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
+        let codec_profile = epoch_1_storage_codec_profile().map_err(RelayError::Storage)?;
         let persistent = block_on(Db::open(DbConfig {
             schema: config.schema.clone(),
-            storage: SqliteStorage::open(config.sqlite_path, &refs).map_err(RelayError::Storage)?,
+            storage: SqliteStorage::open_with_durability_and_codec_profile(
+                config.sqlite_path,
+                &refs,
+                SqliteDurability::WalNoSync,
+                &codec_profile,
+            )
+            .map_err(RelayError::Storage)?,
             identity: config.identity,
             id_source: None,
         }))
@@ -1666,6 +1674,28 @@ mod tests {
             },
             thread_start_counter: None,
         }
+    }
+
+    #[test]
+    fn public_relay_open_rejects_a_planted_groove_only_manifest() {
+        // This is an internal physical-admission receipt. The public relay
+        // opener must not silently adopt a root that was initialized through
+        // SQLite's generic Groove-only convenience API.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let config = config(path.clone(), Some("alice"));
+        let column_families = config.schema.column_families();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        drop(SqliteStorage::open(&path, &refs).expect("plant generic Groove manifest"));
+
+        let registry = NativeRelayRegistry::default();
+        assert!(
+            registry.open(config).is_err(),
+            "the public relay open must reject a manifest that omits Jazz codecs"
+        );
     }
 
     #[test]

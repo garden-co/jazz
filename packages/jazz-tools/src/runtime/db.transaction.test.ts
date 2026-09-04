@@ -309,11 +309,11 @@ describe("Db transactions", () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
-    const openBatchId = tx.openBatchId();
+    const openTransactionId = tx.openTransactionId();
 
     await tx.commit();
 
-    const coreError = `open transaction ${openBatchId} is already committed`;
+    const coreError = `open transaction ${openTransactionId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -328,11 +328,11 @@ describe("Db transactions", () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
-    const openBatchId = tx.openBatchId();
+    const openTransactionId = tx.openTransactionId();
 
     await tx.rollback();
 
-    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
+    const coreError = `open transaction ${openTransactionId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -377,11 +377,11 @@ describe("Db mergeable transactions", () => {
   it("rejects mergeable transaction operations after commit", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
-    const openBatchId = tx.openBatchId();
+    const openTransactionId = tx.openTransactionId();
 
     await tx.commit();
 
-    const coreError = `open transaction ${openBatchId} is already committed`;
+    const coreError = `open transaction ${openTransactionId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
@@ -395,11 +395,11 @@ describe("Db mergeable transactions", () => {
   it("rejects mergeable transaction operations after rollback", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
-    const openBatchId = tx.openBatchId();
+    const openTransactionId = tx.openTransactionId();
 
     await tx.rollback();
 
-    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
+    const coreError = `open transaction ${openTransactionId} has already been completed or was never opened`;
     expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(

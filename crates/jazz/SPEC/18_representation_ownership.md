@@ -24,6 +24,27 @@ Indexed root row deltas + descendant terminal operations
 TypeScript subscription result
 ```
 
+Peer sync enters this pipeline before local execution, never after the remote
+collector:
+
+```text
+authority-maintained authorization and coverage
+        │  safe canonical source closure + residual-program identity
+        ▼
+receiver source/frontier reconciliation  ◀── eligible local pending inputs
+        │
+        ▼
+the same receiver-local LoweredGraph
+        │
+        ▼
+receiver-local terminal operations → application result
+```
+
+There is no authority-terminal arrow into the root delta reducer. An ordered
+terminal operation belongs to the Groove execution that produced it. It may
+cross the local binding ABI after Rust has reduced/indexed it, but it never
+crosses peer sync as result truth (`INV-SYNC-36`).
+
 ## Ownership and boundary
 
 | Stage              | Authoritative owner                                                                                                                                                      | Representation                                                                     | Boundary                                           | Rule that must survive it                                                                                                                                                                |
@@ -46,9 +67,10 @@ TypeScript subscription result
   postcard-encoded `SyncMessage` defined in `protocol.rs`. This is the only
   portable transport-byte contract. Its target subscription representation is
   canonical authored facts, ordered catalogue/lens lineage, and
-  authority-filtered witness/admission facts — never projected app rows or a
-  terminal cache as truth (ch. 8 §8.4.1). Bindings move these bytes but do not
-  treat `SyncMessage` as their application API.
+  authority-filtered witness/admission facts — never projected app rows,
+  collector indices, structural terminal operations, or a terminal cache as
+  truth (ch. 8 §8.4.1). Bindings move these bytes but do not treat
+  `SyncMessage` as their application API.
 - **Binding ABI:** descriptors and packed `Record` row bytes, aligned
   occurrence identities and root indices, plus descendant terminal operations.
   It is deliberately separate from peer wire protocol and may use native host
@@ -56,6 +78,53 @@ TypeScript subscription result
 - **Internal only:** normalized shapes, bindings, lowered graphs, terminal
   schemas, maintained facts, routing fields, and physical carrier choices.
   Their names and layouts are not public compatibility promises.
+
+### Frozen binding byte envelopes
+
+Where a NAPI or WASM host emits a binary subscription payload, it uses the
+shared postcard layout produced by `binding_codec.rs`; TypeScript uses the
+matching production reader. These are exactly one postcard value per binding
+payload: decoders MUST reject trailing bytes rather than treating the input as
+a prefix of a larger carrier (`INV-WIRE-1`). A transport that needs several
+payloads supplies separate byte slices; it does not concatenate them.
+Postcard strings use strict UTF-8 decoding; malformed text is malformed input,
+not a replacement-character-compatible spelling.
+Every binding `u64` uses its shortest base-128 spelling; redundant
+continuations, overlong encodings, and values beyond `u64` are malformed. The
+v1 binding fields are exposed as JavaScript numbers, so their TypeScript reader
+MUST reject a decoded value above `Number.MAX_SAFE_INTEGER` rather than losing
+index or count precision.
+
+The v1 relation snapshot field order is `root_count, rows`; each row batch is
+`table, descriptor, rows`; and each row is `row_id, deleted, raw`. The v1
+subscription delta field order is `added, updated, removed,
+added_occurrence_keys, updated_occurrence_keys, removed_occurrence_keys,
+added_indices, updated_previous_indices, updated_indices, removed_indices`.
+Every occurrence-key and index sidecar is aligned with its corresponding row
+sequence. `removed` entries are `table, row_id`. These positions, postcard
+enum discriminants in nested descriptors, and raw Groove record bytes are
+frozen once emitted: future ABI evolution requires a new explicitly versioned
+envelope, never a reordered field, permissive fallback, or in-place migration.
+
+`binding_codec_golden.json` is the frozen cross-language corpus for this v1
+binding layout. Rust creates the hard-coded semantic cases and exact bytes;
+the TypeScript reader independently decodes them, and the generated NAPI and
+WASM artifacts directly return the Rust-owned corpus in the binding
+compatibility matrix. A change needs this corpus, both binding paths, and the
+SPEC decision reviewed together. Terminal operations remain JSON-native
+metadata rather than an alternative row byte layout.
+
+`wire_frame_artifact_corpus.json` is the companion v1 host-artifact rejection
+receipt. The generated NAPI and WASM artifacts execute **every** exact Hello
+and semantic-message frame from the complete frozen frame manifests, plus the
+frozen structured-error and malformed, unsupported-version, trailing-byte,
+corrupt-compressed, malformed-semantic, unsupported-semantic, and
+trailing-semantic inputs from that corpus. TypeScript supplies the bytes and
+asserts acceptance or rejection through the owning Rust frame, negotiation,
+compression, and semantic-payload decoders. An exact executed-name set makes
+sampling or silently omitting a newly added manifest family fail. This proves
+host-artifact reachability without treating two host bridges as independent
+encoders.
 
 ## Non-negotiable representation rules
 

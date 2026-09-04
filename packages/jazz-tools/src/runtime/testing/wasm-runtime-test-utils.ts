@@ -54,6 +54,15 @@ type JazzWasmPaths = {
 };
 
 function resolveJazzWasmPaths(): JazzWasmPaths | null {
+  const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+  if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+    throw new Error("sealed correctness consumer is missing its admitted WASM package");
+  if (sealedWasmPackage) {
+    const modulePath = resolve(sealedWasmPackage, "jazz_wasm.js");
+    const wasmPath = resolve(sealedWasmPackage, "jazz_wasm_bg.wasm");
+    if (existsSync(modulePath) && existsSync(wasmPath)) return { modulePath, wasmPath };
+    return null;
+  }
   const snapshot = readCorrectnessArtifactSnapshot(
     fileURLToPath(new URL("../../../../..", import.meta.url)),
   );
@@ -86,7 +95,7 @@ export function hasJazzWasmBuild(): boolean {
   return resolveJazzWasmPaths() !== null;
 }
 
-function loadWasmModule(): Promise<any> {
+export function loadWasmModuleForTest(): Promise<any> {
   if (!wasmModulePromise) {
     wasmModulePromise = (async () => {
       const paths = resolveJazzWasmPaths();
@@ -113,7 +122,7 @@ export async function createWasmRuntime(
     peerId?: string;
   },
 ): Promise<TestRuntime> {
-  const wasmModule = await loadWasmModule();
+  const wasmModule = await loadWasmModuleForTest();
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const peerId = opts?.peerId ?? "default";

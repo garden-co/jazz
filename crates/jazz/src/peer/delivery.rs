@@ -13,15 +13,48 @@ use crate::tools::OutputOccurrenceId;
 pub(super) fn maintained_view_update_is_empty(
     result_member_adds: &[ResultMemberEntry],
     result_member_removes: &[ResultMemberEntry],
-    terminal_operations: &[groove::ivm::TerminalOperation],
     program_fact_adds: &[ProgramFactEntry],
     program_fact_removes: &[ProgramFactEntry],
 ) -> bool {
     result_member_adds.is_empty()
         && result_member_removes.is_empty()
-        && terminal_operations.is_empty()
         && program_fact_adds.is_empty()
         && program_fact_removes.is_empty()
+}
+
+/// Produce the one unambiguous unordered transition between two exact sets.
+/// Runtime terminals may have crossed intermediate states while a publisher
+/// drained; those intermediate operations are not peer-wire operations.
+pub(super) fn canonical_set_delta<T: Ord + Clone>(
+    predecessor: &BTreeSet<T>,
+    successor: &BTreeSet<T>,
+) -> (Vec<T>, Vec<T>) {
+    (
+        successor.difference(predecessor).cloned().collect(),
+        predecessor.difference(successor).cloned().collect(),
+    )
+}
+
+#[cfg(test)]
+mod canonical_set_delta_tests {
+    use std::collections::BTreeSet;
+
+    use super::canonical_set_delta;
+
+    #[test]
+    fn emits_only_the_exact_predecessor_to_successor_transition() {
+        let empty = BTreeSet::<u8>::new();
+        let present = BTreeSet::from([7]);
+
+        // absent → absent
+        assert_eq!(canonical_set_delta(&empty, &empty), (vec![], vec![]));
+        // present → present
+        assert_eq!(canonical_set_delta(&present, &present), (vec![], vec![]));
+        // absent → present
+        assert_eq!(canonical_set_delta(&empty, &present), (vec![7], vec![]));
+        // present → absent
+        assert_eq!(canonical_set_delta(&present, &empty), (vec![], vec![7]));
+    }
 }
 
 fn member_row_key(member: &ResultMemberEntry) -> Option<RowKey> {
@@ -83,22 +116,12 @@ pub(super) fn replacement_removals(
 
 pub(super) fn filter_program_facts_for_result_table(
     facts: Vec<ProgramFactEntry>,
-    result_table_filter: Option<&str>,
-    output_tables: &BTreeMap<String, TableSchema>,
+    _result_table_filter: Option<&str>,
+    _output_tables: &BTreeMap<String, TableSchema>,
 ) -> Vec<ProgramFactEntry> {
     facts
         .into_iter()
-        .filter(|fact| match fact {
-            ProgramFactEntry::ResultPayload(payload) => {
-                let Some(table_name) = payload.member.table_name() else {
-                    return false;
-                };
-                matches!(payload.member, ResultMemberEntry::Synthetic { .. })
-                    || (result_table_filter.is_none_or(|table| table_name == table)
-                        && output_tables.contains_key(table_name))
-            }
-            _ => true,
-        })
+        .filter(ProgramFactEntry::is_peer_source_closure_fact)
         .collect()
 }
 
@@ -186,13 +209,8 @@ pub(super) fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> boo
 
 pub(super) fn view_update_singleton_bundles(
     version_carriers: &[VersionCarrier],
-    version_bundles: &[VersionBundle],
 ) -> Vec<VersionBundle> {
-    let mut bundles = version_bundles.to_vec();
-    if let Ok(mut expanded) = expand_version_carriers(version_carriers) {
-        bundles.append(&mut expanded);
-    }
-    bundles
+    expand_version_carriers(version_carriers).unwrap_or_default()
 }
 
 pub(super) fn storage_read_metrics_buckets(metrics: &StorageReadMetrics) -> String {

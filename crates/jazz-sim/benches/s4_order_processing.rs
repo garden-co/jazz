@@ -13,6 +13,7 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
+use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::GlobalTime;
 use jazz::tools::public_schema::{
@@ -20,8 +21,12 @@ use jazz::tools::public_schema::{
 };
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
-use jazz_sim::fixture::{apply_sync_message_settled, commit_mergeable_unit_settled};
+use jazz_sim::fixture::{
+    DirectDbQueryServer, apply_sync_message_settled, commit_mergeable_unit_settled,
+    register_query_receiver,
+};
 use jazz_sim::public_schema_fixture::compile_public_schema;
+use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields, profiling};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -510,6 +515,9 @@ struct ClientHarness {
     edge: NodeState<RocksDbStorage>,
     edge_peer: PeerState,
     client_peer: PeerState,
+    query_server: DirectDbQueryServer,
+    attachments: Vec<jazz::db::QueryAttachment>,
+    hydrated: bool,
     hydration_bytes: u64,
     hydration_rows: usize,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
@@ -1138,7 +1146,13 @@ fn open_clients(
                 _edge_dir: edge_dir,
                 edge,
                 edge_peer: PeerState::new(),
-                client_peer: PeerState::new(),
+                client_peer: PeerState::client_link(AuthorSubject::for_test_bytes([byte; 16])),
+                query_server: DirectDbQueryServer::new(jazz::protocol::DelegatedSessionBinding {
+                    identity: AuthorSubject::for_test_bytes([byte; 16]),
+                    claims: BTreeMap::new(),
+                }),
+                attachments: Vec::new(),
+                hydrated: false,
                 hydration_bytes: 0,
                 hydration_rows: 0,
                 outbound,
@@ -1149,6 +1163,12 @@ fn open_clients(
             client
                 .client_peer
                 .set_ship_complete_exclusive_payloads(true);
+            for table in TABLES {
+                let prepared = client.db.prepare_query(&Query::from(table)).unwrap();
+                client
+                    .attachments
+                    .push(client.db.attach_query(&prepared).unwrap());
+            }
             refresh_client(core, &mut client);
             client
         })
@@ -1163,18 +1183,58 @@ fn refresh_clients(core: &mut NodeState<RocksDbStorage>, clients: &mut [ClientHa
 
 fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarness) {
     for table in TABLES {
-        let update = jazz::db::block_on(client.edge_peer.current_rows_update(core, table)).unwrap();
+        let shape = Query::from(table).validate(&schema()).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        register_query_receiver(
+            &mut client.edge,
+            &shape,
+            &binding,
+            Default::default(),
+            jazz::protocol::DelegatedSessionBinding {
+                identity: AuthorSubject::SYSTEM,
+                claims: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        client.edge_peer.set_subscription_policy_binding(
+            jazz::protocol::SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: Default::default(),
+            },
+            (AuthorSubject::SYSTEM, BTreeMap::new()),
+        );
+        let update = if client.hydrated {
+            jazz::db::block_on(client.edge_peer.query_update(core, &shape, &binding)).unwrap()
+        } else {
+            jazz::db::block_on(client.edge_peer.rehydrate_query(core, &shape, &binding)).unwrap()
+        };
         client.hydration_bytes += view_update_bytes(&update);
         client.hydration_rows += result_row_count(&update);
         apply_sync_message_settled(&mut client.edge, update).unwrap();
     }
-    for table in TABLES {
-        let update = jazz::db::block_on(
-            client
-                .client_peer
-                .current_rows_update(&mut client.edge, table),
-        )
-        .unwrap();
+    client.hydrated = true;
+    jazz::db::block_on(client.db.tick()).unwrap();
+    let queued = client.outbound.borrow_mut().drain(..).collect::<Vec<_>>();
+    for message in queued {
+        if !client
+            .query_server
+            .handle(
+                &mut client.edge,
+                &mut client.client_peer,
+                &schema(),
+                &message,
+            )
+            .unwrap()
+        {
+            client.outbound.borrow_mut().push_back(message);
+        }
+    }
+    for update in client
+        .query_server
+        .updates(&mut client.edge, &mut client.client_peer)
+        .unwrap()
+    {
         client.inbound.borrow_mut().push_back(update);
     }
     jazz::db::block_on(client.db.tick()).unwrap();
@@ -1869,7 +1929,7 @@ fn emit_summary(
             );
             fields.insert(
                 "measurement_excludes".to_owned(),
-                json!("per-accepted-commit peer current_rows_update fan-out"),
+                json!("per-accepted-commit ordinary query-update fan-out"),
             );
         }
         RunMode::ThroughputPropagationInclusive => {
@@ -1883,7 +1943,7 @@ fn emit_summary(
             );
             fields.insert(
                 "measurement_includes".to_owned(),
-                json!("engine commit/accept path plus per-accepted-commit peer current_rows_update fan-out"),
+                json!("engine commit/accept path plus per-accepted-commit ordinary query-update fan-out"),
             );
             fields.insert("measurement_excludes".to_owned(), JsonValue::Null);
         }
@@ -2154,15 +2214,14 @@ fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_bundles,
+            version_carriers,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
         }) => {
-            version_bundles
-                .iter()
-                .flat_map(|bundle| bundle.versions.iter())
+            version_bundle_refs(version_carriers)
+                .flat_map(|bundle| bundle.versions)
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
@@ -2175,10 +2234,22 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 fn result_row_count(update: &SyncMessage) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            result_member_adds,
-            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
             ..
-        }) => result_member_adds.len() + result_member_removes.len(),
+        }) => program_fact_adds
+            .iter()
+            .chain(program_fact_removes)
+            .filter_map(|fact| match fact {
+                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
+                {
+                    Some((&input.version_table, input.source_row, input.version.tx))
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
         _ => 0,
     }
 }

@@ -220,6 +220,40 @@ test("native compatibility identity is stable across committed generated expecta
     rmSync(root, { recursive: true, force: true });
   }));
 
+test("native fingerprints include authoritative artifact tools but not receipt or test outputs", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    const artifacts = join(root, "dev/artifacts");
+    mkdirSync(artifacts, { recursive: true });
+    for (const file of [
+      "build.mjs",
+      "provenance.mjs",
+      "stage-napi-loader.mjs",
+      "stage-native-fingerprints.mjs",
+      "stage-napi-manifests.mjs",
+      "provenance.test.mjs",
+      "correctness-artifact-producer.mjs",
+    ])
+      writeFileSync(join(artifacts, file), `// ${file}\n`);
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+
+    const before = nativeArtifactFingerprint(root, "napi", "release");
+    writeFileSync(join(artifacts, "provenance.test.mjs"), "// changed test output\n");
+    writeFileSync(
+      join(artifacts, "correctness-artifact-producer.mjs"),
+      "// changed producer receipt helper\n",
+    );
+    assert.equal(nativeArtifactFingerprint(root, "napi", "release"), before);
+
+    writeFileSync(join(artifacts, "build.mjs"), "// changed authoritative builder\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), before);
+    rmSync(root, { recursive: true, force: true });
+  }));
+
 test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () => {
   const root = fixture();
   writeManifest(root, "napi", "release");
@@ -242,12 +276,22 @@ test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () 
   assert.equal(expectedManifest(root, "napi", "release").packageInputs, before);
   assert.equal(verifyManifest(root, "napi", "release"), null);
 
+  // napi-rs writes this ignored target manifest next to the binding. It is a
+  // post-build receipt, not a source input for the artifact it describes.
+  writeFileSync(
+    join(root, "crates/jazz-napi/jazz-napi.linux-x64-gnu.manifest.json"),
+    '{"generated":true}\n',
+  );
+  assert.equal(expectedManifest(root, "napi", "release").packageInputs, before);
+  assert.equal(verifyManifest(root, "napi", "release"), null);
+
   // Near misses are ordinary inputs: accepting any made-up binding name,
   // suffix, or appended extension would let generated source evade freshness.
   for (const path of [
     "jazz-napi.linux-x64-gnu.node.staged-123-456.rs",
     "jazz-napi.attacker.node.staged-123-456",
     "jazz-napi.linux-x64-gnu.node.staged-not-a-wrapper",
+    "jazz-napi.attacker.manifest.json",
   ]) {
     const file = join(root, "crates/jazz-napi", path);
     writeFileSync(file, "must remain an input");
@@ -259,6 +303,29 @@ test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () 
   writeFileSync(join(root, "crates/jazz-napi/src/lib.rs"), "// changed native source\n");
   assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/);
 });
+
+test("NAPI fingerprint ignores an ignored nested generated index.js", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    writeFileSync(join(root, "crates/jazz-napi/.gitignore"), "index.js\n");
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+
+    const before = nativeArtifactFingerprint(root, "napi", "release");
+    const nestedOutput = join(root, "crates/jazz-napi/crates/jazz-napi/index.js");
+    mkdirSync(join(root, "crates/jazz-napi/crates/jazz-napi"), { recursive: true });
+    writeFileSync(nestedOutput, "// stale nested generated binding\n");
+
+    assert.equal(
+      nativeArtifactFingerprint(root, "napi", "release"),
+      before,
+      "ignored generated output below a workspace package must not alter the ABI fingerprint",
+    );
+    rmSync(root, { recursive: true, force: true });
+  }));
 
 test("NAPI provenance covers every reachable local Cargo dependency", () => {
   const root = fixture();

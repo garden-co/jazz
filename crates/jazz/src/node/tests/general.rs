@@ -306,6 +306,127 @@ fn default_large_value_staging_policy_is_finite() {
 }
 
 #[test]
+fn malformed_version_receipts_fail_closed_at_direct_semantic_ingress() {
+    let (_writer_dir, mut writer) = open_node();
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0x7d), 10).cells(title_cells("malformed")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, mut versions } = unit else {
+        panic!("commit unit expected");
+    };
+    let valid = versions.pop().unwrap();
+    let mut raw = valid.record().raw().to_vec();
+    raw.push(0xa5); // planted: the central guard must reject unconsumed raw bytes
+    let malformed = VersionRecord::new(
+        valid.table(),
+        valid.schema_version(),
+        OwnedRecord::new(raw, *valid.record().descriptor()),
+    );
+
+    let assert_no_panic = |result: std::thread::Result<Result<(), Error>>| {
+        assert!(result.is_ok(), "direct semantic ingress must not panic");
+        assert!(result.unwrap().is_err());
+    };
+
+    let (_apply_dir, mut apply) = open_node();
+    let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = apply.apply_sync_message_settled(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: vec![malformed.clone()],
+        })?;
+        if matches!(
+            outcome.as_slice(),
+            [SyncMessage::FateUpdate {
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+                ..
+            }]
+        ) {
+            Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
+        } else {
+            Ok(())
+        }
+    }));
+    assert_no_panic(received);
+
+    let (_authority_dir, mut authority) = open_node();
+    let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = authority
+            .ingest_commit_unit(tx.clone(), vec![malformed.clone()], 10)
+            .resolve()?;
+        if matches!(
+            outcome.value.as_slice(),
+            [SyncMessage::FateUpdate {
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+                ..
+            }]
+        ) {
+            Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
+        } else {
+            Ok(())
+        }
+    }));
+    assert_no_panic(received);
+
+    for edge_identity in [None, Some(AuthorSubject::SYSTEM)] {
+        let (_edge_dir, mut edge) = open_node();
+        let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let outcome = if let Some(identity) = edge_identity {
+                edge.ingest_edge_authority_mergeable_commit_unit_with_identity(
+                    tx.clone(),
+                    vec![malformed.clone()],
+                    10,
+                    identity,
+                )
+                .resolve()?
+            } else {
+                edge.ingest_edge_authority_mergeable_commit_unit(
+                    tx.clone(),
+                    vec![malformed.clone()],
+                    10,
+                )
+                .resolve()?
+            };
+            if matches!(
+                outcome.value.as_slice(),
+                [SyncMessage::FateUpdate {
+                    fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+                    ..
+                }]
+            ) {
+                Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
+            } else {
+                Ok(())
+            }
+        }));
+        assert_no_panic(received);
+    }
+
+    let (_relay_dir, mut relay) = open_node();
+    assert_no_panic(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || {
+            relay
+                .ingest_relay_commit_unit(tx.clone(), vec![malformed.clone()])
+                .resolve()
+        },
+    )));
+
+    let (_exclusive_dir, mut exclusive) = open_node();
+    let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = exclusive
+            .finalize_local_exclusive_commit(tx.clone(), vec![malformed.clone()])
+            .resolve()?;
+        if matches!(outcome.value, Fate::Rejected(RejectionReason::MalformedCommit(_))) {
+            Err(Error::UnsupportedCommitUnit("expected malformed rejection"))
+        } else {
+            Ok(())
+        }
+    }));
+    assert_no_panic(received);
+}
+
+#[test]
 fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
     let schema = two_column_schema();
     let (_temp_dir, mut receiver) = open_node_with_schema(node(0x82), schema);
@@ -328,6 +449,7 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
                 identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::Session,
                 edge_authority: false,
+                admitted_write_authorization: false,
             }),
         )
         .resolve()
@@ -435,6 +557,7 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     assert!(matches!(
         missing
@@ -513,6 +636,7 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     let mut root = prepared
         .staged_chunks
@@ -573,6 +697,7 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     let start = receiver
         .apply_sync_message_with_ingest_context(
@@ -696,6 +821,7 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     let _ = receiver
         .apply_sync_message_with_ingest_context(
@@ -743,6 +869,7 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
         identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
+        admitted_write_authorization: false,
     });
     let started = receiver
         .apply_sync_message_with_ingest_context(
@@ -1514,6 +1641,7 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
     );
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
+    register_whole_table_receiver(&mut client, "todos");
     client.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         client
@@ -1708,6 +1836,35 @@ fn remote_history_rejects_noncanonical_parent_order_before_parking() {
     let later = TxId::new(TxTime::from(20), node(0x01));
     let earlier = TxId::new(TxTime::from(10), node(0x01));
 
+    // `VersionRecord::from_cells` is an authoring helper and deliberately
+    // canonicalizes its parent set. A remote peer can instead construct the
+    // physical wire record directly, so make the malformed spelling below
+    // that guarded helper and prove authority ingress rejects it before it
+    // can become a parked missing-parent edge.
+    let canonical = version_record(
+        row(0x76),
+        vec![later, earlier],
+        title_cells("must reject before parking"),
+        None,
+    );
+    let mut values = (0..canonical.record().descriptor().fields().len())
+        .map(|index| canonical.record().get_idx(index).unwrap())
+        .collect::<Vec<_>>();
+    values[1] = Value::Array(
+        [later, earlier]
+            .into_iter()
+            .map(|parent| Value::Tuple(vec![Value::U64(parent.time.0), Value::Uuid(parent.node.0)]))
+            .collect(),
+    );
+    let raw = canonical.record().descriptor().create(&values).unwrap();
+    let malformed = VersionRecord::new(
+        canonical.table(),
+        canonical.schema_version(),
+        OwnedRecord::new(raw, *canonical.record().descriptor()),
+    );
+    assert!(canonical.validate_receipt().is_ok());
+    assert!(malformed.validate_receipt().is_err());
+
     core.ingest_commit_unit_settled(
         Transaction {
             tx_id,
@@ -1722,21 +1879,18 @@ fn remote_history_rejects_noncanonical_parent_order_before_parking() {
             user_metadata_json: None,
             contribution_merge: None,
         },
-        vec![version_record(
-            row(0x76),
-            vec![later, earlier],
-            title_cells("must reject before parking"),
-            None,
-        )],
+        vec![malformed],
         u64::MAX - SKEW_TOLERANCE_MS,
     )
     .unwrap();
 
+    let fate = core.transaction_record(tx_id).unwrap().fate;
     assert!(matches!(
-        core.transaction_record(tx_id).unwrap().fate,
+        fate,
         Fate::Rejected(RejectionReason::MalformedCommit(ref detail))
-            if detail == "row version parents must be sorted and unique"
+            if detail == "malformed version receipt"
     ));
+    assert_eq!(core.sync_metrics().parked_orphans, 0);
 }
 
 #[test]
@@ -2272,4 +2426,64 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
         .unwrap()
         .is_empty());
     assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
+}
+/// Keeps the active query claim scope opaque and deterministic, and restores
+/// the prior node state when a future holding the scope is cancelled.
+///
+/// ```text
+/// session A scope ──poll pending──► cancel ──► no active scope
+/// session B scope ───────────────────────────► distinct opaque key
+/// ```
+#[test]
+fn active_session_claim_scope_is_deterministic_and_cancellation_safe() {
+    let (_dir, mut node) = open_node();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let admin = BTreeMap::from([("admin".to_owned(), Value::Bool(true))]);
+    let denied = BTreeMap::from([("admin".to_owned(), Value::Bool(false))]);
+
+    let first = {
+        let scope = node.scoped_active_session_claims(alice, admin.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("active scope has an opaque key")
+    };
+    let repeat = {
+        let scope = node.scoped_active_session_claims(alice, admin.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("same scope has an opaque key")
+    };
+    let different_claims = {
+        let scope = node.scoped_active_session_claims(alice, denied.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("different claims have an opaque key")
+    };
+    let different_identity = {
+        let scope = node.scoped_active_session_claims(bob, admin.clone());
+        scope
+            .active_session_claim_scope_key(bob)
+            .expect("different identity has an opaque key")
+    };
+    assert_eq!(first, repeat, "scope identities must be deterministic");
+    assert_ne!(first, different_claims, "claims must partition scope keys");
+    assert_ne!(first, different_identity, "identity must partition scope keys");
+    assert!(node.active_session_claim_scope_key(alice).is_none());
+
+    let mut cancelled = Box::pin(async {
+        let _scope = node.scoped_active_session_claims(alice, admin);
+        std::future::pending::<()>().await;
+    });
+    let waker = futures::task::noop_waker();
+    let mut context = std::task::Context::from_waker(&waker);
+    assert!(matches!(
+        std::future::Future::poll(cancelled.as_mut(), &mut context),
+        std::task::Poll::Pending
+    ));
+    drop(cancelled);
+    assert!(
+        node.active_session_claim_scope_key(alice).is_none(),
+        "cancelling a scoped query must restore the prior claim context"
+    );
 }

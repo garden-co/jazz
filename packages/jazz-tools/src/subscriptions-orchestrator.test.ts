@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "./runtime/context.js";
-import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
+import type {
+  DbDeltaSubscriptionCallbacks,
+  QueryBuilder,
+  QueryOptions,
+  SubscriptionHandle,
+} from "./runtime/db.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
   SubscriptionsOrchestrator,
@@ -15,11 +20,12 @@ type Todo = {
 };
 
 type SubscribeCall = {
-  callback: (delta: SubscriptionDelta<any>) => void;
+  onDelta: (delta: SubscriptionDelta<any>) => void;
+  onError?: (error: Error) => void;
   query: QueryBuilder<any>;
   options?: QueryOptions;
   session?: Session;
-  unsubscribe: ReturnType<typeof vi.fn>;
+  unsubscribe: SubscriptionHandle;
 };
 
 type UnitHarness = {
@@ -29,8 +35,12 @@ type UnitHarness = {
     entry: CacheEntryHandle<Todo>;
   };
   calls: SubscribeCall[];
+  all: ReturnType<typeof vi.fn>;
   emit: (index: number, delta: SubscriptionDelta<Todo>) => void;
+  emitError: (index: number, error: Error) => void;
   setThrowOnSubscribe: (error: Error | null) => void;
+  setNextReadiness: (readiness: Promise<void> | null) => void;
+  setErrorOnSubscribe: (error: Error | null) => void;
 };
 
 function makeTodo(id: string, title = `todo-${id}`): Todo {
@@ -67,33 +77,46 @@ function createUnitHarness(
   initialSession?: Session | null,
 ): UnitHarness {
   const calls: SubscribeCall[] = [];
+  const all = vi.fn(async () => []);
   let throwOnSubscribe: Error | null = null;
+  let nextReadiness: Promise<void> | null = null;
+  let errorOnSubscribe: Error | null = null;
 
   const db: {
+    all: typeof all;
     subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
-      callback: (delta: SubscriptionDelta<T>) => void,
+      callbacks: DbDeltaSubscriptionCallbacks<T>,
       options?: QueryOptions,
       session?: Session,
-    ): () => void;
+    ): SubscriptionHandle;
   } = {
+    all,
     subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
-      callback: (delta: SubscriptionDelta<T>) => void,
+      callbacks: DbDeltaSubscriptionCallbacks<T>,
       options?: QueryOptions,
       session?: Session,
-    ): () => void {
+    ): SubscriptionHandle {
       if (throwOnSubscribe) {
         throw throwOnSubscribe;
       }
-      const unsubscribe = vi.fn();
+      const unsubscribe = vi.fn() as SubscriptionHandle;
+      if (nextReadiness) {
+        Object.defineProperty(unsubscribe, "ready", { value: nextReadiness });
+        nextReadiness = null;
+      }
       calls.push({
-        callback: callback as (delta: SubscriptionDelta<any>) => void,
+        onDelta: callbacks.onDelta as (delta: SubscriptionDelta<any>) => void,
+        onError: callbacks.onError,
         query: query as QueryBuilder<any>,
         options,
         session,
         unsubscribe,
       });
+      if (errorOnSubscribe) {
+        callbacks.onError?.(errorOnSubscribe);
+      }
       return unsubscribe;
     },
   };
@@ -108,15 +131,29 @@ function createUnitHarness(
       return { key, entry };
     },
     calls,
+    all,
     emit(index, delta) {
       const call = calls[index];
       if (!call) {
         throw new Error(`No subscription call at index ${index}`);
       }
-      (call.callback as (payload: SubscriptionDelta<Todo>) => void)(delta);
+      (call.onDelta as (payload: SubscriptionDelta<Todo>) => void)(delta);
+    },
+    emitError(index, error) {
+      const call = calls[index];
+      if (!call) {
+        throw new Error(`No subscription call at index ${index}`);
+      }
+      call.onError?.(error);
     },
     setThrowOnSubscribe(error) {
       throwOnSubscribe = error;
+    },
+    setNextReadiness(readiness) {
+      nextReadiness = readiness;
+    },
+    setErrorOnSubscribe(error) {
+      errorOnSubscribe = error;
     },
   };
 }
@@ -191,7 +228,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     await expect(deferred).rejects.toBe(reason);
   });
 
-  it("SO-U07 makeQueryKey includes appId, normalized options, and query payload", async () => {
+  it("SO-U07 makeQueryKey includes appId, public options, and query payload", async () => {
     const harness = createUnitHarness("app-so-u07");
     const query = makeQuery({
       table: "todos",
@@ -199,16 +236,10 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     });
 
     try {
-      const key = harness.manager.makeQueryKey(query, {
-        tier: "edge",
-        localUpdates: "deferred",
-        propagation: "local-only",
-      });
+      const key = harness.manager.makeQueryKey(query, { tier: "edge" });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
           tier: "edge",
-          localUpdates: "deferred",
-          propagation: "local-only",
         })}:${query._build()}`,
       );
     } finally {
@@ -216,18 +247,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U07c makeQueryKey changes when localUpdates or propagation changes", async () => {
+  it("SO-U07c makeQueryKey changes when the public read tier changes", async () => {
     const harness = createUnitHarness("app-so-u07c");
     const query = makeQuery();
 
     try {
       const defaultKey = harness.manager.makeQueryKey(query);
-      const deferredKey = harness.manager.makeQueryKey(query, { localUpdates: "deferred" });
-      const localOnlyKey = harness.manager.makeQueryKey(query, { propagation: "local-only" });
+      const remoteKey = harness.manager.makeQueryKey(query, { tier: "remote" });
+      const localFirstKey = harness.manager.makeQueryKey(query, { tier: "local-first" });
 
-      expect(deferredKey).not.toBe(defaultKey);
-      expect(localOnlyKey).not.toBe(defaultKey);
-      expect(localOnlyKey).not.toBe(deferredKey);
+      expect(remoteKey).not.toBe(defaultKey);
+      expect(localFirstKey).not.toBe(defaultKey);
+      expect(localFirstKey).not.toBe(remoteKey);
     } finally {
       await harness.manager.shutdown();
     }
@@ -260,13 +291,11 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U09b getCacheEntry forwards full QueryOptions to the delta source", async () => {
+  it("SO-U09b getCacheEntry forwards public QueryOptions to the delta source", async () => {
     const harness = createUnitHarness();
     try {
       const options = {
-        tier: "global",
-        localUpdates: "deferred",
-        propagation: "local-only",
+        tier: "remote",
       } satisfies QueryOptions;
       const key = harness.manager.makeQueryKey(makeQuery(), options);
 
@@ -291,6 +320,27 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(entry.state).toEqual({
         status: "fulfilled",
         data: [makeTodo("1")],
+        error: null,
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("accepts an empty opening without a supplemental snapshot read", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      expect(entry.status).toBe("pending");
+      harness.emit(0, makeDelta([]));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(harness.all).not.toHaveBeenCalled();
+      expect(entry.state).toEqual({ status: "fulfilled", data: [], error: null });
+      harness.emit(0, makeDelta([makeTodo("new")]));
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: [makeTodo("new")],
         error: null,
       });
     } finally {
@@ -388,6 +438,140 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         status: "rejected",
         data: undefined,
         error: setupError,
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U14a asynchronous subscription admission failure marks entry rejected", async () => {
+    const harness = createUnitHarness();
+    const admissionError = new Error("browser storage open failed");
+    harness.setNextReadiness(Promise.reject(admissionError));
+
+    try {
+      const { entry } = harness.makeEntry();
+      const onError = vi.fn();
+      entry.subscribe({ onError });
+
+      await expect(entry.promise).rejects.toBe(admissionError);
+      expect(entry.state).toEqual({
+        status: "rejected",
+        data: undefined,
+        error: admissionError,
+      });
+      expect(onError).toHaveBeenCalledWith(admissionError);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U14b preserves a synchronous Db opening failure as the entry outcome", async () => {
+    const harness = createUnitHarness();
+    const openingError = new Error("native opening failed");
+    harness.setErrorOnSubscribe(openingError);
+
+    try {
+      const { entry } = harness.makeEntry();
+      const onError = vi.fn();
+      const onDelta = vi.fn();
+      entry.subscribe({ onError, onDelta });
+
+      expect(entry.state).toEqual({
+        status: "rejected",
+        data: undefined,
+        error: openingError,
+      });
+      expect(onError).toHaveBeenCalledOnce();
+      expect(onError).toHaveBeenCalledWith(openingError);
+      await expect(entry.promise).rejects.toBe(openingError);
+
+      harness.emit(0, makeDelta([makeTodo("late", "late opening delta")]));
+      harness.emitError(0, new Error("late opening error"));
+      expect(onDelta).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledOnce();
+      expect(entry.error).toBe(openingError);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U14c preserves a deferred-start failure as the pending generation outcome", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const onError = vi.fn();
+      entry.subscribe({ onError });
+      expect(entry.status).toBe("pending");
+
+      const readinessError = new Error("deferred subscription readiness failed");
+      harness.emitError(0, readinessError);
+
+      expect(entry.state).toEqual({
+        status: "rejected",
+        data: undefined,
+        error: readinessError,
+      });
+      expect(onError).toHaveBeenCalledOnce();
+      await expect(entry.promise).rejects.toBe(readinessError);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U14d keeps the first terminal error when onError races readiness rejection", async () => {
+    const harness = createUnitHarness();
+    let rejectReadiness!: (error: Error) => void;
+    const readiness = new Promise<void>((_resolve, reject) => {
+      rejectReadiness = reject;
+    });
+    harness.setNextReadiness(readiness);
+    try {
+      const { entry } = harness.makeEntry();
+      const errors: Error[] = [];
+      entry.subscribe({ onError: (error) => errors.push(error as Error) });
+
+      const streamError = new Error("stream failed during admission");
+      harness.emitError(0, streamError);
+      rejectReadiness(new Error("admission rejected after stream failure"));
+      await Promise.resolve();
+
+      expect(errors).toEqual([streamError]);
+      expect(entry.error).toBe(streamError);
+      await expect(entry.promise).rejects.toBe(streamError);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U15 replacement failure rejects the fulfilled entry and remains terminal", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const onError = vi.fn();
+      const onDelta = vi.fn();
+      entry.subscribe({ onError, onDelta });
+      harness.emit(0, makeDelta([makeTodo("1")]));
+
+      const streamError = new Error("subscription stream failed");
+      harness.emitError(0, streamError);
+
+      expect(onError).toHaveBeenCalledOnce();
+      expect(onError).toHaveBeenCalledWith(streamError);
+      expect(entry.state).toEqual({
+        status: "rejected",
+        data: undefined,
+        error: streamError,
+      });
+
+      harness.emit(0, makeDelta([makeTodo("2", "must stay terminal")]));
+      harness.emitError(0, new Error("late duplicate stream failure"));
+      expect(onDelta).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledOnce();
+      expect(entry.state).toEqual({
+        status: "rejected",
+        data: undefined,
+        error: streamError,
       });
     } finally {
       await harness.manager.shutdown();
@@ -677,7 +861,8 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       const { entry } = harness.makeEntry();
       const onfulfilled = vi.fn();
       const onReset = vi.fn();
-      entry.subscribe({ onfulfilled, onReset });
+      const onError = vi.fn();
+      entry.subscribe({ onfulfilled, onReset, onError });
 
       harness.emit(0, makeDelta([makeTodo("1", "from-A")]));
       expect(entry.status).toBe("fulfilled");
@@ -688,6 +873,13 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(entry.status).toBe("pending");
       expect(onReset).toHaveBeenCalledTimes(1);
       expect(harness.calls).toHaveLength(2);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+
+      harness.emit(0, makeDelta([makeTodo("retired", "retired session")]));
+      harness.emitError(0, new Error("retired session failed late"));
+      expect(entry.status).toBe("pending");
+      expect(onfulfilled).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
 
       harness.emit(1, makeDelta([makeTodo("2", "from-B")]));
       expect(entry.status).toBe("fulfilled");

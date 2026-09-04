@@ -32,7 +32,7 @@ use thiserror::Error;
 pub use idb::IdbStorage;
 pub use manifest::{
     AdapterFormat, ManifestOpenReceipt, MigrationJournal, MigrationRegistry, STORAGE_EPOCH_1,
-    StorageEpochManifest, StorageMigration,
+    StorageCodecProfile, StorageEpochManifest, StorageMigration,
 };
 pub use memory::MemoryStorage;
 #[cfg(any(test, feature = "test"))]
@@ -42,6 +42,16 @@ pub type ColumnFamilyName = str;
 pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
+
+/// Return the smallest unsigned-lexicographic key strictly after every key
+/// beginning with `prefix`.
+///
+/// `[0x12, 0xff]` therefore has successor `[0x13]`. A prefix consisting only
+/// of `0xff` has no finite successor; scans must retain their prefix predicate
+/// while traversing to the end of the column family.
+pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+    key_codec::increment_bytes(prefix)
+}
 
 /// Maximum UTF-8 byte length of an application-owned storage name.
 ///
@@ -311,6 +321,15 @@ pub type ScanVisitor<'visitor> =
 /// reflected by those resident reads. A backend may evict retained data; after
 /// eviction, a later read may become pending again.
 pub trait OrderedKvStorage {
+    /// Whether a read that yields once may be immediately re-polled by the
+    /// caller without turning an external storage wait into a synchronous
+    /// drain. Backends return `true` only for executor-local storage whose
+    /// reads cannot require an external readiness event; the conservative
+    /// default keeps self-woken cold backends pending for their runtime owner.
+    fn permits_eager_read_retry(&self) -> bool {
+        false
+    }
+
     /// Begin an encoded storage transaction over this backend.
     ///
     /// The transaction buffers already-encoded key/value writes and presents
@@ -474,6 +493,10 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.as_ref().permits_eager_read_retry()
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.as_ref().scan(request)
     }
@@ -564,6 +587,10 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        S::permits_eager_read_retry(*self)
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         S::scan(*self, request)
     }
@@ -641,27 +668,12 @@ const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v1";
 pub enum StorageLayout {
     #[default]
     Identity,
-    JazzClassV1 {
-        mapped_logical_cfs: BTreeSet<String>,
-    },
+    JazzClassV1,
 }
 
 impl StorageLayout {
     pub fn jazz_class_v1() -> Self {
-        Self::JazzClassV1 {
-            mapped_logical_cfs: BTreeSet::new(),
-        }
-    }
-
-    pub fn jazz_class_v1_for<'a>(
-        logical_column_families: impl IntoIterator<Item = &'a str>,
-    ) -> Self {
-        let mapped_logical_cfs = logical_column_families
-            .into_iter()
-            .filter(|name| jazz_physical_class(name).is_some())
-            .map(str::to_owned)
-            .collect();
-        Self::JazzClassV1 { mapped_logical_cfs }
+        Self::JazzClassV1
     }
 
     pub fn physical_column_families<'a>(
@@ -669,51 +681,47 @@ impl StorageLayout {
         logical_column_families: impl IntoIterator<Item = &'a str>,
     ) -> Vec<String> {
         let mut names = BTreeSet::new();
-        if matches!(self, Self::JazzClassV1 { .. }) {
+        if matches!(self, Self::JazzClassV1) {
             names.insert(CLASS_META_CF.to_owned());
         }
         for logical in logical_column_families {
-            names.insert(self.map_cf(logical).physical_cf.to_owned());
+            let physical = match self {
+                Self::Identity => logical,
+                Self::JazzClassV1 => jazz_physical_class(logical).unwrap_or(logical),
+            };
+            names.insert(physical.to_owned());
         }
         names.into_iter().collect()
     }
 
-    fn map_cf<'a>(&'a self, logical_cf: &'a str) -> PhysicalCf<'a> {
+    fn map_cf<'a>(&'a self, logical_cf: &'a str) -> Result<PhysicalCf<'a>, Error> {
+        // A Jazz class key embeds this name. Validate before calculating its
+        // byte length or framing it, so no invalid logical CF can acquire a
+        // durable spelling even through this lower-level storage view.
+        validate_physical_storage_name(logical_cf)?;
         match self {
-            Self::Identity => PhysicalCf {
+            Self::Identity => Ok(PhysicalCf {
                 physical_cf: logical_cf,
                 logical_prefix: None,
-            },
-            Self::JazzClassV1 { mapped_logical_cfs } => {
-                let should_map =
-                    mapped_logical_cfs.is_empty() || mapped_logical_cfs.contains(logical_cf);
-                if should_map && let Some(physical_cf) = jazz_physical_class(logical_cf) {
-                    PhysicalCf {
+            }),
+            Self::JazzClassV1 => {
+                if let Some(physical_cf) = jazz_physical_class(logical_cf) {
+                    Ok(PhysicalCf {
                         physical_cf,
                         logical_prefix: Some(logical_cf),
-                    }
+                    })
                 } else {
-                    PhysicalCf {
+                    Ok(PhysicalCf {
                         physical_cf: logical_cf,
                         logical_prefix: None,
-                    }
+                    })
                 }
             }
         }
     }
 
     fn validates_marker(&self) -> bool {
-        matches!(self, Self::JazzClassV1 { .. })
-    }
-
-    fn mapped_legacy_cf(&self, cf: &str) -> bool {
-        match self {
-            Self::Identity => false,
-            Self::JazzClassV1 { mapped_logical_cfs } => {
-                (mapped_logical_cfs.is_empty() || mapped_logical_cfs.contains(cf))
-                    && jazz_physical_class(cf).is_some()
-            }
-        }
+        matches!(self, Self::JazzClassV1)
     }
 }
 
@@ -851,10 +859,18 @@ impl LayoutStorage {
     }
 
     async fn has_class_data_or_legacy_layout(&self) -> Result<bool, Error> {
-        if let Some(names) = self.inner.column_family_names()
-            && names.iter().any(|name| self.layout.mapped_legacy_cf(name))
-        {
-            return Ok(true);
+        if self.layout.validates_marker() {
+            // An unenumerable adapter cannot distinguish a fresh class layout
+            // from a legacy logical-CF store. Creating the marker would make
+            // that ambiguity durable, so V1 deliberately refuses it.
+            let names = self.inner.column_family_names().ok_or_else(|| {
+                Error::InvalidStorageLayout(
+                    "class-CF v1 requires enumerable physical column families".to_owned(),
+                )
+            })?;
+            if names.iter().any(|name| jazz_physical_class(name).is_some()) {
+                return Ok(true);
+            }
         }
         for cf in [
             CLASS_HISTORY_CF,
@@ -874,46 +890,52 @@ impl LayoutStorage {
         Ok(false)
     }
 
-    fn physical_key(&self, cf: &ColumnFamilyName, key: &Key) -> (String, Vec<u8>) {
-        let mapping = self.layout.map_cf(cf);
+    fn physical_key(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(String, Vec<u8>), Error> {
+        let mapping = self.layout.map_cf(cf)?;
         let Some(logical_prefix) = mapping.logical_prefix else {
-            return (mapping.physical_cf.to_owned(), key.to_vec());
+            return Ok((mapping.physical_cf.to_owned(), key.to_vec()));
         };
         let mut physical_key = Vec::with_capacity(4 + logical_prefix.len() + key.len());
         physical_key.extend_from_slice(&(logical_prefix.len() as u32).to_be_bytes());
         physical_key.extend_from_slice(logical_prefix.as_bytes());
         physical_key.extend_from_slice(key);
-        (mapping.physical_cf.to_owned(), physical_key)
+        Ok((mapping.physical_cf.to_owned(), physical_key))
     }
 
-    fn physical_prefix(&self, cf: &ColumnFamilyName, prefix: &Key) -> (String, Vec<u8>, usize) {
-        let mapping = self.layout.map_cf(cf);
+    fn physical_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<(String, Vec<u8>, usize), Error> {
+        let mapping = self.layout.map_cf(cf)?;
         let Some(logical_prefix) = mapping.logical_prefix else {
-            return (mapping.physical_cf.to_owned(), prefix.to_vec(), 0);
+            return Ok((mapping.physical_cf.to_owned(), prefix.to_vec(), 0));
         };
         let mut physical_prefix = Vec::with_capacity(4 + logical_prefix.len() + prefix.len());
         physical_prefix.extend_from_slice(&(logical_prefix.len() as u32).to_be_bytes());
         physical_prefix.extend_from_slice(logical_prefix.as_bytes());
         physical_prefix.extend_from_slice(prefix);
         let strip_len = 4 + logical_prefix.len();
-        (mapping.physical_cf.to_owned(), physical_prefix, strip_len)
+        Ok((mapping.physical_cf.to_owned(), physical_prefix, strip_len))
     }
 
     fn physical_operations(
         &self,
         operations: Vec<OwnedWriteOperation>,
-    ) -> Vec<OwnedWriteOperation> {
+    ) -> Result<Vec<OwnedWriteOperation>, Error> {
         operations
             .into_iter()
-            .map(|operation| match operation {
-                OwnedWriteOperation::Set { cf, key, value } => {
-                    let (cf, key) = self.physical_key(&cf, &key);
-                    OwnedWriteOperation::Set { cf, key, value }
-                }
-                OwnedWriteOperation::Delete { cf, key } => {
-                    let (cf, key) = self.physical_key(&cf, &key);
-                    OwnedWriteOperation::Delete { cf, key }
-                }
+            .map(|operation| {
+                Ok(match operation {
+                    OwnedWriteOperation::Set { cf, key, value } => {
+                        let (cf, key) = self.physical_key(&cf, &key)?;
+                        OwnedWriteOperation::Set { cf, key, value }
+                    }
+                    OwnedWriteOperation::Delete { cf, key } => {
+                        let (cf, key) = self.physical_key(&cf, &key)?;
+                        OwnedWriteOperation::Delete { cf, key }
+                    }
+                })
             })
             .collect()
     }
@@ -921,8 +943,10 @@ impl LayoutStorage {
 
 impl OrderedKvStorage for LayoutStorage {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-        self.inner.get(physical_cf, physical_key)
+        Box::pin(async move {
+            let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
+            self.inner.get(physical_cf, physical_key).await
+        })
     }
 
     fn put_if_absent(
@@ -931,8 +955,12 @@ impl OrderedKvStorage for LayoutStorage {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-        self.inner.put_if_absent(physical_cf, physical_key, value)
+        Box::pin(async move {
+            let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
+            self.inner
+                .put_if_absent(physical_cf, physical_key, value)
+                .await
+        })
     }
 
     fn compare_and_delete(
@@ -941,9 +969,12 @@ impl OrderedKvStorage for LayoutStorage {
         key: Vec<u8>,
         expected: Vec<u8>,
     ) -> StorageFuture<'_, Result<bool, Error>> {
-        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-        self.inner
-            .compare_and_delete(physical_cf, physical_key, expected)
+        Box::pin(async move {
+            let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
+            self.inner
+                .compare_and_delete(physical_cf, physical_key, expected)
+                .await
+        })
     }
 
     fn set(
@@ -952,13 +983,17 @@ impl OrderedKvStorage for LayoutStorage {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<(), Error>> {
-        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-        self.inner.set(physical_cf, physical_key, value)
+        Box::pin(async move {
+            let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
+            self.inner.set(physical_cf, physical_key, value).await
+        })
     }
 
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
-        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-        self.inner.delete(physical_cf, physical_key)
+        Box::pin(async move {
+            let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
+            self.inner.delete(physical_cf, physical_key).await
+        })
     }
 
     fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
@@ -980,25 +1015,27 @@ impl OrderedKvStorage for LayoutStorage {
             direction,
             max_items,
         } = request;
-        let (physical_cf, physical_bounds, strip_len) = match bounds {
-            ScanBounds::Prefix(prefix) => {
-                let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
-                (physical_cf, ScanBounds::Prefix(physical_prefix), strip_len)
-            }
-            ScanBounds::Range { start, end } => {
-                let (physical_cf, physical_start, strip_len) = self.physical_prefix(&cf, &start);
-                let (_, physical_end, _) = self.physical_prefix(&cf, &end);
-                (
-                    physical_cf,
-                    ScanBounds::Range {
-                        start: physical_start,
-                        end: physical_end,
-                    },
-                    strip_len,
-                )
-            }
-        };
         Box::pin(async move {
+            let (physical_cf, physical_bounds, strip_len) = match bounds {
+                ScanBounds::Prefix(prefix) => {
+                    let (physical_cf, physical_prefix, strip_len) =
+                        self.physical_prefix(&cf, &prefix)?;
+                    (physical_cf, ScanBounds::Prefix(physical_prefix), strip_len)
+                }
+                ScanBounds::Range { start, end } => {
+                    let (physical_cf, physical_start, strip_len) =
+                        self.physical_prefix(&cf, &start)?;
+                    let (_, physical_end, _) = self.physical_prefix(&cf, &end)?;
+                    (
+                        physical_cf,
+                        ScanBounds::Range {
+                            start: physical_start,
+                            end: physical_end,
+                        },
+                        strip_len,
+                    )
+                }
+            };
             let inner = self
                 .inner
                 .scan(ScanRequest {
@@ -1017,8 +1054,8 @@ impl OrderedKvStorage for LayoutStorage {
         cf: String,
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
         Box::pin(async move {
+            let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix)?;
             Ok(collect_scan(
                 self.inner
                     .scan(ScanRequest::prefix(physical_cf, physical_prefix).reversed())
@@ -1037,9 +1074,9 @@ impl OrderedKvStorage for LayoutStorage {
         prefix: Vec<u8>,
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
-        let (_, physical_upper, _) = self.physical_prefix(&cf, &upper);
         Box::pin(async move {
+            let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix)?;
+            let (_, physical_upper, _) = self.physical_prefix(&cf, &upper)?;
             Ok(collect_scan(
                 self.inner
                     .scan(ScanRequest::prefix(physical_cf, physical_prefix))
@@ -1056,15 +1093,23 @@ impl OrderedKvStorage for LayoutStorage {
         &self,
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
-        self.inner.write_many(self.physical_operations(operations))
+        Box::pin(async move {
+            self.inner
+                .write_many(self.physical_operations(operations)?)
+                .await
+        })
     }
 
     fn write_many_outcome(
         &self,
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, WriteManyOutcome> {
-        self.inner
-            .write_many_outcome(self.physical_operations(operations))
+        Box::pin(async move {
+            match self.physical_operations(operations) {
+                Ok(operations) => self.inner.write_many_outcome(operations).await,
+                Err(error) => WriteManyOutcome::Uncommitted(error),
+            }
+        })
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -1072,8 +1117,10 @@ impl OrderedKvStorage for LayoutStorage {
     }
 
     fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
-        let physical_cf = self.layout.map_cf(&cf).physical_cf.to_owned();
-        self.inner.approximate_class_bytes(physical_cf)
+        Box::pin(async move {
+            let physical_cf = self.layout.map_cf(&cf)?.physical_cf.to_owned();
+            self.inner.approximate_class_bytes(physical_cf).await
+        })
     }
 }
 
@@ -1232,6 +1279,7 @@ pub trait StorageFactory: std::fmt::Debug + Send + Sync {
         &self,
         path: std::path::PathBuf,
         column_families: Vec<String>,
+        codec_profile: StorageCodecProfile,
     ) -> StorageFuture<'_, Result<BoxedStorage, Error>>;
 }
 
@@ -1416,7 +1464,7 @@ impl OwnedWriteOperation {
     }
 }
 
-enum OverlayHandle<'a, T> {
+enum OverlayHandle<'a, T: ?Sized> {
     Borrowed(&'a T),
     Owned(Rc<T>),
 }
@@ -1430,7 +1478,7 @@ impl<T> Clone for OverlayHandle<'_, T> {
     }
 }
 
-impl<T> std::ops::Deref for OverlayHandle<'_, T> {
+impl<T: ?Sized> std::ops::Deref for OverlayHandle<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -1441,9 +1489,15 @@ impl<T> std::ops::Deref for OverlayHandle<'_, T> {
     }
 }
 
-pub struct StagedWriteOverlay<'a, S> {
+pub struct StagedWriteOverlay<'a, S: ?Sized> {
     base: OverlayHandle<'a, S>,
     staged_writes: OverlayHandle<'a, RefCell<StagedWriteState>>,
+}
+
+pub(crate) enum StagedPointValue {
+    Miss,
+    Set(Value),
+    Delete,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1567,7 +1621,7 @@ where
     }
 }
 
-impl<'a, S> StagedWriteOverlay<'a, S> {
+impl<'a, S: ?Sized> StagedWriteOverlay<'a, S> {
     pub(crate) fn new(base: &'a S, staged_writes: &'a RefCell<StagedWriteState>) -> Self {
         Self {
             base: OverlayHandle::Borrowed(base),
@@ -1585,6 +1639,20 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
         StagedWriteOverlay {
             base: OverlayHandle::Owned(base),
             staged_writes: OverlayHandle::Owned(staged_writes),
+        }
+    }
+
+    pub(crate) fn staged_point_value(&self, cf: &ColumnFamilyName, key: &Key) -> StagedPointValue {
+        let mut staged_writes = self.staged_writes.borrow_mut();
+        if staged_writes.is_empty() {
+            return StagedPointValue::Miss;
+        }
+        let Some(index) = staged_writes.latest_index(cf, key) else {
+            return StagedPointValue::Miss;
+        };
+        match &staged_writes.operations[index] {
+            OwnedWriteOperation::Set { value, .. } => StagedPointValue::Set(value.clone()),
+            OwnedWriteOperation::Delete { .. } => StagedPointValue::Delete,
         }
     }
 
@@ -1722,7 +1790,7 @@ fn overlay_scan<'a, S>(
     request: ScanRequest,
 ) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
 where
-    S: OrderedKvStorage,
+    S: OrderedKvStorage + ?Sized,
 {
     let cf = request.cf.clone();
     let bounds = request.bounds.clone();
@@ -1780,10 +1848,14 @@ where
     })
 }
 
-impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
+impl<S: ?Sized> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.base.permits_eager_read_retry()
+    }
+
     fn put_if_absent(
         &self,
         _cf: String,
@@ -1806,22 +1878,10 @@ where
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-        let mut staged_writes = self.staged_writes.borrow_mut();
-        if staged_writes.is_empty() {
-            drop(staged_writes);
-            return self.base.get(cf, key);
-        }
-
-        let Some(index) = staged_writes.latest_index(&cf, &key) else {
-            drop(staged_writes);
-            return self.base.get(cf, key);
-        };
-        match &staged_writes.operations[index] {
-            OwnedWriteOperation::Set { value, .. } => {
-                let value = value.clone();
-                Box::pin(async move { Ok(Some(value)) })
-            }
-            OwnedWriteOperation::Delete { .. } => Box::pin(async { Ok(None) }),
+        match self.staged_point_value(&cf, &key) {
+            StagedPointValue::Miss => self.base.get(cf, key),
+            StagedPointValue::Set(value) => Box::pin(async move { Ok(Some(value)) }),
+            StagedPointValue::Delete => Box::pin(async { Ok(None) }),
         }
     }
 
@@ -1965,11 +2025,15 @@ impl From<crate::records::Error> for Error {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod conformance {
+/// Backend-neutral ordered-KV conformance scenarios.
+///
+/// These test the raw storage seam. Raw cursors are deliberately non-snapshot:
+/// stable repeatable evaluation belongs to the higher-level evaluator.
+#[cfg(any(test, feature = "test"))]
+pub mod conformance {
     use super::*;
 
-    pub(crate) async fn persistence_order_and_batch_atomicity<S>(storage: S)
+    pub async fn persistence_order_and_batch_atomicity<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
@@ -1993,6 +2057,15 @@ pub(crate) mod conformance {
             .set("records".into(), vec![0xff, 0x01], b"ff-one".to_vec())
             .await
             .unwrap();
+        for (key, value) in [
+            (vec![0x12, 0xfe], b"interior-before".to_vec()),
+            (vec![0x12, 0xff], b"interior-root".to_vec()),
+            (vec![0x12, 0xff, 0x00], b"interior-zero".to_vec()),
+            (vec![0x12, 0xff, 0xff], b"interior-ff".to_vec()),
+            (vec![0x13, 0x00], b"interior-after".to_vec()),
+        ] {
+            storage.set("records".into(), key, value).await.unwrap();
+        }
 
         assert_eq!(
             storage
@@ -2012,11 +2085,78 @@ pub(crate) mod conformance {
                 (vec![0xff, 0x01], b"ff-one".to_vec()),
             ]
         );
+        assert_eq!(
+            collect_scan(
+                storage
+                    .scan(ScanRequest::prefix("records".into(), Vec::new()))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![
+                (vec![0x12, 0xfe], b"interior-before".to_vec()),
+                (vec![0x12, 0xff], b"interior-root".to_vec()),
+                (vec![0x12, 0xff, 0x00], b"interior-zero".to_vec()),
+                (vec![0x12, 0xff, 0xff], b"interior-ff".to_vec()),
+                (vec![0x13, 0x00], b"interior-after".to_vec()),
+                (b"user:1".to_vec(), b"one".to_vec()),
+                (b"user:10".to_vec(), b"ten".to_vec()),
+                (b"user:2".to_vec(), b"two".to_vec()),
+                (vec![0xff, 0x00], b"ff-zero".to_vec()),
+                (vec![0xff, 0x01], b"ff-one".to_vec()),
+            ]
+        );
+        assert_eq!(
+            collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix("records".into(), vec![0x12, 0xff])
+                            .reversed()
+                            .with_max_items(2),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![
+                (vec![0x12, 0xff, 0xff], b"interior-ff".to_vec()),
+                (vec![0x12, 0xff, 0x00], b"interior-zero".to_vec()),
+            ]
+        );
+        assert_eq!(
+            collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix("records".into(), Vec::new())
+                            .reversed()
+                            .with_max_items(3),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![
+                (vec![0xff, 0x01], b"ff-one".to_vec()),
+                (vec![0xff, 0x00], b"ff-zero".to_vec()),
+                (b"user:2".to_vec(), b"two".to_vec()),
+            ]
+        );
 
         let error = storage
             .write_many(vec![
-                OwnedWriteOperation::set("records", b"user:3", b"three"),
-                OwnedWriteOperation::set("missing", b"user:4", b"four"),
+                OwnedWriteOperation::Set {
+                    cf: "records".into(),
+                    key: b"user:3".to_vec(),
+                    value: b"three".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "missing".into(),
+                    key: b"user:4".to_vec(),
+                    value: b"four".to_vec(),
+                },
             ])
             .await
             .unwrap_err();
@@ -2031,8 +2171,15 @@ pub(crate) mod conformance {
 
         storage
             .write_many(vec![
-                OwnedWriteOperation::set("records", b"user:3", b"three"),
-                OwnedWriteOperation::delete("records", b"user:2"),
+                OwnedWriteOperation::Set {
+                    cf: "records".into(),
+                    key: b"user:3".to_vec(),
+                    value: b"three".to_vec(),
+                },
+                OwnedWriteOperation::Delete {
+                    cf: "records".into(),
+                    key: b"user:2".to_vec(),
+                },
             ])
             .await
             .unwrap();
@@ -2049,7 +2196,7 @@ pub(crate) mod conformance {
         );
     }
 
-    pub(crate) async fn reopen_preserves_data_and_adds_families<S>(storage: S)
+    pub async fn reopen_preserves_data_and_adds_families<S>(storage: S)
     where
         S: ReopenableStorage + 'static,
     {
@@ -2080,7 +2227,7 @@ pub(crate) mod conformance {
         );
     }
 
-    pub(crate) async fn atomic_conditionals_preserve_winners_and_reject_stale_deletes<S>(storage: S)
+    pub async fn atomic_conditionals_preserve_winners_and_reject_stale_deletes<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
@@ -2131,11 +2278,96 @@ pub(crate) mod conformance {
             Some(b"reinstalled".to_vec())
         );
     }
+
+    /// Invalid operations are rejected before an atomic submission begins.
+    /// This is intentionally below the public database API: only an adapter
+    /// can prove the pre-commit acknowledgement classification.
+    pub async fn invalid_batch_is_proven_uncommitted<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        let outcome = storage
+            .write_many_outcome(vec![OwnedWriteOperation::Set {
+                cf: "missing".into(),
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+            }])
+            .await;
+        assert!(matches!(
+            outcome,
+            WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(name)) if name == "missing"
+        ));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deliberately hides its family catalogue to prove that class-layout V1
+    /// never treats an uninspectable store as fresh.
+    struct NonEnumeratingStorage(MemoryStorage);
+
+    impl OrderedKvStorage for NonEnumeratingStorage {
+        fn get(
+            &self,
+            cf: String,
+            key: Vec<u8>,
+        ) -> StorageFuture<'_, Result<Option<super::Value>, Error>> {
+            self.0.get(cf, key)
+        }
+
+        fn put_if_absent(
+            &self,
+            cf: String,
+            key: Vec<u8>,
+            value: Vec<u8>,
+        ) -> StorageFuture<'_, Result<Option<super::Value>, Error>> {
+            self.0.put_if_absent(cf, key, value)
+        }
+
+        fn compare_and_delete(
+            &self,
+            cf: String,
+            key: Vec<u8>,
+            expected: Vec<u8>,
+        ) -> StorageFuture<'_, Result<bool, Error>> {
+            self.0.compare_and_delete(cf, key, expected)
+        }
+
+        fn set(
+            &self,
+            cf: String,
+            key: Vec<u8>,
+            value: Vec<u8>,
+        ) -> StorageFuture<'_, Result<(), Error>> {
+            self.0.set(cf, key, value)
+        }
+
+        fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+            self.0.delete(cf, key)
+        }
+
+        fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+            self.0.scan(request)
+        }
+
+        fn write_many(
+            &self,
+            operations: Vec<OwnedWriteOperation>,
+        ) -> StorageFuture<'_, Result<(), Error>> {
+            self.0.write_many(operations)
+        }
+    }
+
+    impl ReopenableStorage for NonEnumeratingStorage {
+        fn reopen(
+            self,
+            column_families: Vec<String>,
+        ) -> StorageFuture<'static, Result<Self, Error>> {
+            Box::pin(async move { Ok(Self(self.0.reopen(column_families).await?)) })
+        }
+    }
 
     #[test]
     fn physical_storage_names_reject_nonportable_forms() {
@@ -2145,6 +2377,12 @@ mod tests {
             validate_physical_storage_name(&"a".repeat(MAX_APPLICATION_STORAGE_NAME_BYTES + 1))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn prefix_successor_is_the_exact_unsigned_lexicographic_bound() {
+        assert_eq!(prefix_successor(&[0x12, 0xff]), Some(vec![0x13]));
+        assert_eq!(prefix_successor(&[0xff, 0xff]), None);
     }
     use crate::records::{ScalarEnumSchema, Value, ValueType};
     use std::cell::Cell;
@@ -2475,7 +2713,7 @@ mod tests {
             .iter()
             .flat_map(|(left, right)| [*left, *right])
             .collect::<Vec<_>>();
-        let layout = StorageLayout::jazz_class_v1_for(all_logical.iter().copied());
+        let layout = StorageLayout::jazz_class_v1();
         let physical_cfs = layout.physical_column_families(all_logical.iter().copied());
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(
@@ -2547,8 +2785,198 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn class_layout_preserves_missing_logical_cf_errors_when_declared_set_is_known() {
-        let layout = StorageLayout::jazz_class_v1_for(["jazz_albums_history"]);
+    async fn class_layout_marker_and_mapped_key_receipt_is_exact() {
+        let logical_cf = "jazz_albums_history";
+        let physical_cf = "__groove_class_history";
+        let raw =
+            MemoryStorage::new(&["__groove_class_meta", physical_cf, "__groove_class_indices"])
+                .expect("valid physical class families");
+        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1())
+            .await
+            .expect("fresh class layout initializes its one marker");
+
+        storage
+            .set(logical_cf.into(), b"row\0key".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            raw.get(
+                "__groove_class_meta".into(),
+                b"groove-storage-layout".to_vec()
+            )
+            .await
+            .unwrap(),
+            Some(b"class-cf-v1".to_vec()),
+            "the marker has one frozen physical key and value"
+        );
+        let mut expected_key = (logical_cf.len() as u32).to_be_bytes().to_vec();
+        expected_key.extend_from_slice(logical_cf.as_bytes());
+        expected_key.extend_from_slice(b"row\0key");
+        assert_eq!(
+            raw.get(physical_cf.into(), expected_key).await.unwrap(),
+            Some(b"value".to_vec()),
+            "mapped keys are exactly u32be(UTF-8 logical-CF length) | logical-CF | key"
+        );
+
+        storage
+            .set(
+                "indices".into(),
+                b"existing-index-key".to_vec(),
+                b"index-value".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .prefix("indices".into(), b"existing-".to_vec())
+                .await
+                .unwrap(),
+            vec![(b"existing-index-key".to_vec(), b"index-value".to_vec())],
+            "the public index path must retain its pre-existing logical key"
+        );
+        let mut expected_index_key = ("indices".len() as u32).to_be_bytes().to_vec();
+        expected_index_key.extend_from_slice(b"indicesexisting-index-key");
+        assert_eq!(
+            raw.get("__groove_class_indices".into(), expected_index_key)
+                .await
+                .unwrap(),
+            Some(b"index-value".to_vec()),
+            "indices use the same one class framing, not a second table prefix"
+        );
+
+        assert_eq!(
+            jazz_physical_class("jazz_album_history"),
+            Some(CLASS_HISTORY_CF)
+        );
+        assert_eq!(
+            jazz_physical_class("jazz_album_register"),
+            Some(CLASS_REGISTER_CF)
+        );
+        assert_eq!(
+            jazz_physical_class("jazz_album_register_global_current"),
+            Some(CLASS_GLOBAL_CURRENT_CF)
+        );
+        assert_eq!(
+            jazz_physical_class("jazz_album_register_ahead_current"),
+            Some(CLASS_AHEAD_CURRENT_CF)
+        );
+        assert_eq!(
+            jazz_physical_class("jazz_global_changes"),
+            Some(CLASS_CHANGES_CF)
+        );
+        assert_eq!(jazz_physical_class("indices"), Some(CLASS_INDICES_CF));
+        assert_eq!(jazz_physical_class("jazz_catalogue"), Some(CLASS_META_CF));
+        assert_eq!(jazz_physical_class("application_rows"), None);
+    }
+
+    #[futures_test::test]
+    async fn class_layout_rejects_unknown_old_future_and_malformed_markers_before_logical_access() {
+        for invalid_marker in [
+            b"".as_slice(),
+            b"class-cf-v0".as_slice(),
+            b"class-cf-v2".as_slice(),
+            b"class-cf-v1\0".as_slice(),
+        ] {
+            let raw = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
+                .expect("valid class families");
+            raw.set(
+                "__groove_class_meta".into(),
+                CLASS_LAYOUT_MARKER_KEY.to_vec(),
+                invalid_marker.to_vec(),
+            )
+            .await
+            .unwrap();
+            raw.set(
+                "__groove_class_history".into(),
+                b"existing-physical-data".to_vec(),
+                b"must-not-be-read".to_vec(),
+            )
+            .await
+            .unwrap();
+
+            assert!(matches!(
+                LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1()).await,
+                Err(Error::InvalidStorageLayout(_))
+            ));
+            assert_eq!(
+                raw.get(
+                    "__groove_class_meta".into(),
+                    CLASS_LAYOUT_MARKER_KEY.to_vec()
+                )
+                .await
+                .unwrap(),
+                Some(invalid_marker.to_vec()),
+                "rejection must not normalize or replace {invalid_marker:?}"
+            );
+            assert_eq!(
+                raw.get(
+                    "__groove_class_history".into(),
+                    b"existing-physical-data".to_vec()
+                )
+                .await
+                .unwrap(),
+                Some(b"must-not-be-read".to_vec()),
+                "rejection occurs before logical access or mutation"
+            );
+        }
+    }
+
+    #[futures_test::test]
+    async fn class_layout_requires_an_enumerable_catalogue_before_writing_its_marker() {
+        let raw = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
+            .expect("valid class families");
+        assert!(matches!(
+            LayoutStorage::new(
+                NonEnumeratingStorage(raw.clone()),
+                StorageLayout::jazz_class_v1()
+            )
+            .await,
+            Err(Error::InvalidStorageLayout(_))
+        ));
+        assert_eq!(
+            raw.get(
+                "__groove_class_meta".into(),
+                CLASS_LAYOUT_MARKER_KEY.to_vec()
+            )
+            .await
+            .unwrap(),
+            None,
+            "an uninspectable legacy store must not acquire a V1 marker"
+        );
+    }
+
+    #[futures_test::test]
+    async fn class_layout_rejects_invalid_logical_names_before_key_framing() {
+        let raw = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
+            .expect("valid class families");
+        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1())
+            .await
+            .unwrap();
+        let overlong = format!(
+            "jazz_{}_history",
+            "x".repeat(MAX_APPLICATION_STORAGE_NAME_BYTES)
+        );
+        for invalid in ["jazz_bad\0_history".to_owned(), overlong] {
+            assert!(matches!(
+                storage
+                    .set(invalid, b"key".to_vec(), b"value".to_vec())
+                    .await,
+                Err(Error::InvalidStorageLayout(_))
+            ));
+        }
+        assert_eq!(
+            raw.prefix("__groove_class_history".into(), Vec::new())
+                .await
+                .unwrap(),
+            Vec::<KeyValue>::new(),
+            "invalid names fail before a framed durable key is written"
+        );
+    }
+
+    #[futures_test::test]
+    async fn class_layout_maps_every_classifier_match_and_preserves_unmapped_missing_cf_errors() {
+        let layout = StorageLayout::jazz_class_v1();
         let physical_cfs = layout.physical_column_families(["jazz_albums_history"]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(
@@ -2566,9 +2994,27 @@ mod tests {
             )
             .await
             .unwrap();
+        // This family was not used to compute the physical open set. V1 still
+        // maps it into the existing history class rather than interpreting it
+        // as its own legacy logical CF under the same marker.
+        storage
+            .set(
+                "jazz_tracks_history".into(),
+                b"row:2".to_vec(),
+                b"track-two".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get("jazz_tracks_history".into(), b"row:2".to_vec())
+                .await
+                .unwrap(),
+            Some(b"track-two".to_vec())
+        );
         assert!(matches!(
             storage
-                .get("jazz_tracks_history".into(), b"row:1".to_vec())
+                .get("application_rows".into(), b"row:1".to_vec())
                 .await,
             Err(Error::ColumnFamilyNotFound(_))
         ));
@@ -3665,10 +4111,10 @@ mod tests {
 
     #[futures_test::test]
     async fn memory_storage_conditionals_are_atomic_and_aba_safe() {
-        conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(
-            MemoryStorage::new(&["records"]).expect("valid memory storage families"),
-        )
-        .await;
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
+        conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(storage.clone())
+            .await;
+        conformance::invalid_batch_is_proven_uncommitted(storage).await;
     }
 
     #[futures_test::test]

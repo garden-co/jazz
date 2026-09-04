@@ -111,14 +111,6 @@ fn unordered_array_windows_materialize_per_parent_row_id_order() {
 fn authoritative_reset_version_uses_non_base_partition_descriptor() {
     let (_dir, mut node, evolved_table, todo, tx_id) = evolved_todos_version();
     let table = node.table("todos").unwrap().clone();
-    let row = node
-        .materialize_authoritative_reset_version_row("todos", todo, tx_id, None)
-        .unwrap()
-        .expect("stored evolved version");
-    assert_eq!(
-        row.cell(&table, "title"),
-        Some(Value::String("partition-title".to_owned()))
-    );
     let alias = *node
         .node_aliases
         .get(&tx_id.node)
@@ -129,6 +121,17 @@ fn authoritative_reset_version_uses_non_base_partition_descriptor() {
         .expect("non-base partition version");
     assert_eq!(version.tx_time(), tx_id.time);
     assert_eq!(version.tx_node_alias(), alias);
+    let row = node
+        .projected_current_row_from_materialized_version_in_read_schema(
+            node.catalogue.current_schema_version_id,
+            &version,
+        )
+        .unwrap()
+        .expect("stored evolved version projects into the active schema");
+    assert_eq!(
+        row.cell(&table, "title"),
+        Some(Value::String("partition-title".to_owned()))
+    );
     assert_eq!(
         version.cell(&evolved_table, "body").unwrap(),
         Some(Value::String("partition-body".to_owned()))
@@ -198,23 +201,27 @@ fn relation_edge_target_projects_old_witness_into_read_schema() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            evolved.clone(),
-            MigrationLens::new(
-                base.version_id(),
-                evolved.id,
-                vec![TableLens {
-                    source_table: "todos".to_owned(),
-                    target_table: "todos".to_owned(),
-                    ops: vec![LensOp::AddColumn {
-                        column: "body".to_owned(),
-                        default: Value::String("from-lens-default".to_owned()),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String("from-lens-default".to_owned()),
+                        }],
                     }],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .expect("publish v2 lens");
 
@@ -268,29 +275,33 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            evolved.clone(),
-            MigrationLens::new(
-                base.version_id(),
-                evolved.id,
-                vec![TableLens {
-                    source_table: "users".to_owned(),
-                    target_table: "people".to_owned(),
-                    ops: vec![
-                        LensOp::RenameTable {
-                            from: "users".to_owned(),
-                            to: "people".to_owned(),
-                        },
-                        LensOp::AddColumn {
-                            column: "label".to_owned(),
-                            default: Value::String("migrated".to_owned()),
-                        },
-                    ],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "label".to_owned(),
+                                default: Value::String("migrated".to_owned()),
+                            },
+                        ],
+                    }],
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .expect("publish people lens");
 
@@ -302,17 +313,16 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
         branch_or_prefix: None,
         row_digest: None,
     };
+    let version = node
+        .resolve_relation_edge_version("users", user, &target_version)
+        .expect("resolve canonical relation witness");
     let row = node
-        // The wire fact names the canonical authored table.  The receiver
-        // must lens it to the v2 read table before materializing it.
-        .materialize_authoritative_reset_relation_edge_target(
-            evolved.id,
-            "users",
-            user,
-            &target_version,
-        )
-        .expect("render authority relation target")
-        .expect("authority has stored target witness");
+        // The wire fact names the canonical authored table.  Project the
+        // immutable witness into the v2 read table; this is ordinary lens
+        // materialization, not an authority-reset rendering path.
+        .projected_current_row_from_materialized_version_in_read_schema(evolved.id, &version)
+        .expect("render relation target")
+        .expect("stored target witness projects into v2");
     assert_eq!(row.table(), "people");
     assert_eq!(
         row.cell(&people, "name"),
@@ -369,23 +379,27 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            v2.clone(),
-            MigrationLens::new(
-                v1.version_id(),
-                v2.id,
-                vec![TableLens {
-                    source_table: "users".to_owned(),
-                    target_table: "people".to_owned(),
-                    ops: vec![LensOp::RenameTable {
-                        from: "users".to_owned(),
-                        to: "people".to_owned(),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
                     }],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .expect("publish v2 rename");
 
@@ -401,33 +415,37 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 2,
-        publication: Box::new(SchemaLineagePublication::new(
-            v3.clone(),
-            MigrationLens::new(
-                v2.id,
-                v3.id,
-                vec![TableLens {
-                    source_table: "people".to_owned(),
-                    target_table: "members".to_owned(),
-                    ops: vec![
-                        LensOp::RenameTable {
-                            from: "people".to_owned(),
-                            to: "members".to_owned(),
-                        },
-                        LensOp::RenameColumn {
-                            from: "name".to_owned(),
-                            to: "display_name".to_owned(),
-                        },
-                        LensOp::AddColumn {
-                            column: "origin".to_owned(),
-                            default: Value::String("v1".to_owned()),
-                        },
-                    ],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                v3.clone(),
+                MigrationLens::new(
+                    v2.id,
+                    v3.id,
+                    vec![TableLens {
+                        source_table: "people".to_owned(),
+                        target_table: "members".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "people".to_owned(),
+                                to: "members".to_owned(),
+                            },
+                            LensOp::RenameColumn {
+                                from: "name".to_owned(),
+                                to: "display_name".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "origin".to_owned(),
+                                default: Value::String("v1".to_owned()),
+                            },
+                        ],
+                    }],
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .expect("publish v3 rename");
 
@@ -460,37 +478,13 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
         .expect("project canonical edge through both lenses");
     assert_eq!(projected_edge.target_table, "members");
 
-    let query = Query::from("members")
-        .validate(&v3.schema)
-        .expect("validate v3 members query");
-    let binding = query.bind(BTreeMap::new()).expect("bind members query");
-    let binding_view = BindingViewKey {
-        shape_id: query.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: Default::default(),
-    };
-    node.query
-        .settled_result_sets
-        .insert(binding_view, BTreeSet::new());
-    node.query.settled_program_facts.insert(
-        binding_view,
-        BTreeSet::from([ProgramFactEntry::RelationEdge(edge.clone())]),
-    );
-    let settled_rows = node
-        .settled_binding_view_source_rows(
-            "members",
-            v3.id,
-            binding_view,
-            SettledBindingRows::ResultMembers,
-        )
-        .expect("project canonical settled relation source through both lenses");
-    assert_eq!(settled_rows.len(), 1);
-    assert_eq!(settled_rows[0].table(), "members");
-
+    let version = node
+        .resolve_relation_edge_version("users", user, &target_version)
+        .expect("resolve canonical relation witness");
     let row = node
-        .materialize_authoritative_reset_relation_edge_target(v3.id, "users", user, &target_version)
+        .projected_current_row_from_materialized_version_in_read_schema(v3.id, &version)
         .expect("render canonical relation witness through v3")
-        .expect("stored target witness");
+        .expect("stored target witness projects into v3");
     assert_eq!(row.table(), "members");
     assert_eq!(
         row.cell(&members, "display_name"),
@@ -533,8 +527,6 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
             ),
     ));
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf6; 16]), v1.clone());
-    let (_client_dir, mut client) =
-        open_node_with_uuid(NodeUuid::from_bytes([0xf9; 16]), v1.clone());
     let author = row(0xf7);
     let post = row(0xf8);
     let mismatched_author_row = row(0xf9);
@@ -605,10 +597,8 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         Some(DurabilityTier::Global),
     )
     .expect("settle mismatched v1 post");
-    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorSubject::SYSTEM,
-        catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
+    let publication = node
+        .author_schema_lineage_publication(
             v2.clone(),
             MigrationLens::new(
                 v1.version_id(),
@@ -628,42 +618,18 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
                         ops: Vec::new(),
                     },
                 ],
-            ),
+            )
+            .expect("valid migration lens"),
             Vec::<String>::new(),
             Vec::<String>::new(),
-        )),
+        )
+        .unwrap();
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication.clone()),
     })
     .expect("publish users to people lens");
-    client
-        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorSubject::SYSTEM,
-            catalogue_seq: 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                v2.clone(),
-                MigrationLens::new(
-                    v1.version_id(),
-                    v2.id,
-                    vec![
-                        TableLens {
-                            source_table: "users".to_owned(),
-                            target_table: "people".to_owned(),
-                            ops: vec![LensOp::RenameTable {
-                                from: "users".to_owned(),
-                                to: "people".to_owned(),
-                            }],
-                        },
-                        TableLens {
-                            source_table: "posts".to_owned(),
-                            target_table: "posts".to_owned(),
-                            ops: Vec::new(),
-                        },
-                    ],
-                ),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
-        })
-        .expect("publish users to people lens to client");
     node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
@@ -672,15 +638,6 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         },
     })
     .expect("activate v2 read schema");
-    client
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: v2.id,
-            },
-        })
-        .expect("activate v2 client read schema");
 
     for table in ["people", "posts"] {
         let shape = Query::from(table)
@@ -711,242 +668,30 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         tier: DurabilityTier::Global,
         ..RegisterShapeOptions::default()
     };
-    register_query_shape(&mut node, &shape, opts.clone());
-    subscribe_query_binding_with_opts(&mut node, &shape, &binding, opts.clone());
-    register_query_shape(&mut client, &shape, opts.clone());
-    subscribe_query_binding_with_opts(&mut client, &shape, &binding, opts.clone());
-    let binding_view =
-        BindingViewKey::new(shape.shape_id(), binding.binding_id(), opts.read_view_key());
-    let subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: opts.read_view_key(),
-    };
     let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
-    let known_author = RowVersionRef::new("users", author, author_tx);
-    peer.declare_known_state(
-        subscription,
-        Some(KnownStateDeclaration::ExactVersionSet {
-            versions: vec![known_author.clone()],
-        }),
-    );
     let update = peer
         .rehydrate_query_with_opts(&mut node, &shape, &binding, opts.clone())
         .expect("rehydrate maintained v2 flat join");
-    let missing = client
-        .missing_known_state_row_version_refs(&update)
-        .expect("detect omitted canonical contributor body");
-    assert_eq!(missing, vec![known_author]);
-    let repair = peer
-        .handle_row_versions_fetch(
-            &mut node,
-            SyncMessage::FetchRowVersions {
-                requests: missing.clone(),
-            },
-        )
-        .expect("serve canonical contributor repair");
-    let [SyncMessage::RowVersionPayloads { version_bundles }] = repair.as_slice() else {
-        panic!("known contributor repair must carry row-version payloads");
-    };
-    client
-        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
-        .expect("apply canonical contributor repair");
-    client
-        .apply_sync_message_settled(update.clone())
-        .expect("apply maintained v2 flat join on client");
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
+        program_fact_adds,
         ..
     }) = update
     else {
         panic!("flat join rehydrate must emit a view update");
     };
     assert!(reset_result_set);
-    assert_eq!(
-        result_member_adds.len(),
-        1,
-        "maintained v2 flat join must retain the projected source tuple"
-    );
-    let snapshot = client
-        .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)
-        .expect("materialize applied flat-join authority snapshot")
-        .expect("applied flat-join authority snapshot");
-    assert_eq!(snapshot.root_count, 1);
-    // The authority payload can render this tuple, but the receiver's
-    // local IVM must instead rebuild it from canonical source versions.
-    assert_eq!(
-        client
-            .query_rows_for_client(
-                &shape,
-                &binding,
-                DurabilityTier::Global,
-                AuthorSubject::SYSTEM
-            )
-            .expect("read applied v2 flat join on client")
-            .len(),
-        1,
-        "the client must retain the authority-maintained flat join tuple"
-    );
-
-    let updated_author_tx = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("people", author, 5).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(author.0)),
-                ("name".to_owned(), Value::String("alice".to_owned())),
-            ])),
-        )
-        .expect("update renamed author");
-    node.apply_fate_update(
-        updated_author_tx,
-        Fate::Accepted,
-        Some(GlobalTime(5)),
-        Some(DurabilityTier::Global),
-    )
-    .expect("settle renamed author update");
-    let replacement = peer
-        .query_update_for_subscription_with_opts(
-            &mut node,
-            subscription,
-            &shape,
-            &binding,
-            opts.clone(),
-        )
-        .expect("publish flat tuple replacement")
-        .expect("expected view update");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        version_carriers,
-        version_bundles,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
-        ..
-    }) = &replacement
-    else {
-        panic!("flat tuple replacement must emit a view update");
-    };
     assert!(
-        !reset_result_set,
-        "unchanged result membership must take the non-reset rehydrate path"
+        result_member_adds.is_empty(),
+        "a peer receipt must never carry authority result membership"
     );
     assert!(
-        result_member_adds.is_empty() && result_member_removes.is_empty(),
-        "a no-op source version must retain the same result member"
-    );
-    let outgoing_contributor_adds = program_fact_adds
-        .iter()
-        .filter(|fact| {
-            matches!(
-                fact,
-                ProgramFactEntry::ContributingMembers(contribution)
-                    if contribution
-                        .role
-                        .as_deref()
-                        .is_some_and(|role| role.starts_with("flat_tuple_source:"))
-            )
-        })
-        .count();
-    let outgoing_contributor_removes = program_fact_removes
-        .iter()
-        .filter(|fact| {
-            matches!(
-                fact,
-                ProgramFactEntry::ContributingMembers(contribution)
-                    if contribution
-                        .role
-                        .as_deref()
-                        .is_some_and(|role| role.starts_with("flat_tuple_source:"))
-            )
-        })
-        .count();
-    assert_eq!(outgoing_contributor_adds, 1);
-    assert_eq!(outgoing_contributor_removes, 1);
-    let mut replacement_bundles = version_bundles.clone();
-    replacement_bundles.extend(
-        crate::protocol::expand_version_carriers(version_carriers)
-            .expect("expand replacement contributor bundles"),
-    );
-    assert_eq!(
-        replacement_bundles
-            .iter()
-            .filter(|bundle| bundle.tx.tx_id == updated_author_tx)
-            .flat_map(|bundle| &bundle.versions)
-            .count(),
-        1,
-        "the changed canonical contributor must ship exactly one body"
-    );
-    assert!(program_fact_removes.iter().any(|fact| {
-        matches!(
+        program_fact_adds.iter().any(|fact| matches!(
             fact,
-            ProgramFactEntry::ContributingMembers(contribution)
-                if contribution
-                    .role
-                    .as_deref()
-                    .is_some_and(|role| role.starts_with("flat_tuple_source:"))
-                    && contribution
-                        .contributor
-                        .as_real_row()
-                        .and_then(RealRowMemberEntry::row_projection)
-                        .is_some_and(|(table, row, tx)| table.to_string() == "users" && row == author && tx == author_tx)
-        )
-    }));
-    assert!(program_fact_adds.iter().any(|fact| {
-        matches!(
-            fact,
-            ProgramFactEntry::ContributingMembers(contribution)
-                if contribution
-                    .role
-                    .as_deref()
-                    .is_some_and(|role| role.starts_with("flat_tuple_source:"))
-                    && contribution
-                        .contributor
-                        .as_real_row()
-                        .and_then(RealRowMemberEntry::row_projection)
-                        .is_some_and(|(table, row, tx)| table.to_string() == "people" && row == author && tx == updated_author_tx)
-        )
-    }));
-    client
-        .apply_sync_message_settled(replacement)
-        .expect("apply flat tuple replacement");
-    let active_contributors = client
-        .query
-        .settled_program_facts
-        .get(&binding_view)
-        .expect("flat tuple facts remain scoped to the binding view")
-        .iter()
-        .filter(|fact| {
-            matches!(
-                fact,
-                ProgramFactEntry::ContributingMembers(contribution)
-                    if contribution
-                        .role
-                        .as_deref()
-                        .is_some_and(|role| role.starts_with("flat_tuple_source:"))
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(active_contributors.len(), 1);
-    assert!(matches!(
-        active_contributors[0],
-        ProgramFactEntry::ContributingMembers(contribution)
-            if contribution
-                .contributor
-                .as_real_row()
-                .and_then(RealRowMemberEntry::row_projection)
-                .is_some_and(|(table, row, tx)| table.to_string() == "people" && row == author && tx == updated_author_tx)
-    ));
-    assert_eq!(
-        client
-            .query_rows_for_client(
-                &shape,
-                &binding,
-                DurabilityTier::Global,
-                AuthorSubject::SYSTEM
-            )
-            .expect("read retained flat tuple after no-op source version")
-            .len(),
-        1
+            ProgramFactEntry::CoveredInput(input)
+                if input.source_row == author
+        )),
+        "the renamed join contributor must cross as a compiler-owned covered input: {program_fact_adds:?}"
     );
 }

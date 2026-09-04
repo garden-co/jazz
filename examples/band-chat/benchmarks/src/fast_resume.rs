@@ -32,16 +32,18 @@ pub struct FastResumeReceipt {
     pub result_member_adds: usize,
     pub result_member_removes: usize,
     pub version_carriers: usize,
-    pub version_bundles: usize,
+    pub covered_inputs: usize,
+    pub source_manifests: usize,
 }
 
 impl FastResumeReceipt {
-    pub fn is_caught_up_noop(&self) -> bool {
-        !self.reset_result_set
+    pub fn is_body_deduplicated_reset(&self) -> bool {
+        self.reset_result_set
             && self.result_member_adds == 0
             && self.result_member_removes == 0
             && self.version_carriers == 0
-            && self.version_bundles == 0
+            && self.covered_inputs > 0
+            && self.source_manifests > 0
     }
 }
 
@@ -110,7 +112,10 @@ impl FastResumeFixture {
         // The cursor is learned from an actual settled publication, never from
         // fixture timestamps. That keeps this receipt honest about the protocol
         // frontier used by a reconnecting peer.
-        let mut warm_peer = PeerState::relay();
+        // This receipt deliberately exercises relay fast-resume semantics.
+        // A relay must carry an admitted immutable binding even for SYSTEM;
+        // install the one concrete binding this standalone fixture represents.
+        let mut warm_peer = policy_bound_relay(subscription);
         let warm_update = block_on(warm_peer.rehydrate_query_for_subscription_with_opts(
             &mut core,
             subscription,
@@ -134,11 +139,11 @@ impl FastResumeFixture {
     }
 
     /// Attach a peer whose `FastCurrentMembership` declaration is exactly at
-    /// the observed settled frontier. The update must carry no reset,
-    /// membership transition, or version payload; CPU cost is what Divan and
-    /// CodSpeed measure across fixture scales.
+    /// the observed settled frontier. The new usage still needs a complete
+    /// input-manifest reset, but no projected membership or known version
+    /// bodies. Divan and CodSpeed measure that cost across fixture scales.
     pub fn caught_up_fast_resume(&mut self) -> FastResumeReceipt {
-        let mut peer = PeerState::relay();
+        let mut peer = policy_bound_relay(self.subscription);
         peer.declare_known_state(
             self.subscription,
             Some(KnownStateDeclaration::Fast {
@@ -163,9 +168,32 @@ impl FastResumeFixture {
             result_member_adds: payload.result_member_adds.len(),
             result_member_removes: payload.result_member_removes.len(),
             version_carriers: payload.version_carriers.len(),
-            version_bundles: payload.version_bundles.len(),
+            covered_inputs: payload
+                .program_fact_adds
+                .iter()
+                .filter(|fact| matches!(fact, jazz::protocol::ProgramFactEntry::CoveredInput(_)))
+                .count(),
+            source_manifests: payload
+                .program_fact_adds
+                .iter()
+                .filter(|fact| {
+                    matches!(
+                        fact,
+                        jazz::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
+                    )
+                })
+                .count(),
         }
     }
+}
+
+fn policy_bound_relay(subscription: SubscriptionKey) -> PeerState {
+    let mut peer = PeerState::relay();
+    peer.set_subscription_policy_binding(
+        subscription,
+        (jazz::ids::AuthorSubject::SYSTEM, BTreeMap::new()),
+    );
+    peer
 }
 
 fn schema() -> JazzSchema {

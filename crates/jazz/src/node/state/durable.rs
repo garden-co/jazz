@@ -2,6 +2,184 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    const SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1: u64 = 1;
+
+    /// Record exact row versions successfully applied from this durable
+    /// relay's selected authority. Deliberately append-only: later authority
+    /// removal controls future delivery but cannot erase retained knowledge.
+    pub(crate) async fn record_scope_relay_authoritative_bundles(
+        &self,
+        bundles: &[VersionBundle],
+    ) -> Result<(), Error> {
+        let Some(scope) = self.client_relay_scope() else {
+            return Ok(());
+        };
+        let (owner, subject) = scope.durable_components();
+        let digest = scope.durable_digest();
+        let store = self
+            .database
+            .direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
+        let mut writes = Vec::new();
+        for bundle in bundles {
+            for version in &bundle.versions {
+                let table_id =
+                    self.physical_table_id_for_schema(version.schema_version(), version.table())?;
+                writes.push(DirectRecordStoreWrite::Set {
+                    key: vec![
+                        Value::Bytes(digest.to_vec()),
+                        Value::U64(table_id.0),
+                        Value::Uuid(version.row_uuid().0),
+                        Value::U64(bundle.tx.tx_id.time.0),
+                        Value::Uuid(bundle.tx.tx_id.node.0),
+                    ],
+                    value: vec![
+                        Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1),
+                        Value::String(owner.to_owned()),
+                        Value::Nullable(
+                            subject
+                                .as_ref()
+                                .map(|value| Box::new(Value::String(value.clone()))),
+                        ),
+                    ],
+                });
+            }
+        }
+        if !writes.is_empty() {
+            store.write_many(&writes).await?;
+        }
+        Ok(())
+    }
+
+    /// A row-version payload is durable same-scope disclosure evidence only
+    /// when its pending repair still belongs to the selected authority
+    /// receipt. Stale/fallback payloads can be ingested as cache data but are
+    /// never repair authority.
+    pub(crate) async fn record_scope_relay_authoritative_repair_payloads(
+        &self,
+        bundles: &[VersionBundle],
+        authority_receipt_eligible: bool,
+    ) -> Result<(), Error> {
+        if authority_receipt_eligible {
+            self.record_scope_relay_authoritative_bundles(bundles)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Record a foreground transaction once this exact scope's durable relay
+    /// has accepted it locally. Its caller establishes the live admitted
+    /// session and author ownership; this helper only persists the immutable
+    /// row-version identities.
+    pub(crate) async fn record_scope_relay_authored_pending_versions(
+        &self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+        admitted_session: AuthorSubject,
+    ) -> Result<(), Error> {
+        let Some(scope) = self.client_relay_scope() else {
+            return Ok(());
+        };
+        if !scope.admits_session(admitted_session) || tx.made_by != admitted_session {
+            return Ok(());
+        }
+        let (owner, subject) = scope.durable_components();
+        let digest = scope.durable_digest();
+        let store = self
+            .database
+            .direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
+        let mut writes = Vec::new();
+        for version in versions {
+            let table_id =
+                self.physical_table_id_for_schema(version.schema_version(), version.table())?;
+            writes.push(DirectRecordStoreWrite::Set {
+                key: vec![
+                    Value::Bytes(digest.to_vec()),
+                    Value::U64(table_id.0),
+                    Value::Uuid(version.row_uuid().0),
+                    Value::U64(tx.tx_id.time.0),
+                    Value::Uuid(tx.tx_id.node.0),
+                ],
+                value: vec![
+                    Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1),
+                    Value::String(owner.to_owned()),
+                    Value::Nullable(
+                        subject
+                            .as_ref()
+                            .map(|value| Box::new(Value::String(value.clone()))),
+                    ),
+                ],
+            });
+        }
+        if !writes.is_empty() {
+            store.write_many(&writes).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn scope_relay_repair_ledger_contains(
+        &self,
+        table_id: PhysicalTableId,
+        request: &RowVersionRef,
+    ) -> Result<bool, Error> {
+        let Some(scope) = self.client_relay_scope() else {
+            return Ok(false);
+        };
+        let (expected_owner, expected_subject) = scope.durable_components();
+        let store = self
+            .database
+            .direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
+        let record = store
+            .get(&[
+                Value::Bytes(scope.durable_digest().to_vec()),
+                Value::U64(table_id.0),
+                Value::Uuid(request.row_uuid.0),
+                Value::U64(request.tx_time.0),
+                Value::Uuid(request.tx_node_id.0),
+            ])
+            .await?;
+        let Some(record) = record else {
+            return Ok(false);
+        };
+        match record.get_idx(0)? {
+            Value::U64(Self::SCOPE_RELAY_REPAIR_LEDGER_FORMAT_V1) => {}
+            _ => {
+                return Err(Error::InvalidStoredValue(
+                    "unknown scope relay ledger format",
+                ));
+            }
+        }
+        let owner = match record.get_idx(1)? {
+            Value::String(value) => value,
+            _ => {
+                return Err(Error::InvalidStoredValue(
+                    "scope relay ledger owner must be string",
+                ));
+            }
+        };
+        let subject = match record.get_idx(2)? {
+            Value::Nullable(None) => None,
+            Value::Nullable(Some(value)) => match value.as_ref() {
+                Value::String(value) => Some(value.to_owned()),
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "scope relay ledger subject must be string",
+                    ));
+                }
+            },
+            _ => {
+                return Err(Error::InvalidStoredValue(
+                    "scope relay ledger subject must be nullable string",
+                ));
+            }
+        };
+        if owner != expected_owner || subject != expected_subject {
+            return Err(Error::InvalidStoredValue(
+                "scope relay ledger value does not match admitted scope",
+            ));
+        }
+        Ok(true)
+    }
+
     /// Return local synchronization counters.
     pub fn sync_metrics(&self) -> &SyncMetrics {
         &self.sync_metrics
@@ -130,7 +308,49 @@ where
             .map(|lineage| (lineage.catalogue_seq, lineage.publication.clone()))
             .collect::<Vec<_>>();
         lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
+        // The write pointer is deliberately independent of the authority's
+        // unique genesis.  Once a lineage is active it normally points at a
+        // descendant, whose manifest must never be re-labelled as genesis in
+        // a snapshot (doing so lets a receiver allocate a different physical
+        // root for the real genesis schema).
+        let lineage_targets = self
+            .catalogue
+            .active_lineages_by_target
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let genesis = self
+            .catalogue
+            .catalogue_schemas
+            .keys()
+            .find(|schema| !lineage_targets.contains(schema))
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "catalogue genesis schema is missing",
+            ))?;
+        if self
+            .catalogue
+            .catalogue_schemas
+            .keys()
+            .filter(|schema| !lineage_targets.contains(schema))
+            .nth(1)
+            .is_some()
+        {
+            return Err(Error::InvalidStoredValue(
+                "catalogue has multiple genesis schemas",
+            ));
+        }
+        let genesis_physical_identities = self
+            .catalogue
+            .physical_mappings
+            .get(&genesis)
+            .ok_or(Error::InvalidStoredValue(
+                "genesis physical mapping missing",
+            ))?
+            .identities
+            .clone();
         Ok(crate::protocol::CatalogueSnapshot {
+            genesis_physical_identities,
             schemas,
             lineages,
             current_write_schema: self.catalogue.current_write_schema,
@@ -176,46 +396,43 @@ where
         table: &str,
         settled: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let table_schema = self.table(table)?.clone();
-        let subscription = self.whole_table_subscription_key(table)?;
         match settled {
             DurabilityTier::None | DurabilityTier::Local => self.current_rows(table, settled).await,
             DurabilityTier::Edge => self.current_rows(table, settled).await,
             DurabilityTier::Global => {
-                let binding_view_key =
-                    BindingViewKey::from_canonical_subscription_key(subscription);
-                let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view_key)
-                else {
-                    return Ok(Vec::new());
-                };
-                let row_entries = row_result_set
-                    .iter()
-                    .filter_map(ResultMemberEntry::as_row)
-                    .collect::<Vec<_>>();
-                let mut rows = Vec::new();
-                for (entry_table, row_uuid, tx_id) in row_entries {
-                    if entry_table.as_str() != table {
-                        continue;
-                    }
-                    let tx_node_alias = self
-                        .node_aliases
-                        .get(&tx_id.node)
-                        .copied()
-                        .ok_or(Error::MissingTransaction(tx_id))?;
-                    let version = self
-                        .query_version_by_alias(
-                            table,
-                            row_uuid,
-                            VersionLayer::Content,
-                            tx_id.time,
-                            tx_node_alias,
-                        )
-                        .await?
-                        .ok_or(Error::MissingTransaction(tx_id))?;
-                    rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
+                // This convenience surface is used by topology tests, but it
+                // must exercise the same local Groove terminal as a serving
+                // subscription. Reading the authority result cache here would
+                // silently preserve the retired result-output bypass.
+                let shape = crate::query::Query::from(table)
+                    .validate(&self.catalogue.schema)
+                    .map_err(|error| Error::Query(Box::new(error)))?;
+                let binding = shape
+                    .bind(BTreeMap::new())
+                    .map_err(|error| Error::Query(Box::new(error)))?;
+                if self.is_history_complete() {
+                    self.query_rows_with_prepared_plan_for_identity(
+                        &shape,
+                        &binding,
+                        DurabilityTier::Global,
+                        None,
+                        AuthorSubject::SYSTEM,
+                    )
+                    .await
+                } else {
+                    // A partial client has no authority to reopen this query
+                    // as SYSTEM. It consumes the exact scoped CoveredInput
+                    // closure installed by the received whole-table
+                    // subscription, through the same receiver-local graph as
+                    // every other client read.
+                    self.query_rows_for_client(
+                        &shape,
+                        &binding,
+                        DurabilityTier::Global,
+                        AuthorSubject::SYSTEM,
+                    )
+                    .await
                 }
-                sort_current_rows(&mut rows);
-                Ok(rows)
             }
         }
     }
@@ -256,7 +473,10 @@ where
         node: NodeUuid,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        Ok(self.pending_transaction_scan_for(node, author).await?.tx_ids)
+        Ok(self
+            .pending_transaction_scan_for(node, author)
+            .await?
+            .tx_ids)
     }
 
     /// Return unsettled transactions by `author`, irrespective of their
@@ -267,41 +487,48 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids_for_author(author, true).await
+        self.below_global_transaction_ids(Some(author), false).await
     }
 
-    pub(crate) async fn unresolved_transaction_ids_for_author(
+    /// Edge-host recovery includes accepted writes from every originating
+    /// client, plus edge-generated merges; it is not local-author recovery.
+    #[cfg(any(test, feature = "runtime"))]
+    pub(crate) async fn pending_edge_authority_transaction_ids(
         &mut self,
-        author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids_for_author(author, false)
-            .await
+        self.below_global_transaction_ids(None, true).await
     }
 
-    async fn below_global_transaction_ids_for_author(
+    async fn below_global_transaction_ids(
         &mut self,
-        author: AuthorSubject,
-        include_accepted: bool,
+        author: Option<AuthorSubject>,
+        edge_only: bool,
     ) -> Result<Vec<TxId>, Error> {
         let mut candidates = Vec::new();
-        for raw in self.database.index_scan_raw(
-            "jazz_transactions",
-            "by_global_time",
-            &[Value::Nullable(None)],
-        )
-        .await?
+        for raw in self
+            .database
+            .index_scan_raw(
+                "jazz_transactions",
+                "by_global_time",
+                &[Value::Nullable(None)],
+            )
+            .await?
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            if AuthorSubject::from_canonical(
+            let made_by = AuthorSubject::from_canonical(
                 record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
             )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                != author
-                || !(fate == 0 || (include_accepted && fate == 1))
-                || durability_from_discriminant(
-                    record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
-                )? >= DurabilityTier::Global
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
+            let durability = durability_from_discriminant(
+                record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+            )?;
+            if author.is_some_and(|author| made_by != author)
+                || if edge_only {
+                    fate != 1 || durability != DurabilityTier::Edge
+                } else {
+                    !(fate == 0 || fate == 1) || durability >= DurabilityTier::Global
+                }
             {
                 continue;
             }
@@ -322,21 +549,6 @@ where
         Ok(tx_ids)
     }
 
-    pub(crate) async fn transaction_row_keys(
-        &mut self,
-        tx_ids: &[TxId],
-    ) -> Result<BTreeSet<(String, RowUuid)>, Error> {
-        let mut row_keys = BTreeSet::new();
-        for tx_id in tx_ids {
-            row_keys.extend(
-                self.query_versions_for_tx(*tx_id).await?
-                    .into_iter()
-                    .map(|version| (version.table().to_owned(), version.row_uuid())),
-            );
-        }
-        Ok(row_keys)
-    }
-
     /// Find replayable local transactions in the null slice of
     /// `by_global_time`. The sequence/durability invariant makes every
     /// below-Global transaction sequence-null, so settled history is outside
@@ -351,12 +563,14 @@ where
         };
 
         let mut scan = PendingTransactionScan::default();
-        for raw in self.database.index_scan_raw(
-            "jazz_transactions",
-            "by_global_time",
-            &[Value::Nullable(None)],
-        )
-        .await?
+        for raw in self
+            .database
+            .index_scan_raw(
+                "jazz_transactions",
+                "by_global_time",
+                &[Value::Nullable(None)],
+            )
+            .await?
         {
             scan.records_visited += 1;
             let record = raw.record();
@@ -395,63 +609,46 @@ where
 
     pub(crate) async fn current_row_tx_id(&mut self, row: &CurrentRow) -> Option<TxId> {
         let (time, alias) = row.projected_tx_alias()?;
-        Some(TxId::new(
-            time,
-            self.resolve_node_alias(alias).await.ok()??,
-        ))
+        Some(TxId::new(time, self.resolve_node_alias(alias).await.ok()??))
     }
 
-    pub(crate) async fn persist_known_state_fact(
+    pub(crate) async fn persist_known_state_fact_for_authority_result(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         settled_through: GlobalTime,
     ) -> Result<(), Error> {
+        let closure_generation = self
+            .query
+            .authority_results
+            .get(&authority_result_key)
+            .and_then(|state| match state.source_closure {
+                crate::node::AuthoritySourceClosure::Claimed { generation } => Some(generation),
+                crate::node::AuthoritySourceClosure::Pending => None,
+            })
+            .unwrap_or(0);
         self.database
             .direct_record_store(KNOWN_STATE_FACTS_STORE)?
             .set(
-                &known_state_fact_key(binding_view_key),
+                &known_state_fact_key(&authority_result_key),
                 &[
                     Value::U64(settled_through.0),
                     Value::U64(
                         self.query
-                            .authorization_progress_by_binding_view
-                            .get(&binding_view_key)
-                            .copied()
+                            .authority_results
+                            .get(&authority_result_key)
+                            .and_then(|state| state.authorization_progress)
                             .unwrap_or(u64::MAX),
                     ),
+                    // This is an exact-closure receipt, not `live_settled`.
+                    // It permits a reopened receiver to rebuild its own
+                    // descriptor-bound graph from the persisted CoveredInput
+                    // frontier, while a fresh remote read still waits for a
+                    // live authority handoff.
+                    Value::U64(closure_generation),
                 ],
             )
             .await?;
         Ok(())
-    }
-
-    pub(crate) async fn load_known_state_fact(
-        &mut self,
-        binding_view_key: BindingViewKey,
-    ) -> Result<Option<GlobalTime>, Error> {
-        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        let Some(record) = store.get(&known_state_fact_key(binding_view_key)).await? else {
-            return Ok(None);
-        };
-        let settled_through = match record.get_idx(0)? {
-            Value::U64(value) => GlobalTime(value),
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "known-state settled-through must be u64",
-                ));
-            }
-        };
-        self.query
-            .settled_through_by_binding_view
-            .insert(binding_view_key, settled_through);
-        if let Value::U64(progress) = record.get_idx(1)?
-            && progress != u64::MAX
-        {
-            self.query
-                .authorization_progress_by_binding_view
-                .insert(binding_view_key, progress);
-        }
-        Ok(Some(settled_through))
     }
 
     pub(crate) async fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {
@@ -465,15 +662,14 @@ where
         for key in keys {
             store.delete(&key).await?;
         }
-        self.query.settled_through_by_binding_view.clear();
-        self.query.authorization_progress_by_binding_view.clear();
+        self.query.authority_results.clear();
         self.clear_all_settled_result_state().await?;
         Ok(())
     }
 
-    pub(crate) async fn persist_settled_result_state_delta(
+    pub(crate) async fn persist_settled_result_state_delta_for_authority_result(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         cleared: bool,
         member_adds: &[ResultMemberEntry],
         member_removes: &[ResultMemberEntry],
@@ -482,8 +678,10 @@ where
         fact_removes: &[ViewFactEntry],
         fact_rewrite: Option<&BTreeSet<ViewFactEntry>>,
     ) -> Result<(), Error> {
+        self.persist_authority_policy_binding_directory(&authority_result_key)
+            .await?;
         self.persist_settled_result_members_delta(
-            binding_view_key,
+            authority_result_key.clone(),
             cleared,
             member_adds,
             member_removes,
@@ -491,7 +689,7 @@ where
         )
         .await?;
         self.persist_settled_program_facts_delta(
-            binding_view_key,
+            authority_result_key,
             cleared,
             fact_adds,
             fact_removes,
@@ -501,9 +699,63 @@ where
         Ok(())
     }
 
+    /// Install the exact policy identity behind the bounded result-store key.
+    /// A digest is an address only: a pre-existing unequal value is a
+    /// cryptographic collision (or corruption) and must fail closed.
+    async fn persist_authority_policy_binding_directory(
+        &self,
+        authority_result_key: &AuthorityResultKey,
+    ) -> Result<(), Error> {
+        let Some(policy) = &authority_result_key.policy_binding else {
+            return Ok(());
+        };
+        let digest = policy.directory_digest();
+        let claims = crate::protocol::policy_binding_directory_claims_value(policy.claims())
+            .map_err(|_| Error::InvalidStoredValue("policy binding claims must encode"))?;
+        let store = self
+            .database
+            .direct_record_store(AUTHORITY_POLICY_BINDINGS_STORE)?;
+        let key = [Value::Bytes(digest.to_vec())];
+        if let Some(existing) = store.get(&key).await? {
+            let Value::String(subject) = existing.get_idx(0)? else {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding directory subject must be string",
+                ));
+            };
+            let existing_claims = existing.get_idx(1)?;
+            let existing_claims =
+                crate::protocol::policy_binding_directory_claims_from_value(existing_claims)
+                    .map_err(|_| {
+                        Error::InvalidStoredValue("policy binding directory claims are invalid")
+                    })?;
+            let existing = crate::protocol::PolicyBindingKey::from_canonical_parts(
+                AuthorSubject::from_canonical(&subject).map_err(|_| {
+                    Error::InvalidStoredValue("policy binding directory subject is invalid")
+                })?,
+                existing_claims,
+            );
+            if existing != *policy {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding digest aliases a distinct exact policy identity",
+                ));
+            }
+            return Ok(());
+        }
+        store
+            .set(
+                &key,
+                &[
+                    Value::String(policy.identity.canonical().to_owned()),
+                    claims,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn persist_settled_result_members_delta(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         cleared: bool,
         adds: &[ResultMemberEntry],
         removes: &[ResultMemberEntry],
@@ -513,7 +765,7 @@ where
             .database
             .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
         if cleared || rewrite.is_some() {
-            let prefix = binding_view_store_prefix(binding_view_key);
+            let prefix = authority_result_store_prefix(&authority_result_key);
             let keys = store
                 .prefix_entries(&prefix)
                 .await?
@@ -526,17 +778,17 @@ where
                 .collect::<Vec<_>>();
             if let Some(members) = rewrite {
                 for member in members {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_result_member_key(binding_view_key, member)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_result_member_storage_write(
+                        &authority_result_key,
+                        member,
+                    )?);
                 }
             } else {
                 for member in adds {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_result_member_key(binding_view_key, member)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_result_member_storage_write(
+                        &authority_result_key,
+                        member,
+                    )?);
                 }
             }
             store.write_many(&operations).await?;
@@ -546,14 +798,14 @@ where
         let mut operations = Vec::with_capacity(removes.len() + adds.len());
         for member in removes {
             operations.push(DirectRecordStoreWrite::Delete {
-                key: settled_result_member_key(binding_view_key, member)?,
+                key: settled_result_member_key(&authority_result_key, member)?,
             });
         }
         for member in adds {
-            operations.push(DirectRecordStoreWrite::Set {
-                key: settled_result_member_key(binding_view_key, member)?,
-                value: vec![Value::U64(1)],
-            });
+            operations.push(settled_result_member_storage_write(
+                &authority_result_key,
+                member,
+            )?);
         }
         if !operations.is_empty() {
             store.write_many(&operations).await?;
@@ -563,7 +815,7 @@ where
 
     async fn persist_settled_program_facts_delta(
         &self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         cleared: bool,
         adds: &[ViewFactEntry],
         removes: &[ViewFactEntry],
@@ -573,7 +825,7 @@ where
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
         if cleared || rewrite.is_some() {
-            let prefix = binding_view_store_prefix(binding_view_key);
+            let prefix = authority_result_store_prefix(&authority_result_key);
             let keys = store
                 .prefix_entries(&prefix)
                 .await?
@@ -586,17 +838,17 @@ where
                 .collect::<Vec<_>>();
             if let Some(facts) = rewrite {
                 for fact in facts {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_program_fact_key(binding_view_key, fact)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_program_fact_storage_write(
+                        &authority_result_key,
+                        fact,
+                    )?);
                 }
             } else {
                 for fact in adds {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_program_fact_key(binding_view_key, fact)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_program_fact_storage_write(
+                        &authority_result_key,
+                        fact,
+                    )?);
                 }
             }
             store.write_many(&operations).await?;
@@ -606,14 +858,14 @@ where
         let mut operations = Vec::with_capacity(removes.len() + adds.len());
         for fact in removes {
             operations.push(DirectRecordStoreWrite::Delete {
-                key: settled_program_fact_key(binding_view_key, fact)?,
+                key: settled_program_fact_key(&authority_result_key, fact)?,
             });
         }
         for fact in adds {
-            operations.push(DirectRecordStoreWrite::Set {
-                key: settled_program_fact_key(binding_view_key, fact)?,
-                value: vec![Value::U64(1)],
-            });
+            operations.push(settled_program_fact_storage_write(
+                &authority_result_key,
+                fact,
+            )?);
         }
         if !operations.is_empty() {
             store.write_many(&operations).await?;
@@ -634,10 +886,7 @@ where
                 store.delete(&key).await?;
             }
         }
-        self.query.settled_result_sets.clear();
-        self.query.local_materialized_window_binding_views.clear();
-        self.query.settled_result_row_index.clear();
-        self.query.settled_program_facts.clear();
+        self.query.retained_root_window_sources.clear();
         Ok(())
     }
 
@@ -649,48 +898,63 @@ where
     }
 
     async fn recover_known_state_facts(&mut self) -> Result<(), Error> {
-        self.query.settled_through_by_binding_view.clear();
-        self.query.authorization_progress_by_binding_view.clear();
-        self.query.settled_result_sets.clear();
-        self.query.local_materialized_window_binding_views.clear();
-        self.query.settled_result_row_index.clear();
-        self.query.settled_program_facts.clear();
+        self.query.authority_results.clear();
+        self.query.retained_root_window_sources.clear();
         // Validate the complete durable closure off to the side.  Open/recovery
         // must not leave even a prefix of the recovered state resident when a
         // later store entry is malformed.
-        let mut settled_through_by_binding_view = BTreeMap::new();
-        let mut authorization_progress_by_binding_view = BTreeMap::new();
-        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        for entry in store.prefix_entries(&[]).await? {
-            if entry.key.len() != 3 {
+        let mut authority_results = BTreeMap::<AuthorityResultKey, AuthorityResultState>::new();
+        let mut policies = BTreeMap::<[u8; 32], crate::protocol::PolicyBindingKey>::new();
+        let policy_store = self
+            .database
+            .direct_record_store(AUTHORITY_POLICY_BINDINGS_STORE)?;
+        for entry in policy_store.prefix_entries(&[]).await? {
+            let [Value::Bytes(digest)] = entry.key.as_slice() else {
                 return Err(Error::InvalidStoredValue(
-                    "known-state fact key must have three columns",
+                    "policy binding directory key must be one digest",
+                ));
+            };
+            let digest: [u8; 32] = digest
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidStoredValue("policy binding digest must be 32 bytes"))?;
+            let Value::String(subject) = entry.value.get_idx(0)? else {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding directory subject must be string",
+                ));
+            };
+            let claims = crate::protocol::policy_binding_directory_claims_from_value(
+                entry.value.get_idx(1)?,
+            )
+            .map_err(|_| {
+                Error::InvalidStoredValue("policy binding directory claims are invalid")
+            })?;
+            let policy = crate::protocol::PolicyBindingKey::from_canonical_parts(
+                AuthorSubject::from_canonical(&subject).map_err(|_| {
+                    Error::InvalidStoredValue("policy binding directory subject is invalid")
+                })?,
+                claims,
+            );
+            if policy.directory_digest() != digest
+                || policies
+                    .insert(digest, policy.clone())
+                    .is_some_and(|previous| previous != policy)
+            {
+                return Err(Error::InvalidStoredValue(
+                    "policy binding directory digest does not name its exact policy identity",
                 ));
             }
-            let shape_id = match &entry.key[0] {
-                Value::Uuid(uuid) => ShapeId(*uuid),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state shape id must be uuid",
-                    ));
-                }
-            };
-            let binding_id = match &entry.key[1] {
-                Value::Uuid(uuid) => BindingId(*uuid),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state binding id must be uuid",
-                    ));
-                }
-            };
-            let read_view = match &entry.key[2] {
-                Value::Uuid(uuid) => ReadViewKey { id: *uuid },
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state read view must be uuid",
-                    ));
-                }
-            };
+        }
+        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
+        for entry in store.prefix_entries(&[]).await? {
+            let authority_result_key = resolve_stored_authority_result_key(
+                authority_result_key_from_store_prefix(
+                    &entry.key,
+                    "known-state authority result key must be valid",
+                )?,
+                &policies,
+                "known-state policy directory entry is missing",
+            )?;
             let settled_through = match entry.value.get_idx(0)? {
                 Value::U64(value) => GlobalTime(value),
                 _ => {
@@ -699,11 +963,14 @@ where
                     ));
                 }
             };
-            let binding_view_key = BindingViewKey::new(shape_id, binding_id, read_view);
-            settled_through_by_binding_view.insert(binding_view_key, settled_through);
+            let state = authority_results.entry(authority_result_key).or_default();
+            // Recovery restores durable cache material and, when present, a
+            // fast cursor. It must not restore `live_settled`: a reopened
+            // process has no current exact authority handoff yet.
+            state.settled_through = (settled_through.0 != 0).then_some(settled_through);
             match entry.value.get_idx(1)? {
                 Value::U64(progress) if progress != u64::MAX => {
-                    authorization_progress_by_binding_view.insert(binding_view_key, progress);
+                    state.authorization_progress = Some(progress);
                 }
                 Value::U64(_) => {}
                 _ => {
@@ -712,22 +979,50 @@ where
                     ));
                 }
             }
+            match entry.value.get_idx(2)? {
+                Value::U64(generation) if generation != 0 => {
+                    state.source_closure =
+                        crate::node::AuthoritySourceClosure::Claimed { generation };
+                }
+                Value::U64(_) => {}
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "known-state source-closure generation must be u64",
+                    ));
+                }
+            }
         }
         let store = self
             .database
             .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
-        let mut recovered_members = Vec::new();
         for entry in store.prefix_entries(&[]).await? {
-            if entry.key.len() != 4 {
+            let Some((member_digest, prefix)) = entry.key.split_last() else {
                 return Err(Error::InvalidStoredValue(
-                    "settled result member key must have four columns",
+                    "settled result member key is empty",
+                ));
+            };
+            let authority_result_key = resolve_stored_authority_result_key(
+                authority_result_key_from_store_prefix(
+                    prefix,
+                    "settled result member binding key must be valid",
+                )?,
+                &policies,
+                "settled result member policy directory entry is missing",
+            )?;
+            let member_digest = match member_digest {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled result member digest must be bytes",
+                    ));
+                }
+            };
+            if member_digest.len() != 32 {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member digest must be 32 bytes",
                 ));
             }
-            let binding_view_key = binding_view_key_from_store_key(
-                &entry.key,
-                "settled result member binding key must be valid",
-            )?;
-            let member_bytes = match &entry.key[3] {
+            let member_bytes = match entry.value.get_idx(0)? {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -735,41 +1030,52 @@ where
                     ));
                 }
             };
-            let member = result_member_from_storage_bytes(member_bytes)?;
-            recovered_members.push((binding_view_key, member));
-        }
-        let mut settled_result_sets =
-            BTreeMap::<BindingViewKey, BTreeSet<ResultMemberEntry>>::new();
-        let mut settled_result_row_index =
-            BTreeMap::<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>::new();
-        for (binding_view_key, member) in recovered_members {
+            if settled_result_member_digest(&member_bytes).as_slice() != member_digest {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member payload does not match its digest",
+                ));
+            }
+            let member = result_member_from_storage_bytes(&member_bytes)?;
+            let state = authority_results.entry(authority_result_key).or_default();
             if let Some(row_key) = Self::result_member_row_key(&member) {
-                settled_result_row_index
-                    .entry(binding_view_key)
-                    .or_default()
+                state
+                    .settled_result_row_index
                     .insert(row_key, member.clone());
             }
-            settled_result_sets
-                .entry(binding_view_key)
-                .or_default()
-                .insert(member);
+            state.settled_result_set.insert(member);
         }
 
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        let mut settled_program_facts = BTreeMap::<BindingViewKey, BTreeSet<ViewFactEntry>>::new();
         for entry in store.prefix_entries(&[]).await? {
-            if entry.key.len() != 4 {
+            let Some((fact_digest, prefix)) = entry.key.split_last() else {
                 return Err(Error::InvalidStoredValue(
-                    "settled program fact key must have four columns",
+                    "settled program fact key is empty",
+                ));
+            };
+            let authority_result_key = resolve_stored_authority_result_key(
+                authority_result_key_from_store_prefix(
+                    prefix,
+                    "settled program fact binding key must be valid",
+                )?,
+                &policies,
+                "settled program fact policy directory entry is missing",
+            )?;
+            let fact_digest = match fact_digest {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact digest must be bytes",
+                    ));
+                }
+            };
+            if fact_digest.len() != 32 {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact digest must be 32 bytes",
                 ));
             }
-            let binding_view_key = binding_view_key_from_store_key(
-                &entry.key,
-                "settled program fact binding key must be valid",
-            )?;
-            let fact_bytes = match &entry.key[3] {
+            let fact_bytes = match entry.value.get_idx(0)? {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -777,17 +1083,36 @@ where
                     ));
                 }
             };
-            let fact = codec::program_fact_from_storage_bytes(fact_bytes)?;
-            settled_program_facts
-                .entry(binding_view_key)
+            if settled_program_fact_digest(&fact_bytes).as_slice() != fact_digest {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact payload does not match its digest",
+                ));
+            }
+            let fact = codec::program_fact_from_storage_bytes(&fact_bytes)?;
+            authority_results
+                .entry(authority_result_key)
                 .or_default()
+                .settled_program_facts
                 .insert(fact);
         }
-        self.query.settled_through_by_binding_view = settled_through_by_binding_view;
-        self.query.authorization_progress_by_binding_view = authorization_progress_by_binding_view;
-        self.query.settled_result_sets = settled_result_sets;
-        self.query.settled_result_row_index = settled_result_row_index;
-        self.query.settled_program_facts = settled_program_facts;
+        for state in authority_results.values_mut() {
+            state.covered_input_sources.clear();
+            state.covered_input_versions.clear();
+            for fact in &state.settled_program_facts {
+                match fact {
+                    ProgramFactEntry::ProgramSourceCoverage(coverage) if coverage.complete => {
+                        state.covered_input_sources.insert(coverage.source.clone());
+                    }
+                    ProgramFactEntry::CoveredInput(input) => {
+                        state
+                            .covered_input_versions
+                            .insert((input.source.clone(), input.source_row), input.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.query.authority_results = authority_results;
         Ok(())
     }
 
@@ -820,11 +1145,13 @@ where
         );
         for table_id in self.physical_table_ids() {
             let storage_table = physical_rejected_versions_table_name(table_id);
-            for raw in self.database.primary_key_scan_raw(
-                &storage_table,
-                &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
-            )
-            .await?
+            for raw in self
+                .database
+                .primary_key_scan_raw(
+                    &storage_table,
+                    &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+                )
+                .await?
             {
                 let record = raw.record();
                 let node_id = record.get_u64(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?;
@@ -839,8 +1166,8 @@ where
             }
         }
         let applied = self.database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-self.database.finish_persistence(persisted)?;
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted)?;
         self.rejections.rejected_transactions.remove(&tx_id);
         Ok(())
     }
@@ -923,6 +1250,7 @@ self.database.finish_persistence(persisted)?;
 
     /// Resume all query work that can make progress now, without holding the
     /// caller open for storage-blocked nodes.
+    #[allow(dead_code)] // Test-only and feature-gated direct callers use the no-owner form.
     pub(crate) async fn drive_ready_query_runtime(&mut self) -> Result<(), Error> {
         self.drive_ready_query_runtime_with_waker(None).await
     }
@@ -1019,6 +1347,17 @@ self.database.finish_persistence(persisted)?;
         self.groove_runtime_token
     }
 
+    /// Simulate a live catalogue change that invalidates prepared Groove
+    /// handles without replacing the durable node state.
+    ///
+    /// Production takes this path for changes such as same-version policy
+    /// updates: existing subscriptions must rehydrate against the new runtime
+    /// token while already-received authority state remains available.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn invalidate_groove_runtime_for_test(&mut self) {
+        self.groove_runtime_token = crate::node::next_groove_runtime_token();
+    }
+
     /// Return metrics for the most recent committed storage batch, if any.
     pub fn last_commit_metrics(&self) -> Option<&CommitMetrics> {
         self.database.last_commit_metrics()
@@ -1049,5 +1388,4 @@ self.database.finish_persistence(persisted)?;
     pub fn take_storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
         self.database.take_storage_read_metrics()
     }
-
 }

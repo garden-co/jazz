@@ -1,3 +1,12 @@
+/// The authorization source for a row-version repair response. Scope relays
+/// may disclose only exact row versions in their durable authority ledger;
+/// they never re-evaluate a foreground's read policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RowVersionRepairAuthorization {
+    EnforceReadPolicy(AuthorSubject),
+    RetainedScopeLedger,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -245,7 +254,7 @@ where
     pub(crate) async fn row_version_payloads_for_refs(
         &mut self,
         requests: &[RowVersionRef],
-        identity: AuthorSubject,
+        authorization: RowVersionRepairAuthorization,
     ) -> Result<Vec<VersionBundle>, Error> {
         let mut by_tx = BTreeMap::<TxId, Vec<VersionRow>>::new();
         for request in requests {
@@ -321,15 +330,27 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "repair request physical table must have a schema mapping",
             ))?;
-            if !self.dry_run_read_current_allows_in_schema(
-                &request.table,
-                request.row_uuid,
-                request_schema,
-                identity,
-            )
-            .await?
-            {
-                continue;
+            match authorization {
+                RowVersionRepairAuthorization::EnforceReadPolicy(identity) => {
+                    if !self.dry_run_read_current_allows_in_schema(
+                        &request.table,
+                        request.row_uuid,
+                        request_schema,
+                        identity,
+                    )
+                    .await?
+                    {
+                        continue;
+                    }
+                }
+                RowVersionRepairAuthorization::RetainedScopeLedger => {
+                    if !self
+                        .scope_relay_repair_ledger_contains(requested_table_id, request)
+                        .await?
+                    {
+                        continue;
+                    }
+                }
             }
             for (table_id, version) in matching_versions {
                 if table_id == requested_table_id {
@@ -357,7 +378,11 @@ where
         &mut self,
         requests: &[RowVersionRef],
         version_bundles: Vec<VersionBundle>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<VersionBundle>, Error> {
+        for bundle in &version_bundles {
+            crate::protocol::validate_version_records(&bundle.versions)
+                .map_err(|_| Error::MalformedViewUpdate("malformed version receipt"))?;
+        }
         let requested_physical = requests
             .iter()
             .map(|request| {
@@ -436,17 +461,19 @@ where
             bundle.versions = versions;
             prevalidated_bundles.push(bundle);
         }
+        let mut applied_bundles = Vec::with_capacity(prevalidated_bundles.len());
         for bundle in prevalidated_bundles {
             self.ingest_known_transaction(
-                bundle.tx,
-                bundle.versions,
-                bundle.fate,
+                bundle.tx.clone(),
+                bundle.versions.clone(),
+                bundle.fate.clone(),
                 bundle.global_time,
                 bundle.durability,
             )
             .await?;
+            applied_bundles.push(bundle);
         }
-        Ok(())
+        Ok(applied_bundles)
     }
 
     #[allow(dead_code)]
@@ -454,34 +481,17 @@ where
         &mut self,
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
-        let (
-            subscription,
-            result_member_adds,
-            version_carriers,
-            version_bundles,
-            program_fact_adds,
-        ) = match message {
+        let (subscription, version_carriers, program_fact_adds) = match message {
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
-                result_member_adds,
                 version_carriers,
-                version_bundles,
                 program_fact_adds,
                 ..
-            }) => (
-                *subscription,
-                result_member_adds,
-                version_carriers,
-                version_bundles,
-                program_fact_adds,
-            ),
+            }) => (*subscription, version_carriers, program_fact_adds),
             _ => return Ok(Vec::new()),
         };
-        let mut normalized_bundles = version_bundles.clone();
-        normalized_bundles.extend(
-            expand_version_carriers(version_carriers)
-                .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?,
-        );
+        let normalized_bundles = expand_version_carriers(version_carriers)
+            .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         let incoming_versions = normalized_bundles
             .iter()
             .flat_map(|bundle| {
@@ -510,59 +520,20 @@ where
                 )?;
             }
         }
-        // Only additions require repair. Removals are self-sufficient because
-        // the removed version may now be policy-invisible to this receiver, in
-        // which case fetching the body is both unnecessary and allowed to
-        // return no payload.
-        for (table, row_uuid, tx_id) in result_member_adds
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-        {
-            let version_ref = RowVersionRef::new(table.to_string(), row_uuid, tx_id);
-            if self.inline_version_bundle_covers(
-                &version_ref,
-                result_schema_version,
-                &incoming_versions,
-            )? {
-                continue;
-            }
-            let has_body = self.local_version_row_for_ref(&version_ref).await?.is_some()
-                && self.query_transaction(tx_id).await?.is_some();
-            if !has_body {
-                missing.insert(version_ref);
-            } else if let Some(version) = self.local_version_record_for_ref(&version_ref).await? {
-                self.collect_missing_text_ancestor_refs(
-                    &version,
-                    &mut missing,
-                    &mut visited_text_ancestors,
-                )?;
-            }
-        }
+        // Only an added CoveredInput may require a body repair.  A removed
+        // input is self-sufficient: its successor closure retracts the old
+        // receiver record, and its body may now be policy-invisible.  Result
+        // members and relation/contribution facts are authority output or
+        // proof and are intentionally never a repair source under
+        // INV-SYNC-36.
         for (table, row_uuid, tx_id) in program_fact_adds
             .iter()
             .flat_map(|fact| match fact {
-                ProgramFactEntry::RelationEdge(edge) => vec![
-                    edge.source_version.as_ref().map(|version| {
-                        (edge.source_table.to_string(), edge.source_row, version.tx)
-                    }),
-                    edge.target_version.as_ref().map(|version| {
-                        (edge.target_table.to_string(), edge.target_row, version.tx)
-                    }),
-                ],
-                ProgramFactEntry::ContributingMembers(contribution)
-                    if contribution
-                        .role
-                        .as_deref()
-                        .is_some_and(|role| role.starts_with("flat_tuple_source:")) =>
-                {
-                    vec![
-                        contribution
-                            .contributor
-                            .as_real_row()
-                            .and_then(RealRowMemberEntry::row_projection)
-                            .map(|(table, row, tx)| (table.to_string(), row, tx)),
-                    ]
-                }
+                ProgramFactEntry::CoveredInput(input) => vec![Some((
+                    input.version_table.to_string(),
+                    input.source_row,
+                    input.version.tx,
+                ))],
                 _ => Vec::new(),
             })
             .flatten()
@@ -684,12 +655,21 @@ where
     }
 
     fn mint_tx_time(&mut self, now_ms: u64) -> Result<TxTime, Error> {
-        let made_at = TxTime::tick(self.clock.tx_time, now_ms)?;
+        let made_at = TxTime::tick(
+            self.clock
+                .tx_time
+                .max(self.clock.reservation_high_water.get()),
+            now_ms,
+        )?;
         self.clock.tx_time = made_at;
+        self.clock.reservation_high_water.set(made_at);
         Ok(made_at)
     }
 
     fn merge_tx_time(&mut self, observed: TxTime) {
         self.clock.tx_time = self.clock.tx_time.max(observed);
+        self.clock
+            .reservation_high_water
+            .set(self.clock.reservation_high_water.get().max(observed));
     }
 }

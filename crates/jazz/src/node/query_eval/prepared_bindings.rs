@@ -187,7 +187,10 @@ pub(super) fn prepared_claim_value(
     Ok(None)
 }
 
-pub(super) fn coerce_prepared_binding_value(
+/// Canonicalizes a bound value to the descriptor representation used by a
+/// prepared Groove binding source. Lowering literal-only routed terminals
+/// uses the same conversion so their route predicates compare like-for-like.
+pub(crate) fn coerce_prepared_binding_value(
     value: Value,
     column_type: &groove::schema::ColumnType,
 ) -> Value {

@@ -8,9 +8,29 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
+import {
+  createDb,
+  Db,
+  getDbSubscriptionSource,
+  resolveDefaultPersistentDbName,
+  type QueryBuilder,
+} from "../../src/runtime/db.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
+import {
+  INDEXEDDB_BTREE_METADATA_STORE,
+  INDEXEDDB_BTREE_PAGES_STORE,
+  INDEXEDDB_STORAGE_MANIFEST,
+  INDEXEDDB_STORAGE_MANIFEST_KEY,
+  INDEXEDDB_STORAGE_MANIFEST_STORE,
+  IndexedDbPageStore,
+} from "../../src/runtime/indexeddb-page-store.js";
+import {
+  createBrowserSharedWorkerBaseName,
+  SharedBrowserForegroundNodeLease,
+} from "../../src/runtime/native-runtime/browser-shared-worker-connection.js";
+import { createBrowserStorageOwner } from "../../src/runtime/browser-worker-config.js";
 import {
   TestCleanup,
   createSyncedDb,
@@ -24,6 +44,7 @@ import {
   blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
+  stopJazzServer,
   type JazzServerInfo,
   unblockJazzServerNetwork,
 } from "./testing-server.js";
@@ -39,10 +60,12 @@ import {
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
 import { deploy } from "../../src/dev/catalogue.js";
-import type {
-  BrowserInspectorContext,
-  BrowserInspectorControlEvent,
-  BrowserInspectorControlRequest,
+import {
+  deserializeBrowserRelayError,
+  type BrowserInspectorContext,
+  type BrowserInspectorControlEvent,
+  type BrowserInspectorControlRequest,
+  type BrowserRelayError,
 } from "../../src/runtime/native-runtime/browser-worker-protocol.js";
 
 declare const __JAZZ_BROWSER_SOAK__: string;
@@ -62,6 +85,21 @@ async function listWorkerContexts(port: MessagePort): Promise<BrowserInspectorCo
   });
 }
 
+async function listWorkerLifecycle(
+  port: MessagePort,
+): Promise<Extract<BrowserInspectorControlEvent, { type: "lifecycle-trace" }>["entries"]> {
+  const id = nextInspectorRequestId++;
+  return new Promise((resolve) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "lifecycle-trace" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      resolve(event.data.entries);
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "lifecycle-trace", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
 async function waitForWorkerContextRelease(port: MessagePort, dbName: string): Promise<void> {
   await waitForCondition(
     async () => !(await listWorkerContexts(port)).some((context) => context.dbName === dbName),
@@ -76,7 +114,7 @@ async function terminateWorker(port: MessagePort): Promise<void> {
     const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
       if (event.data.type !== "result" || event.data.id !== id) return;
       port.removeEventListener("message", onMessage);
-      if (event.data.error) reject(new Error(event.data.error));
+      if (event.data.error) reject(deserializeBrowserRelayError(event.data.error));
       else resolve();
     };
     port.addEventListener("message", onMessage);
@@ -105,6 +143,31 @@ const app: s.App<AppSchema> = s.defineApp(schema);
 const { projects, todos } = app;
 type Todo = s.RowOf<typeof todos>;
 
+const transactionIdentitySchema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  documents: s
+    .table({
+      branch: s.string(),
+      title: s.string(),
+      projectId: s.ref("projects"),
+      body: s.string(),
+    })
+    .branchBy("branch"),
+};
+const transactionIdentityApp = s.defineApp(transactionIdentitySchema);
+const transactionIdentityPermissions = s.definePermissions(transactionIdentityApp, ({ policy }) => [
+  policy.projects.allowRead.always(),
+  policy.projects.allowInsert.always(),
+  policy.projects.allowUpdate.always(),
+  policy.projects.allowDelete.always(),
+  policy.documents.allowRead.always(),
+  policy.documents.allowInsert.always(),
+  policy.documents.allowUpdate.always(),
+  policy.documents.allowDelete.always(),
+]);
+
 const readOnlyPermissions = s.definePermissions(app, ({ policy }) => [
   policy.projects.allowRead.always(),
   policy.projects.allowInsert.never(),
@@ -114,6 +177,21 @@ const readOnlyPermissions = s.definePermissions(app, ({ policy }) => [
   policy.todos.allowInsert.never(),
   policy.todos.allowUpdate.never(),
   policy.todos.allowDelete.never(),
+]);
+
+// A single recovered worker restart must be able to settle two former
+// foreground transactions independently: the ordinary todo is admitted,
+// while the marked todo is rejected.  Keeping both outcomes in one authority
+// policy makes the receipt independent of a mid-test policy redeploy.
+const recoveryTerminalPermissions = s.definePermissions(app, ({ policy }) => [
+  policy.projects.allowRead.always(),
+  policy.projects.allowInsert.always(),
+  policy.projects.allowUpdate.always(),
+  policy.projects.allowDelete.always(),
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.where({ done: false }),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
 ]);
 
 const noUpdatePermissions = s.definePermissions(app, ({ policy }) => [
@@ -219,11 +297,509 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
   return app.todos.where({ projectId });
 }
 
+type RawForegroundLease = {
+  node: Uint8Array;
+  returnWithHighWater(value: bigint): Promise<void>;
+};
+
+function startRawForegroundLease(
+  port: MessagePort,
+  request: {
+    dbName: string;
+    storageOwner: string;
+    testDelayBeforeLeaseAllocationMs?: number;
+  },
+): { queued: Promise<void>; ready: Promise<RawForegroundLease> } {
+  let resolveQueued!: () => void;
+  const queued = new Promise<void>((resolve) => {
+    resolveQueued = resolve;
+  });
+  const ready = new Promise<RawForegroundLease>((resolve, reject) => {
+    const onMessage = (
+      event: MessageEvent<{
+        type?: string;
+        error?: BrowserRelayError;
+        node?: Uint8Array;
+        leaseId?: string;
+      }>,
+    ) => {
+      if (event.data?.type === "foreground-node-lease-test-queued") {
+        resolveQueued();
+        return;
+      }
+      if (event.data?.type === "foreground-node-lease-error" && event.data.error) {
+        port.removeEventListener("message", onMessage);
+        reject(deserializeBrowserRelayError(event.data.error));
+        return;
+      }
+      if (event.data?.type !== "foreground-node-lease-ready" || !event.data.node) return;
+      const node = event.data.node.slice();
+      resolve({
+        node,
+        returnWithHighWater(value) {
+          return new Promise<void>((resolveReturn, rejectReturn) => {
+            const onResult = (
+              resultEvent: MessageEvent<{ type?: string; error?: BrowserRelayError }>,
+            ) => {
+              if (resultEvent.data?.type !== "foreground-node-lease-result") return;
+              port.removeEventListener("message", onResult);
+              port.removeEventListener("message", onMessage);
+              port.close();
+              if (resultEvent.data.error) {
+                rejectReturn(deserializeBrowserRelayError(resultEvent.data.error));
+              } else resolveReturn();
+            };
+            port.addEventListener("message", onResult);
+            port.postMessage({
+              type: "return-foreground-node-lease",
+              confirmedTxTime: value.toString(),
+            });
+          });
+        },
+      });
+    };
+    port.addEventListener("message", onMessage);
+    port.start();
+    port.postMessage({ type: "acquire-foreground-node-lease", ...request });
+  });
+  return { queued, ready };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe("SharedWorker bridge with IndexedDB", () => {
+  it("retains a queued first-owner allocation after the preceding lease returns", async () => {
+    const dbName = uniqueDbName("queued-first-owner");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("queued-first-owner-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const createPort = () => {
+      const worker = new SharedWorker(new URL("./jazz-broker-worker-test.ts", import.meta.url), {
+        type: "module",
+        name: `${workerName}:generation-0`,
+      });
+      return worker.port;
+    };
+    const first = startRawForegroundLease(createPort(), { dbName, storageOwner });
+    const second = startRawForegroundLease(createPort(), {
+      dbName,
+      storageOwner,
+      testDelayBeforeLeaseAllocationMs: 250,
+    });
+
+    const [firstLease] = await withTimeout(
+      Promise.all([first.ready, second.queued]),
+      5_000,
+      "second foreground allocation did not enter the admitted queue",
+    );
+    await firstLease.returnWithHighWater(11n);
+    const secondLease = await withTimeout(
+      second.ready,
+      5_000,
+      "returning the first lease released a physical owner with admitted allocation work",
+    );
+    // The queued request begins only after the clean return commits, so it is
+    // allowed—and expected—to reuse that safely handed-off identity.
+    expect(secondLease.node).toEqual(firstLease.node);
+    await secondLease.returnWithHighWater(22n);
+
+    // Both balanced reservations are now gone. A successor realm can claim
+    // the physical root and reuse the final clean handoff.
+    await sleep(100);
+    const successorWorker = new SharedWorker(
+      new URL("./jazz-broker-worker-test.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-1` },
+    );
+    const successor = await withTimeout(
+      startRawForegroundLease(successorWorker.port, { dbName, storageOwner }).ready,
+      5_000,
+      "balanced queued allocations left the physical root unavailable to a successor realm",
+    );
+    expect(successor.node).toEqual(secondLease.node);
+    await successor.returnWithHighWater(33n);
+  }, 10_000);
+
+  it("releases a terminally failed pending allocation for a clean successor", async () => {
+    const dbName = uniqueDbName("failed-pending-owner");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("failed-pending-owner-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const failedWorker = new SharedWorker(
+      new URL("./jazz-broker-worker-test.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-0` },
+    );
+    const failed = startRawForegroundLease(failedWorker.port, {
+      dbName,
+      storageOwner,
+      testDelayBeforeLeaseAllocationMs: 1_001,
+    });
+    await expect(failed.ready).rejects.toThrow("Invalid foreground lease test delay");
+
+    await sleep(100);
+    const successorWorker = new SharedWorker(
+      new URL("./jazz-broker-worker-test.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-1` },
+    );
+    const successor = await withTimeout(
+      startRawForegroundLease(successorWorker.port, { dbName, storageOwner }).ready,
+      5_000,
+      "failed pending allocation retained the physical owner",
+    );
+    await successor.returnWithHighWater(44n);
+  }, 10_000);
+
+  it("coalesces concurrent first-tab durable-owner admission in one worker realm", async () => {
+    const dbName = uniqueDbName("concurrent-first-owner");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("concurrent-first-owner-app"),
+      secret: generateAuthSecret(),
+    });
+
+    const [first, second] = await withTimeout(
+      Promise.all([
+        SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+        SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+      ]),
+      5_000,
+      "concurrent first tabs did not share durable physical-owner admission",
+    );
+    try {
+      expect(second.node).not.toEqual(first.node);
+    } finally {
+      // A second first-open transaction must not have retired the first live
+      // identity as "abandoned". Clean return rejects an unknown/retired
+      // lease, so both succeeding proves both remained durably active.
+      await Promise.all([first.returnWithHighWater(11n), second.returnWithHighWater(22n)]);
+    }
+  }, 10_000);
+
+  /**
+   * A foreground which times out while the worker is still delivering its
+   * durable identity must cancel/retire that lease before a later foreground
+   * opens the same root.
+   *
+   * first tab ──acquire──► worker ──durably allocate──► delayed delivery
+   * first tab ──cancel───► worker ──retire────────────► durable lease pool
+   * second tab ──acquire──► worker ──fresh node──► second tab
+   */
+  it("retires a foreground lease when cancellation races durable allocation delivery", async () => {
+    const dbName = uniqueDbName("cancelled-foreground-lease");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("cancelled-foreground-lease-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const worker = new SharedWorker(new URL("./jazz-broker-worker-test.ts", import.meta.url), {
+      type: "module",
+      name: `${workerName}:generation-0`,
+    });
+    const port = worker.port;
+    port.start();
+    let unexpectedlyIssued = false;
+    let allocatedNode: Uint8Array | null = null;
+    let cancellationLeaseState: string | undefined;
+    try {
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          const onMessage = (
+            event: MessageEvent<{
+              type?: string;
+              node?: Uint8Array;
+              error?: BrowserRelayError;
+              testLeaseState?: string;
+            }>,
+          ) => {
+            if (event.data?.type === "foreground-node-lease-ready" && event.data.node) {
+              unexpectedlyIssued = true;
+            }
+            if (event.data?.type === "foreground-node-lease-test-allocated" && event.data.node) {
+              allocatedNode = event.data.node.slice();
+              // Follow the durable allocation receipt rather than a wall-clock
+              // guess: sealed CI can otherwise cancel during root admission,
+              // before a lease exists to retire.
+              port.postMessage({ type: "cancel-foreground-node-lease" });
+            }
+            if (event.data?.type === "foreground-node-lease-error" && event.data.error) {
+              port.removeEventListener("message", onMessage);
+              reject(deserializeBrowserRelayError(event.data.error));
+            }
+            if (event.data?.type === "foreground-node-lease-cancelled") {
+              cancellationLeaseState = event.data.testLeaseState;
+              port.removeEventListener("message", onMessage);
+              resolve();
+            }
+          };
+          port.addEventListener("message", onMessage);
+          port.postMessage({
+            type: "acquire-foreground-node-lease",
+            dbName,
+            storageOwner,
+            testDelayAfterLeaseAllocationMs: 250,
+          });
+        }),
+        5_000,
+        "in-flight foreground lease cancellation was not acknowledged after cleanup",
+      );
+    } finally {
+      port.close();
+    }
+    expect(unexpectedlyIssued).toBe(false);
+    expect(allocatedNode).not.toBeNull();
+    expect(cancellationLeaseState).toBe("retired");
+
+    // Cancellation releases the now-idle physical realm. Let the browser
+    // finish that close before opening its successor generation.
+    await sleep(100);
+
+    // A cancelled-but-issued identity is retired, never put back into the
+    // reusable pool. A later foreground must receive a distinct node.
+    const successor = await withTimeout(
+      SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+      5_000,
+      "foreground lease cancellation left the physical root unavailable",
+    );
+    try {
+      expect(successor.node).not.toEqual(allocatedNode);
+    } finally {
+      await successor.retire();
+    }
+  }, 15_000);
+
+  it("does not expose the foreground lease test seam to an ordinary worker client", async () => {
+    const dbName = uniqueDbName("ordinary-foreground-lease");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("ordinary-foreground-lease-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const worker = new SharedWorker(
+      new URL("../../src/worker/jazz-broker-worker.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-0` },
+    );
+    const port = worker.port;
+    port.start();
+    let sawTestAllocation = false;
+    try {
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          const onMessage = (event: MessageEvent<{ type?: string; error?: BrowserRelayError }>) => {
+            if (event.data?.type === "foreground-node-lease-test-allocated") {
+              sawTestAllocation = true;
+            }
+            if (event.data?.type === "foreground-node-lease-error" && event.data.error) {
+              port.removeEventListener("message", onMessage);
+              reject(deserializeBrowserRelayError(event.data.error));
+            }
+            if (event.data?.type === "foreground-node-lease-ready") {
+              port.postMessage({ type: "retire-foreground-node-lease" });
+            }
+            if (event.data?.type === "foreground-node-lease-result") {
+              port.removeEventListener("message", onMessage);
+              resolve();
+            }
+          };
+          port.addEventListener("message", onMessage);
+          // The production worker has no hook installation, so this
+          // test-only scheduling field is inert even when a raw client sends it.
+          port.postMessage({
+            type: "acquire-foreground-node-lease",
+            dbName,
+            storageOwner,
+            testDelayAfterLeaseAllocationMs: 1_000,
+          });
+        }),
+        5_000,
+        "ordinary foreground lease client did not finish",
+      );
+    } finally {
+      port.close();
+    }
+    expect(sawTestAllocation).toBe(false);
+  }, 10_000);
+
+  it("shares one stable test-worker realm between foreground lease clients", async () => {
+    const dbName = uniqueDbName("shared-test-worker-lease");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("shared-test-worker-lease-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const workerUrl = new URL("./jazz-broker-worker-test.ts", import.meta.url);
+    const acquire = async () => {
+      const worker = new SharedWorker(workerUrl, {
+        type: "module",
+        name: `${workerName}:generation-0`,
+      });
+      const port = worker.port;
+      port.start();
+      let allocation: { node: Uint8Array; workerRealmId: string } | null = null;
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          const onMessage = (
+            event: MessageEvent<{
+              type?: string;
+              error?: BrowserRelayError;
+              node?: Uint8Array;
+              workerRealmId?: string;
+            }>,
+          ) => {
+            if (
+              event.data?.type === "foreground-node-lease-test-allocated" &&
+              event.data.node &&
+              event.data.workerRealmId
+            ) {
+              allocation = {
+                node: event.data.node.slice(),
+                workerRealmId: event.data.workerRealmId,
+              };
+            }
+            if (event.data?.type === "foreground-node-lease-error" && event.data.error) {
+              port.removeEventListener("message", onMessage);
+              reject(deserializeBrowserRelayError(event.data.error));
+            }
+            if (event.data?.type === "foreground-node-lease-ready") {
+              port.removeEventListener("message", onMessage);
+              resolve();
+            }
+          };
+          port.addEventListener("message", onMessage);
+          port.postMessage({
+            type: "acquire-foreground-node-lease",
+            dbName,
+            storageOwner,
+            testDelayAfterLeaseAllocationMs: 0,
+          });
+        }),
+        5_000,
+        "test foreground lease client did not receive a lease",
+      );
+      if (!allocation) throw new Error("test foreground lease allocation was not observed");
+      return {
+        ...allocation,
+        async retire() {
+          await withTimeout(
+            new Promise<void>((resolve, reject) => {
+              const onMessage = (
+                event: MessageEvent<{ type?: string; error?: BrowserRelayError }>,
+              ) => {
+                if (event.data?.type !== "foreground-node-lease-result") return;
+                port.removeEventListener("message", onMessage);
+                if (event.data.error) reject(deserializeBrowserRelayError(event.data.error));
+                else resolve();
+              };
+              port.addEventListener("message", onMessage);
+              port.postMessage({ type: "retire-foreground-node-lease" });
+            }),
+            5_000,
+            "test foreground lease did not retire",
+          );
+          port.close();
+        },
+      };
+    };
+
+    const first = await acquire();
+    let second: Awaited<ReturnType<typeof acquire>> | null = null;
+    try {
+      second = await acquire();
+      expect(first.workerRealmId).toBe(second.workerRealmId);
+      expect(first.node).not.toEqual(second.node);
+    } finally {
+      await Promise.all([first.retire(), second?.retire()]);
+    }
+  }, 15_000);
+
+  it("fences a generation-advanced worker realm until its live predecessor releases the physical root", async () => {
+    const appId = uniqueDbName("physical-worker-epoch-app");
+    const dbName = uniqueDbName("physical-worker-epoch-root");
+    const secret = generateAuthSecret();
+    const config = { appId, secret, driver: { type: "persistent" as const, dbName } };
+    // `driver.dbName` is the caller-selected logical base. The worker and
+    // IndexedDB liveness fence deliberately protect its auth-scoped physical
+    // root, which is the name `createDb` actually opens.
+    const first = track(await createDb(config));
+    try {
+      // `createDb` turns a local-first secret into its canonical session
+      // before deriving the physical root. Derive from that resolved config,
+      // rather than from the caller input whose secret has not yet become a
+      // session identity.
+      const physicalDbName = resolveDefaultPersistentDbName(first.config);
+      // Materialize both the foreground lease and worker runtime before
+      // deliberately advancing the page-side generation key.
+      await first.all(allTodos, { tier: "local" });
+      const workerName = createBrowserSharedWorkerBaseName(undefined, physicalDbName);
+      localStorage.setItem(`jazz:shared-worker-generation:${workerName}`, "1");
+
+      // Planted overlap: generation one names a distinct SharedWorker even
+      // though generation zero is live. It must fail before it can recover
+      // generation zero's foreground lease pool.
+      await expect(createDb(config)).rejects.toThrow("active in another Jazz SharedWorker realm");
+
+      await first.shutdown();
+      untrack(first);
+      await sleep(100);
+
+      const successor = track(await createDb(config));
+      try {
+        await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+      } finally {
+        await successor.shutdown();
+        untrack(successor);
+      }
+    } finally {
+      await first.shutdown().catch(() => undefined);
+      untrack(first);
+    }
+  });
+
+  it("releases an invalidated physical-worker epoch so a successor generation can reopen", async () => {
+    const appId = uniqueDbName("invalidated-physical-worker-epoch-app");
+    const dbName = uniqueDbName("invalidated-physical-worker-epoch-root");
+    const secret = generateAuthSecret();
+    const storageOwner = createBrowserStorageOwner({ appId, secret });
+    const first = await SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner });
+    try {
+      const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+      localStorage.setItem(`jazz:shared-worker-generation:${workerName}`, "1");
+      await expect(
+        SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+      ).rejects.toThrow("active in another Jazz SharedWorker realm");
+
+      // Planted lifecycle transition: this is not a clean worker handoff.
+      // IDB versionchange/delete invalidates the live worker handle, so the
+      // successor must be admitted after that handle releases its Web Lock.
+      await withTimeout(
+        IndexedDbPageStore.destroy(dbName),
+        5_000,
+        "External IndexedDB invalidation remained blocked by the lease-only worker handle",
+      );
+      await sleep(100);
+
+      const successor = await withTimeout(
+        SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+        5_000,
+        "Successor generation did not acquire the invalidated physical root",
+      );
+      try {
+        expect(successor.node).not.toEqual(first.node);
+      } finally {
+        await successor.retire();
+      }
+    } finally {
+      await withTimeout(
+        first.retire(),
+        1_000,
+        "Invalidated predecessor lease did not settle during test cleanup",
+      ).catch(() => undefined);
+    }
+  }, 15_000);
+
   const ctx = new TestCleanup();
   const remoteBrowserDbIds = new Set<string>();
   const errorListeners = new Set<(event: ErrorEvent) => void>();
@@ -291,6 +867,158 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     expect(db).toBeDefined();
     expect(db).toBeInstanceOf(Db);
+  });
+
+  it("exposes a bounded redacted worker lifecycle ledger to the owning inspector", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("worker-lifecycle-ledger");
+    const db = track(
+      await createDb({
+        appId: syncServer.appId,
+        serverUrl: syncServer.serverUrl,
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: uniqueDbName("worker-lifecycle-ledger") },
+        logLevel: "trace",
+        schema: app,
+      }),
+    );
+    // `createDb` resolves after the foreground runtime is available; the
+    // worker follower is installed on the first public read.
+    await db.all(allTodos, { tier: "local" });
+    const inspector = await db.openInspectorControlPort();
+    inspector.start();
+    try {
+      const entries = await listWorkerLifecycle(inspector);
+      expect(entries.map((entry) => entry.event)).toEqual(
+        expect.arrayContaining(["bootstrap-start", "peer-attached"]),
+      );
+      expect(entries).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sequence: expect.any(Number),
+            peerCount: expect.any(Number),
+            pendingBootstraps: expect.any(Number),
+            activeLeases: expect.any(Number),
+          }),
+        ]),
+      );
+    } finally {
+      inspector.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+    }
+  });
+
+  it("registers concurrent local subscriptions before worker admission while withholding openings", async () => {
+    const db = track(
+      await createDb({
+        appId: "concurrent-local-subscription-admission",
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: uniqueDbName("concurrent-local-subscription") },
+      }),
+    );
+    // Selecting the schema begins the worker handshake but cannot complete it
+    // in this same call stack. The registration spy distinguishes the required
+    // native ordering from the old workaround that waited before subscribing.
+    const client = (
+      db as unknown as {
+        getClient(schema: typeof todos._schema): {
+          subscribeInternal: (...args: never[]) => number;
+        };
+      }
+    ).getClient(todos._schema);
+    const nativeSubscribe = vi.spyOn(client, "subscribeInternal");
+    const source = getDbSubscriptionSource(db);
+    const firstDeltas: unknown[] = [];
+    const secondDeltas: unknown[] = [];
+    const first = source.subscribeDelta(todos, (delta) => firstDeltas.push(delta), {
+      tier: "local",
+    });
+    const second = source.subscribeDelta(todos, (delta) => secondDeltas.push(delta), {
+      tier: "local",
+    });
+    try {
+      expect(first.ready).toBeDefined();
+      expect(second.ready).toBeDefined();
+      expect(nativeSubscribe).toHaveBeenCalledTimes(2);
+      expect(firstDeltas).toEqual([]);
+      expect(secondDeltas).toEqual([]);
+      await expect(Promise.all([first.ready, second.ready])).resolves.toEqual([
+        undefined,
+        undefined,
+      ]);
+    } finally {
+      first();
+      second();
+    }
+  });
+
+  it("rejects createDb operation-scoped when its foreground lease cannot open durable storage", async () => {
+    const ambientErrors: string[] = [];
+    const unhandledRejections: string[] = [];
+    const recordAmbientError = (event: ErrorEvent) => {
+      ambientErrors.push(event.error instanceof Error ? event.error.message : event.message);
+    };
+    const recordUnhandledRejection = (event: PromiseRejectionEvent) => {
+      event.preventDefault();
+      unhandledRejections.push(
+        event.reason instanceof Error ? event.reason.message : String(event.reason),
+      );
+    };
+    globalThis.addEventListener("error", recordAmbientError);
+    globalThis.addEventListener("unhandledrejection", recordUnhandledRejection);
+    errorListeners.add(recordAmbientError);
+    const dbName = uniqueDbName("corrupt-storage-open");
+    const secret = generateAuthSecret();
+    const config = { appId: "test-app", secret, driver: { type: "persistent" as const, dbName } };
+    try {
+      const initial = track(await createDb(config));
+      await initial
+        .insert(todos, { title: "durable sentinel", done: false })
+        .wait({ tier: "local" });
+      await initial.shutdown();
+      untrack(initial);
+      // The last follower releases its worker context after the short idle
+      // window. Without this, a cached worker runtime never reopens the raw
+      // IndexedDB namespace and cannot observe the corruption below.
+      await sleep(100);
+
+      // Local-first caller credentials are normalized to a canonical session
+      // during `createDb`, so the actual physical root must be derived from
+      // the resolved Db config rather than the pre-normalization input.
+      const physicalDbName = resolveDefaultPersistentDbName(initial.config);
+
+      await replaceStorageManifest(physicalDbName, {
+        ...INDEXEDDB_STORAGE_MANIFEST,
+        storageEpoch: 2,
+      });
+      const recordsBeforeRead = await rawStorageRecords(physicalDbName);
+
+      // Persistent create must acquire a durable foreground-node lease before
+      // any synchronous mutation can mint a transaction identity. Storage
+      // readiness therefore belongs to createDb, while schema selection stays
+      // lazy. The original structured worker error must reject that operation
+      // directly instead of collapsing to a message-only main-thread Error.
+      let openFailure: unknown;
+      try {
+        await createDb(config);
+      } catch (error) {
+        openFailure = error;
+      }
+      expect(openFailure).toBeInstanceOf(Error);
+      if (!(openFailure instanceof Error)) throw new Error("Expected browser worker open to fail");
+      expect(openFailure).toMatchObject({
+        name: "Error",
+        message: "Missing or invalid IndexedDB storage epoch manifest",
+        stack: expect.stringContaining("Missing or invalid IndexedDB storage epoch manifest"),
+      });
+      expect(openFailure.cause).toBeUndefined();
+      await sleep(0);
+      expect(ambientErrors).toEqual([]);
+      expect(unhandledRejections).toEqual([]);
+      expect(await rawStorageRecords(physicalDbName)).toEqual(recordsBeforeRead);
+    } finally {
+      globalThis.removeEventListener("error", recordAmbientError);
+      globalThis.removeEventListener("unhandledrejection", recordUnhandledRejection);
+      errorListeners.delete(recordAmbientError);
+    }
   });
 
   // -------------------------------------------------------------------------
@@ -524,6 +1252,48 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(afterReinsert[0].done).toBe(true);
   });
 
+  it("shuts down immediately after a storage reset and reopens the cleared root", async () => {
+    const dbName = uniqueDbName("delete-storage-shutdown");
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    await db.insert(todos, { title: "Before reset", done: false }).wait({ tier: "local" });
+    await db.deleteClientStorage();
+
+    await withTimeout(
+      db.shutdown(),
+      5_000,
+      "Db shutdown did not settle immediately after resetting SharedWorker storage",
+    );
+    untrack(db);
+
+    const reopened = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    expect(await reopened.all(allTodos, { tier: "local" })).toEqual([]);
+
+    await reopened
+      .insert(todos, { title: "Fresh after reset and reopen", done: true })
+      .wait({ tier: "local" });
+    expect(await reopened.all(allTodos, { tier: "local" })).toMatchObject([
+      { title: "Fresh after reset and reopen", done: true },
+    ]);
+
+    await withTimeout(
+      reopened.shutdown(),
+      5_000,
+      "Reopened Db shutdown did not settle after resetting SharedWorker storage",
+    );
+    untrack(reopened);
+  });
+
   it("resolves a storage reset requested before any schema use", async () => {
     const db = track(
       await createDb({
@@ -642,7 +1412,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       initialRow: { title: "dirty before external deletion", done: false },
     });
 
-    await deleteRemoteBrowserIndexedDbAndWaitForReload(remoteDbId, dbName);
+    await deleteRemoteBrowserIndexedDbAndWaitForReload(
+      remoteDbId,
+      resolveDefaultPersistentDbName({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
   });
 
   it("logout with wipeData clears browser storage before the next session opens", async () => {
@@ -868,6 +1644,47 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsub();
   });
 
+  it("maintains an IndexedDB-backed equality window across a tombstone", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("maintained-equality-window-tombstone"),
+        },
+      }),
+    );
+    const openWindow = app.todos.where({ done: false }).orderBy("title", "asc").limit(2);
+    const snapshots: Todo[][] = [];
+    const unsubscribe = trackSubscription(
+      db.subscribe(openWindow, (rows) => snapshots.push(rows), { tier: "local" }),
+    );
+
+    const alpha = await db.insert(todos, { title: "alpha", done: false }).wait({ tier: "local" });
+    await db.insert(todos, { title: "bravo", done: false }).wait({ tier: "local" });
+    await db.insert(todos, { title: "charlie", done: false }).wait({ tier: "local" });
+
+    await waitForCondition(
+      async () =>
+        snapshots.some((rows) => rows.map((row) => row.title).join(",") === "alpha,bravo"),
+      8_000,
+      "maintained equality query should retain its ordered local window",
+    );
+
+    await db.delete(todos, alpha.id).wait({ tier: "local" });
+    await waitForCondition(
+      async () =>
+        snapshots.some((rows) => rows.map((row) => row.title).join(",") === "bravo,charlie"),
+      8_000,
+      "tombstoning the first window member should promote the next equality match",
+    );
+    expect((await db.all(openWindow, { tier: "local" })).map((row) => row.title)).toEqual([
+      "bravo",
+      "charlie",
+    ]);
+    unsubscribe();
+  });
+
   it("tiered subscriptions gate the first callback until the worker's settled snapshot content is local", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("subscribe-global-gated");
     const sharedLocalAuthToken = generateAuthSecret();
@@ -1068,6 +1885,141 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
+  /**
+   * Two fresh foreground runtimes can share a persistent worker. Each runtime
+   * starts with an empty HLC register, so their first writes must not alias
+   * one transaction identity when the browser gives both writes the same
+   * millisecond.
+   *
+   * alice tab A ──insert project────────────► shared worker ──► server
+   * alice tab B ──insert large branch doc───► shared worker ──► server
+   */
+  it("prevents foreground transaction identity aliasing in one millisecond", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "distinct-client-tx-ids",
+      transactionIdentityPermissions,
+      transactionIdentityApp.wasmSchema,
+    );
+    const secret = generateAuthSecret();
+    const dbName = uniqueDbName("distinct-client-tx-ids");
+    const config = {
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+      schema: transactionIdentityApp,
+    };
+    const first = track(await createDb(config));
+    const second = track(await createDb(config));
+    const fixedNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+    const { project, document } = (() => {
+      try {
+        const project = first.insert(transactionIdentityApp.projects, {
+          name: "shared-worker project",
+        });
+        const document = second.insert(
+          transactionIdentityApp.documents,
+          {
+            branch: "main",
+            title: "first title",
+            projectId: project.value.id,
+            body: "large browser value ".repeat(20_000),
+          },
+          { branch: "main" },
+        );
+        return { project, document };
+      } finally {
+        now.mockRestore();
+      }
+    })();
+    const projectTxId = await project.txId;
+    const documentTxId = await document.txId;
+    expect(documentTxId).not.toBe(projectTxId);
+    await withTimeout(
+      Promise.all([project.wait({ tier: "global" }), document.wait({ tier: "global" })]),
+      20_000,
+      "aliased foreground transactions did not both settle globally",
+    );
+  }, 60_000);
+
+  /**
+   * Two independent browser storage replicas can intentionally share every
+   * logical input (app, schema, server, author, and first-write clock). Their
+   * `dbName` is the physical-storage locator only, so each opens a separate
+   * SharedWorker + Wasm + IndexedDB realm and must receive a distinct durable
+   * replica node. The public TxIds are therefore distinct even at one fixed
+   * first-write clock, both settle, and each replica can be reopened.
+   */
+  it("keeps public transaction identities distinct across physical browser replicas", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "distinct-physical-replica-tx-ids",
+      transactionIdentityPermissions,
+      transactionIdentityApp.wasmSchema,
+    );
+    const secret = generateAuthSecret();
+    const firstName = uniqueDbName("physical-replica-a");
+    const secondName = uniqueDbName("physical-replica-b");
+    const config = (dbName: string) => ({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+      schema: transactionIdentityApp,
+    });
+    const [first, second] = await Promise.all([
+      createDb(config(firstName)),
+      createDb(config(secondName)),
+    ]);
+    track(first);
+    track(second);
+
+    const fixedNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+    const { firstWrite, secondWrite } = (() => {
+      try {
+        return {
+          firstWrite: first.insert(transactionIdentityApp.projects, {
+            name: "physical replica a project",
+          }),
+          secondWrite: second.insert(transactionIdentityApp.projects, {
+            name: "physical replica b project",
+          }),
+        };
+      } finally {
+        now.mockRestore();
+      }
+    })();
+    const [firstTxId, secondTxId] = await Promise.all([firstWrite.txId, secondWrite.txId]);
+    expect(firstTxId).not.toBe(secondTxId);
+    await withTimeout(
+      Promise.all([firstWrite.wait({ tier: "global" }), secondWrite.wait({ tier: "global" })]),
+      20_000,
+      "physical-replica writes did not both settle globally",
+    );
+
+    await first.shutdown();
+    await second.shutdown();
+    untrack(first);
+    untrack(second);
+    const [reopenedFirst, reopenedSecond] = await Promise.all([
+      createDb(config(firstName)),
+      createDb(config(secondName)),
+    ]);
+    track(reopenedFirst);
+    track(reopenedSecond);
+    await expect(
+      reopenedFirst.all(transactionIdentityApp.projects, { tier: "local" }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: firstWrite.value.id })]),
+    );
+    await expect(
+      reopenedSecond.all(transactionIdentityApp.projects, { tier: "local" }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: secondWrite.value.id })]),
+    );
+  }, 60_000);
+
   it("resolves insert wait at edge tier through the worker bridge", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-wait-edge");
     const sharedLocalAuthToken = generateAuthSecret();
@@ -1128,15 +2080,75 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken, syncServer);
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      transactionId: batchId,
+      transactionId: txId,
       code: "permission_denied",
     });
 
     const todosAfterRevert = await db.all(allTodos, { tier: "local" });
     expect(todosAfterRevert.length).toBe(0);
+  });
+
+  /**
+   * 1. Two in-memory `Db`s attach to the same persistent browser worker.
+   * 2. One DB inserts a row.
+   * 3. The other DB receives the optimistic row through its subscription.
+   * 4. The server rejects the transaction.
+   * 5. The persistent worker rolls back.
+   * 6. The writer DB rolls back.
+   * 7. The other in-memory DB rolls back as well.
+   */
+  it("rejected write from one live peer reverts every attached peer", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-cross-peer-rejection",
+      readOnlyPermissions,
+    );
+    const secret = generateAuthSecret();
+    const dbName = uniqueDbName("sync-cross-peer-rejection");
+    const config = {
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+      schema: app,
+    };
+    // Both `Db`s attach to the same persistent worker
+    const appPeer = track(await createDb(config));
+    const writerPeer = track(await createDb(config));
+
+    await Promise.all([
+      appPeer.all(allTodos, { tier: "edge" }),
+      writerPeer.all(allTodos, { tier: "edge" }),
+    ]);
+    // Disconnect from server so both in-memory `Db`s receive the optimistic insert
+    // before the server rejection
+    await appPeer.disconnect();
+
+    const rejected = writerPeer.insert(todos, {
+      title: "Rejected from the other peer",
+      done: false,
+    });
+    await rejected.wait({ tier: "local" });
+    await waitForCondition(
+      async () => (await appPeer.all(allTodos, { tier: "local" })).length === 1,
+      5000,
+      "non-originating app peer should observe the optimistic insert",
+    );
+
+    await appPeer.reconnect();
+    await expect(rejected.wait({ tier: "edge" })).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      code: "permission_denied",
+    });
+    expect(await writerPeer.all(allTodos, { tier: "local" })).toEqual([]);
+    expect(await appPeer.all(allTodos, { tier: "edge" })).toEqual([]);
+    await waitForCondition(
+      async () => (await appPeer.all(allTodos, { tier: "local" })).length === 0,
+      5000,
+      "non-originating app peer should receive the rejection rollback",
+    );
   });
 
   it("server permissions check rejects client optimistic insert - onMutationError notification", async () => {
@@ -1152,7 +2164,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     db.onMutationError(mutationErrorSpy);
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
       5000,
@@ -1162,12 +2174,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        transactionId: batchId,
+        transactionId: txId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          transactionId: batchId,
+          transactionId: txId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1194,7 +2206,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      transactionId: insertResult.transactionId,
+      transactionId: insertResult.txId,
       code: "permission_denied",
     });
     expect(mutationErrorSpy).not.toHaveBeenCalled();
@@ -1230,7 +2242,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       title: "Rejected across restart",
       done: false,
     });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
 
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
@@ -1241,12 +2253,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        transactionId: batchId,
+        transactionId: txId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          transactionId: batchId,
+          transactionId: txId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1255,14 +2267,17 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const inspectorControl = await dbBeforeRestart.openInspectorControlPort();
     inspectorControl.start();
-    const [initialContext] = (await listWorkerContexts(inspectorControl)).filter(
-      (context) => context.dbName === dbName,
-    );
+    const [initialContext] = await listWorkerContexts(inspectorControl);
     expect(initialContext).toBeDefined();
+    // Persistent browser roots are scoped by the auth session. Inspector
+    // contexts deliberately report that physical name, not the caller's raw
+    // driver.dbName; retain it only as an opaque same-root handle across the
+    // worker restart below.
+    const workerDbName = initialContext!.dbName;
     try {
       await dbBeforeRestart.shutdown();
       untrack(dbBeforeRestart);
-      await waitForWorkerContextRelease(inspectorControl, dbName);
+      await waitForWorkerContextRelease(inspectorControl, workerDbName);
       await terminateWorker(inspectorControl);
 
       const dbAfterAcknowledgement = track(await createPersistentDb(undefined));
@@ -1274,7 +2289,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const secondInspectorControl = await dbAfterAcknowledgement.openInspectorControlPort();
       secondInspectorControl.start();
       const [secondContext] = (await listWorkerContexts(secondInspectorControl)).filter(
-        (context) => context.dbName === dbName,
+        (context) => context.dbName === workerDbName,
       );
       expect(secondContext?.workerRealmId).not.toBe(initialContext?.workerRealmId);
       // The destroyed worker context rehydrated the settled local view, but the
@@ -1284,7 +2299,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
       await dbAfterAcknowledgement.shutdown();
       untrack(dbAfterAcknowledgement);
-      await waitForWorkerContextRelease(secondInspectorControl, dbName);
+      await waitForWorkerContextRelease(secondInspectorControl, workerDbName);
       await terminateWorker(secondInspectorControl);
 
       const dbAfterSecondRestart = track(await createPersistentDb(undefined));
@@ -1294,7 +2309,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const thirdInspectorControl = await dbAfterSecondRestart.openInspectorControlPort();
       thirdInspectorControl.start();
       const [thirdContext] = (await listWorkerContexts(thirdInspectorControl)).filter(
-        (context) => context.dbName === dbName,
+        (context) => context.dbName === workerDbName,
       );
       expect(thirdContext?.workerRealmId).not.toBe(secondContext?.workerRealmId);
       thirdInspectorControl.postMessage({
@@ -1334,12 +2349,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const inspectorBeforeRestart = await dbBeforeRestart.openInspectorControlPort();
     inspectorBeforeRestart.start();
-    const [contextBeforeRestart] = (await listWorkerContexts(inspectorBeforeRestart)).filter(
-      (context) => context.dbName === dbName,
-    );
+    const [contextBeforeRestart] = await listWorkerContexts(inspectorBeforeRestart);
+    expect(contextBeforeRestart).toBeDefined();
+    const workerDbName = contextBeforeRestart!.dbName;
     await dbBeforeRestart.shutdown();
     untrack(dbBeforeRestart);
-    await waitForWorkerContextRelease(inspectorBeforeRestart, dbName);
+    await waitForWorkerContextRelease(inspectorBeforeRestart, workerDbName);
     await terminateWorker(inspectorBeforeRestart);
 
     const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
@@ -1351,7 +2366,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const inspectorAfterRestart = await dbAfterRestart.openInspectorControlPort();
     inspectorAfterRestart.start();
     const [contextAfterRestart] = (await listWorkerContexts(inspectorAfterRestart)).filter(
-      (context) => context.dbName === dbName,
+      (context) => context.dbName === workerDbName,
     );
     expect(contextAfterRestart?.workerRealmId).not.toBe(contextBeforeRestart?.workerRealmId);
 
@@ -1372,7 +2387,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await dbAfterRestart.shutdown();
     untrack(dbAfterRestart);
-    await waitForWorkerContextRelease(inspectorAfterRestart, dbName);
+    await waitForWorkerContextRelease(inspectorAfterRestart, workerDbName);
     await terminateWorker(inspectorAfterRestart);
 
     const dbAfterSecondRestart = track(await createPersistentDb(undefined));
@@ -1381,12 +2396,114 @@ describe("SharedWorker bridge with IndexedDB", () => {
     inspectorAfterSecondRestart.start();
     const [contextAfterSecondRestart] = (
       await listWorkerContexts(inspectorAfterSecondRestart)
-    ).filter((context) => context.dbName === dbName);
+    ).filter((context) => context.dbName === workerDbName);
     expect(contextAfterSecondRestart?.workerRealmId).not.toBe(contextAfterRestart?.workerRealmId);
     inspectorAfterSecondRestart.postMessage({
       type: "close",
     } satisfies BrowserInspectorControlRequest);
   });
+
+  /**
+   * Physical browser receipt for the complete identity/recovery path. The
+   * first `createDb` acquires a foreground lease; after its SharedWorker ends,
+   * a successor lease attaches to the reopened durable replica. The recovered
+   * relay must route each former foreground terminal exactly once: rejection
+   * is one live callback, acceptance is one normal Global row.
+   */
+  it("settles recovered accepted and rejected foreground writes exactly once", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-recovery-terminal-pair",
+      recoveryTerminalPermissions,
+    );
+    const secret = generateAuthSecret();
+    const dbName = uniqueDbName("sync-recovery-terminal-pair");
+    const createPersistentDb = (serverUrl?: string) =>
+      createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent" as const, dbName },
+        serverUrl,
+        secret,
+      });
+
+    const first = track(await createPersistentDb(undefined));
+    const accepted = first.insert(todos, {
+      title: "accepted after worker restart",
+      done: false,
+    });
+    const rejected = first.insert(todos, {
+      title: "rejected after worker restart",
+      done: true,
+    });
+    const rejectedTxId = await rejected.txId;
+    await withTimeout(
+      Promise.all([accepted.wait({ tier: "local" }), rejected.wait({ tier: "local" })]),
+      5000,
+      "foreground writes should be durable in the worker before restart",
+    );
+
+    const firstInspector = await first.openInspectorControlPort();
+    firstInspector.start();
+    const [firstContext] = await listWorkerContexts(firstInspector);
+    expect(firstContext).toBeDefined();
+    const workerDbName = firstContext!.dbName;
+    await first.shutdown();
+    untrack(first);
+    await waitForWorkerContextRelease(firstInspector, workerDbName);
+    await terminateWorker(firstInspector);
+
+    const successor = track(await createPersistentDb(syncServer.serverUrl));
+    const mutationErrors = vi.fn();
+    successor.onMutationError(mutationErrors);
+    // `createDb` is intentionally lazy. Attach the foreground runtime before
+    // opening the inspector so this receipt observes the same public startup
+    // path as an application's first local query.
+    await successor.all(allTodos, { tier: "local" });
+    const successorInspector = await successor.openInspectorControlPort();
+    successorInspector.start();
+
+    await waitForCondition(
+      async () => {
+        const rows = await successor.all(allTodos, { tier: "local" });
+        return rows.length === 1 && rows[0]?.id === accepted.value.id;
+      },
+      10_000,
+      "recovered accepted write should settle once into the successor local view",
+    );
+    await waitForCondition(
+      () => mutationErrors.mock.calls.length === 1,
+      10_000,
+      "recovered rejection should produce exactly one live successor callback",
+    );
+    expect(mutationErrors).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "permission_denied",
+        transaction: expect.objectContaining({ transactionId: rejectedTxId }),
+      }),
+    );
+
+    await successor.all(allTodos, { tier: "edge" });
+    await sleep(250);
+    expect(mutationErrors).toHaveBeenCalledTimes(1);
+    await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([
+      expect.objectContaining({ id: accepted.value.id, title: "accepted after worker restart" }),
+    ]);
+
+    await successor.shutdown();
+    untrack(successor);
+    await waitForWorkerContextRelease(successorInspector, workerDbName);
+    await terminateWorker(successorInspector);
+
+    const later = track(await createPersistentDb(undefined));
+    const laterErrors = vi.fn();
+    later.onMutationError(laterErrors);
+    await expect(later.all(allTodos, { tier: "local" })).resolves.toEqual([
+      expect.objectContaining({ id: accepted.value.id }),
+    ]);
+    await sleep(250);
+    expect(laterErrors).not.toHaveBeenCalled();
+    await later.shutdown();
+    untrack(later);
+  }, 60_000);
 
   describe("optimistic writes are reverted on server rejection", () => {
     it("insert", async () => {
@@ -1401,7 +2518,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const insertResult = db.insert(todos, { title: "Rejected", done: false });
       await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: insertResult.transactionId,
+        transactionId: insertResult.txId,
         code: "permission_denied",
       });
 
@@ -1427,7 +2544,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const updateResult = db.update(todos, todo.id, { title: "Updated task" });
       await expect(updateResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: updateResult.transactionId,
+        transactionId: updateResult.txId,
         code: "permission_denied",
       });
 
@@ -1453,7 +2570,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const deleteResult = db.delete(todos, todo.id);
       await expect(deleteResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: deleteResult.transactionId,
+        transactionId: deleteResult.txId,
         code: "permission_denied",
       });
 
@@ -1660,6 +2777,49 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(rowsOnB.some((row) => row.title === recoveredTitle)).toBe(true);
   }, 60000);
 
+  it("keeps a local subscription live after an unexpected server shutdown", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("local-after-server-shutdown");
+    const db = await createSyncedDb(
+      ctx,
+      "local-after-server-shutdown",
+      generateAuthSecret(),
+      syncServer,
+    );
+    const snapshots: Todo[][] = [];
+    trackSubscription(db.subscribe(allTodos, (rows) => snapshots.push(rows), { tier: "local" }));
+    await waitForCondition(
+      async () => snapshots.length > 0,
+      5000,
+      "local subscription did not publish its opening snapshot",
+    );
+
+    await stopJazzServer(syncServer.serverUrl);
+    const edgeError = await withTimeout(
+      db.all(allTodos, { tier: "edge" }),
+      5000,
+      "edge read did not observe the stopped server",
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(edgeError).toBeInstanceOf(Error);
+    expect((edgeError as Error).message).not.toContain(
+      "edge read did not observe the stopped server",
+    );
+
+    const title = `local-after-server-shutdown-${Date.now()}`;
+    await withTimeout(
+      db.insert(todos, { title, done: false }).wait({ tier: "local" }),
+      5000,
+      "offline insert did not become locally durable",
+    );
+    await waitForCondition(
+      async () => snapshots.some((rows) => rows.some((row) => row.title === title)),
+      5000,
+      "local subscription did not publish the offline insert",
+    );
+  });
+
   /**
    *   writer ──baseline write──► server
    *   fresh probe starts while server traffic is blocked
@@ -1859,7 +3019,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (rows) => {
           snapshots.push(rows);
         },
-        { propagation: "local-only" },
+        inspectorLocalQueryOptions(),
       ),
     );
 
@@ -1887,14 +3047,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await waitForCondition(
       async () => {
-        const rows = await dbB.all(allTodos, { propagation: "local-only" });
+        const rows = await dbB.all(allTodos, inspectorLocalQueryOptions());
         return rows.some((row) => row.title === "local-only-local-1");
       },
       8000,
       "local-only query should retrieve persisted IndexedDB rows after reopen",
     );
 
-    const snapshotsB = await dbB.all(allTodos, { propagation: "local-only" });
+    const snapshotsB = await dbB.all(allTodos, inspectorLocalQueryOptions());
     expect(snapshotsB.length).toBe(1);
     expect(snapshotsB[0].title).toBe("local-only-local-1");
   }, 60000);
@@ -1912,7 +3072,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (rows) => {
           snapshots.push(rows);
         },
-        { propagation: "local-only" },
+        inspectorLocalQueryOptions(),
       ),
     );
 
@@ -2449,6 +3609,80 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
+  it("keeps explicit-name account caches separate, shared per scope, and destroys only the selected scope", async () => {
+    const appId = uniqueDbName("explicit-browser-owner-app");
+    const dbName = uniqueDbName("shared-device-cache");
+    const aliceJwt = makeStructurallyValidJwt("explicit-base-alice");
+    const bobJwt = makeStructurallyValidJwt("explicit-base-bob");
+    const aliceConfig = {
+      appId,
+      jwtToken: aliceJwt,
+      driver: { type: "persistent" as const, dbName },
+    };
+    const bobConfig = { appId, jwtToken: bobJwt, driver: { type: "persistent" as const, dbName } };
+    const alicePhysicalName = resolveDefaultPersistentDbName(aliceConfig);
+    const bobPhysicalName = resolveDefaultPersistentDbName(bobConfig);
+    expect(alicePhysicalName).toMatch(new RegExp(`^${dbName}::jazz-browser-v1::`));
+    expect(alicePhysicalName).not.toBe(bobPhysicalName);
+    expect(alicePhysicalName).not.toContain(aliceJwt);
+    expect(bobPhysicalName).not.toContain(bobJwt);
+
+    let alice: Db | null = track(await createDb(aliceConfig));
+    let aliceSecondTab: Db | null = null;
+    let bob: Db | null = null;
+    let aliceReopened: Db | null = null;
+    let bobReopened: Db | null = null;
+    try {
+      alice.insert(todos, { title: "Alice durable row", done: false });
+      await waitForCondition(
+        async () => (await alice.all(allTodos, { tier: "local" })).length === 1,
+        8_000,
+        "Alice should persist into her scoped root",
+      );
+
+      // A second tab for the same canonical scope joins Alice's same worker
+      // and physical root, rather than creating a second cache.
+      aliceSecondTab = track(await createDb(aliceConfig));
+      expect(
+        (await aliceSecondTab.all(allTodos, { tier: "local" })).map((row) => row.title),
+      ).toEqual(["Alice durable row"]);
+      bob = track(await createDb(bobConfig));
+      await expect(bob.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+      bob.insert(todos, { title: "Bob durable row", done: false });
+      await waitForTodos(
+        bob,
+        (rows) => rows.some((row) => row.title === "Bob durable row"),
+        "Bob should use his own scoped root",
+      );
+
+      // Destruction is deliberately per physical scope. Bob's explicit reset
+      // cannot transfer or erase Alice's coexisting cache.
+      await bob.deleteClientStorage();
+      await bob.shutdown();
+      untrack(bob);
+      bob = null;
+
+      await aliceSecondTab.shutdown();
+      untrack(aliceSecondTab);
+      aliceSecondTab = null;
+      await alice.shutdown();
+      untrack(alice);
+      alice = null;
+
+      aliceReopened = track(await createDb(aliceConfig));
+      expect(
+        (await aliceReopened.all(allTodos, { tier: "local" })).map((row) => row.title),
+      ).toEqual(["Alice durable row"]);
+      bobReopened = track(await createDb(bobConfig));
+      await expect(bobReopened.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+    } finally {
+      for (const db of [bobReopened, aliceReopened, bob, aliceSecondTab, alice]) {
+        await db?.shutdown().catch(() => undefined);
+        if (db) untrack(db);
+      }
+    }
+  });
+
   it("fans out auth loss and accepts same-principal refresh from either tab", async () => {
     const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions("auth-fanout");
     const dbName = uniqueDbName("auth-fanout");
@@ -2515,6 +3749,41 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
   }, 60000);
 
+  it("rejects a principal-changing live auth update before local or worker state changes", async () => {
+    const { appId } = await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
+    const dbName = uniqueDbName("live-auth-owner-guard");
+    const aliceJwt = await getJazzServerJwtForUser(
+      "00000000-0000-0000-0000-00000000aa11",
+      undefined,
+      appId,
+    );
+    const bobJwt = await getJazzServerJwtForUser(
+      "00000000-0000-0000-0000-00000000bb22",
+      undefined,
+      appId,
+    );
+    const db = track(
+      await createDb({ appId, jwtToken: aliceJwt, driver: { type: "persistent", dbName } }),
+    );
+    try {
+      await db.all(allTodos, { tier: "local" });
+      const aliceState = db.getAuthState();
+      expect(aliceState.session?.user).toBeDefined();
+
+      // Planted positive: applying Bob before BrowserConnectionManager checks
+      // ownership would mutate this state and forward Bob's claims into the
+      // durable Alice worker before the guard could reject it.
+      expect(() => db.updateAuthToken(bobJwt)).toThrow(
+        "Changing auth principal on a live client is not supported. Recreate the Db.",
+      );
+      expect(db.getAuthState()).toEqual(aliceState);
+      await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+    } finally {
+      await db.shutdown();
+      untrack(db);
+    }
+  }, 60000);
+
   it("can update an optional row field to null", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "null-update-repro",
@@ -2544,7 +3813,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const rowAfterNullUpdate = await db.one(nullableApp.todos.where({ id: insertedTodo.id }), {
       tier: "local",
-      localUpdates: "immediate",
     });
     expect(rowAfterNullUpdate).not.toBeNull();
     expect(rowAfterNullUpdate?.description ?? null).toBeNull();
@@ -2660,5 +3928,53 @@ async function publishPermissionsForServer(
     adminSecret,
     schema: schema ?? app.wasmSchema,
     permissions,
+  });
+}
+
+async function replaceStorageManifest(name: string, manifest: unknown): Promise<void> {
+  const database = await requestResult(indexedDB.open(name));
+  const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+  transaction
+    .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
+    .put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
+  await transactionDone(transaction);
+  database.close();
+}
+
+async function rawStorageRecords(name: string): Promise<Record<string, unknown>> {
+  const database = await requestResult(indexedDB.open(name));
+  const storeNames = [
+    INDEXEDDB_BTREE_PAGES_STORE,
+    INDEXEDDB_BTREE_METADATA_STORE,
+    INDEXEDDB_STORAGE_MANIFEST_STORE,
+  ];
+  const transaction = database.transaction(storeNames, "readonly");
+  const records = Object.fromEntries(
+    await Promise.all(
+      storeNames.map(async (storeName) => {
+        const store = transaction.objectStore(storeName);
+        return [storeName, await requestResult(store.getAll())] as const;
+      }),
+    ),
+  );
+  await transactionDone(transaction);
+  database.close();
+  return records;
+}
+
+function requestResult<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+
+function transactionDone(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
   });
 }

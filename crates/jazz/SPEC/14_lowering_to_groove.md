@@ -76,9 +76,10 @@ register, current, ahead-current, and rejected-version tables per
 `PhysicalTableId`. The full Groove schema is therefore the fixed lowering plus
 the recovered physical lineages (ch. 2, `INV-DATA-20`).
 
-Wire identities remain UUIDs. Lowered storage may intern those identities into
-node-local `u64` aliases in `jazz_nodes`/`jazz_schema_versions`, but those
-aliases must never appear on the wire (ch. 2, `INV-LOWER-3`).
+Wire and catalogue semantic identities remain UUIDs. Lowered storage may intern
+node, schema, physical table, physical column, and enum-variant identities into
+node-local integer aliases, but those aliases must never appear on the wire,
+enter content identity, or decide cross-node equality (ch. 2, `INV-LOWER-3`).
 
 ### 14.2.1 Concurrent enum cases
 
@@ -86,45 +87,71 @@ Jazz explicitly permits concurrent schema versions. Therefore every compact enum
 discriminant in a wire row is an **authored ordinal**, qualified by the
 row's `SchemaVersionId`; it is not a global enum tag. For every physical enum
 occurrence, including a payload enum case and recursively inside its payload,
-the semantic identity of a case is its `GlobalCaseId`:
+the semantic identity of a case is its authority-allocated identity:
 
 ```text
-(introducing SchemaVersionId, introducing authored ordinal)
+GlobalPhysicalEnumVariantId(UUID)
 ```
 
-An inherited case retains the identity of the schema version that introduced it.
+`GlobalEnumCaseId` stores the introducing authored ordinal as `u32`, which matches
+payload-enum tags. Payload enums are not limited to 256 cases. Scalar enums keep
+their `u8` discriminants: lowering must reject a physical scalar registry or
+scalar remap position that does not fit in `u8`. Widening the qualified identity
+must not relax that scalar encoding boundary.
+
+The scalar limit is a catalogue-admission invariant, not a late storage error.
+Before a lineage reserves a pending/staged record, activates a schema, or consumes
+physical ids, the node MUST compute the union of root and nested scalar case
+identities for every reused physical occurrence. A union of 257 or more cases
+MUST reject atomically; reopening the store MUST reveal neither the rejected
+schema nor pending/staged residue.
+
+An inherited case retains the UUID allocated by its introducing publication.
 For example, if a base schema declares `draft` and `published`, concurrent
 children A and B may both declare authored ordinal `2`, respectively `archived`
-and `snoozed`. They are distinct cases: `(A, 2)` and `(B, 2)`. A later merge
+and `snoozed`. They are distinct because the authority allocated distinct UUIDs. A later merge
 schema maps both into its own authored ordinal space. The physical column
 occurrence is part of every lookup of that identity; similarly named cases in
 different columns never share a registry.
 
-The catalogue supplies the evidence for the introducing schema and its lineage.
+The catalogue supplies the immutable UUID manifest and lineage evidence.
 Active catalogue subsets are dense prefixes: a receiver parks a later envelope
 until every earlier `CatalogueSeq` has activated. Thus a node interns cases in
 authoritative catalogue order, never arbitrary network receipt order, and that
 order remains append-only as its prefix grows. A node may assign durable dense
-local tags after resolving `GlobalCaseId`, but it must persist the
+local tags after resolving the global UUID, but it must persist the
 mapping and translate at the wire/storage and storage/projection boundaries.
-The compact wire representation remains `SchemaVersionId + authored ordinal`,
+The compact row representation remains `SchemaVersionId + authored ordinal`,
 because the row already carries the former; values which escape that row context
 (for example standalone parameters or caches) must carry equivalent schema or
 case context.
 
 For ordering, a node uses the target schema's current representable case view.
 Within that view an ancestrally earlier introduction MUST sort before a later
-introduction. Concurrent siblings have no ancestral order, so their order is the
-deterministic lexicographic order of their introducing `SchemaVersionId` followed
-by the introducing ordinal. This is a semantic tie-break, not local arrival order.
-It is optimized into the physical registry ordinal assigned by the authoritative
-catalogue prefix; a partial node must preserve that order for every case it can
-represent.
+introduction. Concurrent siblings have no ancestral order, so a target schema's
+authored view defines their presentation order. Neither that order nor the
+authored ordinal is identity. It is optimized into a node-local registry tag only
+after the permanent UUID has been resolved.
+The durable binding also records introducing schema/position solely as ordering
+provenance for the append-only physical tag vector. Changing that provenance
+cannot create a distinct case: equality, collision checks, descriptor spelling,
+and recursive payload paths use only the authority UUID.
 
 Payload-enum projection preserves the selected payload record while remapping
 its case tag. Same-name cases from independent schemas are distinct identities;
 incompatible payload layouts reject rather than merge. The same translation
 recurs at nested enum occurrences.
+
+The `u32` payload tag is preserved by schema defaults and by every production
+row boundary: history/current/ahead-current writes, current and query projection,
+lens remapping, and durable reopen. These paths MUST accept authored and physical
+case ordinal 256 (including recursively nested payload values); no intermediate
+representation may narrow it to the scalar enum's `u8` width.
+
+The public payload-enum v1 boundary MUST continue to admit only scalar payload
+fields; arrays, rows, and nested enums remain unsupported. Recursive ordinal
+translation is an internal physical/catalogue invariant and does not expand the
+public schema surface.
 
 Projection from a physical case back into an authored schema is non-total. If a
 query does not read, filter, join, order, group, authorize, or otherwise require
@@ -139,8 +166,16 @@ parent; a required relation follows its explicit requirement semantics. Equality
 against a known case consequently treats an absent newer case as non-matching.
 
 _Further invariant._ `INV-LOWER-27` — local enum tags are only interned
-representations of schema-qualified case identities; simultaneous sibling ordinal
+representations of permanent global enum-variant UUIDs; simultaneous sibling ordinal
 allocations cannot alias one another.
+
+_Further invariant._ `INV-LOWER-29` — durable physical mappings use the sole
+v1 canonical binary codec described in ch. 10, whose payload-enum introduction
+ordinals are always `u32`. Local physical aliases are
+opaque storage handles, while every table, column, scalar, payload, and nested
+enum occurrence resolves a permanent authority-allocated UUID;
+recovery rejects malformed, non-canonical, trailing, or unknown-reference
+metadata rather than deriving identity from names, JSON map order, or arrival.
 
 _Further invariant._ `INV-LOWER-28` — enum compatibility is evaluated at the
 source boundary immediately after Global/Ahead currentness selection (or after
@@ -369,11 +404,25 @@ the patch is subordinate to the root occurrence and must reduce to the same
 terminal relation. It must not create a separately authoritative
 `relation_delta`, row/edge snapshot, or high-level assembler state.
 
+That carrier boundary is local to one Groove execution and its application
+consumer. A serving authority does not send its collector's terminal row or
+structural patch to another peer. It sends the exact safe source closure and
+the identity of the authorized residual program; the receiver projects those
+inputs through catalogue lineage and runs the same lowered graph locally. The
+receiver's collector is therefore the sole owner of ordering after local and
+authority inputs have been reconciled (`INV-SYNC-36`, ch. 16). This is required
+even when the authority and receiver currently have equal source state: an
+eligible local pending write can make an authority-computed child index false.
+
 During migration, relation facts remain permitted as internal sync coverage and
 authorization evidence. They are not public query output and consumers must
 not combine them with a root-row delta to reconstruct application values. A
-protocol revision that carries terminal rows advertises that output mode
-explicitly; receivers must not infer it from query syntax or descriptor shape.
+relation fact carries every source/correlation dimension required by the local
+lowered program. Query ordering comes from explicit query terms, the specified
+implicit stable order, or ordinary stored ordering data; it is never recovered
+from an authority collector position. A shape whose safe closure cannot let the
+receiver reproduce its terminal is outside the synchronized query surface and
+must be rejected rather than tunneled as authority output.
 
 Sync view maintenance shares the same lowered query machinery as ordinary reads.
 The target peer-serving path consumes maintained terminal facts for result

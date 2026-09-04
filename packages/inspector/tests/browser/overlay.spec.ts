@@ -1,5 +1,3 @@
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,18 +25,6 @@ function extOf(path: string): string {
 }
 
 test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", () => {
-  test.beforeAll(() => {
-    // The embedded entry is a separate Vite build. Build it on demand so
-    // `pnpm test:browser` works from a clean checkout; rebuild manually with
-    // `pnpm --filter inspector run build:embedded` to refresh the assets.
-    if (!existsSync(join(distEmbedded, "embedded.html"))) {
-      execFileSync("pnpm", ["run", "build:embedded"], {
-        cwd: packageRoot,
-        stdio: "inherit",
-      });
-    }
-  });
-
   test("embedded inspector discovers and switches across auth-session runtimes", async ({
     page,
   }) => {
@@ -100,6 +86,14 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
           __jazzInspectorHost?: {
             getConnectionConfig(): {
               driver?: { type?: string };
+              jwtToken?: string;
+              runtimeSources?: {
+                browserWorkerSession?: {
+                  issuer?: string;
+                  user_id?: string;
+                  authMode?: string;
+                };
+              };
             };
             openControlPort?: unknown;
           };
@@ -108,10 +102,17 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
       return {
         driverType: host?.getConnectionConfig().driver?.type,
         hasControlPort: typeof host?.openControlPort === "function",
+        hasJwtToken: Boolean(host?.getConnectionConfig().jwtToken),
+        browserWorkerSession: host?.getConnectionConfig().runtimeSources?.browserWorkerSession,
       };
     });
     expect(overlayConfig.driverType).toBe("persistent");
     expect(overlayConfig.hasControlPort).toBe(true);
+    expect(overlayConfig.hasJwtToken).toBe(true);
+    expect(overlayConfig.browserWorkerSession).toMatchObject({
+      issuer: "urn:jazz:local-first",
+      authMode: "local-first",
+    });
 
     // The overlay reads the handle, opens its connection joining that store, and
     // leaves the connecting state.
@@ -128,25 +129,79 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     await expect(runtimeSelect).toBeVisible({ timeout: 10_000 });
     const runtimeOptions = runtimeSelect.locator("option");
     await expect(runtimeOptions).toHaveCount(2);
-    const primaryContext = runtimeOptions.filter({ hasNotText: "inspector-secondary-context" });
-    const secondaryContext = runtimeOptions.filter({ hasText: "inspector-secondary-context" });
+    const primaryContext = runtimeOptions.filter({ hasText: "local-first" });
+    const secondaryContext = runtimeOptions.filter({ hasText: "external" });
     const primaryContextValue = await primaryContext.getAttribute("value");
     const secondaryContextValue = await secondaryContext.getAttribute("value");
     expect(primaryContextValue).toBeTruthy();
     expect(secondaryContextValue).toBeTruthy();
-
     await runtimeSelect.selectOption(primaryContextValue!);
     await inspector.getByRole("link", { name: "View todos data" }).click();
     await expect(inspector.getByText("First seeded todo")).toBeVisible({ timeout: 30_000 });
 
-    await runtimeSelect.selectOption(secondaryContextValue!);
-    await expect(inspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+    // The attached inspector peer must be admitted as the host's verified
+    // local-first session for writes as well as reads. Leave the host's
+    // readiness row intact while the inspector reconstructs its attachment.
+    const writableRowTitle = "Second seeded todo";
+    const writableRow = inspector.locator('[role="row"]').filter({
+      has: inspector.getByRole("gridcell", { name: writableRowTitle, exact: true }),
+    });
+    const doneToggle = writableRow.getByRole("checkbox");
+    const wasDone = await doneToggle.isChecked();
+    await doneToggle.click();
+    await expect(inspector.getByRole("status")).toContainText("Queued");
+    await inspector.getByRole("button", { name: "Save changes" }).click();
+    // The save button immediately changes its name to "Saving...". Its old
+    // name disappearing is not a durability receipt. Discard stays mounted
+    // (disabled) throughout submission and local confirmation, and disappears
+    // only when the pending-save banner is cleared.
+    await expect(inspector.getByRole("button", { name: "Discard", exact: true })).toHaveCount(0);
+    await expect(doneToggle).toHaveJSProperty("checked", !wasDone);
+
+    // Reload only the inspector frame. The host remains live, while the
+    // overlay must reconstruct its own peer and read the locally committed
+    // write back through that fresh attachment.
+    await page.locator('iframe[title="jazz-inspector"]').evaluate((iframe) => {
+      iframe.contentWindow?.location.reload();
+    });
+    const reloadedInspector = page.frameLocator('iframe[title="jazz-inspector"]');
+    await expect(reloadedInspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+      timeout: 30_000,
+    });
+    // A reload has no per-frame selected-context state. It must reconnect to
+    // the host context, not choose an arbitrary sibling based on provider
+    // registration order.
+    await expect(reloadedInspector.getByLabel("Runtime context")).toHaveValue(primaryContextValue!);
+    await reloadedInspector.getByRole("link", { name: "View todos data" }).click();
+    const reloadedWritableRow = reloadedInspector.locator('[role="row"]').filter({
+      has: reloadedInspector.getByRole("gridcell", { name: writableRowTitle, exact: true }),
+    });
+    await expect(reloadedWritableRow.getByRole("checkbox")).toHaveJSProperty("checked", !wasDone, {
+      timeout: 30_000,
+    });
+
+    await reloadedInspector.getByLabel("Runtime context").selectOption(secondaryContextValue!);
+    // The periodic context refresh only replaces a missing selection. It must
+    // not undo an explicit later user choice in favour of the host default.
+    await page.waitForTimeout(1_100);
+    await expect(reloadedInspector.getByLabel("Runtime context")).toHaveValue(
+      secondaryContextValue!,
+    );
+    await expect(reloadedInspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
       timeout: 10_000,
     });
 
+    // This is an aggregated control session: switching changes the attached
+    // worker peer, not merely a UI label. The secondary auth scope has no
+    // primary rows, so the normal `useAll` call in the grid must use the
+    // newly constructed Inspector-local source rather than a cached query
+    // from the first context.
+    await reloadedInspector.getByRole("link", { name: "Data Explorer" }).click();
+    await expect(reloadedInspector.getByText("First seeded todo")).toBeHidden({ timeout: 30_000 });
+
     // The host's `useAll(app.todos)` subscription is pushed to the Subscriptions tab.
-    await inspector.getByRole("link", { name: "Subscriptions" }).click();
-    await expect(inspector.getByRole("cell", { name: "todos", exact: true })).toBeVisible({
+    await reloadedInspector.getByRole("link", { name: "Subscriptions" }).click();
+    await expect(reloadedInspector.getByRole("cell", { name: "todos", exact: true })).toBeVisible({
       timeout: 30_000,
     });
     expect(browserErrors).toEqual([]);

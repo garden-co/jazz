@@ -28,7 +28,10 @@ pub(crate) use catalogue_storage::{
 };
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "embedded-server")]
-pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
+pub use testing::{
+    JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER,
+    TestJwtIssuer, TestJwtOptions,
+};
 
 /// Publish catalogue inputs directly into an in-process test server.
 #[cfg(feature = "embedded-server")]

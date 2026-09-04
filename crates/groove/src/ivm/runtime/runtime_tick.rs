@@ -11,7 +11,31 @@ use super::evaluation_session::{
     EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
 };
 use super::*;
-use crate::storage::OwnedStorage;
+use crate::storage::{OwnedStorage, StagedWriteOverlay, StagedWriteState, WriteManyOutcome};
+
+/// Hydration can discover a large resident graph in one poll. Keep every
+/// owner turn bounded so a browser worker returns to transport ingress between
+/// CPU-only graph slices. Cold storage takes the separate request-pending path
+/// below; its waker is intentionally not used to classify the pending reason.
+const MAX_HYDRATION_RUNNABLE_NODES_PER_POLL: usize = 32;
+
+type PersistFlush<'a> = Pin<Box<dyn Future<Output = Result<(), IvmRuntimeError>> + 'a>>;
+
+/// A started direct flush has no rollback path. If its owner drops it before
+/// receiving a definite outcome, retain that fact on the runtime so a later
+/// owner cannot continue from the old evaluator state.
+struct PersistFlushAttempt {
+    indeterminate: Rc<Cell<bool>>,
+    completed: bool,
+}
+
+impl Drop for PersistFlushAttempt {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.indeterminate.set(true);
+        }
+    }
+}
 
 /// Owned preparation state for one interruptible evaluation.
 ///
@@ -30,7 +54,11 @@ struct EvaluationSession<'a> {
     eval_memo_bytes: usize,
     memo_use_clock: u64,
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
-    binding_frontiers: HashMap<String, u64>,
+    /// Collector operations produced while hydrating the exact initial
+    /// snapshot. These are the authoritative terminal-tree seed for a new
+    /// subscription, not an incremental side channel.
+    terminal_deltas: HashMap<NodeId, TerminalDeltas>,
+    binding_frontiers: HashMap<BindingSourceKey, u64>,
     storage: OwnedStorage<'a>,
     requests: EvaluationRequests<'a>,
     evaluation_inputs: EvaluationInputs,
@@ -40,18 +68,21 @@ struct EvaluationSession<'a> {
 pub(super) struct IncrementalEvaluation<'a> {
     table_deltas: Vec<TableDelta>,
     binding_deltas: Vec<BindingDelta>,
-    binding_snapshots: HashMap<String, RecordDeltas>,
+    binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
     table_frontiers: HashMap<String, u64>,
-    binding_frontiers: HashMap<String, u64>,
+    binding_frontiers: HashMap<BindingSourceKey, u64>,
     current_tick: u64,
     metrics: TickMetrics,
     storage: OwnedStorage<'a>,
     requests: EvaluationRequests<'a>,
     evaluation_inputs: Option<EvaluationInputs>,
     work_queue: EvaluationWorkQueue,
+    /// Graph slice whose state is staged by this evaluation. Unrelated
+    /// runtime state remains live and is merged only when the tick commits.
+    relevant_nodes: HashSet<NodeId>,
     published_subscriptions: HashSet<SubscriptionId>,
-    affected_nodes: HashSet<NodeId>,
     affected_subscriptions: HashSet<SubscriptionId>,
+    affected_nodes: HashSet<NodeId>,
     /// Relational output retained while logical terminal materialization waits
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
@@ -61,6 +92,25 @@ pub(super) struct IncrementalEvaluation<'a> {
     notification_publication: Option<PublicationId>,
     defer_notifications_until_durable: bool,
     pending_resident_publication: Option<PendingResidentPublication>,
+    /// All evaluator-owned state is prepared here and installed only after the
+    /// complete direct tick reaches Ready. This keeps failed ticks atomic while
+    /// allowing a suspended evaluation to retain its exact continuation.
+    operator_states: HashMap<OperatorStateKey, OperatorState>,
+    arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
+    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo_bytes: usize,
+    memo_use_clock: u64,
+    node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    pending_binding_retractions: usize,
+    pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
+    /// Derived writes use the same sparse overlay as their evaluation reads.
+    /// The owned flush future is retained across resident owner turns.
+    durable_writes: RefCell<StagedWriteState>,
+    persist_flush: Option<PersistFlush<'a>>,
+    /// No independent root remains after a scoped failure, so this tick must
+    /// not publish its staged globals.
+    discarded: bool,
 }
 
 #[derive(Clone)]
@@ -113,6 +163,68 @@ struct PendingIncrementalState {
     next_id: u64,
 }
 
+impl PendingIncrementalState {
+    /// Select each hydration whose snapshot overlaps `nodes`, plus every
+    /// evaluation which is temporally ahead of it on any registered node.
+    /// Repeat to closure because one predecessor may itself wait behind an
+    /// evaluation on a different node.
+    fn hydration_admission_evaluations(&self, nodes: &HashSet<NodeId>) -> HashSet<u64> {
+        let mut selected = self
+            .evaluations
+            .iter()
+            .filter_map(|(evaluation_id, evaluation)| {
+                (matches!(evaluation, PendingEvaluation::SubscriptionHydration(_))
+                    && evaluation.work_queue().overlaps(nodes))
+                .then_some(*evaluation_id)
+            })
+            .collect::<HashSet<_>>();
+        loop {
+            let mut changed = false;
+            for waiters in self.waiters_by_node.values() {
+                let Some(last_selected) = waiters
+                    .iter()
+                    .rposition(|evaluation_id| selected.contains(evaluation_id))
+                else {
+                    continue;
+                };
+                for predecessor in waiters.iter().take(last_selected + 1) {
+                    changed |= selected.insert(*predecessor);
+                }
+            }
+            if !changed {
+                return selected;
+            }
+        }
+    }
+
+    /// Release evaluations queued behind `evaluation_id` at completed graph
+    /// nodes. Snapshot hydration calls this only after its isolated state is
+    /// installed; incremental evaluations can release nodes as they complete.
+    fn release_temporal_successors(
+        &mut self,
+        evaluation_id: u64,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) {
+        for node in nodes {
+            let Some(waiters) = self.waiters_by_node.get_mut(&node) else {
+                continue;
+            };
+            debug_assert_eq!(waiters.front(), Some(&evaluation_id));
+            waiters.pop_front();
+            let successor = waiters.front().copied();
+            if waiters.is_empty() {
+                self.waiters_by_node.remove(&node);
+            }
+            if let Some(successor) = successor
+                && let Some(later) = self.evaluations.get_mut(&successor)
+            {
+                later.work_queue_mut().temporal_ready(node);
+            }
+        }
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
 enum PendingEvaluation {
     Incremental(IncrementalEvaluation<'static>),
     SubscriptionHydration(PendingSubscriptionHydration),
@@ -123,7 +235,7 @@ struct PendingSubscriptionHydration {
     outputs: BTreeMap<String, CompiledNode>,
     initial: Arc<Mutex<Option<MultisinkDeltas>>>,
     session: EvaluationSession<'static>,
-    binding_snapshots: HashMap<String, RecordDeltas>,
+    binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
     hydrate_arrangements: bool,
     metrics: TickMetrics,
 }
@@ -141,6 +253,10 @@ impl PendingEvaluation {
             Self::Incremental(evaluation) => &evaluation.work_queue,
             Self::SubscriptionHydration(evaluation) => &evaluation.session.work_queue,
         }
+    }
+
+    fn has_resident_continuation(&self) -> bool {
+        self.work_queue().has_resident_continuation()
     }
 }
 
@@ -165,6 +281,14 @@ impl std::fmt::Debug for PendingIncrementalEvaluation {
 impl PendingIncrementalEvaluation {
     pub(super) fn is_pending(&self) -> bool {
         !self.0.borrow().order.is_empty()
+    }
+
+    fn has_resident_continuation(&self) -> bool {
+        self.0
+            .borrow()
+            .evaluations
+            .values()
+            .any(PendingEvaluation::has_resident_continuation)
     }
 }
 
@@ -379,6 +503,13 @@ impl EvaluationWorkQueue {
         self.runnable.push_front(node);
     }
 
+    /// A runnable node is an explicit in-memory evaluator continuation.
+    /// Requests are represented separately as `Waiting`, so an eager cold
+    /// storage wake cannot be mistaken for CPU work.
+    fn has_resident_continuation(&self) -> bool {
+        !self.runnable.is_empty()
+    }
+
     fn is_root(&self, node: NodeId) -> bool {
         self.roots.contains(&node)
     }
@@ -395,6 +526,16 @@ impl EvaluationWorkQueue {
         self.entries
             .iter()
             .filter_map(|(node, entry)| (*entry != EvaluationEntry::Complete).then_some(*node))
+    }
+
+    /// Every node registered with a snapshot hydration is a single temporal
+    /// barrier: successors may use none of its isolated state until install.
+    fn registered_nodes(&self) -> Vec<NodeId> {
+        self.entries.keys().copied().collect()
+    }
+
+    fn overlaps(&self, nodes: &HashSet<NodeId>) -> bool {
+        self.entries.keys().any(|node| nodes.contains(node))
     }
 
     fn downstream_closure(&self, roots: impl IntoIterator<Item = NodeId>) -> HashSet<NodeId> {
@@ -500,11 +641,141 @@ impl EvaluationWorkQueue {
 }
 
 impl IncrementalEvaluation<'_> {
+    /// Base-table frontiers describe resident row visibility, not completion
+    /// of every dependent evaluator branch. Publish them monotonically when
+    /// this evaluation parks so independent snapshots cannot reuse an old
+    /// table-source cache; retain all operator state until full installation.
+    fn install_input_frontiers(&self, runtime: &mut IvmRuntime) {
+        for (table, frontier) in &self.table_frontiers {
+            runtime
+                .table_frontiers
+                .entry(table.clone())
+                .and_modify(|live| *live = (*live).max(*frontier))
+                .or_insert(*frontier);
+        }
+        for (binding, frontier) in &self.binding_frontiers {
+            runtime
+                .binding_frontiers
+                .entry(binding.clone())
+                .and_modify(|live| *live = (*live).max(*frontier))
+                .or_insert(*frontier);
+        }
+        for (node, staged) in &self.node_meta {
+            if let Some(live) = runtime.node_meta.get_mut(node) {
+                live.input_generation = live.input_generation.max(staged.input_generation);
+            }
+        }
+    }
+
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
+        // An empty set is the explicit cancellation path used by an owner
+        // which is abandoning the whole uninstalled evaluation. Scoped
+        // failures carry their downstream closure and may leave independent
+        // roots publishable.
+        self.discarded = nodes.is_empty()
+            || self
+                .work_queue
+                .roots
+                .iter()
+                .all(|root| nodes.contains(root));
         self.work_queue.abandon(nodes);
+        // A scoped failure owns only its downstream slice. Keep evaluating
+        // disjoint roots in this tick; their prepared state and notifications
+        // remain publishable. The staged maps share immutable bases and this
+        // removes only entries produced by the failed owner.
+        self.operator_states
+            .retain(|key, _| !nodes.contains(&key.node));
+        self.arrangement_states
+            .retain(|key, _| !nodes.contains(&key.input));
+        self.arrangement_keys_by_input
+            .retain(|node, _| !nodes.contains(node));
+        self.eval_memo.retain(|key, _| !nodes.contains(&key.node));
+        self.eval_memo_bytes = self
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum();
+        self.node_meta.retain(|node, _| !nodes.contains(node));
+        self.relevant_nodes.retain(|node| !nodes.contains(node));
+        self.affected_nodes.retain(|node| !nodes.contains(node));
         self.terminal_deltas.retain(|node, _| !nodes.contains(node));
         self.root_ordering_windows
             .retain(|node, _| !nodes.contains(node));
+        self.pending_subscription_outputs
+            .retain(|node, _| !nodes.contains(node));
+    }
+
+    fn install(&mut self, runtime: &mut IvmRuntime) {
+        if self.discarded {
+            return;
+        }
+        // Drop the committed entries before folding staged COW state. This
+        // makes recursive closures and arrangement bases uniquely owned while
+        // leaving unrelated graph state untouched.
+        for (key, state) in &mut self.operator_states {
+            runtime.operator_states.remove(key);
+            if let OperatorState::Recursive(recursive) = state {
+                recursive.value_mut().commit_staged_positive();
+            }
+            if let OperatorState::TopBy(top_by) = state {
+                top_by.value_mut().commit_overlays();
+            }
+            if let OperatorState::SemiJoin(semi_join) = state {
+                semi_join.commit_published_overlay();
+            }
+            if let OperatorState::AntiJoin(anti_join) = state {
+                anti_join.commit_published_overlay();
+            }
+            if let OperatorState::CollectBy(collect_by) = state {
+                collect_by.groups.commit_overlay();
+            }
+        }
+        runtime
+            .operator_states
+            .extend(std::mem::take(&mut self.operator_states));
+
+        for (key, state) in &mut self.arrangement_states {
+            runtime.arrangement_states.remove(key);
+            state.value_mut().commit_overlay();
+        }
+        runtime
+            .arrangement_states
+            .extend(std::mem::take(&mut self.arrangement_states));
+        for node in self.arrangement_keys_by_input.keys() {
+            runtime.arrangement_keys_by_input.remove(node);
+        }
+        runtime
+            .arrangement_keys_by_input
+            .extend(std::mem::take(&mut self.arrangement_keys_by_input));
+
+        runtime
+            .eval_memo
+            .extend(std::mem::take(&mut self.eval_memo));
+        runtime.eval_memo_bytes = runtime.eval_memo_bytes.saturating_add(self.eval_memo_bytes);
+        runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
+        // Retainers are owned by graph lifecycle operations, not by this
+        // evaluation snapshot. Preserve their current live value when a
+        // suspended continuation resumes after lifecycle activity.
+        for node in &self.relevant_nodes {
+            match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
+                (Some(meta), Some(live)) => {
+                    meta.retainers = live.retainers.clone();
+                    meta.input_generation = meta.input_generation.max(live.input_generation);
+                }
+                (None, Some(live)) => {
+                    self.node_meta.insert(*node, live.clone());
+                }
+                _ => {}
+            }
+        }
+        runtime
+            .node_meta
+            .extend(std::mem::take(&mut self.node_meta));
+        self.install_input_frontiers(runtime);
+        runtime.current_tick = runtime.current_tick.max(self.current_tick);
+        runtime
+            .pending_binding_retractions
+            .drain(..self.pending_binding_retractions);
     }
 
     fn poll(
@@ -512,7 +783,13 @@ impl IncrementalEvaluation<'_> {
         runtime: &mut IvmRuntime,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), EvaluationFailure>> {
-        self.requests.poll(cx);
+        if self.discarded {
+            return Poll::Ready(Ok(()));
+        }
+        let ready = self.requests.poll(cx);
+        if ready == 0 {
+            self.requests.poll_eager_retry(cx);
+        }
         let ready = match self.requests.drain_ready() {
             Ok(ready) => ready,
             Err(error) => {
@@ -525,7 +802,7 @@ impl IncrementalEvaluation<'_> {
             inputs.install(ready);
         }
 
-        let mut dropped_subscriptions = Vec::new();
+        let dropped_subscriptions = Vec::new();
         let mut evaluator = TickEvaluator {
             schema: &runtime.schema,
             graph: &runtime.graph,
@@ -534,15 +811,15 @@ impl IncrementalEvaluation<'_> {
             binding_deltas: &self.binding_deltas,
             binding_snapshots: &self.binding_snapshots,
             current_tick: self.current_tick,
-            operator_states: &mut runtime.operator_states,
-            arrangement_states: &mut runtime.arrangement_states,
-            arrangement_keys_by_input: &mut runtime.arrangement_keys_by_input,
-            eval_memo: &mut runtime.eval_memo,
-            eval_memo_bytes: &mut runtime.eval_memo_bytes,
+            operator_states: &mut self.operator_states,
+            arrangement_states: &mut self.arrangement_states,
+            arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
+            eval_memo: &mut self.eval_memo,
+            eval_memo_bytes: &mut self.eval_memo_bytes,
             table_frontiers: &self.table_frontiers,
             binding_frontiers: &self.binding_frontiers,
-            memo_use_clock: &mut runtime.memo_use_clock,
-            node_meta: &mut runtime.node_meta,
+            memo_use_clock: &mut self.memo_use_clock,
+            node_meta: &mut self.node_meta,
             storage: Some(self.storage.as_ref()),
             evaluation_inputs: self.evaluation_inputs.as_mut(),
             context: EvalContext::root(),
@@ -602,10 +879,11 @@ impl IncrementalEvaluation<'_> {
             0
         };
         if registered_requests && immediately_ready == 0 {
-            // Test and memory providers may deliberately yield once on a cold
-            // resident lookup. Match terminal materialization by advancing
-            // that retained request future once more before detaching the tick.
-            immediately_ready = self.requests.poll(cx);
+            // A backend may explicitly attest that a yielded read is still
+            // executor-local (for example, the in-memory cursor path). Retry
+            // only those requests; opaque cold storage keeps ownership of its
+            // self-wake and remains pending for the real runtime owner.
+            immediately_ready = self.requests.poll_eager_retry(cx);
         }
         if immediately_ready > 0 {
             // Resident requests completed synchronously. Install their results
@@ -710,10 +988,10 @@ impl IncrementalEvaluation<'_> {
                         drop(evaluator);
                         let mut ready = self.requests.poll(cx);
                         if ready == 0 {
-                            // A provider may deliberately yield once on a cold
-                            // resident request. Advance that retained future a
-                            // second time before yielding the whole commit.
-                            ready = self.requests.poll(cx);
+                            // Retry only a backend that explicitly attests its
+                            // reads are executor-local. A cold self-wake is
+                            // not a resident continuation.
+                            ready = self.requests.poll_eager_retry(cx);
                         }
                         if ready > 0 {
                             return self.poll(runtime, cx);
@@ -764,7 +1042,13 @@ impl IncrementalEvaluation<'_> {
                         None
                     };
                     if let Some(mut terminal) = terminal {
-                        if let Some(root_ordering_node) = output.root_ordering_node {
+                        // A CollectBy root terminal already owns exact
+                        // occurrence keys and positional edits. Its rendered
+                        // record can omit joined occurrence fields, so the
+                        // generic root-ordering pass would synthesize a
+                        // root-UUID-only Move that cannot address the
+                        // collector's occurrence-keyed output.
+                        if !structured && let Some(root_ordering_node) = output.root_ordering_node {
                             evaluator.apply_root_ordering(
                                 root_ordering_node,
                                 output.output,
@@ -799,26 +1083,19 @@ impl IncrementalEvaluation<'_> {
             queued.publication = notification_publication;
             if !queued.deltas.is_empty() {
                 if let Some(pending) = &self.pending_resident_publication
-                    && notification_publication.is_none()
+                    && queued.publication.is_none()
                 {
+                    // A resident publication may have an independent cold
+                    // branch still parked. Its completed subscriptions are
+                    // already a valid publication slice, so hand their
+                    // notifications to the resident receipt now instead of
+                    // waiting for the unrelated branch to hydrate.
                     pending
                         .notifications
                         .borrow_mut()
                         .push((*subscription_id, queued));
-                } else if self.defer_notifications_until_durable
-                    && notification_publication.is_some_and(|publication| {
-                        !runtime
-                            .durable_notification_publications
-                            .contains(&publication)
-                    })
-                {
-                    runtime
-                        .deferred_notifications
-                        .entry(notification_publication.expect("checked publication"))
-                        .or_default()
-                        .push((*subscription_id, queued));
-                } else if subscription.sender.send(queued).is_err() {
-                    dropped_subscriptions.push(*subscription_id);
+                } else {
+                    self.pending_notifications.push((*subscription_id, queued));
                 }
             }
             self.published_subscriptions.insert(*subscription_id);
@@ -831,9 +1108,68 @@ impl IncrementalEvaluation<'_> {
         }
 
         drop(evaluator);
+        if self.persist_flush.is_none() && !self.durable_writes.borrow().is_empty() {
+            let operations = std::mem::take(self.durable_writes.get_mut()).into_operations();
+            let storage = self.storage.clone();
+            let indeterminate = Rc::clone(&runtime.persistence_indeterminate);
+            self.persist_flush = Some(Box::pin(async move {
+                let mut attempt = PersistFlushAttempt {
+                    indeterminate,
+                    completed: false,
+                };
+                let result = match storage.as_ref().write_many_outcome(operations).await {
+                    WriteManyOutcome::Committed => Ok(()),
+                    WriteManyOutcome::Uncommitted(error) => Err(error.into()),
+                    WriteManyOutcome::PossiblyCommitted(error) => {
+                        attempt.indeterminate.set(true);
+                        Err(error.into())
+                    }
+                };
+                attempt.completed = true;
+                result
+            }));
+        }
+        if let Some(flush) = &mut self.persist_flush {
+            match flush.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Ok(())) => self.persist_flush = None,
+            }
+        }
+        self.install(runtime);
         runtime
             .operator_states
             .retain(|key, _| key.scope == ScopeId::root());
+        let notifications = std::mem::take(&mut self.pending_notifications);
+        let mut dropped_subscriptions = dropped_subscriptions;
+        for (subscription_id, queued) in notifications {
+            if self.defer_notifications_until_durable
+                && queued.publication.is_some_and(|publication| {
+                    !runtime
+                        .durable_notification_publications
+                        .contains(&publication)
+                })
+            {
+                runtime
+                    .deferred_notifications
+                    .entry(queued.publication.expect("checked publication"))
+                    .or_default()
+                    .push((subscription_id, queued));
+            } else if let Some(pending) = &self.pending_resident_publication
+                && queued.publication.is_none()
+            {
+                pending
+                    .notifications
+                    .borrow_mut()
+                    .push((subscription_id, queued));
+            } else if runtime
+                .multisink_subscriptions
+                .get(&subscription_id)
+                .is_some_and(|subscription| subscription.sender.send(queued).is_err())
+            {
+                dropped_subscriptions.push(subscription_id);
+            }
+        }
         for subscription_id in dropped_subscriptions {
             runtime.unsubscribe(subscription_id);
         }
@@ -990,6 +1326,7 @@ impl<'a> EvaluationSession<'a> {
             eval_memo_bytes,
             memo_use_clock: runtime.memo_use_clock,
             node_meta,
+            terminal_deltas: HashMap::default(),
             binding_frontiers: runtime.binding_frontiers.clone(),
             storage,
             requests,
@@ -999,9 +1336,10 @@ impl<'a> EvaluationSession<'a> {
     }
 
     fn advance_binding_input(&mut self, graph: &IvmGraph, shape: &str) {
-        *self.binding_frontiers.entry(shape.to_owned()).or_default() += 1;
+        let key = BindingSourceKey::prepared(shape);
+        *self.binding_frontiers.entry(key.clone()).or_default() += 1;
         let affected = graph
-            .affected_nodes(std::iter::empty(), std::iter::once(shape))
+            .affected_nodes(std::iter::empty(), std::iter::once(&key))
             .intersection(&self.relevant_nodes)
             .copied()
             .collect::<HashSet<_>>();
@@ -1014,159 +1352,209 @@ impl<'a> EvaluationSession<'a> {
     fn poll(
         &mut self,
         runtime: &IvmRuntime,
-        binding_snapshots: &HashMap<String, RecordDeltas>,
+        binding_snapshots: &HashMap<BindingSourceKey, RecordDeltas>,
         hydrate_arrangements: bool,
         metrics: &mut TickMetrics,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
-        self.requests.poll(cx);
-        let ready = match self.requests.drain_ready() {
-            Ok(ready) => ready,
-            Err(error) => return Poll::Ready(Err(error.1.error)),
-        };
-        self.work_queue.requests_ready(ready.keys().cloned());
-        self.evaluation_inputs.install(ready);
-
-        while let Some(node) = self.work_queue.runnable.pop_front() {
-            let context = if hydrate_arrangements {
-                EvalContext::root_subscription_snapshot()
-            } else {
-                EvalContext::root_snapshot()
-            };
-            let result = if let Some(records) = self.pending_outputs.remove(&node) {
-                Ok(records)
-            } else {
-                let mut evaluator = TickEvaluator {
-                    schema: &runtime.schema,
-                    graph: &runtime.graph,
-                    variant_projections: &runtime.variant_projections,
-                    table_deltas: &[],
-                    binding_deltas: &[],
-                    binding_snapshots,
-                    current_tick: runtime.current_tick,
-                    operator_states: &mut self.operator_states,
-                    arrangement_states: &mut self.arrangement_states,
-                    arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
-                    eval_memo: &mut self.eval_memo,
-                    eval_memo_bytes: &mut self.eval_memo_bytes,
-                    table_frontiers: &runtime.table_frontiers,
-                    binding_frontiers: &self.binding_frontiers,
-                    memo_use_clock: &mut self.memo_use_clock,
-                    node_meta: &mut self.node_meta,
-                    storage: Some(self.storage.as_ref()),
-                    evaluation_inputs: Some(&mut self.evaluation_inputs),
-                    context,
-                    metrics,
-                    terminal_deltas: HashMap::default(),
-                    root_ordering_windows: HashMap::default(),
-                };
-                let mut evaluation = evaluator.update_node(node);
-                match Pin::new(&mut evaluation).poll(cx) {
-                    Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
-                    Poll::Pending => {
-                        self.work_queue.requeue_yielded(node);
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                }
-            };
-            match result {
-                Ok(mut records) => {
-                    if self.work_queue.is_root(node) {
-                        let mut materialized = Vec::with_capacity(records.deltas.len());
-                        let mut blocked = false;
-                        for delta in &records.deltas {
-                            match crate::large_values::materialize_record_attempt(
-                                &records.descriptor,
-                                delta.raw(),
-                                &mut self.evaluation_inputs,
-                            ) {
-                                Ok(record) => materialized.push(RecordDelta {
-                                    record: record.into(),
-                                    weight: delta.weight,
-                                }),
-                                Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
-                                Err(error) => return Poll::Ready(Err(error)),
-                            }
-                        }
-                        if blocked {
-                            let requests = self.evaluation_inputs.take_missing();
-                            if requests.is_empty() {
-                                return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
-                            }
-                            for request in requests.iter().cloned() {
-                                self.requests.request(
-                                    request,
-                                    &self.storage,
-                                    Some(&runtime.chunk_provider),
-                                    &runtime.schema,
-                                );
-                            }
-                            self.pending_outputs.insert(node, records);
-                            self.work_queue.wait_for_requests(node, requests);
-                            // Every newly retained future must be polled once
-                            // before returning Pending so it can install the
-                            // caller's waker.
-                            if self.requests.poll(cx) > 0 {
-                                return self.poll(
-                                    runtime,
-                                    binding_snapshots,
-                                    hydrate_arrangements,
-                                    metrics,
-                                    cx,
-                                );
-                            }
-                            continue;
-                        }
-                        records.deltas = materialized;
-                        self.outputs.insert(node, records);
-                    }
-                    self.work_queue.complete(node);
-                }
-                Err(IvmRuntimeError::EvaluationBlocked) => {
-                    let requests = self.evaluation_inputs.take_missing();
-                    if requests.is_empty() {
-                        return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
-                    }
-                    let mut registered = false;
-                    for request in requests.iter().cloned() {
-                        registered |= self.requests.request(
-                            request,
-                            &self.storage,
-                            Some(&runtime.chunk_provider),
-                            &runtime.schema,
-                        );
-                    }
-                    self.work_queue.wait_for_requests(node, requests);
-                    if registered && self.requests.poll(cx) > 0 {
-                        return self.poll(
-                            runtime,
-                            binding_snapshots,
-                            hydrate_arrangements,
-                            metrics,
-                            cx,
-                        );
-                    }
-                }
-                Err(error) => return Poll::Ready(Err(error)),
+        let mut remaining_runnable_nodes = MAX_HYDRATION_RUNNABLE_NODES_PER_POLL;
+        'owner_turn: loop {
+            let ready = self.requests.poll(cx);
+            if ready == 0 {
+                self.requests.poll_eager_retry(cx);
             }
-        }
+            let ready = match self.requests.drain_ready() {
+                Ok(ready) => ready,
+                Err(error) => return Poll::Ready(Err(error.1.error)),
+            };
+            self.work_queue.requests_ready(ready.keys().cloned());
+            self.evaluation_inputs.install(ready);
 
-        if self.outputs.len() == self.roots.len() {
-            Poll::Ready(Ok(()))
-        } else if self.requests.has_pending() {
-            Poll::Pending
-        } else {
-            Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked))
+            while let Some(node) = self.work_queue.runnable.pop_front() {
+                if remaining_runnable_nodes == 0 {
+                    self.work_queue.requeue_yielded(node);
+                    // This is a resident CPU budget yield, not an external
+                    // dependency. Arrange exactly one fresh owner turn.
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                remaining_runnable_nodes -= 1;
+                let context = if hydrate_arrangements {
+                    EvalContext::root_subscription_snapshot()
+                } else {
+                    EvalContext::root_snapshot()
+                };
+                let result = if let Some(records) = self.pending_outputs.remove(&node) {
+                    Ok(records)
+                } else {
+                    let mut evaluator = TickEvaluator {
+                        schema: &runtime.schema,
+                        graph: &runtime.graph,
+                        variant_projections: &runtime.variant_projections,
+                        table_deltas: &[],
+                        binding_deltas: &[],
+                        binding_snapshots,
+                        current_tick: runtime.current_tick,
+                        operator_states: &mut self.operator_states,
+                        arrangement_states: &mut self.arrangement_states,
+                        arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
+                        eval_memo: &mut self.eval_memo,
+                        eval_memo_bytes: &mut self.eval_memo_bytes,
+                        table_frontiers: &runtime.table_frontiers,
+                        binding_frontiers: &self.binding_frontiers,
+                        memo_use_clock: &mut self.memo_use_clock,
+                        node_meta: &mut self.node_meta,
+                        storage: Some(self.storage.as_ref()),
+                        evaluation_inputs: Some(&mut self.evaluation_inputs),
+                        context,
+                        metrics,
+                        terminal_deltas: std::mem::take(&mut self.terminal_deltas),
+                        root_ordering_windows: HashMap::default(),
+                    };
+                    let mut evaluation = evaluator.update_node(node);
+                    let poll = Pin::new(&mut evaluation).poll(cx);
+                    drop(evaluation);
+                    self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+                    match poll {
+                        // A future which cooperatively yielded has not registered a
+                        // storage request. Preserve the CPU-yield distinction from
+                        // `IncrementalEvaluation`: requeue it for a fresh owner
+                        // turn rather than pretending it is a missing input.
+                        Poll::Pending => {
+                            self.work_queue.requeue_yielded(node);
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        // `EvaluationBlocked` is deliberately *ready*: the
+                        // evaluator has populated `evaluation_inputs.missing`.
+                        // Let the common branch below retain and poll those
+                        // requests; collapsing it with `Poll::Pending` causes a
+                        // self-waking replay loop that can never hydrate a large
+                        // indirect literal.
+                        Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
+                    }
+                };
+                match result {
+                    Ok(mut records) => {
+                        if self.work_queue.is_root(node) {
+                            let mut materialized = Vec::with_capacity(records.deltas.len());
+                            let mut blocked = false;
+                            for delta in &records.deltas {
+                                match crate::large_values::materialize_record_attempt(
+                                    &records.descriptor,
+                                    delta.raw(),
+                                    &mut self.evaluation_inputs,
+                                ) {
+                                    Ok(record) => materialized.push(RecordDelta {
+                                        record: record.into(),
+                                        weight: delta.weight,
+                                    }),
+                                    Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
+                                    Err(error) => return Poll::Ready(Err(error)),
+                                }
+                            }
+                            if blocked {
+                                let requests = self.evaluation_inputs.take_missing();
+                                if requests.is_empty() {
+                                    return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
+                                }
+                                for request in requests.iter().cloned() {
+                                    self.requests.request(
+                                        request,
+                                        &self.storage,
+                                        Some(&runtime.chunk_provider),
+                                        &runtime.schema,
+                                    );
+                                }
+                                self.pending_outputs.insert(node, records);
+                                self.work_queue.wait_for_requests(node, requests);
+                                // Every newly retained future must be polled once
+                                // before returning Pending so it can install the
+                                // caller's waker.
+                                let ready = self.requests.poll(cx);
+                                if ready > 0
+                                    || (ready == 0 && self.requests.poll_eager_retry(cx) > 0)
+                                {
+                                    continue 'owner_turn;
+                                }
+                                if self.requests.has_pending() {
+                                    // Cold storage owns the continuation now.
+                                    // Do not spin through unrelated runnable
+                                    // graph nodes in this owner turn.
+                                    return Poll::Pending;
+                                }
+                                continue;
+                            }
+                            records.deltas = materialized;
+                            self.outputs.insert(node, records);
+                        }
+                        self.work_queue.complete(node);
+                    }
+                    Err(IvmRuntimeError::EvaluationBlocked) => {
+                        let requests = self.evaluation_inputs.take_missing();
+                        if requests.is_empty() {
+                            return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
+                        }
+                        let mut registered = false;
+                        for request in requests.iter().cloned() {
+                            registered |= self.requests.request(
+                                request,
+                                &self.storage,
+                                Some(&runtime.chunk_provider),
+                                &runtime.schema,
+                            );
+                        }
+                        self.work_queue.wait_for_requests(node, requests);
+                        if registered || self.requests.has_pending() {
+                            let ready = self.requests.poll(cx);
+                            if ready > 0 || (ready == 0 && self.requests.poll_eager_retry(cx) > 0) {
+                                continue 'owner_turn;
+                            }
+                        }
+                        if self.requests.has_pending() {
+                            // A request was polled with this owner's durable
+                            // waker. Yield to it rather than scanning the rest of
+                            // a potentially huge graph while it is cold.
+                            return Poll::Pending;
+                        }
+                    }
+                    Err(error) => return Poll::Ready(Err(error)),
+                }
+            }
+
+            if self.outputs.len() == self.roots.len() {
+                return Poll::Ready(Ok(()));
+            }
+            if self.requests.has_pending() {
+                return Poll::Pending;
+            }
+            return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
         }
     }
 
-    fn install(self, runtime: &mut IvmRuntime) {
+    fn install(mut self, runtime: &mut IvmRuntime) {
         for node in &self.relevant_nodes {
             runtime.operator_states.remove(&OperatorStateKey {
                 scope: ScopeId::root(),
                 node: *node,
             });
+        }
+        // Session hydration also establishes long-lived collector state. Fold
+        // its initially populated sparse groups now, otherwise the first
+        // incremental edit would COW-clone the entire hydration overlay.
+        for state in self.operator_states.values_mut() {
+            if let OperatorState::TopBy(top_by) = state {
+                top_by.value_mut().commit_overlays();
+            }
+            if let OperatorState::SemiJoin(semi_join) = state {
+                semi_join.commit_published_overlay();
+            }
+            if let OperatorState::AntiJoin(anti_join) = state {
+                anti_join.commit_published_overlay();
+            }
+            if let OperatorState::CollectBy(collect_by) = state {
+                collect_by.groups.commit_overlay();
+            }
         }
         runtime.operator_states.extend(self.operator_states);
         for node in &self.relevant_nodes {
@@ -1175,6 +1563,12 @@ impl<'a> EvaluationSession<'a> {
                     runtime.arrangement_states.remove(key);
                 }
             }
+        }
+        // Hydration-created arrangements are the immutable bases for the
+        // next staged tick. Fold their initial overlays after removing the
+        // old live entries, just as incremental installation does.
+        for state in self.arrangement_states.values_mut() {
+            state.value_mut().commit_overlay();
         }
         runtime.arrangement_states.extend(self.arrangement_states);
         for node in &self.relevant_nodes {
@@ -1192,7 +1586,7 @@ impl<'a> EvaluationSession<'a> {
             .values()
             .map(|entry| entry.payload_bytes)
             .sum();
-        runtime.memo_use_clock = self.memo_use_clock;
+        runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
         for node in &self.relevant_nodes {
             runtime.node_meta.remove(node);
         }
@@ -1206,7 +1600,7 @@ impl IvmRuntime {
         subscription_id: SubscriptionId,
         outputs: BTreeMap<String, CompiledNode>,
         storage: OwnedStorage<'static>,
-        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
         binding_frontier_advance: Option<&str>,
         initial: Arc<Mutex<Option<MultisinkDeltas>>>,
     ) -> Result<(), IvmRuntimeError> {
@@ -1369,6 +1763,47 @@ impl IvmRuntime {
                     .with_install_observer(observer, failures)
             }),
         };
+        let changed_tables = table_deltas
+            .iter()
+            .map(|delta| delta.table.as_str())
+            .collect::<HashSet<_>>();
+        let affected_nodes = self
+            .graph
+            .affected_nodes(changed_tables.iter().copied(), std::iter::empty());
+
+        // Hydration evaluates an isolated snapshot and installs that snapshot
+        // atomically. Do not begin a resident tick which overlaps its graph
+        // slice: beginning mutates durable evaluator state and input
+        // generations before the work queue can attach temporal blockers, so
+        // a later hydration install would otherwise roll those mutations back.
+        std::future::poll_fn(|cx| {
+            let selected = self
+                .pending_incremental
+                .0
+                .borrow()
+                .hydration_admission_evaluations(&affected_nodes);
+            if selected.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            match self.poll_incremental(cx, false, Some(&selected)) {
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) | Poll::Pending => {
+                    if self
+                        .pending_incremental
+                        .0
+                        .borrow()
+                        .hydration_admission_evaluations(&affected_nodes)
+                        .is_empty()
+                    {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        Poll::Pending
+                    }
+                }
+            }
+        })
+        .await?;
+
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();
             pending
@@ -1419,6 +1854,7 @@ impl IvmRuntime {
             Poll::Ready(Err(failure)) => return Err(failure.into_error()),
             Poll::Pending => {
                 evaluation.work_queue.drain_completed_events();
+                evaluation.install_input_frontiers(self);
                 let mut pending = self.pending_incremental.0.borrow_mut();
                 let evaluation_id = pending.next_id;
                 pending.next_id = pending.next_id.saturating_add(1);
@@ -1511,6 +1947,26 @@ impl IvmRuntime {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
+        self.poll_incremental(cx, false, None)
+    }
+
+    /// Poll only evaluations that have retained an explicit in-memory
+    /// continuation. Cold evaluations are left entirely untouched: their
+    /// storage futures may have self-woken, but only a runtime owner may poll
+    /// them again with a durable waker.
+    pub(crate) fn poll_resident_incremental(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        self.poll_incremental(cx, true, None)
+    }
+
+    fn poll_incremental(
+        &mut self,
+        cx: &mut Context<'_>,
+        resident_only: bool,
+        selected_evaluations: Option<&HashSet<u64>>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
         let slot = Rc::clone(&self.pending_incremental.0);
         let mut state = std::mem::take(&mut *slot.borrow_mut());
         if state.order.is_empty() {
@@ -1522,6 +1978,16 @@ impl IvmRuntime {
                 .evaluations
                 .remove(&evaluation_id)
                 .expect("pending evaluation order references a live session");
+            if selected_evaluations.is_some_and(|selected| !selected.contains(&evaluation_id)) {
+                state.evaluations.insert(evaluation_id, evaluation);
+                retained_order.push_back(evaluation_id);
+                continue;
+            }
+            if resident_only && !evaluation.has_resident_continuation() {
+                state.evaluations.insert(evaluation_id, evaluation);
+                retained_order.push_back(evaluation_id);
+                continue;
+            }
             let progress = match &mut evaluation {
                 PendingEvaluation::Incremental(incremental) => incremental.poll(self, cx),
                 PendingEvaluation::SubscriptionHydration(hydration) => hydration
@@ -1539,31 +2005,27 @@ impl IvmRuntime {
                         error: Arc::new(error),
                     }),
             };
-            let completed = evaluation.work_queue_mut().drain_completed_events();
-            for node in &completed {
-                let Some(waiters) = state.waiters_by_node.get_mut(node) else {
-                    continue;
-                };
-                debug_assert_eq!(waiters.front(), Some(&evaluation_id));
-                waiters.pop_front();
-                let successor = waiters.front().copied();
-                if waiters.is_empty() {
-                    state.waiters_by_node.remove(node);
-                }
-                if let Some(successor) = successor
-                    && let Some(later) = state.evaluations.get_mut(&successor)
-                {
-                    later.work_queue_mut().temporal_ready(*node);
-                }
+            // A hydration session owns a private snapshot of all reachable
+            // state. Its completed interior nodes are not safe handoff points:
+            // a later incremental evaluation would run against the old live
+            // runtime, then lose its changes when hydration installs. Treat
+            // the whole session as one temporal barrier instead.
+            if matches!(evaluation, PendingEvaluation::Incremental(_)) {
+                let completed = evaluation.work_queue_mut().drain_completed_events();
+                state.release_temporal_successors(evaluation_id, completed);
             }
             match progress {
                 Poll::Ready(Ok(())) => {
                     if let PendingEvaluation::SubscriptionHydration(hydration) = evaluation {
                         let snapshot = subscription_snapshot_from_hydrated(
+                            &self.graph,
                             &hydration.outputs,
                             &hydration.session.outputs,
+                            &hydration.session.terminal_deltas,
                         );
+                        let completed = hydration.session.work_queue.registered_nodes();
                         hydration.session.install(self);
+                        state.release_temporal_successors(evaluation_id, completed);
                         self.record_hydration_memo_metrics(&hydration.metrics);
                         self.evict_eval_memo();
                         match snapshot {
@@ -1610,11 +2072,16 @@ impl IvmRuntime {
                         return Poll::Ready(Err(failure.into_error()));
                     }
                     self.fail_evaluation_nodes(&failure);
-                    let incomplete = evaluation
-                        .work_queue()
-                        .incomplete_nodes()
-                        .collect::<Vec<_>>();
-                    for node in incomplete {
+                    let released_nodes =
+                        if matches!(&evaluation, PendingEvaluation::SubscriptionHydration(_)) {
+                            evaluation.work_queue().registered_nodes()
+                        } else {
+                            evaluation
+                                .work_queue()
+                                .incomplete_nodes()
+                                .collect::<Vec<_>>()
+                        };
+                    for node in released_nodes {
                         let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
                             continue;
                         };
@@ -1633,6 +2100,24 @@ impl IvmRuntime {
                 Poll::Pending => {
                     state.evaluations.insert(evaluation_id, evaluation);
                     retained_order.push_back(evaluation_id);
+                    if resident_only {
+                        // A resident slice can discover cold storage. It has
+                        // installed only this direct call's no-op waker, so
+                        // leave it parked and continue looking for unrelated
+                        // resident work later in the queue.
+                        continue;
+                    }
+                    // One owner turn advances at most one suspended
+                    // evaluation. In particular, a cold subscription
+                    // hydration must hand control back to the runtime owner
+                    // before it can drain unrelated queued work (such as
+                    // transport ingress and local write fates). The pending
+                    // storage future has just received this poll's durable
+                    // waker; cooperative in-memory yields wake it directly.
+                    retained_order.append(&mut state.order);
+                    state.order = retained_order;
+                    *slot.borrow_mut() = state;
+                    return Poll::Pending;
                 }
             }
         }
@@ -1648,6 +2133,12 @@ impl IvmRuntime {
 
     pub(crate) fn has_pending_incremental(&self) -> bool {
         self.pending_incremental.is_pending()
+    }
+
+    /// Whether the last suspended owner turn retained a cooperative CPU
+    /// continuation rather than a cold storage request.
+    pub(crate) fn has_resident_continuation(&self) -> bool {
+        self.pending_incremental.has_resident_continuation()
     }
 
     /// Drop an uninstalled hydration when its subscription is cancelled.
@@ -1685,7 +2176,7 @@ impl IvmRuntime {
                 continue;
             };
             state.order.retain(|candidate| *candidate != evaluation_id);
-            for node in evaluation.work_queue().incomplete_nodes() {
+            for node in evaluation.work_queue().registered_nodes() {
                 let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
                     continue;
                 };
@@ -1717,6 +2208,9 @@ impl IvmRuntime {
         storage: OwnedStorage<'a>,
         notification_publication: Option<PublicationId>,
     ) -> Result<TickMetrics, IvmRuntimeError> {
+        if self.persistence_indeterminate.get() {
+            return Err(IvmRuntimeError::PersistenceOutcomeIndeterminate);
+        }
         self.drive_pending_incremental().await?;
         let mut evaluation = self
             .begin_tick_with_params(
@@ -1771,16 +2265,81 @@ impl IvmRuntime {
             .collect::<HashSet<_>>();
         let changed_bindings = binding_deltas
             .iter()
-            .map(|delta| delta.shape.as_str())
+            .map(|delta| &delta.key)
             .collect::<HashSet<_>>();
         let affected_nodes = self.graph.affected_nodes(
             changed_tables.iter().copied(),
             changed_bindings.iter().copied(),
         );
-        // Do not commit tick lifecycle state until fallible durable evaluation
-        // has completed. In particular, queued binding retractions must remain
-        // retryable when preparing a tick encounters a storage error.
+        // Capture only the graph slice reached from changed inputs. The
+        // evaluator may need unchanged sibling inputs (for example the other
+        // side of a join), so discovery walks ancestors of every affected
+        // node, while unrelated graph state remains in the live runtime.
+        let (relevant_nodes, _) = EvaluationWorkQueue::new(affected_nodes.iter().copied())
+            .discover_incremental(&self.graph)?;
+        // Capture by graph key, never by filtering global retained maps. Root
+        // state is the only durable evaluator state; recursive child scopes
+        // are scratch and are removed before publication.
+        let mut operator_states = relevant_nodes
+            .iter()
+            .filter_map(|node| {
+                let key = OperatorStateKey {
+                    scope: ScopeId::root(),
+                    node: *node,
+                };
+                self.operator_states
+                    .get(&key)
+                    .cloned()
+                    .map(|state| (key, state))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut arrangement_states = HashMap::default();
+        let mut arrangement_keys_by_input = HashMap::default();
+        for input in &relevant_nodes {
+            let Some(keys) = self.arrangement_keys_by_input.get(input) else {
+                continue;
+            };
+            for key in keys {
+                if let Some(state) = self.arrangement_states.get(key) {
+                    arrangement_states.insert(key.clone(), state.clone());
+                    arrangement_keys_by_input
+                        .entry(*input)
+                        .or_insert_with(HashSet::default)
+                        .insert(key.clone());
+                }
+            }
+        }
+        // Tick memo entries are disposable. Recomputing the affected graph is
+        // bounded by that graph slice and avoids a global memo scan.
+        let mut eval_memo = HashMap::default();
+        let mut eval_memo_bytes = 0;
+        let mut memo_use_clock = self.memo_use_clock;
+        let mut node_meta = relevant_nodes
+            .iter()
+            .filter_map(|node| self.node_meta.get(node).cloned().map(|meta| (*node, meta)))
+            .collect::<HashMap<_, _>>();
+        let mut table_frontiers = HashMap::default();
+        let mut binding_frontiers = HashMap::default();
+        for node in &relevant_nodes {
+            let Some(graph_node) = self.graph.node(*node) else {
+                continue;
+            };
+            match &graph_node.descriptor.operator {
+                OpType::TableSource(source) => {
+                    if let Some(frontier) = self.table_frontiers.get(&source.table) {
+                        table_frontiers.insert(source.table.clone(), *frontier);
+                    }
+                }
+                OpType::BindingSource(source) => {
+                    if let Some(frontier) = self.binding_frontiers.get(&source.key) {
+                        binding_frontiers.insert(source.key.clone(), *frontier);
+                    }
+                }
+                _ => {}
+            }
+        }
         let current_tick = self.current_tick + 1;
+        let durable_writes = RefCell::new(StagedWriteState::default());
         let table_delta_records = table_deltas
             .iter()
             .map(|delta| delta.deltas.len())
@@ -1790,12 +2349,26 @@ impl IvmRuntime {
             &affected_nodes,
             current_tick,
             storage.as_ref(),
+            &mut operator_states,
+            &mut arrangement_states,
+            &mut arrangement_keys_by_input,
+            &mut eval_memo,
+            &mut eval_memo_bytes,
+            &mut memo_use_clock,
+            &mut node_meta,
+            &table_frontiers,
+            &binding_frontiers,
+            &durable_writes,
         )
         .await?;
-        self.current_tick = current_tick;
-        self.bump_input_frontiers(&table_deltas, &binding_deltas);
-        self.pending_binding_retractions
-            .drain(..pending_binding_retractions);
+        bump_input_frontiers_staged(
+            &self.graph,
+            &table_deltas,
+            &binding_deltas,
+            &mut table_frontiers,
+            &mut binding_frontiers,
+            &mut node_meta,
+        );
         let metrics = TickMetrics {
             tick: current_tick,
             table_delta_records,
@@ -1847,8 +2420,8 @@ impl IvmRuntime {
             table_deltas,
             binding_deltas,
             binding_snapshots,
-            table_frontiers: self.table_frontiers.clone(),
-            binding_frontiers: self.binding_frontiers.clone(),
+            table_frontiers,
+            binding_frontiers,
             current_tick,
             metrics,
             storage,
@@ -1856,6 +2429,7 @@ impl IvmRuntime {
             evaluation_inputs,
             work_queue,
             published_subscriptions: HashSet::default(),
+            relevant_nodes,
             affected_nodes,
             affected_subscriptions,
             pending_subscription_outputs: HashMap::default(),
@@ -1864,6 +2438,18 @@ impl IvmRuntime {
             notification_publication,
             defer_notifications_until_durable,
             pending_resident_publication,
+            operator_states,
+            arrangement_states,
+            arrangement_keys_by_input,
+            eval_memo,
+            eval_memo_bytes,
+            memo_use_clock,
+            node_meta,
+            pending_binding_retractions,
+            pending_notifications: Vec::new(),
+            durable_writes,
+            persist_flush: None,
+            discarded: false,
         })
     }
 
@@ -1872,32 +2458,14 @@ impl IvmRuntime {
         table_deltas: &[TableDelta],
         binding_deltas: &[BindingDelta],
     ) {
-        let mut changed_tables = Vec::new();
-        for delta in table_deltas.iter().filter(|delta| !delta.deltas.is_empty()) {
-            *self.table_frontiers.entry(delta.table.clone()).or_default() += 1;
-            changed_tables.push(delta.table.as_str());
-        }
-        let mut changed_bindings = Vec::new();
-        for delta in binding_deltas
-            .iter()
-            .filter(|delta| !delta.deltas.is_empty())
-        {
-            *self
-                .binding_frontiers
-                .entry(delta.shape.clone())
-                .or_default() += 1;
-            changed_bindings.push(delta.shape.as_str());
-        }
-        if changed_tables.is_empty() && changed_bindings.is_empty() {
-            return;
-        }
-        for node in self.graph.affected_nodes(
-            changed_tables.iter().copied(),
-            changed_bindings.iter().copied(),
-        ) {
-            let meta = self.node_meta.entry(node).or_default();
-            meta.input_generation = meta.input_generation.wrapping_add(1);
-        }
+        bump_input_frontiers_staged(
+            &self.graph,
+            table_deltas,
+            binding_deltas,
+            &mut self.table_frontiers,
+            &mut self.binding_frontiers,
+            &mut self.node_meta,
+        );
     }
 
     fn evict_eval_memo(&mut self) {
@@ -1997,7 +2565,7 @@ impl IvmRuntime {
         roots: impl IntoIterator<Item = NodeId>,
         owned_storage: OwnedStorage<'a>,
         mode: HydrationMode,
-        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
         binding_frontier_advance: Option<&str>,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
@@ -2049,7 +2617,7 @@ impl IvmRuntime {
         outputs: &BTreeMap<String, CompiledNode>,
         storage: &S,
         mode: HydrationMode,
-        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
         binding_frontier_advance: Option<&str>,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
@@ -2071,7 +2639,7 @@ impl IvmRuntime {
                 binding_frontier_advance,
             )
             .await?;
-        subscription_snapshot_from_hydrated(outputs, &hydrated)
+        subscription_snapshot_from_hydrated(&self.graph, outputs, &hydrated, &HashMap::default())
     }
 
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -2089,12 +2657,23 @@ impl IvmRuntime {
         Ok(false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn tick_durable_nodes(
-        &mut self,
+        &self,
         table_deltas: &[TableDelta],
         affected_nodes: &std::collections::HashSet<NodeId>,
         current_tick: u64,
         storage: &dyn OrderedKvStorage,
+        operator_states: &mut HashMap<OperatorStateKey, OperatorState>,
+        arrangement_states: &mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+        arrangement_keys_by_input: &mut HashMap<NodeId, HashSet<ArrangementKey>>,
+        eval_memo: &mut HashMap<EvalMemoKey, EvalMemoEntry>,
+        eval_memo_bytes: &mut usize,
+        memo_use_clock: &mut u64,
+        node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
+        table_frontiers: &HashMap<String, u64>,
+        binding_frontiers: &HashMap<BindingSourceKey, u64>,
+        durable_writes: &RefCell<StagedWriteState>,
     ) -> Result<(), IvmRuntimeError> {
         let durable_nodes = affected_nodes
             .iter()
@@ -2106,6 +2685,7 @@ impl IvmRuntime {
             })
             .collect::<Vec<_>>();
         let binding_snapshots = self.binding_snapshot_deltas();
+        let durable_overlay = StagedWriteOverlay::new(storage, durable_writes);
         let mut metrics = TickMetrics::default();
         for node in durable_nodes {
             let graph_node = self
@@ -2127,16 +2707,16 @@ impl IvmRuntime {
                     binding_deltas: &[],
                     binding_snapshots: &binding_snapshots,
                     current_tick,
-                    operator_states: &mut self.operator_states,
-                    arrangement_states: &mut self.arrangement_states,
-                    arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
-                    eval_memo: &mut self.eval_memo,
-                    eval_memo_bytes: &mut self.eval_memo_bytes,
-                    table_frontiers: &self.table_frontiers,
-                    binding_frontiers: &self.binding_frontiers,
-                    memo_use_clock: &mut self.memo_use_clock,
-                    node_meta: &mut self.node_meta,
-                    storage: Some(storage),
+                    operator_states,
+                    arrangement_states,
+                    arrangement_keys_by_input,
+                    eval_memo,
+                    eval_memo_bytes,
+                    table_frontiers,
+                    binding_frontiers,
+                    memo_use_clock,
+                    node_meta,
+                    storage: Some(&durable_overlay),
                     evaluation_inputs: None,
                     context: EvalContext::root(),
                     metrics: &mut metrics,
@@ -2146,7 +2726,7 @@ impl IvmRuntime {
                 evaluator.update_node(*input_node).await?.as_ref().clone()
             };
             apply_persist_delta(
-                storage,
+                &durable_overlay,
                 &persist.storage,
                 &persist.key_fields,
                 persist.unique,
@@ -2160,10 +2740,13 @@ impl IvmRuntime {
 }
 
 fn subscription_snapshot_from_hydrated(
+    graph: &IvmGraph,
     outputs: &BTreeMap<String, CompiledNode>,
     hydrated: &HashMap<NodeId, RecordDeltas>,
+    terminal_deltas: &HashMap<NodeId, TerminalDeltas>,
 ) -> Result<MultisinkDeltas, IvmRuntimeError> {
     let mut sinks = BTreeMap::new();
+    let mut terminal_sinks = BTreeMap::new();
     for (sink, output) in outputs {
         let ordering = match output.root_ordering_node {
             Some(node) => Some(
@@ -2184,10 +2767,204 @@ fn subscription_snapshot_from_hydrated(
         if let Some(ordering) = &ordering {
             order_terminal_snapshot(&mut records, ordering)?;
         }
+        let (has_public_collector, terminal) =
+            terminal_delta_for_hydrated_output(graph, output.node, terminal_deltas)?;
+        // A hydrated root collector has no before-image, but it still owns
+        // the exact terminal key that later incremental edits address. Seed
+        // its opening through that same terminal representation instead of
+        // exposing a keyless record snapshot to a higher layer.
+        let terminal = match terminal {
+            Some(terminal) => Some(terminal),
+            None if has_public_collector => Some(terminal_deltas_from_record_deltas(&records)?),
+            None => None,
+        };
+        if let Some(terminal) = terminal.filter(|terminal| !terminal.is_empty()) {
+            terminal_sinks.insert(sink.clone(), terminal);
+        }
         sinks.insert(sink.clone(), records);
     }
     Ok(MultisinkDeltas {
         sinks,
-        terminal_sinks: BTreeMap::new(),
+        terminal_sinks,
     })
+}
+
+/// Locate the public collector that belongs to one output and return its
+/// hydration seed operations. `Collect` renders a structured root tree while
+/// `Root` renders a flat root record; both own an opaque terminal key and both
+/// must seed an opening through the same terminal representation as updates.
+fn terminal_delta_for_hydrated_output(
+    graph: &IvmGraph,
+    output: NodeId,
+    terminal_deltas: &HashMap<NodeId, TerminalDeltas>,
+) -> Result<(bool, Option<TerminalDeltas>), IvmRuntimeError> {
+    let mut pending = vec![output];
+    let mut seen = HashSet::new();
+    let mut fallback = None;
+    let mut has_public_collector = false;
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let graph_node = graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        let is_public_collector = matches!(
+            graph_node.descriptor.operator,
+            OpType::CollectBy(ref collect_by)
+                if matches!(collect_by.mode, CollectByMode::Collect | CollectByMode::Root)
+        );
+        has_public_collector |= is_public_collector;
+        if let Some(terminal) = terminal_deltas.get(&node) {
+            if is_public_collector {
+                return Ok((true, Some(terminal.clone())));
+            }
+            fallback.get_or_insert_with(|| terminal.clone());
+        }
+        pending.extend(graph_node.descriptor.inputs.iter().copied());
+    }
+    Ok((
+        has_public_collector,
+        (!has_public_collector).then_some(fallback).flatten(),
+    ))
+}
+
+fn bump_input_frontiers_staged(
+    graph: &IvmGraph,
+    table_deltas: &[TableDelta],
+    binding_deltas: &[BindingDelta],
+    table_frontiers: &mut HashMap<String, u64>,
+    binding_frontiers: &mut HashMap<BindingSourceKey, u64>,
+    node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
+) {
+    let mut changed_tables = Vec::new();
+    for delta in table_deltas.iter().filter(|delta| !delta.deltas.is_empty()) {
+        *table_frontiers.entry(delta.table.clone()).or_default() += 1;
+        changed_tables.push(delta.table.as_str());
+    }
+    let mut changed_bindings = Vec::new();
+    for delta in binding_deltas
+        .iter()
+        .filter(|delta| !delta.deltas.is_empty() || delta.initializes_snapshot)
+    {
+        *binding_frontiers.entry(delta.key.clone()).or_default() += 1;
+        changed_bindings.push(&delta.key);
+    }
+    if changed_tables.is_empty() && changed_bindings.is_empty() {
+        return;
+    }
+    for node in graph.affected_nodes(
+        changed_tables.iter().copied(),
+        changed_bindings.iter().copied(),
+    ) {
+        let meta = node_meta.entry(node).or_default();
+        meta.input_generation = meta.input_generation.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{
+        ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
+    };
+    use crate::storage::MemoryStorage;
+
+    #[futures_test::test]
+    async fn resumed_install_preserves_live_retainer_changes() {
+        let schema = DatabaseSchema::new([TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage =
+            Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+        let output = runtime
+            .add_dedup_graph(&GraphBuilder::table("edges").project(["src", "dst"]))
+            .unwrap()
+            .node;
+        runtime.add_retainer(output, Retainer::PreparedShape("old".to_owned()));
+        let edges = schema.table("edges").unwrap().record_schema();
+        let record = edges
+            .create(&[Value::U64(1), Value::U64(1), Value::U64(2)])
+            .unwrap();
+        let mut evaluation = runtime
+            .begin_tick_with_params(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "edges".to_owned(),
+                    descriptor: edges,
+                    deltas: vec![RecordDelta {
+                        record: record.into(),
+                        weight: 1,
+                    }],
+                }],
+                Vec::new(),
+                OwnedStorage::new(Rc::clone(&storage)),
+                None,
+            )
+            .await
+            .unwrap();
+
+        runtime.add_retainer(output, Retainer::Subscription("new".to_owned()));
+        evaluation.install(&mut runtime);
+
+        let retainers = &runtime.node_meta.get(&output).unwrap().retainers;
+        assert!(retainers.contains(&Retainer::PreparedShape("old".to_owned())));
+        assert!(retainers.contains(&Retainer::Subscription("new".to_owned())));
+    }
+
+    #[futures_test::test]
+    async fn abandoned_resident_evaluation_cannot_install_frontiers() {
+        let schema = DatabaseSchema::new([TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage =
+            Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
+        let output = runtime
+            .add_dedup_graph(&GraphBuilder::table("edges").project(["src", "dst"]))
+            .unwrap()
+            .node;
+        runtime.add_retainer(output, Retainer::PreparedShape("retained".to_owned()));
+        let edges = schema.table("edges").unwrap().record_schema();
+        let record = edges
+            .create(&[Value::U64(1), Value::U64(1), Value::U64(2)])
+            .unwrap();
+        let mut evaluation = runtime
+            .begin_tick_with_params(
+                vec![TableDelta {
+                    variant_tag: 0,
+                    table: "edges".to_owned(),
+                    descriptor: edges,
+                    deltas: vec![RecordDelta {
+                        record: record.into(),
+                        weight: 1,
+                    }],
+                }],
+                Vec::new(),
+                OwnedStorage::new(Rc::clone(&storage)),
+                None,
+            )
+            .await
+            .unwrap();
+        let before_tick = runtime.current_tick;
+        let before_frontiers = runtime.table_frontiers.clone();
+        evaluation.abandon(&HashSet::default());
+        evaluation.install(&mut runtime);
+
+        assert_eq!(runtime.current_tick, before_tick);
+        assert_eq!(runtime.table_frontiers, before_frontiers);
+    }
 }

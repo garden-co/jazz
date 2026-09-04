@@ -206,16 +206,39 @@ where
             }
         }
         evictable.sort_by_key(|candidate| candidate.tx_id);
+        if !evictable.is_empty() {
+            // INV-SYNC-27: once local row-version bodies may be removed, no
+            // persisted or in-memory fast known-state cursor may survive.
+            // Clear these facts before publishing any body deletion so a
+            // clearing failure leaves every candidate body intact.
+            self.clear_all_known_state_facts().await?;
+        }
+
+        if low_water_bytes.is_none() {
+            // Manual eviction publishes one batch, so every affected cache
+            // must be invalid before that batch can have an ambiguous outcome.
+            let mut last_invalidated_tx_id = None;
+            for candidate in &evictable {
+                if last_invalidated_tx_id == Some(candidate.tx_id) {
+                    continue;
+                }
+                self.invalidate_tx_version_tables_cache(candidate.tx_id);
+                last_invalidated_tx_id = Some(candidate.tx_id);
+            }
+        }
 
         let mut batch = self.database.open_batch();
         let mut batch_deletes = 0_usize;
-        let mut evicted_tx_ids = BTreeSet::new();
         for candidate in evictable {
             if low_water_bytes.is_some_and(|low_water| remaining_bytes <= low_water) {
                 break;
             }
             report.row_versions_evictable += 1;
-            evicted_tx_ids.insert(candidate.tx_id);
+            if low_water_bytes.is_some() {
+                // A budgeted deletion is persisted per candidate. Invalidate
+                // both transaction-version caches before its fallible commit.
+                self.invalidate_tx_version_tables_cache(candidate.tx_id);
+            }
             let history_table = self.version_storage_table_for_row(&candidate.version)?;
             batch.delete(
                 history_table.as_ref(),
@@ -237,16 +260,6 @@ where
             let applied = self.database.apply_batch(batch).await?;
             let persisted = applied.persist().await;
             self.database.finish_persistence(persisted)?;
-        }
-        for tx_id in evicted_tx_ids {
-            self.invalidate_tx_version_tables_cache(tx_id);
-        }
-        if report.row_versions_evictable > 0 {
-            // INV-SYNC-27: once local row-version bodies are removed, no
-            // persisted fast known-state cursor may survive. This coarse
-            // invalidation is conservative until eviction tracks affected
-            // binding views directly.
-            self.clear_all_known_state_facts().await?;
         }
 
         let after_bytes = self

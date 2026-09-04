@@ -473,6 +473,183 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    pub(super) fn queued_write_handle(
+        &self,
+        row: RowUuid,
+        tx_id: TxId,
+        queued_status: Rc<RefCell<QueuedMutationStatus>>,
+        queued_alias: Option<QueuedMutationAlias>,
+    ) -> WriteHandle<S> {
+        WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier: DurabilityTier::None,
+            queued_status: Some(queued_status),
+            queued_alias,
+        }
+    }
+
+    /// Synchronously reserve identity and enqueue an owner-retained insert.
+    #[doc(hidden)]
+    pub fn enqueue_insert(
+        &self,
+        table: String,
+        cells: RowCells,
+        mut options: InsertOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let row = options
+            .row_id
+            .unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.row_id = Some(row);
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.insert(&table, cells, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status, None))
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_update(
+        &self,
+        table: String,
+        row: RowUuid,
+        patch: RowCells,
+        mut options: UpdateOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let empty_patch = patch.is_empty();
+        let alias = Rc::new(RefCell::new(None));
+        let update_alias = Rc::clone(&alias);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.update(&table, row, patch, options).await?;
+                let actual_tx_id = write.mergeable_tx_id();
+                if empty_patch && actual_tx_id != tx_id {
+                    // Empty root patches deliberately validate visibility and
+                    // reuse the current row transaction. The returned write
+                    // handle retains that existing transaction as its bounded
+                    // completion target once validation succeeds.
+                    *update_alias.borrow_mut() = Some(actual_tx_id);
+                } else {
+                    debug_assert_eq!(actual_tx_id, tx_id);
+                }
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status, Some(alias)))
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_upsert(
+        &self,
+        table: String,
+        row: RowUuid,
+        cells: RowCells,
+        mut options: UpsertOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.upsert(&table, row, cells, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status, None))
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_delete(
+        &self,
+        table: String,
+        row: RowUuid,
+        mut options: DeleteOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.delete(&table, row, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status, None))
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_restore(
+        &self,
+        table: String,
+        row: RowUuid,
+        cells: Option<RowCells>,
+        mut options: RestoreOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.restore(&table, row, cells, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status, None))
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_large_value_update(
+        &self,
+        table: String,
+        row: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+        updated_at_ms: Option<u64>,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(updated_at_ms)?;
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db
+                    .update_with_large_value_mutations_at_ms(&table, row, patch, mutations, now_ms)
+                    .await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status, None))
+    }
     /// Read a byte range from an ordinary bytes or string cell without
     /// exposing its physical representation. Inline and indirect cells share
     /// this API; only the intersecting chunk paths are requested.
@@ -561,6 +738,7 @@ where
         column: &str,
         bytes: Vec<u8>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let (value, nullable) =
             unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
         match value {
@@ -619,6 +797,7 @@ where
         delete_length: u64,
         insert: Vec<u8>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let (value, nullable) =
             unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
         match value {
@@ -678,6 +857,7 @@ where
         patch: RowCells,
         mutations: Vec<LargeValueUpdate>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.update_with_large_value_mutations_at_ms_option(table, row, patch, mutations, None)
             .await
     }
@@ -692,6 +872,7 @@ where
         mutations: Vec<LargeValueUpdate>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.update_with_large_value_mutations_at_ms_option(
             table,
             row,
@@ -788,8 +969,17 @@ where
                     node.seal_large_value_updates(commit, &staged, self.schema_version_id)
                         .await?
                 };
-                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                if let Some(reserved) = self.reserved_tx_id {
+                    node.commit_mergeable_many_in_schema_at(
+                        self.schema_version_id,
+                        vec![commit],
+                        reserved,
+                    )
                     .await?
+                } else {
+                    node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                        .await?
+                }
             };
             Ok::<_, Error>(published)
         }
@@ -1144,8 +1334,17 @@ where
                     self.schema_version_id,
                 )
                 .await?;
-            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+            if let Some(reserved) = self.reserved_tx_id {
+                node.commit_mergeable_many_in_schema_at(
+                    self.schema_version_id,
+                    vec![commit],
+                    reserved,
+                )
                 .await?
+            } else {
+                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                    .await?
+            }
         };
         self.finish_published_write(row, published).await
     }
@@ -1216,6 +1415,7 @@ where
         cells: RowCells,
         options: InsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let InsertOptions {
             row_id,
             identity,
@@ -1256,6 +1456,7 @@ where
             None,
             updated_at_ms.unwrap_or_else(|| self.next_now_ms()),
             branch,
+            None,
         )
         .await
     }
@@ -1417,6 +1618,7 @@ where
         cells: &RowCells,
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let (kind, _) = self.validate_streaming_column(table, cells, column)?;
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let emitted_for_stage = Rc::clone(&emitted);
@@ -1442,6 +1644,7 @@ where
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         let initialized_now = !upload.initialized;
         if !upload.initialized {
             self.node
@@ -1498,6 +1701,7 @@ where
         &self,
         mut upload: StreamingValueUpload,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         upload.preparation.take();
         self.node
             .node
@@ -1524,6 +1728,7 @@ where
         base: Option<BranchViewBase>,
         attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let attribution_rejection = match attribution {
             Some(author) if author != self.identity.author && !self.backend_attribution => {
                 Some("attribution requires a trusted serving node")
@@ -1904,8 +2109,17 @@ where
                 .seal_inherited_large_values(commit, self.schema_version_id, true)
                 .await?
                 .staged_large_cell(column, staged, nullable);
-            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+            if let Some(reserved) = self.reserved_tx_id {
+                node.commit_mergeable_many_in_schema_at(
+                    self.schema_version_id,
+                    vec![commit],
+                    reserved,
+                )
                 .await?
+            } else {
+                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                    .await?
+            }
         };
         self.finish_published_write(row, published).await
     }
@@ -1958,6 +2172,7 @@ where
         patch: RowCells,
         options: UpdateOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let UpdateOptions {
             identity,
             target,
@@ -2039,35 +2254,42 @@ where
                     .await
                     .visible_current_cells_in_branch(table, &head, row)
                     .await?;
-                let (mut cells, parents, authored_columns) = if let Some(cells) = local {
-                    let parent = self
-                        .node
-                        .node
-                        .lock()
-                        .await
-                        .local_content_winner_tx_id_in_branch(table, &head, row)
-                        .await?;
-                    (
-                        visible_to_session.unwrap_or(cells),
-                        parent.into_iter().collect(),
-                        Some(patch.keys().cloned().collect()),
-                    )
-                } else {
-                    let inherited = self
-                        .node
-                        .node
-                        .lock()
-                        .await
-                        .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
-                        .await?
-                        .ok_or_else(|| {
-                            Error::new(
-                                ErrorCode::NotObserved,
-                                format!("row is not visible in branch view: {}", row.0),
-                            )
-                        })?;
-                    (visible_to_session.unwrap_or(inherited), Vec::new(), None)
-                };
+                let (mut cells, parents, authored_columns, verified_inherited_cells) =
+                    if let Some(cells) = local {
+                        let parent = self
+                            .node
+                            .node
+                            .lock()
+                            .await
+                            .local_content_winner_tx_id_in_branch(table, &head, row)
+                            .await?;
+                        (
+                            visible_to_session.unwrap_or(cells),
+                            parent.into_iter().collect(),
+                            Some(patch.keys().cloned().collect()),
+                            None,
+                        )
+                    } else {
+                        let inherited = self
+                            .node
+                            .node
+                            .lock()
+                            .await
+                            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                            .await?
+                            .ok_or_else(|| {
+                                Error::new(
+                                    ErrorCode::NotObserved,
+                                    format!("row is not visible in branch view: {}", row.0),
+                                )
+                            })?;
+                        let cells = visible_to_session.unwrap_or(inherited);
+                        // This complete cell map came from the locally observed
+                        // branch base. Retain it as engine-only provenance for
+                        // unchanged large descriptors when creating the overlay.
+                        let verified_inherited_cells = cells.clone();
+                        (cells, Vec::new(), None, Some(verified_inherited_cells))
+                    };
                 cells.extend(patch);
                 self.write_mergeable_at_ms_with_authorship_in_branch(
                     made_by,
@@ -2080,6 +2302,7 @@ where
                     authored_columns,
                     now_ms,
                     head,
+                    verified_inherited_cells,
                 )
                 .await
             }
@@ -2114,6 +2337,7 @@ where
         cells: RowCells,
         options: UpsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let UpsertOptions {
             identity,
             target,
@@ -2121,15 +2345,14 @@ where
         } = options;
         self.reject_attributed_branch_target(
             identity,
-            matches!(target, ExactWriteTarget::Branch(_)),
+            matches!(target, WriteTarget::BranchView { .. }),
         )?;
         validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        let branch = target.branch();
 
-        let (cells, parents, authored_columns) = match target {
-            ExactWriteTarget::Root => {
+        let (branch, cells, parents, authored_columns, verified_inherited_cells) = match target {
+            WriteTarget::Root => {
                 self.ensure_row_not_deleted(table, row).await?;
                 let exists = match identity {
                     WriteIdentity::Database | WriteIdentity::Attribution(_) => self
@@ -2145,7 +2368,7 @@ where
                         .await?
                         .is_some(),
                 };
-                if exists {
+                let (cells, parents, authored_columns) = if exists {
                     let (cells, parent, authored_columns) = match identity {
                         WriteIdentity::Database | WriteIdentity::Attribution(_) => {
                             self.merge_existing_cells(table, row, cells).await?
@@ -2158,52 +2381,84 @@ where
                     (cells, parent.into_iter().collect(), Some(authored_columns))
                 } else {
                     (cells, Vec::new(), None)
-                }
+                };
+                (
+                    BranchSelector::default(),
+                    cells,
+                    parents,
+                    authored_columns,
+                    None,
+                )
             }
-            ExactWriteTarget::Branch(_) => {
+            WriteTarget::BranchView { head, base } => {
+                self.ensure_branch_view_row_not_deleted(table, &head, base.as_ref(), row)
+                    .await?;
                 let visible_to_session = match identity {
                     WriteIdentity::Session(author) => {
                         self.visible_branch_view_cells_for_identity(
-                            table, &branch, None, row, author,
+                            table,
+                            &head,
+                            base.as_ref(),
+                            row,
+                            author,
                         )
                         .await?
                     }
                     WriteIdentity::Database | WriteIdentity::Attribution(_) => None,
                 };
+                let authored_columns = cells.keys().cloned().collect();
                 let mut node = self.node.node.lock().await;
-                let existing = node
-                    .visible_current_cells_in_branch(table, &branch, row)
-                    .await?;
-                let parent = if existing.is_some() {
-                    node.local_content_winner_tx_id_in_branch(table, &branch, row)
-                        .await?
-                } else {
-                    None
-                };
-                drop(node);
-                if let Some(mut existing) = existing {
-                    if matches!(identity, WriteIdentity::Session(_)) && visible_to_session.is_none()
-                    {
-                        return Err(read_for_write_denied("UPSERT", table));
-                    }
+                if let Some(mut current) = node
+                    .visible_current_cells_in_branch(table, &head, row)
+                    .await?
+                {
                     if cells.is_empty() {
                         return Err(Error::new(
                             ErrorCode::Schema,
                             "branch upsert update requires at least one authored column",
                         ));
                     }
-                    if let Some(visible_to_session) = visible_to_session {
-                        existing = visible_to_session;
+                    if matches!(identity, WriteIdentity::Session(_)) && visible_to_session.is_none()
+                    {
+                        return Err(read_for_write_denied("UPSERT", table));
                     }
-                    let authored_columns = cells.keys().cloned().collect();
-                    existing.extend(cells);
+                    if let Some(visible_to_session) = visible_to_session {
+                        current = visible_to_session;
+                    }
+                    let parent = node
+                        .local_content_winner_tx_id_in_branch(table, &head, row)
+                        .await?;
+                    drop(node);
+                    current.extend(cells);
                     (
-                        existing,
+                        head,
+                        current,
                         parent.into_iter().collect(),
                         Some(authored_columns),
+                        None,
+                    )
+                } else if let Some(inherited) = node
+                    .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                    .await?
+                {
+                    drop(node);
+                    if matches!(identity, WriteIdentity::Session(_)) && visible_to_session.is_none()
+                    {
+                        return Err(read_for_write_denied("UPSERT", table));
+                    }
+                    let verified_inherited_cells = inherited.clone();
+                    let mut inherited = visible_to_session.unwrap_or(inherited);
+                    inherited.extend(cells);
+                    (
+                        head,
+                        inherited,
+                        Vec::new(),
+                        Some(authored_columns),
+                        Some(verified_inherited_cells),
                     )
                 } else {
-                    (cells, Vec::new(), None)
+                    drop(node);
+                    (head, cells, Vec::new(), None, None)
                 }
             }
         };
@@ -2219,6 +2474,7 @@ where
             authored_columns,
             now_ms,
             branch,
+            verified_inherited_cells,
         )
         .await
     }
@@ -2250,6 +2506,7 @@ where
         row: RowUuid,
         options: DeleteOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let DeleteOptions {
             identity,
             target,
@@ -2313,6 +2570,7 @@ where
             None,
             now_ms,
             branch,
+            None,
         )
         .await
     }
@@ -2442,6 +2700,7 @@ where
         cells: Option<RowCells>,
         options: RestoreOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let RestoreOptions {
             identity,
             target,
@@ -2506,13 +2765,16 @@ where
                 .cells(BTreeMap::<String, Value>::new())
                 .deletion(DeletionEvent::Restored),
         ));
-        let published = self
-            .node
-            .node
-            .lock()
-            .await
-            .commit_mergeable_many_in_schema(self.schema_version_id, commits)
-            .await?;
+        let published = {
+            let mut node = self.node.node.lock().await;
+            if let Some(reserved) = self.reserved_tx_id {
+                node.commit_mergeable_many_in_schema_at(self.schema_version_id, commits, reserved)
+                    .await?
+            } else {
+                node.commit_mergeable_many_in_schema(self.schema_version_id, commits)
+                    .await?
+            }
+        };
         self.finish_published_write(row, published).await
     }
 
@@ -2559,6 +2821,7 @@ where
             authored_columns,
             now_ms,
             BranchSelector::default(),
+            None,
         )
         .await
     }
@@ -2576,6 +2839,7 @@ where
         authored_columns: Option<BTreeSet<String>>,
         now_ms: u64,
         branch: BranchSelector,
+        verified_inherited_cells: Option<BTreeMap<String, Value>>,
     ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
             "DELETE"
@@ -2605,6 +2869,9 @@ where
         if let Some(authored_columns) = authored_columns {
             commit = commit.authored_columns(authored_columns);
         }
+        if let Some(inherited) = verified_inherited_cells.as_ref() {
+            commit = commit.verified_inherited_large_cells(inherited);
+        }
         if let Some(subject) = permission_subject {
             commit = commit.permission_subject(subject);
         }
@@ -2622,8 +2889,17 @@ where
                     allow_inherited_descriptors,
                 )
                 .await?;
-            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+            if let Some(reserved) = self.reserved_tx_id {
+                node.commit_mergeable_many_in_schema_at(
+                    self.schema_version_id,
+                    vec![commit],
+                    reserved,
+                )
                 .await?
+            } else {
+                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                    .await?
+            }
         };
         self.finish_published_write(row, published).await
     }
@@ -2635,11 +2911,8 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
         let local_tier = if self.node.defer_local_persistence.get() {
-            // Publication is the synchronous visibility boundary. Refresh
-            // resident subscribers before returning, then let the host tick
-            // own suspendable persistence and later peer visibility.
-            self.refresh_subscriptions().await?;
-            self.node.queue_local_publication(published, None);
+            self.finish_deferred_local_publication(published, None)
+                .await?;
             DurabilityTier::None
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
@@ -2651,7 +2924,26 @@ where
             row_uuid: row,
             tx_id,
             local_tier,
+            queued_status: None,
+            queued_alias: None,
         })
+    }
+
+    /// Transfer a published ordered slot into node ownership before resident
+    /// subscription refresh can suspend, fail, or be cancelled.
+    pub(super) async fn finish_deferred_local_publication(
+        &self,
+        published: PublishedTransaction,
+        upload_unit: Option<SyncMessage>,
+    ) -> Result<(), Error> {
+        self.node.queue_local_publication(published, upload_unit);
+        if let Err(error) = self.refresh_subscriptions().await {
+            super::peer_connection::route_subscription_refresh_failure(
+                &self.node.subscriptions,
+                &error,
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn finish_publication_outcome<'a, T: 'a>(
@@ -2666,7 +2958,6 @@ where
             } = outcome;
             loop {
                 if !publications.is_empty() {
-                    self.refresh_subscriptions().await?;
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {
                         persisted.push((publication.tx_id(), publication.persist().await));
@@ -2674,6 +2965,13 @@ where
                     let mut node = self.node.node.lock().await;
                     for (tx_id, persistence) in persisted {
                         node.settle_published_transaction(tx_id, persistence)?;
+                    }
+                    drop(node);
+                    if let Err(error) = self.refresh_subscriptions().await {
+                        super::peer_connection::route_subscription_refresh_failure(
+                            &self.node.subscriptions,
+                            &error,
+                        );
                     }
                 }
                 let Some(message) = post_settlement_work.pop_front() else {
@@ -2690,6 +2988,7 @@ where
                             identity: AuthorSubject::SYSTEM,
                             trust: CommitUnitTrust::TrustedBackend,
                             edge_authority: false,
+                            admitted_write_authorization: false,
                         }),
                     )
                     .await?;
@@ -2956,7 +3255,11 @@ where
         }
     }
 
-    async fn ensure_row_not_deleted(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+    pub(super) async fn ensure_row_not_deleted(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
         self.table_schema(table)?;
         let deleted = self
             .node
@@ -2967,6 +3270,31 @@ where
             .await?
             .is_some();
         if deleted {
+            Err(row_already_deleted(row))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) async fn ensure_branch_view_row_not_deleted(
+        &self,
+        table: &str,
+        head: &BranchSelector,
+        base: Option<&BranchViewBase>,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.table_schema(table)?;
+        let mut node = self.node.node.lock().await;
+        let has_deletion_winner = node
+            .local_deletion_winner_tx_id_in_branch(table, head, row)
+            .await?
+            .is_some();
+        let tombstone_hidden = has_deletion_winner
+            && node
+                .visible_current_cells_in_branch_view(table, head, base, row)
+                .await?
+                .is_none();
+        if tombstone_hidden {
             Err(row_already_deleted(row))
         } else {
             Ok(())
@@ -3104,6 +3432,8 @@ where
             row_uuid: row,
             tx_id,
             local_tier,
+            queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -3132,6 +3462,8 @@ where
             row_uuid: row,
             tx_id,
             local_tier,
+            queued_status: None,
+            queued_alias: None,
         })
     }
 

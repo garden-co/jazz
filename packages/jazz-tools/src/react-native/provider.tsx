@@ -11,6 +11,9 @@ import {
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import type { DbConfig } from "./create-db.js";
 
+const createClient: CreateJazzClient = (config) =>
+  createJazzClient(config as DbConfig) as Promise<CreatedJazzClient>;
+
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
 interface JazzClientContextValue {
@@ -27,9 +30,6 @@ export type JazzProviderProps = {
 };
 
 export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzProviderProps) {
-  const createClient: CreateJazzClient = (nextConfig) =>
-    createJazzClient(nextConfig as DbConfig) as Promise<CreatedJazzClient>;
-
   return (
     <CoreJazzProvider
       config={config}

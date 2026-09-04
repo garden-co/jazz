@@ -7,9 +7,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "pnpm test:unit && pnpm test:provider && pnpm test:selection && pnpm test:topology",
-    "test:unit": "vitest run tests/*.test.ts",
-    "test:topology": "vitest run --config vitest.config.browser.ts",
+    "test": "pnpm test:unit && pnpm test:provider && pnpm test:selection",
+    "test:unit": "vitest run --config vitest.config.unit.ts",
+    "test:topology": "node ../../../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
     "test:browser": "pnpm test:topology",
     "test:provider": "vitest run --config vitest.config.provider.ts",
     "test:selection": "node --test tests/test-selection.test.mjs"

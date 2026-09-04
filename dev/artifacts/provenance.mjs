@@ -76,6 +76,14 @@ const isStagedNapiBinding = (repoPath) =>
     repoPath,
   );
 
+// napi-rs writes the matching target manifest beside its loadable binding.
+// It is ignored, sealed after the producer build, and cannot be a producer
+// input without making the native fingerprint depend on lane-local output.
+const isNapiGeneratedTargetManifest = (repoPath) =>
+  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.manifest\.json$/.test(
+    repoPath,
+  );
+
 const isNapiGeneratedOutput = (repoPath) =>
   repoPath === "crates/jazz-napi/index.js" ||
   repoPath === "crates/jazz-napi/index.d.ts" ||
@@ -110,13 +118,50 @@ function files(root, paths) {
         isNapiGeneratedOutput(repoPath) ||
         repoPath.endsWith("native-artifact-fingerprint-napi.ts") ||
         repoPath.endsWith("native-artifact-fingerprint-wasm.ts") ||
-        isStagedNapiBinding(repoPath)
+        isStagedNapiBinding(repoPath) ||
+        isNapiGeneratedTargetManifest(repoPath)
       )
         return;
       found.push(repoPath);
     }
   };
   for (const path of paths) visit(join(root, path));
+  return found.sort();
+}
+
+// An ABI fingerprint is a source identity, not an inventory of whatever a
+// previous build happened to leave below a package directory.  In a checkout,
+// use git's tracked-file inventory as the boundary: ignored/untracked build
+// products (including nested package copies) must not alter a later native
+// fingerprint.  The recursive fallback deliberately exists only for the
+// hermetic non-git fixtures used by this module's unit tests.
+function trackedFiles(root, paths) {
+  const result = spawnSync("git", ["ls-files", "-z", "--", ...paths], {
+    cwd: root,
+    encoding: "buffer",
+  });
+  if (result.status !== 0) return files(root, paths);
+
+  const found = [];
+  for (const rawPath of result.stdout.toString("utf8").split("\0")) {
+    if (!rawPath) continue;
+    const path = resolve(root, rawPath);
+    if (relative(root, path).startsWith("..") || !existsSync(path) || !statSync(path).isFile())
+      continue;
+    const repoPath = relative(root, path);
+    if (
+      repoPath.endsWith(".node") ||
+      repoPath.endsWith(".jazz-artifact-manifest.json") ||
+      repoPath === "crates/jazz-wasm/.jazz-correctness-test-artifacts.json" ||
+      isNapiGeneratedOutput(repoPath) ||
+      repoPath.endsWith("native-artifact-fingerprint-napi.ts") ||
+      repoPath.endsWith("native-artifact-fingerprint-wasm.ts") ||
+      isStagedNapiBinding(repoPath) ||
+      isNapiGeneratedTargetManifest(repoPath)
+    )
+      continue;
+    found.push(repoPath);
+  }
   return found.sort();
 }
 
@@ -130,7 +175,16 @@ const sharedInputs = [
   "pnpm-lock.yaml",
   "pnpm-workspace.yaml",
   "turbo.json",
-  "dev/artifacts",
+  // These build wrappers define how the native binding is produced and
+  // admitted, so changes are source-bound.  Keep this an explicit inventory:
+  // test scripts, producer/snapshot receipts, and generated expected
+  // fingerprint modules are deliberately not ABI inputs and must not cause
+  // self-referential fingerprint churn.
+  "dev/artifacts/build.mjs",
+  "dev/artifacts/provenance.mjs",
+  "dev/artifacts/stage-napi-loader.mjs",
+  "dev/artifacts/stage-native-fingerprints.mjs",
+  "dev/artifacts/stage-napi-manifests.mjs",
 ];
 
 const artifactRoots = {
@@ -246,7 +300,10 @@ function activeNapiBindings(root) {
 
 function packageInputsFingerprint(root, kind) {
   if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
-  const trackedInputs = files(root, [...inputsFor[kind], ...workspaceDependencyInputs(root, kind)]);
+  const trackedInputs = trackedFiles(root, [
+    ...inputsFor[kind],
+    ...workspaceDependencyInputs(root, kind),
+  ]);
   const inputHash = createHash("sha256");
   for (const path of trackedInputs) {
     inputHash

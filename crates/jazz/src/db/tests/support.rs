@@ -243,6 +243,51 @@ pub(super) fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
+/// A test-only authenticated scope-isolated relay link. Production admission
+/// derives this capability from the handshake, never from SyncMessage input.
+pub(super) fn relay_duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
+    use std::collections::VecDeque;
+    let left = Rc::new(RefCell::new(VecDeque::new()));
+    let right = Rc::new(RefCell::new(VecDeque::new()));
+    (
+        Box::new(RelayDuplexTransport {
+            outbound: Rc::clone(&left),
+            inbound: Rc::clone(&right),
+            session_context: None,
+        }),
+        Box::new(RelayDuplexTransport {
+            outbound: right,
+            inbound: left,
+            session_context: None,
+        }),
+    )
+}
+
+struct RelayDuplexTransport {
+    outbound: Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+    inbound: Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+    session_context: Option<ConnectionSessionContext>,
+}
+
+impl Transport for RelayDuplexTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.outbound.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.session_context
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        true
+    }
+}
+
 pub(super) fn duplex_with_taps() -> (
     Box<dyn Transport>,
     Box<dyn Transport>,
@@ -1775,6 +1820,23 @@ pub(super) fn open_core_with_claims(
 }
 
 impl CoreDb {
+    /// Test authority counterpart to `Db::author_schema_lineage_publication`.
+    /// Descendant fixtures must obtain the active source manifest here rather
+    /// than minting an unrelated identity descriptor.
+    pub(super) fn author_schema_lineage_publication(
+        &self,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<SchemaLineagePublication, Error> {
+        Ok(self
+            .server
+            .node()
+            .borrow()
+            .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)?)
+    }
+
     pub(super) fn node(&self) -> SharedNodeState<RocksDbStorage> {
         self.server.node()
     }
@@ -1849,6 +1911,8 @@ impl CoreDb {
             row_uuid: row,
             tx_id,
             local_tier: DurabilityTier::Global,
+            queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -1877,6 +1941,8 @@ impl CoreDb {
             row_uuid: row,
             tx_id,
             local_tier: DurabilityTier::Global,
+            queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -1930,6 +1996,8 @@ impl CoreDb {
             row_uuid: row,
             tx_id,
             local_tier: DurabilityTier::Global,
+            queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -1989,6 +2057,8 @@ impl CoreDb {
             row_uuid: row,
             tx_id,
             local_tier: DurabilityTier::Global,
+            queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -2015,6 +2085,21 @@ impl CoreDb {
             identity,
             test_provider_claims(identity),
             trust,
+        )
+    }
+
+    pub(super) fn accept_scope_isolated_relay_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        admission_epoch: u64,
+    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
+        self.server.accept_scope_isolated_relay_subscriber(
+            transport,
+            identity,
+            claims,
+            admission_epoch,
         )
     }
 

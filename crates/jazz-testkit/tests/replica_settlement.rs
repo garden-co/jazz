@@ -17,6 +17,7 @@ mod relay_topology {
     use jazz::groove::records::Value;
     use jazz::groove::storage::MemoryStorage;
     use jazz::ids::{AuthorSubject, NodeUuid};
+    use jazz::node::CommitUnitTrust;
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
@@ -124,7 +125,16 @@ mod relay_topology {
         let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
         let (relay_upstream_transport, authority_transport) = duplex();
         let _relay_upstream = block_on(relay.connect_upstream(relay_upstream_transport));
-        let _authority_subscriber = authority.accept_subscriber(authority_transport, alice);
+        // The relay-to-authority hop is a trusted backend link. It delegates
+        // Alice's immutable session binding inside its propagated
+        // subscription; Core must not model the physical transport as Alice's
+        // direct session link.
+        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
+            authority_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -236,7 +246,16 @@ mod relay_topology {
              settlement on hold: {premature:?}"
         );
 
-        let _authority_subscriber = authority.accept_subscriber(held_authority_transport, alice);
+        // As above, this is a trusted relay transport, not a direct Alice
+        // session. Keeping the same admission model in the delayed-handshake
+        // case proves that non-settlement is caused by the missing upstream
+        // frontier, rather than rejected delegated policy context.
+        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
+            held_authority_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
         let mut events = premature;
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");
@@ -629,11 +648,6 @@ mod client_transport {
             .build()
     }
 
-    fn reserve_local_port() -> u16 {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve local port");
-        listener.local_addr().expect("reserved local addr").port()
-    }
-
     /// Waits for the initial settled reset of a fresh subscription and
     /// asserts it carries `expected_id`.
     async fn assert_initial_settled_row(
@@ -740,17 +754,19 @@ mod client_transport {
             .run_until(async {
                 let schema = document_schema();
                 let app_id = AppId::random();
-                let port = reserve_local_port();
                 let data_dir = TempDir::new().expect("server data dir");
 
+                // Let the first server retain the kernel-selected port rather
+                // than reserving and dropping one before it starts: nextest
+                // runs this topology alongside other server tests.
                 let first_server = JazzServer::builder()
                     .with_app_id(app_id)
-                    .with_port(port)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
                     .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
                     .await;
+                let port = first_server.port();
                 let alice = TestingClient::builder()
                     .with_server(&first_server)
                     .with_schema(schema.clone())

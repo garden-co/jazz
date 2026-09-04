@@ -1,4 +1,5 @@
 import { access } from "node:fs/promises";
+import { JazzServer } from "jazz-napi";
 import { afterEach, describe, expect, it } from "vitest";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
 import { getAvailablePort } from "./test-helpers.js";
@@ -61,6 +62,28 @@ describe("startLocalJazzServer via JazzServer", () => {
     await expect(fetch(`${url}/health`).then((r) => r.ok)).rejects.toThrow();
   }, 30_000);
 
+  it("shares native stop completion with concurrent and repeated callers", async () => {
+    const port = await getAvailablePort();
+    const server = await JazzServer.start({
+      appId: "00000000-0000-0000-0000-000000000002",
+      port,
+      inMemory: true,
+      adminSecret: "concurrent-stop-admin",
+      backendSecret: "concurrent-stop-backend",
+    });
+
+    try {
+      const results = await Promise.allSettled([server.stop(), server.stop()]);
+      expect(results).toEqual([
+        { status: "fulfilled", value: undefined },
+        { status: "fulfilled", value: undefined },
+      ]);
+      await expect(server.stop()).resolves.toBeUndefined();
+    } finally {
+      await server.stop().catch(() => undefined);
+    }
+  }, 30_000);
+
   it("passes edge upstream options through JazzServer with admin secret only", async () => {
     const port = await getAvailablePort();
     handle = await startLocalJazzServer({
@@ -69,12 +92,14 @@ describe("startLocalJazzServer via JazzServer", () => {
       adminSecret: "admin-secret",
       inMemory: true,
     });
-
-    expect(handle.port).toBe(port);
     const healthResponse = await fetch(`${handle.url}/health`);
-    expect(healthResponse.ok).toBe(true);
+    expect(handle.port).toBe(port);
+    expect(healthResponse.status).toBe(503);
+    await expect(healthResponse.json()).resolves.toEqual({
+      status: "not_ready",
+      component: "runtime",
+    });
   }, 30_000);
-
   it("uses an isolated temp data dir by default and cleans it up on stop", async () => {
     let first: LocalJazzServerHandle | null = null;
     let second: LocalJazzServerHandle | null = null;

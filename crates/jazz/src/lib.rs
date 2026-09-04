@@ -448,6 +448,8 @@ pub mod binding_codec;
 pub mod cold_settle_attribution;
 /// High-level thread-affine database facade.
 pub mod db;
+/// Host-facing exclusive lifecycle for foreground transaction-node identities.
+pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
 /// Wire-stable identifiers.
@@ -472,6 +474,7 @@ pub mod schema;
 /// Platform-neutral client and server runtime APIs used by target shells.
 #[cfg(feature = "runtime")]
 pub mod serving;
+pub mod storage_codec_profile;
 #[cfg(test)]
 mod test_public_schema;
 /// Logical time and sequence counters.

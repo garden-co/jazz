@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 
 use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
-    ScanDirection, ScanRequest, StorageCursor, StorageEpochManifest, StorageFactory, StorageFuture,
-    StorageScan, Value, validate_physical_storage_names,
+    ScanDirection, ScanRequest, StorageCodecProfile, StorageCursor, StorageEpochManifest,
+    StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
+    validate_physical_storage_names,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -106,28 +107,55 @@ impl StorageFactory for SqliteStorageFactory {
         &self,
         path: PathBuf,
         column_families: Vec<String>,
+        codec_profile: StorageCodecProfile,
     ) -> StorageFuture<'_, Result<groove::storage::BoxedStorage, Error>> {
         Box::pin(async move {
             let refs = column_families
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            Ok(groove::storage::BoxedStorage::new(SqliteStorage::open(
-                path, &refs,
-            )?))
+            Ok(groove::storage::BoxedStorage::new(
+                SqliteStorage::open_with_durability_and_codec_profile(
+                    path,
+                    &refs,
+                    Durability::default(),
+                    &codec_profile,
+                )?,
+            ))
         })
     }
 }
 
 impl SqliteStorage {
     pub fn open(path: impl AsRef<Path>, column_families: &[&str]) -> Result<Self, Error> {
-        Self::open_with_durability(path, column_families, Durability::default())
+        Self::open_with_durability_and_codec_profile(
+            path,
+            column_families,
+            Durability::default(),
+            &StorageCodecProfile::groove_epoch_1(),
+        )
     }
 
     pub fn open_with_durability(
         path: impl AsRef<Path>,
         column_families: &[&str],
         durability: Durability,
+    ) -> Result<Self, Error> {
+        Self::open_with_durability_and_codec_profile(
+            path,
+            column_families,
+            durability,
+            &StorageCodecProfile::groove_epoch_1(),
+        )
+    }
+
+    /// Open with the caller's closed persistent-codec profile. The adapter
+    /// records and compares opaque IDs but does not interpret Jazz semantics.
+    pub fn open_with_durability_and_codec_profile(
+        path: impl AsRef<Path>,
+        column_families: &[&str],
+        durability: Durability,
+        codec_profile: &StorageCodecProfile,
     ) -> Result<Self, Error> {
         validate_physical_storage_names(column_families)?;
         let path = path.as_ref().to_path_buf();
@@ -147,11 +175,11 @@ impl SqliteStorage {
             // application can already have claimed its physical header. Only
             // the neutral SQLite header is a fresh root we may adopt.
             Self::validate_neutral_empty_header(&connection)?;
-            Self::create_schema(&mut connection)?;
+            Self::create_schema(&mut connection, codec_profile)?;
         } else {
             // Validation is deliberately before WAL/synchronous setup: an
             // incompatible store must fail before this adapter changes it.
-            Self::validate_schema(&connection)?;
+            Self::validate_schema(&connection, codec_profile)?;
         }
         let mode: String = connection
             .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
@@ -195,8 +223,11 @@ impl SqliteStorage {
         Ok(())
     }
 
-    fn create_schema(connection: &mut Connection) -> Result<(), Error> {
-        let manifest = sqlite_manifest()?.encode()?;
+    fn create_schema(
+        connection: &mut Connection,
+        codec_profile: &StorageCodecProfile,
+    ) -> Result<(), Error> {
+        let manifest = sqlite_manifest(codec_profile)?.encode()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend)?;
@@ -224,7 +255,10 @@ impl SqliteStorage {
         transaction.commit().map_err(backend)
     }
 
-    fn validate_schema(connection: &Connection) -> Result<(), Error> {
+    fn validate_schema(
+        connection: &Connection,
+        codec_profile: &StorageCodecProfile,
+    ) -> Result<(), Error> {
         let application_id: i64 = connection
             .pragma_query_value(None, "application_id", |row| row.get(0))
             .map_err(backend)?;
@@ -324,7 +358,7 @@ impl SqliteStorage {
                 "unsupported sqlite ordered-kv format".to_owned(),
             ));
         }
-        sqlite_manifest()?.admit_existing(&epoch_manifest)?;
+        sqlite_manifest(codec_profile)?.admit_existing(&epoch_manifest)?;
         Ok(())
     }
 
@@ -440,8 +474,8 @@ impl SqliteStorage {
     }
 }
 
-fn sqlite_manifest() -> Result<StorageEpochManifest, Error> {
-    StorageEpochManifest::epoch_1(
+fn sqlite_manifest(codec_profile: &StorageCodecProfile) -> Result<StorageEpochManifest, Error> {
+    StorageEpochManifest::epoch_1_with_codec_profile(
         "sqlite",
         1,
         BTreeMap::from([
@@ -452,6 +486,7 @@ fn sqlite_manifest() -> Result<StorageEpochManifest, Error> {
             ("ddl-id".to_owned(), DDL_ID.to_vec()),
             ("key-order".to_owned(), b"unsigned-lexicographic".to_vec()),
         ]),
+        codec_profile,
     )
 }
 
@@ -702,7 +737,7 @@ impl OrderedKvStorage for SqliteStorage {
             } = request;
             let (start, end) = match bounds {
                 ScanBounds::Prefix(prefix) => {
-                    let end = prefix_upper_bound(&prefix);
+                    let end = groove::storage::prefix_successor(&prefix);
                     (prefix, end)
                 }
                 ScanBounds::Range { start, end } => (start, Some(end)),
@@ -826,6 +861,27 @@ impl OrderedKvStorage for SqliteStorage {
         })
     }
 
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        Box::pin(async move {
+            for operation in &operations {
+                let cf = match operation {
+                    OwnedWriteOperation::Set { cf, .. }
+                    | OwnedWriteOperation::Delete { cf, .. } => cf,
+                };
+                if let Err(error) = self.cf_id(cf) {
+                    return WriteManyOutcome::Uncommitted(error);
+                }
+            }
+            match self.write_many(operations).await {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            }
+        })
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         Some(self.column_families.borrow().keys().cloned().collect())
     }
@@ -843,17 +899,6 @@ fn backend(error: impl std::fmt::Display) -> Error {
         backend: "sqlite",
         message: error.to_string(),
     }
-}
-
-fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
-    let mut result = prefix.to_vec();
-    while let Some(last) = result.pop() {
-        if last != u8::MAX {
-            result.push(last + 1);
-            return Some(result);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -931,5 +976,43 @@ mod tests {
             count, 0,
             "open must reject before admitting requested families"
         );
+    }
+
+    #[test]
+    fn caller_selected_codec_profile_is_pinned_and_required_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.sqlite");
+        let profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["jazz.example-opaque.v1"])
+            .unwrap();
+        drop(
+            SqliteStorage::open_with_durability_and_codec_profile(
+                &path,
+                &["records"],
+                Durability::default(),
+                &profile,
+            )
+            .unwrap(),
+        );
+
+        let connection = Connection::open(&path).unwrap();
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'epoch_manifest'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bytes, sqlite_manifest(&profile).unwrap().encode().unwrap());
+        drop(connection);
+
+        SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &["records"],
+            Durability::default(),
+            &profile,
+        )
+        .unwrap();
+        assert!(SqliteStorage::open(&path, &["records"]).is_err());
     }
 }

@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 
 # The test-ts runner has 16 CPUs. Turbo gets at most two test tasks, while the
-# jazz-tools browser suite caps Vitest at four file workers so Chromium retains
-# scheduling headroom; both reuse the artifact build completed before this
-# script starts.
+# browser lane runs the Jazz Tools and inspector suites in parallel. Jazz Tools
+# caps Vitest at four file workers so Chromium retains scheduling headroom; all
+# suites reuse the artifact build completed before this script starts.
 set -u
 
 # The runner accepts small command overrides solely so its process-management
-# contract tests can use deterministic short-lived children.  The shared local
+# contract tests can use deterministic short-lived children. The shared local
 # CI partition sets this guard, matching CI's unmodified environment: an
 # inherited override would otherwise let a local "CI-equivalent" receipt skip
-# the suites that GitHub will run.
+# the suites that GitHub will run. Check this before the producer admission so
+# an unsafe inherited control always gets its own actionable diagnostic.
 if [[ "${JAZZ_REQUIRE_CI_TEST_COMMANDS:-0}" == "1" ]]; then
   for override in JAZZ_NODE_TEST_COMMAND JAZZ_BROWSER_TEST_COMMAND JAZZ_SKIP_JAZZ_TOOLS_BUILD; do
     if [[ -v "${override}" ]]; then
@@ -20,21 +21,48 @@ if [[ "${JAZZ_REQUIRE_CI_TEST_COMMANDS:-0}" == "1" ]]; then
   done
 fi
 
+# This runner is deliberately not a standalone shortcut.  Its parent performs
+# the producer-manifest admission and supplies exact snapshot paths; accepting
+# a direct invocation would reintroduce mutable NAPI/WASM pointer selection.
+if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
+  if [[ "${JAZZ_CORRECTNESS_ARTIFACT_RUN:-}" != "1" ]]; then
+    echo "run-ts-tests must be launched through pnpm test:typescript-consumers" >&2
+    exit 1
+  fi
+  for required_artifact_env in \
+    JAZZ_CORRECTNESS_WASM_PACKAGE \
+    JAZZ_CORRECTNESS_NAPI_BINDING \
+    JAZZ_CORRECTNESS_NAPI_FINGERPRINT; do
+    if [[ -z "${!required_artifact_env:-}" ]]; then
+      echo "run-ts-tests is missing sealed correctness artifact ${required_artifact_env}" >&2
+      exit 1
+    fi
+  done
+fi
+
+# Every workspace package's `test` target belongs to this Node/Turbo partition.
+# Browser-only receipts keep their topology out of that target and run through
+# `test:browser` below, where their Vitest projects own the Jazz server commands.
 node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2"}
-browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --filter jazz-tools test:browser"}
+browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth test:browser"}
 node_tests_pid=""
 browser_tests_pid=""
 log_dir=${RUNNER_TEMP:-/tmp}
 node_tests_log="${log_dir}/jazz-node-tests-$$.log"
 browser_tests_log="${log_dir}/jazz-browser-tests-$$.log"
 
-# The workflow's top-level artifact gate prepares the release NAPI loader and
-# Jazz Tools public exports before either suite starts. Test children only
-# consume those immutable artifacts: allowing an example pretest to rebuild
-# either package races a sibling importer and can delete its dist files.
+# The producer receipt is checked before either suite starts. It binds the
+# sealed NAPI/WASM snapshot to this exact checkout, so a cache hit
+# from another revision cannot become a TypeScript false-green. Jazz Tools is
+# built by run-ts-consumers.mjs after that preflight; this runner only consumes
+# the prepared surface and seals it against child rebuilds.
 if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
+  if ! node dev/artifacts/correctness-artifact-producer.mjs; then
+    echo "prepared native correctness artifact manifest is missing or stale; run pnpm build:correctness-artifacts" >&2
+    exit 1
+  fi
   if ! node -e "require('./crates/jazz-napi')"; then
-    echo "prepared release jazz-napi artifact did not load; run pnpm build:test-artifacts before test-ts" >&2
+    echo "prepared release jazz-napi artifact did not load; run pnpm build:correctness-artifacts before test-ts" >&2
     exit 1
   fi
   if ! node dev/gates/verify-jazz-tools-exports.mjs; then

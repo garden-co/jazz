@@ -554,7 +554,9 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
                 contains([input.as_ref() as *const GraphBuilder], &contains_collect)
             }
             GraphBuilder::Union { inputs } => contains(
-                inputs.iter().map(|input| input as *const GraphBuilder),
+                inputs
+                    .iter()
+                    .map(|input| input.as_ref() as *const GraphBuilder),
                 &contains_collect,
             ),
             GraphBuilder::Join { left, right, .. }
@@ -566,15 +568,29 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
                 ],
                 &contains_collect,
             ),
-            GraphBuilder::Recursive { seed, step, .. } => contains(
-                [
-                    seed.as_ref() as *const GraphBuilder,
-                    step.as_ref() as *const GraphBuilder,
-                ],
+            GraphBuilder::Recursive {
+                seed,
+                step,
+                step_witness,
+                ..
+            } => {
+                contains(
+                    [
+                        seed.as_ref() as *const GraphBuilder,
+                        step.as_ref() as *const GraphBuilder,
+                    ],
+                    &contains_collect,
+                ) || step_witness.as_ref().is_some_and(|witness| {
+                    contains([witness.as_ref() as *const GraphBuilder], &contains_collect)
+                })
+            }
+            GraphBuilder::RecursiveStepWitness { recursive } => contains(
+                [recursive.as_ref() as *const GraphBuilder],
                 &contains_collect,
             ),
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::InputSource { .. }
             | GraphBuilder::Index { .. }
             | GraphBuilder::FrontierSource { .. }
             | GraphBuilder::BindingSource { .. } => false,

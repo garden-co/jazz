@@ -107,8 +107,8 @@ fn remap_authored_scalar_enum_value(
 fn remap_authored_payload_enum_value(
     value: Value,
     authored_schema: &records::EnumSchema,
-    authored_cases: &[GlobalScalarEnumCaseId],
-    physical_cases: &[GlobalScalarEnumCaseId],
+    authored_cases: &[GlobalEnumCaseId],
+    physical_cases: &[GlobalEnumCaseId],
 ) -> Result<Value, Error> {
     match value {
         Value::Enum(value) => {
@@ -358,7 +358,7 @@ pub(super) fn physical_version_storage_tables(
 ) -> Result<Vec<GrooveTableSchema>, Error> {
     let mut lineages = BTreeMap::<
         PhysicalTableId,
-        Vec<(SchemaVersionId, &TableSchema, &TablePhysicalMapping)>,
+        Vec<(SchemaVersionId, &TableSchema, &TablePhysicalMapping, &PhysicalTableIdentity)>,
     >::new();
     for (schema_version, mapping) in physical_mappings {
         let schema = catalogue_schemas
@@ -367,6 +367,9 @@ pub(super) fn physical_version_storage_tables(
                 "physical mapping schema payload missing",
             ))?;
         for (logical_table, table_mapping) in &mapping.tables {
+            let table_identity = mapping.identities.tables.get(logical_table).ok_or(
+                Error::InvalidStoredValue("physical table identity missing"),
+            )?;
             let table = schema
                 .schema
                 .tables
@@ -379,13 +382,14 @@ pub(super) fn physical_version_storage_tables(
                 *schema_version,
                 table,
                 table_mapping,
+                table_identity,
             ));
         }
     }
 
     let mut tables = Vec::with_capacity(lineages.len() * 7);
     for (table_id, variants) in lineages {
-        let (_, template_table, _) = variants
+        let (_, template_table, _, _) = variants
             .first()
             .ok_or(Error::InvalidStoredValue("physical history lineage empty"))?;
         let template = template_table.history_storage_table();
@@ -403,11 +407,11 @@ pub(super) fn physical_version_storage_tables(
             .collect::<Vec<_>>();
         // First form the persistent registry for every scalar enum occurrence.
         // Concurrent schemas may use the same authored ordinal for distinct
-        // cases; their schema-qualified identities must therefore be unioned
+        // cases; their permanent UUID identities must therefore be unioned
         // before any descriptor assigns compact local tags.
         let mut scalar_enum_registries =
             BTreeMap::<PhysicalColumnId, BTreeSet<GlobalScalarEnumCaseId>>::new();
-        for (schema_version, logical_table, mapping) in &variants {
+        for (schema_version, logical_table, mapping, table_identity) in &variants {
             for column in &logical_table.columns {
                 let records::ValueType::EnumTag(enum_schema) = &column.column_type else {
                     continue;
@@ -420,25 +424,29 @@ pub(super) fn physical_version_storage_tables(
                         .ok_or(Error::InvalidStoredValue(
                             "physical scalar enum column mapping missing",
                         ))?;
-                let cases = mapping
-                    .scalar_enum_cases
-                    .get(&column_id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        // Provisional bootstrap schemas acquire their durable
-                        // mapping immediately after table construction.  Until
-                        // then this deterministic spelling is the same mapping
-                        // hydration will persist; it is not receipt-order state.
-                        enum_schema
-                            .variants
-                            .iter()
-                            .enumerate()
-                            .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                let cases = if let Some(cases) = mapping.scalar_enum_cases.get(&column_id) {
+                    cases.clone()
+                } else {
+                    // Provisional bootstrap schemas acquire their durable
+                    // mapping immediately after table construction. Until
+                    // then this deterministic spelling is the same mapping
+                    // hydration will persist; it is not receipt-order state.
+                    enum_schema
+                        .variants
+                        .iter()
+                        .zip(&table_identity.columns[&column.name].enum_variants["root"])
+                        .enumerate()
+                        .map(|(ordinal, (_, id))| {
+                            Ok(GlobalScalarEnumCaseId {
+                                id: *id,
                                 introducing_schema: *schema_version,
-                                introducing_ordinal: ordinal as u8,
+                                introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
+                                    Error::InvalidStoredValue("scalar enum tag exhausted")
+                                })?,
                             })
-                            .collect()
-                    });
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?
+                };
                 scalar_enum_registries
                     .entry(column_id)
                     .or_default()
@@ -458,7 +466,7 @@ pub(super) fn physical_version_storage_tables(
 
         let mut nested_scalar_enum_registries =
             BTreeMap::<(PhysicalColumnId, String), BTreeSet<GlobalScalarEnumCaseId>>::new();
-        for (schema_version, logical_table, mapping) in &variants {
+        for (schema_version, logical_table, mapping, table_identity) in &variants {
             // Bootstrap constructs physical tables before the freshly
             // introduced mapping is hydrated into the catalogue. Seed nested
             // occurrences from the authored descriptor in that one state;
@@ -472,7 +480,9 @@ pub(super) fn physical_version_storage_tables(
                     }
                     hydrate_nested_scalar_enum_cases(
                         &column.column_type,
+                        &table_identity.columns[&column.name].enum_variants,
                         *schema_version,
+                        "root",
                         "root",
                         bootstrap_paths
                             .entry(mapping.columns.get(&column.name).copied().ok_or(
@@ -506,15 +516,15 @@ pub(super) fn physical_version_storage_tables(
 
         // Payload enum occurrences, including those inside another payload,
         // need the same lineage-wide union.  The path beneath a payload case
-        // is rooted by that case's GlobalCaseId, so concurrent siblings which
+        // is rooted by that case's global UUID, so concurrent siblings which
         // both authored ordinal `n` never share a descendant registry.
         let mut nested_payload_enum_registries =
-            BTreeMap::<(PhysicalColumnId, String), BTreeSet<GlobalScalarEnumCaseId>>::new();
+            BTreeMap::<(PhysicalColumnId, String), BTreeSet<GlobalEnumCaseId>>::new();
         let mut nested_payload_enum_layouts = BTreeMap::<
-            (PhysicalColumnId, String, GlobalScalarEnumCaseId),
+            (PhysicalColumnId, String, GlobalEnumCaseId),
             records::RecordDescriptor,
         >::new();
-        for (schema_version, logical_table, mapping) in &variants {
+        for (schema_version, logical_table, mapping, table_identity) in &variants {
             for column in &logical_table.columns {
                 let column_id =
                     mapping
@@ -532,7 +542,9 @@ pub(super) fn physical_version_storage_tables(
                 if bootstrap_paths.is_empty() {
                     hydrate_nested_payload_enum_cases(
                         &column.column_type,
+                        &table_identity.columns[&column.name].enum_variants,
                         *schema_version,
+                        "root",
                         "root",
                         bootstrap_paths.entry(column_id).or_default(),
                     )?;
@@ -575,18 +587,17 @@ pub(super) fn physical_version_storage_tables(
             .map(|((column_id, path), cases)| {
                 let mut cases = cases.into_iter().collect::<Vec<_>>();
                 cases.sort_by(|left, right| {
-                    compare_scalar_enum_cases(schema_version_aliases, left, right)
+                    compare_global_enum_cases(schema_version_aliases, left, right)
                 });
                 Ok(((column_id, path), cases))
             })
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
 
         let mut payload_enum_registries =
-            BTreeMap::<PhysicalColumnId, BTreeSet<GlobalScalarEnumCaseId>>::new();
+            BTreeMap::<PhysicalColumnId, BTreeSet<GlobalEnumCaseId>>::new();
         let mut payload_enum_layouts =
-            BTreeMap::<(PhysicalColumnId, GlobalScalarEnumCaseId), records::RecordDescriptor>::new(
-            );
-        for (schema_version, logical_table, mapping) in &variants {
+            BTreeMap::<(PhysicalColumnId, GlobalEnumCaseId), records::RecordDescriptor>::new();
+        for (schema_version, logical_table, mapping, table_identity) in &variants {
             for column in &logical_table.columns {
                 let records::ValueType::Enum(enum_schema) = &column.column_type else {
                     continue;
@@ -599,21 +610,25 @@ pub(super) fn physical_version_storage_tables(
                         .ok_or(Error::InvalidStoredValue(
                             "physical payload enum column mapping missing",
                         ))?;
-                let identities = mapping
-                    .payload_enum_cases
-                    .get(&column_id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        enum_schema
-                            .cases
-                            .iter()
-                            .enumerate()
-                            .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                let identities = if let Some(cases) = mapping.payload_enum_cases.get(&column_id) {
+                    cases.clone()
+                } else {
+                    enum_schema
+                        .cases
+                        .iter()
+                        .zip(&table_identity.columns[&column.name].enum_variants["root"])
+                        .enumerate()
+                        .map(|(ordinal, (_, id))| {
+                            Ok(GlobalEnumCaseId {
+                                id: *id,
                                 introducing_schema: *schema_version,
-                                introducing_ordinal: ordinal as u8,
+                                introducing_ordinal: u32::try_from(ordinal).map_err(|_| {
+                                    Error::InvalidStoredValue("payload enum tag exhausted")
+                                })?,
                             })
-                            .collect()
-                    });
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?
+                };
                 if identities.len() != enum_schema.cases.len() {
                     return Err(Error::InvalidStoredValue(
                         "payload enum identity mapping width mismatch",
@@ -655,14 +670,14 @@ pub(super) fn physical_version_storage_tables(
             .map(|(column_id, cases)| {
                 let mut cases = cases.into_iter().collect::<Vec<_>>();
                 cases.sort_by(|left, right| {
-                    compare_scalar_enum_cases(schema_version_aliases, left, right)
+                    compare_global_enum_cases(schema_version_aliases, left, right)
                 });
                 Ok((column_id, cases))
             })
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
 
         let mut physical_columns = BTreeMap::new();
-        for (_, logical_table, mapping) in &variants {
+        for (_, logical_table, mapping, _) in &variants {
             for column in &logical_table.columns {
                 let column_id =
                     mapping
@@ -724,7 +739,7 @@ pub(super) fn physical_version_storage_tables(
                                     unreachable!("record lowering preserves payload shape");
                                 };
                                 Ok(records::EnumCase::new(
-                                    physical_scalar_enum_case_name(identity),
+                                    physical_enum_case_name(identity),
                                     *payload,
                                 ))
                             })
@@ -838,7 +853,7 @@ pub(super) fn physical_version_storage_tables(
         physical_global.primary_key = logical_global_tables[0].primary_key.clone();
         let indexed_columns = variants
             .iter()
-            .flat_map(|(_, logical_table, mapping)| {
+            .flat_map(|(_, logical_table, mapping, _)| {
                 logical_table
                     .global_current_indexed_columns()
                     .into_iter()
@@ -848,7 +863,7 @@ pub(super) fn physical_version_storage_tables(
         for &column_id in &indexed_columns {
             physical_global = physical_global.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
-                [physical_user_column_field(column_id)],
+                vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
             ));
         }
         let mut register_global = logical_global_tables[1].clone();
@@ -864,7 +879,7 @@ pub(super) fn physical_version_storage_tables(
         for column_id in indexed_columns {
             physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
-                [physical_user_column_field(column_id)],
+                vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
             ));
         }
         let mut register_ahead = logical_ahead_tables[1].clone();
@@ -890,7 +905,7 @@ pub(super) fn physical_version_storage_tables(
         let mut layouts_by_tag = BTreeMap::new();
         let mut current_layouts_by_tag = BTreeMap::new();
         let mut rejected_layouts_by_tag = BTreeMap::new();
-        for (schema_version, logical_table, mapping) in &variants {
+        for (schema_version, logical_table, mapping, _) in &variants {
             let alias = schema_version_aliases.get(&schema_version).copied().ok_or(
                 Error::InvalidStoredValue("physical history schema alias missing"),
             )?;
@@ -1035,7 +1050,7 @@ fn merge_physical_value_type(
             // snapshots.  A shared authored registry id does not make ordinal
             // `n` globally meaningful: concurrent siblings can legitimately
             // introduce distinct cases at that ordinal.  The physical-table
-            // path supplies schema-qualified identities and replaces these
+            // path supplies permanent global identities and replaces these
             // names with its durable registry; retain a deterministic union
             // here so descriptor construction never aliases sibling cases.
             // This is a physical registry, so its declaration order is the
@@ -1351,7 +1366,7 @@ fn physical_rejected_version_field_names_for_case(
     Ok(fields)
 }
 
-pub(super) fn physical_column_epoch_is_compatible(
+pub(crate) fn physical_column_epoch_is_compatible(
     source_table: &TableSchema,
     source_column_name: &str,
     target_table: &TableSchema,
@@ -1377,7 +1392,7 @@ pub(super) fn physical_column_epoch_is_compatible(
             == target_table.merge_strategy(target_column_name)
 }
 
-pub(super) fn physical_value_epoch_is_compatible(
+pub(crate) fn physical_value_epoch_is_compatible(
     source: &records::ValueType,
     target: &records::ValueType,
 ) -> bool {

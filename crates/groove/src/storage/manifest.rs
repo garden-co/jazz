@@ -15,15 +15,79 @@ use super::Error;
 pub const STORAGE_EPOCH_1: u16 = 1;
 const MAGIC: &[u8; 4] = b"JSM1";
 
-/// The complete authoritative-codec registry for a durable Epoch-1 ordered-KV
-/// root.  This list is deliberately a single source of truth: an adapter must
-/// not grow a private opaque-byte seam without first giving it a stable ID and
-/// adding it here (which in turn changes every epoch manifest and its corpus).
+/// The closed, mandatory Groove-owned epoch-one payload families.
 ///
-/// The settled baseline currently has one registered payload codec:
-/// `groove.ordered-kv.v1`. The manifest envelope is itself the root boundary,
-/// not an entry in its own payload registry.
-pub const EPOCH_1_AUTHORITATIVE_CODECS: &[&str] = &["groove.ordered-kv.v1"];
+/// `groove.large-value.v1` is one inseparable family: the V1 scalar
+/// descriptor and `NodeRef` records select the same V1 node envelope that is
+/// also decoded before a descriptor is available. `groove.ordered-chunk-
+/// storage.v1` is separate because its install-receipt wrapper belongs to the
+/// generic ordered chunk adapter and can evolve independently of the value
+/// tree codec. Higher layers compose this base with their own opaque IDs;
+/// Groove does not interpret those additions.
+pub const GROOVE_EPOCH_1_CODECS: &[&str] = &[
+    "groove.large-value.v1",
+    "groove.ordered-chunk-storage.v1",
+    "groove.ordered-kv.v1",
+];
+
+/// A closed, deterministic set of persistent payload codecs required by one
+/// storage root.
+///
+/// An adapter only carries this opaque profile through its physical manifest.
+/// It never interprets the IDs; the layer that writes a payload owns its codec
+/// and selects the profile.  This keeps Groove independent of Jazz while
+/// making an omitted, duplicate, or future codec observable at open time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageCodecProfile {
+    required_codecs: BTreeSet<String>,
+}
+
+impl StorageCodecProfile {
+    /// Construct a closed profile. Duplicate IDs are rejected rather than
+    /// silently normalized so the caller cannot accidentally hide an ambiguous
+    /// registry declaration before it becomes durable.
+    pub fn new(codecs: impl IntoIterator<Item = impl Into<String>>) -> Result<Self, Error> {
+        let mut required_codecs = BTreeSet::new();
+        for codec in codecs {
+            let codec = codec.into();
+            valid_id("codec ID", &codec)?;
+            if !required_codecs.insert(codec) {
+                return Err(invalid("codec profile has duplicate codec ID"));
+            }
+        }
+        if required_codecs.is_empty() {
+            return Err(invalid("codec profile is empty"));
+        }
+        require_groove_epoch_1_codecs(&required_codecs)?;
+        Ok(Self { required_codecs })
+    }
+
+    /// The profile for a storage root used only by Groove.
+    pub fn groove_epoch_1() -> Self {
+        // This literal is fixed and validated above; keeping the infallible
+        // convenience avoids spreading an impossible error through generic
+        // adapter callers.
+        Self::new(GROOVE_EPOCH_1_CODECS.iter().copied()).expect("valid Groove codec profile")
+    }
+
+    /// Return a new closed profile with additional caller-owned codec IDs.
+    ///
+    /// This is composition, not adapter interpretation: a server-owned root
+    /// can add its own durable metadata family without teaching Groove what the
+    /// payload means.
+    pub fn with_additional_codecs(
+        &self,
+        codecs: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, Error> {
+        let mut all = self.required_codecs.iter().cloned().collect::<Vec<_>>();
+        all.extend(codecs.into_iter().map(Into::into));
+        Self::new(all)
+    }
+
+    pub fn codec_ids(&self) -> impl Iterator<Item = &str> {
+        self.required_codecs.iter().map(String::as_str)
+    }
+}
 
 /// Adapter-specific physical format identity, pinned by the top-level epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,13 +121,30 @@ impl StorageEpochManifest {
         adapter_version: u16,
         parameters: BTreeMap<String, Vec<u8>>,
     ) -> Result<Self, Error> {
+        Self::epoch_1_with_codec_profile(
+            adapter_id,
+            adapter_version,
+            parameters,
+            &StorageCodecProfile::groove_epoch_1(),
+        )
+    }
+
+    /// Construct epoch-one metadata for a caller-selected, closed codec
+    /// profile. Adapters use this generic composition boundary; only the
+    /// caller knows which higher-level persistent bytes it may write.
+    pub fn epoch_1_with_codec_profile(
+        adapter_id: impl Into<String>,
+        adapter_version: u16,
+        parameters: BTreeMap<String, Vec<u8>>,
+        codec_profile: &StorageCodecProfile,
+    ) -> Result<Self, Error> {
         let manifest = Self {
             epoch: STORAGE_EPOCH_1,
             adapter: AdapterFormat {
                 id: adapter_id.into(),
                 version: adapter_version,
             },
-            required_codecs: epoch_1_authoritative_codec_set(),
+            required_codecs: codec_profile.required_codecs.clone(),
             parameters,
         };
         manifest.validate()?;
@@ -170,11 +251,10 @@ impl StorageEpochManifest {
         for codec in &self.required_codecs {
             valid_id("codec ID", codec)?;
         }
-        if self.required_codecs != epoch_1_authoritative_codec_set() {
-            return Err(invalid(
-                "epoch-1 manifest codec IDs do not match the authoritative registry",
-            ));
+        if self.required_codecs.is_empty() {
+            return Err(invalid("manifest codec profile is empty"));
         }
+        require_groove_epoch_1_codecs(&self.required_codecs)?;
         for key in self.parameters.keys() {
             valid_id("parameter ID", key)?;
         }
@@ -182,11 +262,15 @@ impl StorageEpochManifest {
     }
 }
 
-fn epoch_1_authoritative_codec_set() -> BTreeSet<String> {
-    EPOCH_1_AUTHORITATIVE_CODECS
-        .iter()
-        .map(|codec| (*codec).to_owned())
-        .collect()
+fn require_groove_epoch_1_codecs(codecs: &BTreeSet<String>) -> Result<(), Error> {
+    for required in GROOVE_EPOCH_1_CODECS {
+        if !codecs.contains(*required) {
+            return Err(invalid(
+                "codec profile omits mandatory Groove epoch-one codec",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A future migration must be explicitly registered for exactly one adjacent
@@ -300,7 +384,7 @@ mod tests {
     }
     #[test]
     fn epoch_1_manifest_has_frozen_golden_bytes() {
-        assert_eq!(manifest().encode().unwrap(), b"JSM1\0\x01\0\x01\x06memory\x01\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic");
+        assert_eq!(manifest().encode().unwrap(), b"JSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic");
     }
 
     #[test]
@@ -308,7 +392,7 @@ mod tests {
         // This is the backend-neutral semantic-to-byte corpus. The companion
         // fixture records the settlement commit/checksum and is intentionally
         // not regenerated by tests: changing these bytes is an epoch change.
-        let committed = b"JSM1\0\x01\0\x01\x06memory\x01\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        let committed = b"JSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
         let semantic = manifest();
         assert_eq!(semantic.encode().unwrap(), committed);
         assert_eq!(StorageEpochManifest::decode(committed).unwrap(), semantic);
@@ -343,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn epoch_1_codec_registry_rejects_omitted_extra_and_unknown_ids() {
+    fn selected_codec_profile_rejects_omitted_extra_and_unknown_ids_at_admission() {
         fn unchecked_manifest(codecs: &[&str]) -> StorageEpochManifest {
             StorageEpochManifest {
                 epoch: STORAGE_EPOCH_1,
@@ -367,14 +451,54 @@ mod tests {
             bytes
         }
 
-        for codecs in [
-            Vec::<&str>::new(),
-            vec!["groove.ordered-kv.v1", "groove.future.v2"],
-            vec!["groove.future.v2"],
-        ] {
-            assert!(unchecked_manifest(&codecs).encode().is_err());
-            assert!(StorageEpochManifest::decode(&unchecked_bytes(&codecs)).is_err());
+        assert!(StorageCodecProfile::new(Vec::<String>::new()).is_err());
+        assert!(
+            StorageCodecProfile::new(
+                GROOVE_EPOCH_1_CODECS
+                    .iter()
+                    .copied()
+                    .chain(["groove.ordered-kv.v1"])
+            )
+            .is_err()
+        );
+        for omitted in GROOVE_EPOCH_1_CODECS {
+            assert!(
+                StorageCodecProfile::new(
+                    GROOVE_EPOCH_1_CODECS
+                        .iter()
+                        .copied()
+                        .filter(|codec| *codec != *omitted)
+                )
+                .is_err(),
+                "profile construction must reject omitted mandatory {omitted}"
+            );
         }
+
+        let expected = manifest();
+        assert!(unchecked_manifest(&[]).encode().is_err());
+        assert!(StorageEpochManifest::decode(&unchecked_bytes(&[])).is_err());
+        let base_and_future = GROOVE_EPOCH_1_CODECS
+            .iter()
+            .copied()
+            .chain(["groove.future.v2"])
+            .collect::<Vec<_>>();
+        let encoded = unchecked_manifest(&base_and_future).encode().unwrap();
+        assert_eq!(
+            StorageEpochManifest::decode(&encoded)
+                .unwrap()
+                .encode()
+                .unwrap(),
+            encoded
+        );
+        assert!(
+            expected
+                .admit_existing(&unchecked_bytes(&base_and_future))
+                .is_err()
+        );
+
+        let future_only = vec!["groove.future.v2"];
+        assert!(unchecked_manifest(&future_only).encode().is_err());
+        assert!(StorageEpochManifest::decode(&unchecked_bytes(&future_only)).is_err());
     }
     #[test]
     fn missing_unknown_inconsistent_and_corrupt_manifests_fail_closed() {

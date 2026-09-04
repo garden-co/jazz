@@ -1,4 +1,4 @@
-import { PersistedWriteRejectedError, schema as s, type Db } from "jazz-tools";
+import { PersistedWriteRejectedError, ReadTier, schema as s, type Db } from "jazz-tools";
 import { app } from "../schema.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
@@ -26,7 +26,7 @@ export function subscribeOpenTodos(db: Db, onChange: (todos: unknown[]) => void)
 
 // #region reading-durability-tier-ts
 export async function readTodosAtEdgeDurability(db: Db) {
-  return db.all(app.todos.where({ done: false }), { tier: "edge", localUpdates: "immediate" });
+  return db.all(app.todos.where({ done: false }), { tier: ReadTier.Remote });
 }
 // #endregion reading-durability-tier-ts
 
@@ -312,7 +312,7 @@ export async function insertTodoAndWait(db: Db) {
     projectId: EXAMPLE_PROJECT_ID,
   });
 
-  console.log(await pending.transactionId);
+  console.log(await pending.txId);
 
   try {
     const row = await pending.wait({ tier: "global" });

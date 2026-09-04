@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: `AuthorSubject::SYSTEM` MUST have the exact portable value `["urn:jazz:system","system"]`, and no authenticated user may claim the reserved system issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
-- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
+- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one exclusive `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
 - `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns. Public `Integer` and `BigInt` columns lower to `I32` and `I64`; internal schemas may use `U8`, `U16`, `U32`, `U64`, `I32`, or `I64`.
@@ -32,6 +32,7 @@ Invariant digest:
 - `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state, and change history.
 - `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, branch_key, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch-key branch-local rows.
 - `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
+- `INV-DATA-23`: Transaction/version receipts MUST have one canonical byte spelling: fixed record-field positions and discriminants, canonical author JSON and UUID/HLC encodings, strictly ordered parent `TxId`s, and no malformed, trailing, or alternate postcard encoding.
 
 ## Details
 
@@ -64,10 +65,51 @@ newtypes (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
 distinct packed HLC newtype `GlobalTime` (ch. 3–4). A transaction id combines a
 packed hybrid logical clock (`TxTime`,
 physical milliseconds plus a logical counter) with the writing node; the
-transaction is identified and tie-broken by both values (`INV-DATA-5`). The
-An `AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
+transaction is identified and tie-broken by both values (`INV-DATA-5`). Node
+identity is neither an app, account, author, database-name, nor worker-name
+derivation. Two independent durable replicas may share all of those logical
+values but must still use distinct durable-owner nodes, because equal HLC times
+would otherwise name the same transaction. A durable replica loads its node
+before minting and retains it across reopen so recovery and at-least-once
+delivery can recognize its own transactions.
+
+A foreground runtime is a separate live transaction issuer, even when it is
+paired with a durable relay. Its host gives it an exclusive foreground-node
+lease before its first write. The lease starts with either a new CSPRNG node and
+zero high-water or a node returned by a prior _clean_ handoff together with the
+exact HLC high-water reported by that runtime's native core. The runtime must
+seed its HLC at or above that high-water, and the high-water includes every
+minted transaction, including one later rolled back or never submitted. On
+clean shutdown the host first closes mutation admission and drains any
+already-started synchronous, asynchronous, and streaming write work; only then
+may it capture the native/Wasm high-water. It atomically persists
+`max(previous durable floor, captured high-water)` while the lease is still
+active before making the node reusable. A failed readout, failed persistence,
+crash, forced shutdown, or lost peer is an uncertain termination: the node is
+retired permanently. High-waters are canonical packed-HLC `u64`s; hosts reject
+out-of-range receipts rather than allowing a persisted value to poison a later
+native open. There is no lease expiry, central transaction minting, fencing
+generation, or range allocation in this model. The
+`AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
 in-memory intern is never durable or portable. The well-known
 `AuthorSubject::SYSTEM` string passes all policies (ch. 7, `INV-DATA-3`).
+
+Hosts mediate this contract rather than making a relay mint transaction ids.
+The browser's durable SharedWorker owns the foreground-lease pool for its
+physical IndexedDB replica and gives each attached tab a separate lease over a
+dedicated port. A persistent Node foreground owner keeps its pool under the
+current working directory, namespaced by app, environment, and auth scope;
+exclusive state as a per-node O_EXCL active claim plus a separate durable
+per-node reusable high-water receipt. A claimant creates its active claim
+before reading a reusable receipt; it never deletes or reclaims an unknown
+active claim. A clean handoff fsyncs the replacement receipt, fsyncs its
+directory, removes only its own active claim, and fsyncs that directory again.
+Thus a crash before claim removal permanently quarantines that node; even a
+random allocation collision with a reusable receipt must inherit that receipt's
+floor. Explicit memory-mode runtimes deliberately
+create no filesystem lease state and receive a fresh in-memory node instead.
+Those are host adapters for the same lease contract, not alternate TxId
+formats or durability semantics.
 
 Storage may use compact local aliases without changing the wire identity model.
 Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases
@@ -132,8 +174,20 @@ without creating a second physical storage partition. Changing any storage-shape
 input yields a new `SchemaVersionId`. This content-addressing is what lets
 multiple storage schema versions coexist (ch. 10).
 
+Column-type encoding is recursive and tag-discriminated. In particular, a
+payload enum contributes its distinct type tag, declared case count and order,
+then each case's name, declared field count and order, and each field's name,
+recursive type, and nullability. Payload-field references, defaults, and merge
+metadata are not part of this inner type encoding. This exact byte layout is
+shared by the Rust and TypeScript structural hashers and is covered by their
+cross-runtime corpus. The corpus has a unique fixture hash for every portable
+column-type tag, top-level nullability, and representative recursively nested
+Array, Row, Enum, and payload-enum shapes; a change to any encoded schema
+component yields a different schema identity.
+
 _Further invariants._ `INV-DATA-7` — `SchemaVersionId` changes when a column's
-merge strategy changes.
+merge strategy changes. `INV-DATA-8` — every portable column type, including
+payload-enum case and field structure, is part of structural schema identity.
 
 ### 2.5 Rows, versions, and layers
 
@@ -231,7 +285,10 @@ bytes)` sequence, with no duplicate or empty names and no trailing or alternate
 bytes accepted on decode. The typed value envelope and Groove payload must each
 round-trip canonically. This is the only settled branch-key representation used
 in history primary keys, shared deletion keys, current/index prefixes, reopen,
-and rebuild; legacy serde/postcard shapes are never guessed.
+and rebuild; legacy serde/postcard shapes are never guessed. The first frozen
+physical current-index identity is `by_physical_user_v1_<PhysicalColumnId>`;
+its key starts with the canonical `BranchKey` followed by its user key. There
+is no predecessor current-index layout decoder or migration path.
 
 Accepted transactions, immutable version rows, and their atomically persisted
 fate/durability are authority state. Current winners, visibility rows, global
@@ -264,6 +321,189 @@ row_uuid, tx_time, tx_node_id)` and with a seek/index prefix
 - _change stream_ — the append-only `jazz_global_changes`, keyed
   `(physical_table_id, row_uuid, layer, global_time)` with physical-table and
   global-time indexes (`INV-DATA-19`);
+
+### 2.8 Frozen transaction, version, and receipt layout
+
+This is the epoch-1 layout decision for the canonical transaction/version
+facts. It applies to the node's Groove records and to their replicated postcard
+receipts. There is no alpha compatibility decoder or migration for an older
+layout: malformed, trailing, and non-canonical bytes fail closed
+(`INV-DATA-23`). Backend database/WAL files remain adapter-private, as specified
+by Groove's storage epoch; this section freezes logical record and transport
+bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
+
+**Transaction audit record.** `jazz_transactions` has permanent logical field
+positions `0..=18`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
+made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
+user_metadata_json, contribution_merge, permission_subject,
+view_scoped_cardinality_marker, fate, global_time, rejection_reason,
+cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
+`Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
+`None=0`, `Local=1`, `Edge=2`, `Global=3`; rejection reasons are
+`ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
+`CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`. The
+`view-scoped-cardinality` marker is exactly the internal string
+`"view-scoped-cardinality"` in retained position 12; it says only that the
+stored `n_total_writes` is view-redacted, and is cleared when a complete payload
+arrives. Fate/global time and durability remain separate lattice observations:
+accepted/global uses an authority `GlobalTime`, rejection has no global winner,
+and a receiver never infers one from durability alone. A malformed or stale
+receipt that happens to carry a global-time field with a rejection still cannot
+make that transaction a content or deletion winner (ch. 3).
+
+Positions 5 through 8 are retained nullable layout slots, but the durable audit
+row writes them null in epoch 1. Exclusive snapshot/read/CAS evidence belongs to
+the immutable `Transaction` commit-unit payload and authority validation seam;
+it is deliberately not a recovery-time revalidation log. Validation MUST finish
+before lowering discards that evidence. Reopen recovers the resulting fate and
+immutable versions, and MUST NOT reconstruct exclusive dependencies from
+parents or user metadata.
+
+The optional audit fields have kind-specific meaning; their shared physical
+slots do not make their semantics interchangeable:
+
+- A `Mergeable` transaction carries row-version provenance and causal parent
+  dots but has no exclusive dependency/read-set contract. Canonical local
+  authoring leaves `base_snapshot`, `row_read_set`, `absent_read_set`, and
+  `predicate_read_set` null; their shared audit slots do not confer
+  serializability if encountered on a mergeable receipt. An authority MUST NOT
+  interpret either those values or mergeable parents as compare-and-swap
+  evidence. Optional `contribution_merge` is non-causal, field-grained
+  calculated-merge provenance, not a read dependency. It may also carry
+  versioned branch-view copy evidence: exact target/base coordinates, source
+  row, and source content version for a first inherited head overlay. That is
+  authority-checked operation provenance, never a parent, history dependency,
+  or serializability read.
+- An `Exclusive` transaction carries its table-bound compare-and-swap evidence:
+  `base_snapshot`, point reads `(table, row_uuid, observed TxId)`, absent reads
+  `(table, row_uuid)`, and predicate reads `(table, shape_id, canonical query,
+binding_id, binding values)`. The authority compares those dependencies and
+  every written row's single parent against global current state. The table is
+  part of each dependency identity; the same `RowUuid` in another table is not
+  the same read or CAS target. These fields MUST NOT be discarded or inferred
+  from version parents while an exclusive commit is being validated.
+
+For example, concurrent mergeable edits to `todos/r1` may each name the prior
+transaction as provenance and later merge per column; neither asserts that the
+prior transaction is still current. By contrast, an exclusive update that read
+`todos/r1@T1`, proved `todos/r2` absent, and evaluated predicate `P(binding B)`
+commits only if `r1` is still at `T1`, `r2` is still absent, and the bound
+predicate output is unchanged at authority validation. A write to
+`projects/r1` cannot satisfy or conflict with the `todos/r1` dependency merely
+because the UUID bytes match.
+
+**Version/provenance record.** Content history positions `0..=9` are
+`(branch_key, row_uuid, tx_time, tx_node_alias, schema_version_alias, parents,
+created_by, created_at, updated_by, updated_at)`, followed by declared
+`user_{column}` cells in application declaration order. The deletion relation
+adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
+it has no user cells. The replicated `WireRowRecord` positions are
+`(row_uuid, parents, created_by, created_at_ms, updated_by, updated_at_ms,
+nullable _deletion, user cells...)`. A version is content iff `_deletion` is
+null, otherwise it is the deletion/register layer. Parent references are the
+strictly increasing lexicographic sequence of `(TxTime, NodeUuid)` pairs;
+duplicates and insertion-order spellings are rejected on receipt. This makes a
+parent set one deterministic byte sequence while leaving causal DAG semantics
+unchanged.
+
+The optional calculated-merge provenance in transaction position 10 has its
+own frozen Groove records. `ContributionMergeStorageRecord` is
+`(source branch-key bytes, target branch-key bytes, substitutions[])`;
+each substitution is `(target coordinate, source dots[])`; each dot is
+`(tx_time: u64, tx_node: UUID, coordinate)`; and each coordinate is
+`(branch_key bytes, physical_table_id: u64, row_uuid: UUID, merge aspect,
+component)`, where merge aspect is `Content=0`, `Deletion=1` and the component
+registry is permanently ordered `column=0`, `operation=1`, `register=2`.
+Column components contain exactly `physical_column_id: u64`,
+operation components contain `(physical_column_id: u64, identity bytes)`, and
+the register component has an empty payload. Substitutions and source dots use
+their canonical sorted/deduplicated order. These records explain contributed
+field origin only; they add neither causal parents nor exclusive dependencies.
+
+Derived global-current content positions `0..=10` are `(branch_key, row_uuid,
+tx_time, tx_node_alias, schema_version_alias, parents, created_by,
+created_at_ms, updated_by, updated_at_ms, nullable global_time)`, followed by
+the declared user cells. The deletion-current record appends `_deletion` at
+position 11 and has no user cells. `jazz_global_changes` positions `0..=7` are
+`(physical_table_id, branch_key, row_uuid, layer bytes, global_time, tx_time,
+tx_node_alias, nullable deletion event)`. These current/change records are
+derived indexes and replay receipts over immutable history; they MUST be
+reproducible from accepted history plus transaction fate and MUST NOT become a
+second authored fact format.
+
+**Portable identity and time.** `NodeUuid`, `RowUuid`, and
+`SchemaVersionId` are raw canonical 16-byte UUIDs on the wire; local aliases
+never escape. `AuthorSubject` is its exact canonical JSON `[issuer, subject]`
+string, including `AuthorSubject::SYSTEM`'s fixed spelling. Transaction and
+global times are unsigned packed HLC `u64`s (46 physical-millisecond bits then
+18 logical bits); row provenance emits only physical milliseconds and restores
+the logical counter as zero. The authoritative HLC/UUID comparison is also the
+winner tie-break order. Content and deletion winners are derived independently;
+accepted versions update global-current state, while pending/rejected versions
+never become a global winner.
+
+**Current-winner and replay rule.** A row-version receipt is immutable history;
+fate and durability updates never rewrite its authored provenance. For each
+exact `(physical table lineage, branch key, row UUID)`, content and deletion are
+separate winner registers. Only an `Accepted` transaction with an authoritative
+`GlobalTime` participates in global-current selection. Within one layer the
+candidate wins if it directly names the open winner as a parent; otherwise
+concurrent candidates use the greater `(TxTime, NodeUuid)` tuple, with UUID
+comparison in canonical wire-byte order. `GlobalTime` establishes authoritative
+acceptance/progress, not the row-conflict tie-break. A deletion winner does not
+erase content history, and a later restore/delete-register event changes only
+deletion visibility. Pending,
+rejected, local-only, edge-only, view-scoped-incomplete, or malformed facts may
+be retained for their stated purpose but cannot be promoted into a global
+winner by replay or reopen. Replaying an identical receipt is idempotent;
+conflicting bytes for an already named transaction/version fail closed.
+
+Worked example: accepted content `C1@G10` and accepted deletion `D1@G11` remain
+the independent content and deletion winners, so the row is hidden while `C1`
+remains historical truth. An accepted restore `R1@G12` becomes the deletion
+register winner and reveals `C1` again unless a later accepted content version
+wins the content layer. A concurrent pending content `C2` never displaces `C1`,
+even if its local `TxTime` is greater; after an accepted fate assigns `G13`, it
+may become the content winner without changing the deletion-register winner.
+
+**Receipt envelope.** Semantic `SyncMessage` and `WireFrame` values serialize
+with postcard in declaration/variant order. Both sender and receiver must run
+the same fully fallible `VersionRecord` validator before postcard encoding or
+before any infallible semantic accessor. That validator decodes the UUID,
+parent tuple array, both canonical authors, both timestamps, deletion tag, and
+every declared user field; it recreates the complete Groove record and requires
+exact raw-byte equality (including full consumption). `created_by` and
+`updated_by` must equal the bytes returned by `AuthorSubject::canonical`, not
+merely parse to the same JSON value. Outbound immutable records are rejected,
+not repaired; sorting/deduplication is permitted only at birth in
+`VersionRecord::encode`. A decoder then re-encodes the semantic carrier to
+require byte-for-byte postcard equality.
+`VersionRecord::new` remains a public untrusted constructor, so every node
+semantic ingress repeats whole-carrier validation before accessor-based
+filtering, parking, staging, policy evaluation, or mutation. This includes
+commit authority and edge/relay paths, local exclusive finalization, view and
+authorization-view application, and row-version repair. Multi-bundle view and
+repair frames are preflighted in full: one bad later receipt leaves no partial
+transaction, history, clock, or view mutation.
+Consequently it rejects trailing bytes, overlong/alternate varints, invalid
+discriminants, malformed UUID/deletion/parent shapes, non-canonical authors,
+unsorted or duplicate parents, and malformed carrier runs before storage/replay,
+and none of these failures may panic. The hard-coded accepted/global fate receipt
+in `wire::tests::transaction_fate_receipt_has_one_canonical_postcard_spelling`
+is both semantic-to-bytes and independent bytes-to-semantic coverage; the test's
+durability-tag mutation is a planted sensitivity check. Reopen and replay
+receipts for accepted, rejected, concurrent content/delete, and view-scoped
+payloads remain covered by the cited invariant tests below.
+
+**Explicit non-goals and follow-on #2036 work.** This decision does not promise
+mixed-schema wire compatibility, a persisted-storage migration, physical backend
+file interchange, a public raw-record API, or a format for open transactions.
+The remaining #2036 work is (1) independent golden fixtures for every
+transaction/history Groove record rather than the first fate receipt, (2) a
+cross-adapter corpus for accepted/rejected/concurrent/delete and view-scoped
+reopen/replay, and (3) an adversarial corrupt-store matrix for every retained
+transaction/version field. Those are intentionally not claimed complete by this
+first layout-freeze slice.
 
 ### 2.14 Subsumed table-first row-history notes
 

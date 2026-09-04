@@ -8,5 +8,8 @@ groove.workspace = true
 rusqlite = { version = "0.34", features = ["bundled"] }
 
 [dev-dependencies]
+groove = { workspace = true, features = ["test"] }
+base64 = "0.22"
 futures = "0.3"
+sha2 = "0.10"
 tempfile = "3.27.0"

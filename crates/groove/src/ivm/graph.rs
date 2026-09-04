@@ -7,7 +7,10 @@
 //! [`super::op_types`]; lowering from queries lives in [`super::planner`]; the
 //! tick loop that evaluates the graph lives in [`super::runtime`].
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::{
+    hash::{BuildHasher, Hash, Hasher},
+    sync::Arc,
+};
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -21,6 +24,10 @@ use super::op_types::*;
 /// Builders refer to table and field names directly; the runtime resolves those
 /// names against the database schema when a graph is subscribed, queried, or
 /// prepared.
+///
+/// Recursive child edges are immutable shared allocations. This keeps copies
+/// of a deeply lowered graph shallow while preserving the builder's ordinary
+/// value semantics for callers that replace an enclosing node.
 ///
 /// ```rust
 /// # futures::executor::block_on(async {
@@ -150,6 +157,12 @@ pub enum GraphBuilder {
         output: RecordDescriptor,
         records: Vec<Vec<u8>>,
     },
+    /// Runtime-owned mutable records. The input identity is local to the owning
+    /// runtime and receives record replacement batches through its API.
+    InputSource {
+        id: InputSourceId,
+        output: RecordDescriptor,
+    },
     Index {
         table: String,
         index: String,
@@ -171,77 +184,91 @@ pub enum GraphBuilder {
         output: RecordDescriptor,
     },
     Recursive {
-        seed: Box<GraphBuilder>,
-        step: Box<GraphBuilder>,
+        seed: Arc<GraphBuilder>,
+        step: Arc<GraphBuilder>,
+        /// Optional generic side output evaluated once for each actual
+        /// recursive step, with the exact frontier and depth used by `step`.
+        /// It does not participate in the public recursive fixed point.
+        step_witness: Option<Arc<GraphBuilder>>,
         frontier: FrontierName,
         max_iters: usize,
+        /// A semantic depth bound truncates the next frontier; a fixpoint
+        /// safety limit reports non-convergence instead.
+        truncate_at_max_iters: bool,
+    },
+    /// The generic side output of a [`Self::Recursive`] builder that was
+    /// explicitly constructed with `step_witness`. This is deliberately a
+    /// separate graph value: callers may subscribe to it without changing the
+    /// recursive relation's public set semantics.
+    RecursiveStepWitness {
+        recursive: Arc<GraphBuilder>,
     },
     Filter {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         predicate: PredicateExpr,
         comparison: ValueComparison,
     },
     UnwrapNullable {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         field: FieldRef,
     },
     Unnest {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         array_field: FieldRef,
         element_field: String,
     },
     VariantProject {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         field: FieldRef,
         case: String,
     },
     Project {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         fields: Vec<ProjectField>,
     },
     StreamingChecksum {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         field: FieldRef,
         output_field: String,
         window_bytes: usize,
         max_bytes_per_turn: usize,
     },
     Union {
-        inputs: Vec<GraphBuilder>,
+        inputs: Vec<Arc<GraphBuilder>>,
     },
     Join {
-        left: Box<GraphBuilder>,
-        right: Box<GraphBuilder>,
+        left: Arc<GraphBuilder>,
+        right: Arc<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
     },
     SemiJoin {
-        left: Box<GraphBuilder>,
-        right: Box<GraphBuilder>,
+        left: Arc<GraphBuilder>,
+        right: Arc<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
     },
     AntiJoin {
-        left: Box<GraphBuilder>,
-        right: Box<GraphBuilder>,
+        left: Arc<GraphBuilder>,
+        right: Arc<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
     },
     ArgMaxBy {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<FieldRef>,
     },
     ArgMinBy {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<FieldRef>,
     },
     TopBy {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<TopByOrder>,
         tie_cols: Vec<FieldRef>,
@@ -249,14 +276,64 @@ pub enum GraphBuilder {
         limit: TopByLimit,
     },
     CollectBy {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         collect: Box<CollectByBuilder>,
     },
     Aggregate {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         aggregates: Vec<AggregateExpr>,
     },
+}
+
+/// Opaque identity of one mutable input owned by a single IVM runtime.
+///
+/// It is neither durable nor wire-facing. Callers obtain it from
+/// [`crate::ivm::IvmRuntime::allocate_input_source`] and use it only with that
+/// runtime's graph and replacement APIs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InputSourceId {
+    runtime_namespace: u64,
+    local: u64,
+}
+
+impl InputSourceId {
+    pub(crate) fn new(runtime_namespace: u64, local: u64) -> Self {
+        Self {
+            runtime_namespace,
+            local,
+        }
+    }
+
+    pub(crate) fn belongs_to(self, runtime_namespace: u64) -> bool {
+        self.runtime_namespace == runtime_namespace
+    }
+
+    pub(crate) fn was_allocated_by(self, runtime_namespace: u64, next_local: u64) -> bool {
+        self.belongs_to(runtime_namespace) && self.local < next_local
+    }
+
+    pub(crate) fn binding_key(self) -> BindingSourceKey {
+        BindingSourceKey::RuntimeInput {
+            runtime_namespace: self.runtime_namespace,
+            local: self.local,
+        }
+    }
+
+    pub(crate) fn diagnostic_name(self) -> String {
+        format!(
+            "runtime input source {}:{}",
+            self.runtime_namespace, self.local
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_binding_shape(self) -> String {
+        format!(
+            "__groove_input_source_{}_{}",
+            self.runtime_namespace, self.local
+        )
+    }
 }
 
 /// Public builder payload for a terminal [`GraphBuilder::CollectBy`] node.
@@ -441,6 +518,11 @@ impl GraphBuilder {
         }
     }
 
+    /// Build a runtime-owned mutable source with a fixed output descriptor.
+    pub fn input_source(id: InputSourceId, output: RecordDescriptor) -> Self {
+        Self::InputSource { id, output }
+    }
+
     pub fn values(
         output: RecordDescriptor,
         rows: impl IntoIterator<Item = impl AsRef<[Value]>>,
@@ -531,17 +613,75 @@ impl GraphBuilder {
         frontier: impl Into<String>,
         max_iters: usize,
     ) -> Self {
+        Self::recursive_with_limit(seed, step, frontier, max_iters, false)
+    }
+
+    /// Build recursion whose iteration count is an observable depth cutoff.
+    ///
+    /// Unlike [`Self::recursive`]'s non-convergence guard, reaching this bound
+    /// discards the next frontier and returns every fact accumulated through
+    /// `max_iters` recursive steps. A zero bound returns only the seed.
+    pub fn recursive_bounded(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+    ) -> Self {
+        Self::recursive_with_limit(seed, step, frontier, max_iters, true)
+    }
+
+    fn recursive_with_limit(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+        truncate_at_max_iters: bool,
+    ) -> Self {
         Self::Recursive {
-            seed: Box::new(seed),
-            step: Box::new(step),
+            seed: Arc::new(seed),
+            step: Arc::new(step),
+            step_witness: None,
             frontier: FrontierName(frontier.into()),
             max_iters,
+            truncate_at_max_iters,
+        }
+    }
+
+    /// Build a recursive relation with a generic, recursion-owned side
+    /// output. The witness is evaluated at each actual step using the same
+    /// frontier and semantic depth as `step`; it is never fed back into the
+    /// public fixed point.
+    pub fn recursive_with_step_witness(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        step_witness: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+        truncate_at_max_iters: bool,
+    ) -> Self {
+        Self::Recursive {
+            seed: Arc::new(seed),
+            step: Arc::new(step),
+            step_witness: Some(Arc::new(step_witness)),
+            frontier: FrontierName(frontier.into()),
+            max_iters,
+            truncate_at_max_iters,
+        }
+    }
+
+    /// Expose the side output of a recursive graph constructed with
+    /// [`Self::recursive_with_step_witness`]. Compilation rejects an ordinary
+    /// recursive graph here, making a missing witness unrepresentable at the
+    /// graph boundary.
+    pub fn recursive_step_witness(recursive: GraphBuilder) -> Self {
+        Self::RecursiveStepWitness {
+            recursive: Arc::new(recursive),
         }
     }
 
     pub fn union(inputs: impl IntoIterator<Item = GraphBuilder>) -> Self {
         Self::Union {
-            inputs: inputs.into_iter().collect(),
+            inputs: inputs.into_iter().map(Arc::new).collect(),
         }
     }
 
@@ -570,7 +710,7 @@ impl GraphBuilder {
                 | Self::CollectBy { input, .. }
                 | Self::Aggregate { input, .. } => pending.push((input, false)),
                 Self::Union { inputs } => {
-                    pending.extend(inputs.iter().rev().map(|input| (input, false)));
+                    pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
                 }
                 Self::Join { left, right, .. }
                 | Self::SemiJoin { left, right, .. }
@@ -578,12 +718,22 @@ impl GraphBuilder {
                     pending.push((right, false));
                     pending.push((left, false));
                 }
-                Self::Recursive { seed, step, .. } => {
+                Self::Recursive {
+                    seed,
+                    step,
+                    step_witness,
+                    ..
+                } => {
+                    if let Some(witness) = step_witness {
+                        pending.push((witness, false));
+                    }
                     pending.push((step, false));
                     pending.push((seed, false));
                 }
+                Self::RecursiveStepWitness { recursive } => pending.push((recursive, false)),
                 Self::Table { .. }
                 | Self::InlineRecords { .. }
+                | Self::InputSource { .. }
                 | Self::Index { .. }
                 | Self::FrontierSource { .. }
                 | Self::BindingSource { .. } => {}
@@ -599,8 +749,8 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::Join {
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Exact,
@@ -615,8 +765,8 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::Join {
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Policy,
@@ -630,8 +780,8 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::SemiJoin {
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Exact,
@@ -645,8 +795,8 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::AntiJoin {
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Exact,
@@ -659,7 +809,7 @@ impl GraphBuilder {
         order_cols: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::ArgMaxBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
             order_cols: order_cols.into_iter().map(FieldRef::name).collect(),
         }
@@ -671,7 +821,7 @@ impl GraphBuilder {
         order_cols: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::ArgMinBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
             order_cols: order_cols.into_iter().map(FieldRef::name).collect(),
         }
@@ -686,7 +836,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::TopBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
             order_cols: order_cols.into_iter().collect(),
             tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
@@ -708,7 +858,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(CollectByBuilder {
                 mode: CollectByMode::Collect,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
@@ -760,7 +910,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(CollectByBuilder {
                 mode: CollectByMode::Collect,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
@@ -790,7 +940,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(CollectByBuilder {
                 mode: CollectByMode::Root,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
@@ -826,7 +976,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(CollectByBuilder {
                 mode: CollectByMode::Expand,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
@@ -874,7 +1024,7 @@ impl GraphBuilder {
         aggregates: impl IntoIterator<Item = AggregateExpr>,
     ) -> Self {
         Self::Aggregate {
-            input: Box::new(input),
+            input: Arc::new(input),
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
             aggregates: aggregates.into_iter().collect(),
         }
@@ -882,7 +1032,7 @@ impl GraphBuilder {
 
     pub fn filter(self, predicate: PredicateExpr) -> Self {
         Self::Filter {
-            input: Box::new(self),
+            input: Arc::new(self),
             predicate,
             comparison: ValueComparison::Exact,
         }
@@ -891,7 +1041,7 @@ impl GraphBuilder {
     /// Filter using policy value comparison semantics.
     pub fn policy_filter(self, predicate: PredicateExpr) -> Self {
         Self::Filter {
-            input: Box::new(self),
+            input: Arc::new(self),
             predicate,
             comparison: ValueComparison::Policy,
         }
@@ -899,14 +1049,14 @@ impl GraphBuilder {
 
     pub fn unwrap_nullable(self, field: impl Into<String>) -> Self {
         Self::UnwrapNullable {
-            input: Box::new(self),
+            input: Arc::new(self),
             field: FieldRef::name(field),
         }
     }
 
     pub fn unnest(self, array_field: impl Into<String>, element_field: impl Into<String>) -> Self {
         Self::Unnest {
-            input: Box::new(self),
+            input: Arc::new(self),
             array_field: FieldRef::name(array_field),
             element_field: element_field.into(),
         }
@@ -916,7 +1066,7 @@ impl GraphBuilder {
     /// delta; matching rows emit the case's fixed payload descriptor.
     pub fn variant_project(self, field: impl Into<String>, case: impl Into<String>) -> Self {
         Self::VariantProject {
-            input: Box::new(self),
+            input: Arc::new(self),
             field: FieldRef::name(field),
             case: case.into(),
         }
@@ -924,14 +1074,14 @@ impl GraphBuilder {
 
     pub fn project(self, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self::Project {
-            input: Box::new(self),
+            input: Arc::new(self),
             fields: fields.into_iter().map(ProjectField::named).collect(),
         }
     }
 
     pub fn project_fields(self, fields: impl IntoIterator<Item = ProjectField>) -> Self {
         Self::Project {
-            input: Box::new(self),
+            input: Arc::new(self),
             fields: fields.into_iter().collect(),
         }
     }
@@ -949,7 +1099,7 @@ impl GraphBuilder {
         max_bytes_per_turn: usize,
     ) -> Self {
         Self::StreamingChecksum {
-            input: Box::new(self),
+            input: Arc::new(self),
             field: FieldRef::name(field),
             output_field: output_field.into(),
             window_bytes,
@@ -1241,7 +1391,8 @@ pub struct IvmGraph {
     /// descriptor, and insertion asserts that collisions do not merge specs.
     nodes: HashMap<NodeId, GraphNode>,
     table_sources: HashMap<String, HashSet<NodeId>>,
-    binding_sources: HashMap<String, HashSet<NodeId>>,
+    binding_sources: HashMap<BindingSourceKey, HashSet<NodeId>>,
+    frontier_sources: HashMap<String, HashSet<NodeId>>,
 }
 
 impl IvmGraph {
@@ -1283,12 +1434,12 @@ impl IvmGraph {
             }
             OpType::BindingSource(source) => {
                 self.binding_sources
-                    .entry(source.shape.clone())
+                    .entry(source.key.clone())
                     .or_default()
                     .insert(id);
             }
             OpType::FrontierSource(source) => {
-                self.binding_sources
+                self.frontier_sources
                     .entry(source.binding.0.clone())
                     .or_default()
                     .insert(id);
@@ -1338,17 +1489,19 @@ impl IvmGraph {
     pub(crate) fn affected_nodes<'a>(
         &self,
         tables: impl IntoIterator<Item = &'a str>,
-        bindings: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
     ) -> std::collections::HashSet<NodeId> {
         let mut affected = std::collections::HashSet::new();
         let mut pending = tables
             .into_iter()
             .filter_map(|table| self.table_sources.get(table))
-            .chain(
-                bindings
-                    .into_iter()
-                    .filter_map(|binding| self.binding_sources.get(binding)),
-            )
+            .chain(bindings.into_iter().flat_map(|binding| {
+                self.binding_sources.get(binding).into_iter().chain(
+                    binding
+                        .prepared_name()
+                        .and_then(|name| self.frontier_sources.get(name)),
+                )
+            }))
             .flat_map(|nodes| nodes.iter().copied())
             .collect::<Vec<_>>();
         while let Some(node) = pending.pop() {
@@ -1395,17 +1548,20 @@ impl IvmGraph {
                 remove_source_node(&mut self.table_sources, &source.table, id);
             }
             OpType::BindingSource(source) => {
-                remove_source_node(&mut self.binding_sources, &source.shape, id);
+                remove_source_node(&mut self.binding_sources, &source.key, id);
             }
             OpType::FrontierSource(source) => {
-                remove_source_node(&mut self.binding_sources, &source.binding.0, id);
+                remove_source_node(&mut self.frontier_sources, &source.binding.0, id);
             }
             _ => {}
         }
     }
 }
 
-fn remove_source_node(sources: &mut HashMap<String, HashSet<NodeId>>, source: &str, node: NodeId) {
+fn remove_source_node<K>(sources: &mut HashMap<K, HashSet<NodeId>>, source: &K, node: NodeId)
+where
+    K: Eq + std::hash::Hash,
+{
     let remove_source = sources.get_mut(source).is_some_and(|nodes| {
         nodes.remove(&node);
         nodes.is_empty()
@@ -1570,7 +1726,7 @@ impl NodeDescriptor {
                 for &field_idx in arg_max_by
                     .group_field_indices
                     .iter()
-                    .chain(&arg_max_by.primary_key_field_indices)
+                    .chain(&arg_max_by.comparison_field_indices)
                 {
                     if field_idx >= input_outputs[0].fields().len() {
                         return Err(GraphValidationError::FieldIndexOutOfBounds {
@@ -1588,7 +1744,7 @@ impl NodeDescriptor {
                 for &field_idx in arg_min_by
                     .group_field_indices
                     .iter()
-                    .chain(&arg_min_by.primary_key_field_indices)
+                    .chain(&arg_min_by.comparison_field_indices)
                 {
                     if field_idx >= input_outputs[0].fields().len() {
                         return Err(GraphValidationError::FieldIndexOutOfBounds {
@@ -1613,6 +1769,12 @@ impl NodeDescriptor {
                             index: field_idx,
                             len: input_outputs[0].fields().len(),
                         });
+                    }
+                }
+                for &field_idx in &top_by.sort_field_indices {
+                    if !collect_by_ordered_scalar(&input_outputs[0].fields()[field_idx].value_type)
+                    {
+                        return Err(GraphValidationError::TopBySortFieldMustBeOrderable);
                     }
                 }
                 Ok(())
@@ -1996,7 +2158,15 @@ impl NodeDescriptor {
                 }
                 Ok(())
             }
-            OpType::Recursive(_) => expect_arity(&self.inputs, 2),
+            OpType::Recursive(recursive) => expect_arity(
+                &self.inputs,
+                if recursive.step_witness_output.is_some() {
+                    3
+                } else {
+                    2
+                },
+            ),
+            OpType::RecursiveStepWitness(_) => expect_arity(&self.inputs, 1),
         }
     }
 }
@@ -2056,6 +2226,8 @@ pub enum GraphValidationError {
     CollectByOutputDescriptorMismatch,
     #[error("collect_by group, order, and tie fields must be scalar and non-record-valued")]
     CollectByKeyFieldMustBeScalar,
+    #[error("top_by order and tie fields must be orderable scalar values")]
+    TopBySortFieldMustBeOrderable,
     #[error("collect_by is terminal-only and cannot be an input node")]
     CollectByInputIsTerminal,
 }
@@ -2075,6 +2247,7 @@ pub enum OpType {
     /// inflate every recursive graph-compilation frame.
     CollectBy(Box<CollectByOp>),
     Recursive(RecursiveOp),
+    RecursiveStepWitness(RecursiveStepWitnessOp),
     Persist(PersistOp),
     Filter(FilterOp),
     MapProject(MapProjectOp),
@@ -2161,6 +2334,28 @@ mod tests {
 
     fn string_output() -> RecordDescriptor {
         RecordDescriptor::new([("f0", ValueType::String)])
+    }
+
+    #[test]
+    fn cloning_a_deep_builder_is_stack_bounded() {
+        // Lowering policy graphs can compose many unary operators. Keep this
+        // far beyond the depth that recursive `Box` cloning can handle on the
+        // ordinary 2 MiB test-thread stack, and assert immutable child arcs
+        // keep a clone shallow.
+        const DEPTH: usize = 4_096;
+        let mut graph = GraphBuilder::table("rows");
+        for _ in 0..DEPTH {
+            graph = graph.project(["id"]);
+        }
+
+        let cloned = graph.clone();
+        assert_eq!(cloned.postorder().len(), DEPTH + 1);
+
+        // The owned builder's derived recursive destructor is a separate
+        // concern from cloning. Avoid making this regression receipt depend
+        // on that destructor while it validates the clone boundary directly.
+        std::mem::forget(graph);
+        std::mem::forget(cloned);
     }
 
     #[test]
@@ -2340,6 +2535,42 @@ mod tests {
         assert_eq!(
             descriptor.validate(&[NodeOutput::Records(input)]),
             Err(GraphValidationError::FieldIndexOutOfBounds { index: 1, len: 1 })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_top_by_unorderable_tie_fields() {
+        let input = RecordDescriptor::new([
+            ("rank", ValueType::U64),
+            ("tie", ValueType::Array(Box::new(ValueType::U64))),
+        ]);
+        let descriptor = NodeDescriptor::new(
+            OpType::TopBy(TopByOp {
+                group_fields: Vec::new(),
+                group_field_indices: Vec::new(),
+                order_fields: vec![TopByOrderField {
+                    field: "rank".to_owned(),
+                    direction: TopByDirection::Asc,
+                }],
+                tie_fields: vec!["tie".to_owned()],
+                // `sort_field_indices` is deliberately the concatenation of
+                // order and tie fields. Validate every member, not only the
+                // user-visible order prefix, because both are compared by the
+                // runtime's TopBy key.
+                sort_field_indices: vec![0, 1],
+                sort_directions: vec![TopByDirection::Asc, TopByDirection::Asc],
+                offset: 0,
+                limit: TopByLimit::Finite(1),
+            }),
+            [NodeId(1)],
+            input,
+        );
+
+        assert_eq!(
+            descriptor.validate(&[NodeOutput::Arrangement(ArrangementDescriptor {
+                records: input,
+            })]),
+            Err(GraphValidationError::TopBySortFieldMustBeOrderable),
         );
     }
 

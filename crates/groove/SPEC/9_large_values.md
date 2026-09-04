@@ -27,6 +27,14 @@ Invariant digest:
   separate lifetimes.
 - `INV-LARGE-8`: persistent derived state is keyed by exact logical input and
   operator identity.
+- `INV-LARGE-9`: row mutation, durable/staged refcounts, and reclamation are
+  crash-consistent and idempotent.
+- `INV-LARGE-10`: finalization binds its exact authenticated descriptor before
+  a receipt becomes publishable.
+- `INV-LARGE-11`: descriptor-led format dispatch and canonical physical codecs
+  fail closed before traversal or lifecycle mutation.
+- `INV-LARGE-12`: lifecycle journal keys, duplicate IDs, and immutable locator
+  mappings are exact authorities; copied/corrupt records fail closed.
 
 ## 9.1 Logical and physical values
 
@@ -103,6 +111,15 @@ by the operating system CSPRNG. Production construction, streaming,
 consolidation, append, and edit APIs do not accept locator allocators from
 callers; tests may inject deterministic allocators only through crate-private
 test helpers.
+
+A locator is exactly 32 raw bytes: it is neither a hash-derived name nor a
+backend key. Its canonical serialization is the fixed `bytes32` locator field
+of `NodeRef`. Authorization is conjunctive: the locator selects a private
+mapping and its accompanying `object_hash` authenticates the exact bytes. A
+mapping collision is never repaired or rekeyed: atomic
+`put_if_absent(locator, hash, bytes)` accepts an identical mapping and otherwise
+fails without overwriting bytes, mutating reference metadata, or disclosing the
+existing mapping.
 
 Small logical values remain inline. Above a versioned threshold, Groove emits a
 large descriptor and immutable chunks. Once indirect, a value may remain
@@ -297,9 +314,9 @@ V1 JSON is literal validated UTF-8 source, never a normalized serialization.
 Its canonical receipt uses the exact source
 `{"literal":"\\uD83D\\uDE42","dup":1,"dup":2,"n":-0,"scientific":1e+00,"text":"\\u00e9"}`;
 the leaf bytes, object hash, and logical hash are respectively
-`0002027b226c69746572616c223a225c75443833445c7544453432222c22647570223a312c22647570223a322c226e223a2d302c22736369656e7469666963223a31652b30302c2274657874223a225c7530306539227d`,
-`c41c347e4880ecb7545a859a9fee9e011551ac5795ced9b5c7b58c77bf69f8b0`, and
-`b538953f883dc4ca231dc62746a6b3e8413b772e2baf267f16be791bd58fcb3f`.
+`0001027b226c69746572616c223a225c75443833445c7544453432222c22647570223a312c22647570223a322c226e223a2d302c22736369656e7469666963223a31652b30302c2274657874223a225c7530306539227d`,
+`14dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf37`, and
+`4a267f38a9486460670c54d2ca475f4058aee0dc528742ddd18ed8f3dae8bab8`.
 The source preserves duplicate spelling and number spelling physically; a
 parsed object read has ordinary last-duplicate-key behavior, retains negative
 zero, and decodes the Unicode escapes. The exact descriptor and scalar
@@ -690,9 +707,36 @@ so reclamation MUST compare key and value before any lifecycle/GC mutation and
 cannot retarget a queue entry; `install/<NodeRef>` is an empty presence marker
 whose key alone carries the identity.
 
+`staged/` and `upload/` keys append exactly one opaque 16-byte staging ID. That
+ID is duplicated in the canonical value and MUST match byte-for-byte before
+scan/recovery, acceptance, finalization, resume, or eviction. A valid value
+copied under a different or malformed key is corruption, not an alias or replay.
+The promotion journals apply the same rule in both directions:
+`completed-upload/<upload-id>` MUST contain that exact embedded upload ID, and
+`completed-receipt/<receipt-id>` MUST contain that exact embedded receipt ID.
+Every staging preflight, forward retry lookup, and reverse
+acceptance/eviction cleanup validates its selected key suffix before any
+metadata or refcount mutation; copying either canonical record under another
+key cannot create an alias.
+The descriptor field is canonical opaque `LargeValueRef` bytes at this metadata
+boundary, so its V1 dispatcher runs before nested descriptor fields are bound.
+Descriptor-keyed uploads derive their initial pending key with
+`BLAKE3 derive_key("groove pending descriptor upload v1",
+canonical_large_value_ref_bytes)[0..16]`; retry-receipt IDs and locators remain
+independent random capabilities. `created_at_ms` is GC/accounting observation,
+not an admission deadline: only host-serialized eviction makes a handle stale.
+Malformed records, key/value identity disagreement, accounting underflow or
+overflow, and reclaim key/value disagreement fail before lifecycle, refcount,
+byte deletion, or row mutation.
+
 `INV-LARGE-9`: physical-record mutation and descriptor-reference deltas MUST be
 crash-consistent and idempotent. A node/blob MUST NOT be reclaimed while its
 durable inbound count, staging protection, or active lease is nonzero.
+
+`INV-LARGE-12`: a lifecycle metadata key selects exactly one canonical record;
+where a value duplicates an opaque ID or `NodeRef`, the identities must agree
+before recovery, acceptance, expiry, refcount, or reclaim mutation. A locator
+collision is a fail-closed immutable-mapping error, never an alias or rewrite.
 
 Derived indices and expensive operator outputs identify their inputs with:
 

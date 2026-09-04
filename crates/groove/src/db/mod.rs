@@ -36,7 +36,8 @@ use crate::schema::{
 };
 use crate::storage::{
     BoxedStorage, LayoutStorage, OrderedKvStorage, OwnedStorage, OwnedWriteOperation, RecordStore,
-    ReopenableStorage, StagedWriteOverlay, StagedWriteState, StorageLayout, WriteManyOutcome,
+    ReopenableStorage, StagedPointValue, StagedWriteOverlay, StagedWriteState, StorageLayout,
+    WriteManyOutcome,
 };
 use thiserror::Error;
 
@@ -54,6 +55,28 @@ fn pending_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -
     let mut key = b"upload/".to_vec();
     key.extend_from_slice(&id.0);
     key
+}
+
+/// Bind an engine-owned lifecycle record to the fixed-width opaque identity in
+/// its metadata key.  The key is part of the durable authority: copying a
+/// receipt under a different key must never make it resumable or evictable as
+/// that other lifecycle handle.
+fn staged_large_value_id_from_metadata_key(
+    key: &[u8],
+    prefix: &'static [u8],
+    record_name: &'static str,
+) -> Result<crate::large_values::StagedLargeValueId, Error> {
+    let encoded = key.strip_prefix(prefix).ok_or_else(|| {
+        Error::InvalidLargeValueMetadata(format!(
+            "{record_name} has an invalid metadata key prefix"
+        ))
+    })?;
+    let id: [u8; 16] = encoded.try_into().map_err(|_| {
+        Error::InvalidLargeValueMetadata(format!(
+            "{record_name} metadata key must contain exactly 16 staging-id bytes"
+        ))
+    })?;
+    Ok(crate::large_values::StagedLargeValueId(id))
 }
 
 fn completed_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -> Vec<u8> {
@@ -142,6 +165,37 @@ struct LargeValueNodeReferences {
     references: u64,
     upload_references: u64,
     children: Vec<crate::large_values::NodeRef>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LargeValueReclaimDecision {
+    /// Both durable and resident views still retain the node. Any queue entry
+    /// predates their activation and can be discarded.
+    ClearStaleQueue,
+    /// The latest resident publication deactivates a still-durable node. Keep
+    /// the queue entry for the publication's eventual durable-zero transition.
+    WaitForDurableZero,
+    /// Durable zero authorizes deletion, but a resident activation vetoes it.
+    ResidentVeto,
+    /// Durable zero authorizes deletion and the resident view does not veto it.
+    Delete,
+}
+
+/// Combine Groove's two reference views without creating another reclamation
+/// authority: durable zero is the sole authorization, and resident references
+/// can only veto it.
+fn large_value_reclaim_decision(
+    durable: &LargeValueNodeReferences,
+    resident: &LargeValueNodeReferences,
+) -> LargeValueReclaimDecision {
+    let durable_retained = durable.references != 0 || durable.upload_references != 0;
+    let resident_retained = resident.references != 0 || resident.upload_references != 0;
+    match (durable_retained, resident_retained) {
+        (true, true) => LargeValueReclaimDecision::ClearStaleQueue,
+        (true, false) => LargeValueReclaimDecision::WaitForDurableZero,
+        (false, true) => LargeValueReclaimDecision::ResidentVeto,
+        (false, false) => LargeValueReclaimDecision::Delete,
+    }
 }
 
 fn unique_large_value_children(
@@ -731,6 +785,20 @@ fn decode_staged_large_value(
     })
 }
 
+fn decode_staged_large_value_at_key(
+    key: &[u8],
+    encoded: &[u8],
+) -> Result<crate::large_values::StagedLargeValue, Error> {
+    let key_id = staged_large_value_id_from_metadata_key(key, b"staged/", "staged large value")?;
+    let staged = decode_staged_large_value(encoded)?;
+    if staged.id != key_id {
+        return Err(Error::InvalidLargeValueMetadata(
+            "staged large value key and receipt id differ".to_owned(),
+        ));
+    }
+    Ok(staged)
+}
+
 fn encode_pending_large_value_upload(
     upload: &crate::large_values::PendingLargeValueUpload,
 ) -> Result<Vec<u8>, Error> {
@@ -882,6 +950,54 @@ fn decode_pending_large_value_upload(
         created_at_ms,
         chunks: canonical_node_refs_from_value(&chunks, "pending large-value upload chunks")?,
     })
+}
+
+fn decode_pending_large_value_upload_at_key(
+    key: &[u8],
+    encoded: &[u8],
+) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
+    let key_id = staged_large_value_id_from_metadata_key(key, b"upload/", "pending upload")?;
+    let upload = decode_pending_large_value_upload(encoded)?;
+    if upload.id != key_id {
+        return Err(Error::InvalidLargeValueMetadata(
+            "pending upload key and journal id differ".to_owned(),
+        ));
+    }
+    Ok(upload)
+}
+
+/// Decode the forward completed-upload journal only when its embedded upload
+/// identity is the canonical fixed-width suffix of its metadata key.
+fn decode_completed_large_value_upload_at_key(
+    key: &[u8],
+    encoded: &[u8],
+) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
+    let key_id =
+        staged_large_value_id_from_metadata_key(key, b"completed-upload/", "completed upload")?;
+    let completed = decode_pending_large_value_upload(encoded)?;
+    if completed.id != key_id {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload key and journal id differ".to_owned(),
+        ));
+    }
+    Ok(completed)
+}
+
+/// Decode the reverse completed-receipt journal only when its embedded receipt
+/// identity is the canonical fixed-width suffix of its metadata key.
+fn decode_completed_large_value_receipt_at_key(
+    key: &[u8],
+    encoded: &[u8],
+) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
+    let key_id =
+        staged_large_value_id_from_metadata_key(key, b"completed-receipt/", "completed receipt")?;
+    let completed = decode_pending_large_value_upload(encoded)?;
+    if completed.receipt_id != Some(key_id) {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed receipt key and receipt id differ".to_owned(),
+        ));
+    }
+    Ok(completed)
 }
 
 /// Apply physical-node ownership transitions against one read-your-own-write
@@ -1223,9 +1339,10 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
 }
 
 pub use crate::ivm::{
-    CollectByField, GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription,
-    PredicateExpr, PreparedShapeId, ProjectField, PublicationUpdate, RoutedMultisinkTerminal,
-    Subscription, SubscriptionError, SubscriptionEvent, SubscriptionId,
+    CollectByField, GraphBuilder, InputSourceDelta, InputSourceId, InputSourceReplacement,
+    IvmRuntimeError, MultisinkDeltas, MultisinkSubscription, PredicateExpr, PreparedShapeId,
+    ProjectField, PublicationUpdate, RoutedMultisinkTerminal, Subscription, SubscriptionError,
+    SubscriptionEvent, SubscriptionId,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
@@ -1265,6 +1382,21 @@ pub struct Database {
     large_value_lifecycle_publications: BTreeSet<PublicationId>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
+}
+
+/// An in-memory checkpoint of the schema-derived IVM registry.
+///
+/// Live schema admission is deliberately append-only on success, but callers
+/// which couple it to another activation boundary need a way to make the
+/// registry invisible until that boundary commits.  This checkpoint excludes
+/// storage, rows, publications, and chunk lifecycle state.  It does include
+/// the complete IVM runtime because variant descriptors and projection cases
+/// are spread throughout the runtime graph alongside live subscriptions.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RuntimeRegistryCheckpoint {
+    ivm_runtime: IvmRuntime,
+    stored_record_descriptors: BTreeMap<String, BTreeMap<u32, RecordDescriptor>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

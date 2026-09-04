@@ -12,14 +12,14 @@ identity (ch. 2), history winner selection (ch. 4), and the catalogue sync lane
 Invariant digest:
 
 - `INV-LENS-1`: A published `SchemaVersion` MUST have `schema.id == schema.schema.version_id()`; every non-genesis schema MUST be admitted in one catalogue operation with its lineage-defining lens before it is known or writeable.
-- `INV-LENS-2`: A published `MigrationLens` MUST have `lens.id == lens.content_id()` and both `lens.source` and `lens.target` MUST be known `SchemaVersionId`s; `content_id()` MUST hash the canonical lens payload and exclude the embedded id field.
+- `INV-LENS-2`: A published `MigrationLens` MUST have `lens.id == lens.content_id()` and both `lens.source` and `lens.target` MUST be known `SchemaVersionId`s; `content_id()` MUST hash the canonical lens payload, and the durable/wire form MUST reconstruct rather than store that derived id.
 - `INV-LENS-3`: Catalogue mutation messages MUST be accepted only from catalogue admin identity and MUST reject non-admin authors.
 - `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire `VersionRecord` MUST expose the full `SchemaVersionId`.
 - `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding `SchemaVersion` catalogue value arrives.
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
 - `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
 - `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, schema-version aliases, and physical mappings MUST survive node restart; installing an authority snapshot MUST preserve the node-local storage identity of an already-open schema so pre-snapshot local writes remain addressable.
-- `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; reopen MUST resume staged activation idempotently.
+- `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; one activation batch MUST replace its durable pending obligation with the schema, lens, physical mapping, and active receipt; reopen MUST resume staged activation idempotently.
 - `INV-LENS-10`: New local writes MUST retain `current_write_schema.schema` as their schema discriminator and resolve storage through that schema's durable physical mapping.
 - `INV-LENS-11`: Incoming commit units MUST retain their authored schema discriminator and resolve storage through that schema's durable physical mapping, even when the current write pointer names another schema.
 - `INV-LENS-12`: Natural lens reads MUST select winners from the shared physical lineage before projecting rows into the requested schema.
@@ -37,6 +37,7 @@ Invariant digest:
   does not yet freeze descriptor identity or the remaining catalogue payload
   encodings.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
+- `INV-LENS-24`: A global physical UUID is permanently issued across the whole durable catalogue lineage. Admission, pending/staged replay, snapshot installation, reopen, and authority allocation MUST reject or avoid reusing any retired table, column epoch, or recursive enum-occurrence UUID; only an exact compatible source-to-target coordinate may retain its UUID.
 
 ## Details
 
@@ -61,9 +62,10 @@ were authored, and translation happens at read time (§10.5).
 Identity is content-addressed. `SchemaVersionId = JazzSchema::version_id()`
 (ch. 2), and `MigrationLensId = lens.content_id()`. The lens id hashes a
 canonical byte encoding of the source id, target id, declared table lenses,
-ordered lens ops, and recursively tagged default values. The embedded
-`MigrationLens.id` field is excluded from that encoding, and catalogue ingest
-rejects a mismatched id (`INV-LENS-1`, `INV-LENS-2`).
+ordered lens ops, and recursively tagged default values. The durable catalogue
+and postcard wire form contain that bounded canonical byte blob, not a separate
+`MigrationLens.id` field; decoding reconstructs the id from the payload, making
+a mismatched durable lens identity unrepresentable (`INV-LENS-1`, `INV-LENS-2`).
 
 ### 10.2 The catalogue
 
@@ -109,12 +111,101 @@ the catalogue storage settlement tracked by
 [#2037](https://github.com/garden-co/jazz/issues/2037) and
 [#1779](https://github.com/garden-co/jazz/issues/1779).
 
+#### Node-local protocol lineage payloads
+
+The node-owned `lens`, `schema_lineage_staged`, and
+`schema_lineage_pending` catalogue records are restart-authoritative protocol
+facts. Epoch 1 stores them in separately versioned, exact-consumed canonical
+binary payloads: a lens is `v1 | canonical MigrationLens bytes`; a lineage
+publication binds its ID, canonical schema envelope, canonical protocol lens,
+sorted new/dropped table names, and permanent physical-identity manifest; a
+staged receipt additionally carries its catalogue sequence, node-local schema
+alias, and canonical physical mapping, while a pending receipt carries its
+sequence and publication. Counts and byte lengths are checked before decoding
+their bodies; unknown versions, unordered/duplicate names, malformed nested
+records, trailing bytes, or a content ID/canonical re-encoding mismatch reject
+reopen before resident state changes. The former naked serde JSON has no
+compatibility decoder in this experimental storage epoch.
+
+The protocol `MigrationLens` is intentionally distinct from the server schema
+editor's `LensTransform`. A protocol lens describes a published source/target
+table lineage and includes copy, transform, reverse-default, and
+source-rejection operations; the server editor includes draft operation state
+and table-schema edit operations. They share low-level canonical primitives
+where appropriate but are not converted or encoded as each other.
+
+#### Server `cat:` recovery entries
+
+The server-local catalogue is also restart authority. Its only epoch-1 key is
+`"cat:v1:" | object_id:uuid[16]` in the default ordered-KV family. The raw UUID
+bytes are the identity and ordering coordinate; dashed, simple-hex, textual,
+short, extended, or a prior `cat:` spelling is not an alias. Recovery scans the
+whole reserved `cat:` namespace so that an old or alternate key fails closed
+rather than becoming invisible state.
+
+The matching value is exactly `"JCAT" | v1:u8 | object_id:uuid[16] |
+metadata_count:u16be | (key_len:u16be | UTF-8 key | value_len:u16be | UTF-8
+value)* | content_len:u32be | content`. Metadata keys are strictly increasing
+unsigned UTF-8 byte order; a key is bound to the repeated value object ID.
+Unknown versions, malformed UTF-8, duplicate/alternate map spelling,
+truncation, a trailing byte, a key/value ID mismatch, or an unsupported key
+namespace rejects the entire recovery scan before a resident catalogue index is
+constructed. The previous `HashMap` JSON/admin-row representation has no
+compatibility decoder in epoch 1 (`INV-LENS-25`).
+
+For example, object ID `4a…4a` has key
+`63 61 74 3a 76 31 3a 4a 4a … 4a` (`cat:v1:` plus sixteen raw `4a` bytes).
+Swapping the `app_id` and `type` metadata entries or copying that valid `JCAT`
+value under a different key fails before a valid earlier row can become
+resident.
+
+#### Nested server catalogue payloads
+
+The structural schema, migration-lens, and permissions payload families are
+restart-authoritative subrecords of a `JCAT` entry. Epoch 1 accepts only their
+frozen `v1` outer versions (`schema v1`, `lens v1`, and `permissions v1`,
+including the permissions bundle and head envelopes) and has no decoder for
+the former JSON-bearing versions or pre-freeze outer labels. These outer
+envelope labels are independent of the nested tagged-record `v1` algebra and
+of runtime schema-generation identities. Their `ColumnType::Json`
+schema declaration and `PolicyExpr::ExistsRel` relation tree use one nested
+`v1` tagged record/enum algebra: UTF-8 strings and fixed-width integer
+primitives use the same explicit primitive rules as the enclosing catalogue
+codec; every relation variant, predicate, value reference, row-id reference,
+join kind, projection, and recursion bound has a fixed numeric tag. A JSON
+object is a counted record of strictly increasing UTF-8 byte-ordered keys;
+arrays retain their declared order. Thus object source order and serde map
+layout are not identity, while every schema/policy field needed to reconstruct
+the semantic declaration is represented in the bytes.
+
+A nested codec marker other than `v1`, an unknown enum tag, a non-`0|1`
+presence flag, duplicate or unordered JSON object key, malformed number,
+overstated count, outer noncanonical ordering, truncation, or any suffix is
+corruption. Decoders reconstruct and re-encode the full payload before
+returning it; unequal bytes are rejected. Schema recovery additionally
+requires the decoded schema hash, `schema_hash` metadata, and JCAT object ID to
+agree, while a lens requires its source/target hash metadata and derived object
+ID to agree. These checks occur during the complete catalogue scan before a
+resident index is published. For example, the exact v12 JSON-schema fixture
+starts `0c 01 00 00 00 04 00 00 00 64 6f 63 73 ... 0c 01 01 07`; changing the
+last `01` (nested codec version) to `02`, or appending one byte to a valid
+permissions relation payload, rejects reopen rather than selecting a fallback
+or recovering a partial catalogue.
+
 Schema evolution is coordinated through the catalogue, which serializes
 publication and write-pointer changes under administrative authority. Catalogue
 mutations travel as admin-gated
 `SyncMessage::{PublishSchemaWithLens, PublishLens, SetCurrentWriteSchema}`
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
+
+The authority allocates the genesis physical-identity manifest exactly once.
+Every non-genesis publication is authored from its source schema's durable
+manifest, preserving mapped UUIDs and minting only genuinely new identities.
+On reopen, a node validates each decoded local physical mapping against the
+exact genesis or lineage-publication manifest and replays every source-to-target
+identity evolution before admitting any catalogue state. Local numeric aliases
+are compression details and never authorize a replacement UUID manifest.
 
 Exactly one database-wide catalogue sequencer assigns a dense monotone
 `CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
@@ -176,10 +267,30 @@ only after the complete schema-and-lineage bundle is durable and its Groove
 variants are registered (`INV-LENS-5`, `INV-LENS-6`, ch. 8). There is no
 partially-known or provisionally writeable schema state.
 
+An incoming parked commit unit is link-delivery state, not a decoded
+transaction/history row. If the receiver restarts before its schema lineage is
+active, reconnect re-delivers the unchanged canonical commit unit; it parks
+again until activation and then ingests/projects exactly once. Restart never
+uses the caller schema to decode the unavailable unit, and a retransmit with
+the same `tx_id` but different canonical content fails as a conflicting commit
+unit.
+
 Current-pointer messages and child schema bundles whose dependencies are not
 Active park durably across reopen. They retry after each activation, in
 catalogue order; a transient missing dependency is not a terminal rejection and
 never exposes the pointer early.
+
+Activation is a single durable state transition. Its batch removes the pending
+lineage envelope while recording the immutable staged payload, schema, lens,
+physical mapping, and active sequence receipt. The retained staged payload is
+the canonical witness for the active receipt; it is not a live retry queue. A
+crash before that batch leaves only retryable pending/staged evidence and no
+active receipt, while a crash after it leaves only the complete active bundle.
+For example, if an A-authored unit parks
+until the A→B publication arrives, the successful activation drains and
+projects that unit once. A reconnect that retransmits the same unit after reopen
+must observe the already-active lineage and retain one history/current result,
+never a second projection or a stale pending activation.
 
 ### 10.3 Shared physical storage
 
@@ -276,6 +387,80 @@ rollback exposure. The legacy logical `(table, schema-version)` registry
 `jazz_partitions` no longer exists; durable `jazz_schema_versions` mappings are
 the complete reopen input.
 
+A valid subscription whose registered shape awaits catalogue activation stays
+pending; absence of the active schema is not a permanent query rejection. The
+serving connection retains the usage-site handle and its admitted immutable
+session snapshot, then resumes ordinary subscription admission when the shape
+becomes available. Unsubscribe or connection closure retires that pending
+request. Pending requests are bounded by the existing per-peer registration
+count and aggregate registration-byte budget; exceeding these bounds is a
+protocol error, not silent eviction. Malformed or unsupported shapes still fail
+explicitly. For example, Bob's query opened against a schema draft returns no
+rows before its lineage lens is activated, then resolves through the same
+subscription after activation without requiring Bob to retry it.
+
+`jazz_schema_versions.physical_mapping` is one typed, exact-consumed **v1**
+binary payload, not JSON or a Rust-layout serialization. Its v1 payload-enum
+introduction ordinal is always a little-endian `u32`, including values below
+256; no alternate physical-mapping version or narrow-ordinal compatibility
+decoder exists. It canonically orders
+logical table names, column names, registry column ids, nested occurrence paths,
+and variant fields; malformed UTF-8, duplicate/out-of-order keys, unknown format
+versions, truncation, and trailing bytes fail closed at catalogue recovery.
+Each immutable publication carries an authority-allocated
+`PhysicalIdentityManifest`. `GlobalPhysicalTableId`,
+`GlobalPhysicalColumnId`, and `GlobalPhysicalEnumVariantId` are permanent UUID
+identities. The authority constructs a publication from the active source
+publication plus the proposed schema and lens while replaying every active,
+staged, and parked durable manifest as issuance history: mapped entities retain
+UUIDs and genuinely new tables, column epochs, and recursive enum variants
+receive fresh UUIDs absent from that entire history. There is no separate
+allocation protocol or retirement ledger: retained historical schema mappings
+and parked/staged publication payloads are the canonical reservation set.
+Names, documentation,
+structural paths, authored positions, and source order are lookup coordinates,
+never identity; same-shaped siblings therefore remain distinct. Canonical
+manifest bytes participate in the publication content id and travel in lineage
+publications, while the authority snapshot carries the genesis manifest.
+
+An identity is never returned to an allocation pool. A dropped table or column,
+an incompatible replacement epoch, and every enum UUID recursively beneath it
+are permanently retired: a later new table, column, or enum occurrence MUST
+receive a UUID absent from every preceding durable or reserved manifest, not
+merely from its immediate source manifest or the currently mapped target paths.
+Only the exact compatible mapped coordinate may retain its UUID (including the
+shared prefix of its recursive enum occurrences).
+
+A pure rename of a physically compatible column retains its UUID. Any
+incompatible epoch (changed value representation, merge strategy, or
+non-additive structural shape) MUST receive a fresh `GlobalPhysicalColumnId`;
+activation and recovery reject a publication that either changes the former or
+reuses the latter. A pending publication whose source has not arrived is still
+validated for its exact content id, manifest coverage, UUID uniqueness, and
+structural bounds; when the source does arrive, its source-to-target identity
+evolution is validated before the pending receipt can stage or activate.
+
+The stored `PhysicalTableId` and `PhysicalColumnId` `u64` values are only
+node-local compression aliases below the semantic layer. Nodes may allocate
+different aliases or receive publications in different network orders and must
+still converge on the same global UUID manifest. Before activation and before
+dependent rows can be decoded, Jazz rejects nil UUIDs, duplicate UUIDs, missing
+or extra descriptor coverage, and any mapped identity that changes across an
+evolution. Durable enum registry vectors bind local tags to permanent enum
+variant UUIDs; authored ordinals select entries in a schema but do not identify
+them. A binding may retain introducing schema/position solely as ordering and
+diagnostic provenance so an established append-only local tag prefix survives
+reopen; UUID alone defines equality, descriptor spelling, recursive parent path,
+collision detection, and cross-node identity. There is intentionally no legacy JSON reader or in-place migration for
+this pre-freeze format.
+
+This freeze covers authority allocation, publication/snapshot transport,
+durable physical-mapping encoding, and activation validation. The remaining
+#2037 server-catalogue work is operational ownership and rollout of this same
+publication contract; it may not introduce a second allocator or a node-local
+semantic identity. Lineage retention and compaction preserve the UUID manifest
+of every retained publication.
+
 Once activation begins, any registration or Active-marker failure puts the node
 in a fail-stop catalogue state: it must not continue serving against the
 temporarily installed in-memory schema. Reopen resumes the durable Staged
@@ -300,11 +485,13 @@ client self-declare `SYSTEM` authority.
 
 _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
 current-write pointer, aliases, and physical mappings survive node restart and
-are recovered before the full Groove database is constructed. Aliases and
-physical ids are node-local: when a client has already opened and written under
-a schema before receiving an authority snapshot, snapshot planning preserves
-that schema's local storage identity and reconciles its ancestors and descendants
-around the local anchor. Pending local rows therefore remain addressable.
+are recovered before the full Groove database is constructed. Aliases are
+node-local, while physical UUID identities are global and immutable. When a
+client has already opened and written under a schema before receiving an
+authority snapshot, snapshot planning preserves its local aliases, verifies and
+installs the authority UUID manifest, and reconciles ancestors and descendants
+around the local anchor. Pending local rows therefore remain addressable while
+cross-node semantic identity converges.
 
 ### 10.4 Writes: authored schema variants
 

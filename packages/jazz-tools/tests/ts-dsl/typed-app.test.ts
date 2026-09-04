@@ -230,7 +230,7 @@ describe("typed app prototype", () => {
     const reachableTeams = directParents.gather({
       step: ({ current }) =>
         graphApp.team_edges.where({ child_team: current }).hopTo("parent_team"),
-      maxDepth: 3,
+      maxDepth: 0,
     });
 
     expect(JSON.parse(reachableTeams._build())).toEqual({
@@ -245,7 +245,7 @@ describe("typed app prototype", () => {
           conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
           hops: ["parent_team"],
         },
-        max_depth: 3,
+        max_depth: 0,
         step_table: "team_edges",
         step_current_column: "child_team",
         step_conditions: [],

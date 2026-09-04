@@ -121,6 +121,34 @@ pub(super) fn validate_table_schema_variants(table: &TableSchema) -> Result<(), 
 }
 
 impl Database {
+    /// Capture the complete process-local registry state before a compound
+    /// schema activation.  Call [`Self::restore_runtime_registry`] if the
+    /// enclosing activation fails before its durable commit point.
+    ///
+    /// This is intentionally narrower than a database snapshot: rows,
+    /// publications, subscriptions' externally visible delivery state, and
+    /// storage are not rebuilt or copied.  Schema admission only changes the
+    /// IVM registry and its descriptor cache, so restoring these two pieces
+    /// makes a pre-publication failed admission observationally invisible to
+    /// live users. It deliberately does **not** restore the database poison
+    /// flag: after a failed durable publication, publication ordering is
+    /// ambiguous and every later entry point must remain fail closed.
+    #[doc(hidden)]
+    pub fn runtime_registry_checkpoint(&self) -> RuntimeRegistryCheckpoint {
+        RuntimeRegistryCheckpoint {
+            ivm_runtime: self.ivm_runtime.clone(),
+            stored_record_descriptors: self.stored_record_descriptors.borrow().clone(),
+        }
+    }
+
+    /// Discard schema-registration changes made since a matching
+    /// [`Self::runtime_registry_checkpoint`].
+    #[doc(hidden)]
+    pub fn restore_runtime_registry(&mut self, checkpoint: RuntimeRegistryCheckpoint) {
+        self.ivm_runtime = checkpoint.ivm_runtime;
+        *self.stored_record_descriptors.borrow_mut() = checkpoint.stored_record_descriptors;
+    }
+
     /// Return the live schema for a table.
     pub fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
         self.table(table)
@@ -294,13 +322,19 @@ impl Database {
                 index: index.name,
             });
         }
-        if let Err(error) = self
+        match self
             .ivm_runtime
             .register_table_index(table, index, &self.storage)
             .await
         {
-            self.poisoned = true;
-            return Err(Error::IvmRuntime(error));
+            Ok(()) => {}
+            Err(error @ IvmRuntimeError::UniqueIndexViolation { .. }) => {
+                return Err(Error::IvmRuntime(error));
+            }
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
         }
         Ok(())
     }

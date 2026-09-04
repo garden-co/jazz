@@ -1,6 +1,7 @@
 //! Shared compiler requests, resolvers, projections, and graph assertions.
 
 use super::*;
+use std::{future::Future, pin::Pin};
 
 pub(super) fn schema(byte: u8) -> SchemaVersionId {
     SchemaVersionId::from_bytes([byte; 16])
@@ -55,6 +56,9 @@ pub(super) fn collect_binding_source_fingerprint(
             collect_binding_source_fingerprint(seed, sources);
             collect_binding_source_fingerprint(step, sources);
         }
+        GraphBuilder::RecursiveStepWitness { recursive } => {
+            collect_binding_source_fingerprint(recursive, sources);
+        }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -81,6 +85,7 @@ pub(super) fn collect_binding_source_fingerprint(
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => {}
     }
@@ -106,6 +111,7 @@ pub(super) fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder)
         GraphBuilder::Recursive { seed, step, .. } => {
             graph_any(seed, predicate) || graph_any(step, predicate)
         }
+        GraphBuilder::RecursiveStepWitness { recursive } => graph_any(recursive, predicate),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -125,6 +131,7 @@ pub(super) fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder)
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::BindingSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => false,
@@ -174,6 +181,7 @@ pub(super) fn normalized_shape(byte: u8) -> NormalizedRowSetShape {
         auxiliary_sources: BTreeSet::new(),
         closure_paths: Vec::new(),
         join_contributions: Vec::new(),
+        inherited_contributions: Vec::new(),
         reachable_contributions: Vec::new(),
         nodes: BTreeMap::from([(
             root,
@@ -222,6 +230,7 @@ pub(super) fn chained_row_set_input(
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
             join_contributions: Vec::new(),
+            inherited_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
@@ -305,6 +314,7 @@ pub(super) fn aggregate_over_window_row_set_input(byte: u8) -> RowSetProgramInpu
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
             join_contributions: Vec::new(),
+            inherited_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
@@ -386,6 +396,7 @@ pub(super) fn claim_filtered_row_set_input(byte: u8, claim: &str) -> RowSetProgr
             auxiliary_sources: BTreeSet::new(),
             closure_paths: Vec::new(),
             join_contributions: Vec::new(),
+            inherited_contributions: Vec::new(),
             reachable_contributions: Vec::new(),
             nodes: BTreeMap::from([
                 (
@@ -574,7 +585,7 @@ pub(super) fn production_output_request(
 pub(super) fn sync_facts() -> BTreeSet<ProgramFactKey> {
     BTreeSet::from([
         ProgramFactKey::ResultMembership,
-        ProgramFactKey::SourceCoverage(program_scope()),
+        ProgramFactKey::ProgramSourceCoverage(program_scope()),
         ProgramFactKey::VersionWitnesses,
     ])
 }
@@ -583,91 +594,107 @@ pub(super) fn sync_facts() -> BTreeSet<ProgramFactKey> {
 pub(super) struct FakeSourceResolver {
     pub(super) requests: Vec<SourceRequest>,
     pub(super) branch_witnesses: bool,
+    pub(super) current_rows_use_arg_by: bool,
 }
 
 impl SourceGraphPreparer for FakeSourceResolver {
-    async fn prepare_source_graph(
-        &mut self,
-        request: &SourceRequest,
-    ) -> Result<ResolvedSource, SourceResolutionError> {
-        self.requests.push(request.clone());
-        let deletion_register = request
-            .requirements
-            .metadata
-            .contains(&SourceMetadataRequirement::DeletionMarkers)
-            .then(|| DeletionRegisterSource {
-                graph: GraphBuilder::table(format!("resolved_{}_deletions", request.source.table)),
-                row_uuid_field: "row_uuid".to_owned(),
-            });
-        let content_version = request
-            .requirements
-            .metadata
-            .contains(&SourceMetadataRequirement::VersionPayloads)
-            .then(|| ContentVersionSource {
-                graph: GraphBuilder::table(format!(
-                    "resolved_{}_content_versions",
-                    request.source.table
-                )),
-                row_uuid_field: "row_uuid".to_owned(),
-            });
-        let mut metadata = BTreeMap::from([
-            (
-                SourceMetadataRequirement::VersionWitnesses,
-                SourceMetadataFields::VersionWitnesses {
-                    schema_version_field: "schema_version".to_owned(),
-                    tx_time_field: "tx_time".to_owned(),
-                    tx_node_field: "tx_node_id".to_owned(),
-                    branch_or_prefix_field: self.branch_witnesses.then(|| "branch_id".to_owned()),
+    fn prepare_source_graph<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+        Box::pin(async move {
+            self.requests.push(request.clone());
+            let deletion_register = request
+                .requirements
+                .metadata
+                .contains(&SourceMetadataRequirement::DeletionMarkers)
+                .then(|| DeletionRegisterSource {
+                    graph: GraphBuilder::table(format!(
+                        "resolved_{}_deletions",
+                        request.source.table
+                    )),
+                    row_uuid_field: "row_uuid".to_owned(),
+                });
+            let content_version = request
+                .requirements
+                .metadata
+                .contains(&SourceMetadataRequirement::VersionPayloads)
+                .then(|| ContentVersionSource {
+                    graph: GraphBuilder::table(format!(
+                        "resolved_{}_content_versions",
+                        request.source.table
+                    )),
+                    row_uuid_field: "row_uuid".to_owned(),
+                });
+            let mut metadata = BTreeMap::from([
+                (
+                    SourceMetadataRequirement::VersionWitnesses,
+                    SourceMetadataFields::VersionWitnesses {
+                        schema_version_field: "schema_version".to_owned(),
+                        tx_time_field: "tx_time".to_owned(),
+                        tx_node_field: "tx_node_id".to_owned(),
+                        branch_or_prefix_field: self
+                            .branch_witnesses
+                            .then(|| "branch_id".to_owned()),
+                    },
+                ),
+                (
+                    SourceMetadataRequirement::Coverage,
+                    SourceMetadataFields::Coverage {
+                        coverage_field: "coverage".to_owned(),
+                    },
+                ),
+            ]);
+            if deletion_register.is_some() {
+                metadata.insert(
+                    SourceMetadataRequirement::DeletionMarkers,
+                    SourceMetadataFields::DeletionMarkers {
+                        deletion_state_field: "_deletion".to_owned(),
+                        deletion_tx_time_field: Some("tx_time".to_owned()),
+                        deletion_tx_node_field: Some("tx_node_id".to_owned()),
+                    },
+                );
+            }
+            let mut descriptor_fields = vec![
+                ("table", ValueType::String),
+                ("row_uuid", ValueType::Uuid),
+                ("user_title", ValueType::String),
+                ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+                ("user_tag", ValueType::Nullable(Box::new(ValueType::String))),
+                ("tx_time", ValueType::U64),
+                ("tx_node_id", ValueType::U64),
+                ("schema_version", ValueType::Uuid),
+                ("coverage", ValueType::String),
+                ("layer", ValueType::String),
+            ];
+            if self.branch_witnesses {
+                descriptor_fields.push(("branch_id", ValueType::Uuid));
+            }
+            Ok(ResolvedSource {
+                table_schema: TableSchema::new(
+                    request.source.table.clone(),
+                    [ColumnSchema::new("title", ColumnType::String)],
+                ),
+                graph: {
+                    let graph = GraphBuilder::table(format!("resolved_{}", request.source.table));
+                    if self.current_rows_use_arg_by {
+                        GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"])
+                    } else {
+                        graph
+                    }
                 },
-            ),
-            (
-                SourceMetadataRequirement::Coverage,
-                SourceMetadataFields::Coverage {
-                    coverage_field: "coverage".to_owned(),
+                row_shape: SourceRowShape {
+                    source: request.source.clone(),
+                    descriptor: RecordDescriptor::new(descriptor_fields),
+                    row_uuid_field: "row_uuid".to_owned(),
+                    metadata,
                 },
-            ),
-        ]);
-        if deletion_register.is_some() {
-            metadata.insert(
-                SourceMetadataRequirement::DeletionMarkers,
-                SourceMetadataFields::DeletionMarkers {
-                    deletion_state_field: "_deletion".to_owned(),
-                    deletion_tx_time_field: Some("tx_time".to_owned()),
-                    deletion_tx_node_field: Some("tx_node_id".to_owned()),
-                },
-            );
-        }
-        let mut descriptor_fields = vec![
-            ("table", ValueType::String),
-            ("row_uuid", ValueType::Uuid),
-            ("user_title", ValueType::String),
-            ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
-            ("user_tag", ValueType::Nullable(Box::new(ValueType::String))),
-            ("tx_time", ValueType::U64),
-            ("tx_node_id", ValueType::U64),
-            ("schema_version", ValueType::Uuid),
-            ("coverage", ValueType::String),
-            ("layer", ValueType::String),
-        ];
-        if self.branch_witnesses {
-            descriptor_fields.push(("branch_id", ValueType::Uuid));
-        }
-        Ok(ResolvedSource {
-            table_schema: TableSchema::new(
-                request.source.table.clone(),
-                [ColumnSchema::new("title", ColumnType::String)],
-            ),
-            graph: GraphBuilder::table(format!("resolved_{}", request.source.table)),
-            row_shape: SourceRowShape {
-                source: request.source.clone(),
-                descriptor: RecordDescriptor::new(descriptor_fields),
-                row_uuid_field: "row_uuid".to_owned(),
-                metadata,
-            },
-            routing_fields: BTreeSet::new(),
-            requires_result_payload: false,
-            content_version,
-            deletion_register,
+                routing_fields: BTreeSet::new(),
+                requires_result_payload: false,
+                content_version,
+                deletion_register,
+                authorized_deletion_preimage: None,
+            })
         })
     }
 }
@@ -678,7 +705,9 @@ impl SourceGraphPreparer for FakeSourceResolver {
 /// is explicitly out of scope for this change.
 pub(super) struct InlineCollectorResolver {
     pub(super) requests: Vec<SourceRequest>,
+    pub(super) prepared_child_titles: Vec<&'static str>,
     pub(super) denied_child_title: Option<&'static str>,
+    admitted_child_titles: Option<BTreeSet<&'static str>>,
     root_rows: Vec<InlineCollectorRootRow>,
 }
 
@@ -696,7 +725,9 @@ impl InlineCollectorResolver {
     pub(super) fn new(denied_child_title: Option<&'static str>) -> Self {
         Self {
             requests: Vec::new(),
+            prepared_child_titles: Vec::new(),
             denied_child_title,
+            admitted_child_titles: None,
             root_rows: vec![InlineCollectorRootRow {
                 id: 0xd1,
                 title: "parent",
@@ -708,12 +739,25 @@ impl InlineCollectorResolver {
         }
     }
 
+    /// Model a receiver's already-authorized CoveredInput closure. The
+    /// client-local compiler consumes the authority's exact admitted rows and
+    /// must never derive a second exclusion from `SourceAuthorizationRequest`.
+    pub(super) fn with_admitted_child_rows(
+        admitted_child_titles: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        let mut resolver = Self::new(None);
+        resolver.admitted_child_titles = Some(admitted_child_titles.into_iter().collect());
+        resolver
+    }
+
     pub(super) fn with_root_rows(
         root_rows: impl IntoIterator<Item = (u8, &'static str, u64)>,
     ) -> Self {
         Self {
             requests: Vec::new(),
+            prepared_child_titles: Vec::new(),
             denied_child_title: None,
+            admitted_child_titles: None,
             root_rows: root_rows
                 .into_iter()
                 .map(|(id, title, created_at)| InlineCollectorRootRow {
@@ -733,7 +777,9 @@ impl InlineCollectorResolver {
     ) -> Self {
         Self {
             requests: Vec::new(),
+            prepared_child_titles: Vec::new(),
             denied_child_title: None,
+            admitted_child_titles: None,
             root_rows: root_rows
                 .into_iter()
                 .map(
@@ -754,112 +800,136 @@ impl InlineCollectorResolver {
 }
 
 impl SourceGraphPreparer for InlineCollectorResolver {
-    async fn prepare_source_graph(
-        &mut self,
-        request: &SourceRequest,
-    ) -> Result<ResolvedSource, SourceResolutionError> {
-        self.requests.push(request.clone());
-        let descriptor = RecordDescriptor::new([
-            ("row_uuid", ValueType::Uuid),
-            (
-                "user_title",
-                ValueType::Nullable(Box::new(ValueType::String)),
-            ),
-            ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
-            ("$createdAt", ValueType::U64),
-            ("$createdBy", ValueType::Uuid),
-            ("$updatedAt", ValueType::U64),
-            ("$updatedBy", ValueType::Uuid),
-        ]);
-        let parent = row(0xd1).0;
-        let rows = match request.source.table.as_str() {
-            "todos" => self
-                .root_rows
-                .iter()
-                .map(|root| {
+    fn prepare_source_graph<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+        Box::pin(async move {
+            self.requests.push(request.clone());
+            let descriptor = RecordDescriptor::new([
+                ("row_uuid", ValueType::Uuid),
+                (
+                    "user_title",
+                    ValueType::Nullable(Box::new(ValueType::String)),
+                ),
+                ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+                ("$createdAt", ValueType::U64),
+                ("$createdBy", ValueType::Uuid),
+                ("$updatedAt", ValueType::U64),
+                ("$updatedBy", ValueType::Uuid),
+            ]);
+            let parent = row(0xd1).0;
+            let rows = match request.source.table.as_str() {
+                "todos" => self
+                    .root_rows
+                    .iter()
+                    .map(|root| {
+                        descriptor
+                            .create(&[
+                                Value::Uuid(row(root.id).0),
+                                Value::Nullable(Some(Box::new(Value::String(
+                                    root.title.to_owned(),
+                                )))),
+                                Value::Nullable(None),
+                                Value::U64(root.created_at),
+                                Value::Uuid(row(root.created_by).0),
+                                Value::U64(root.updated_at),
+                                Value::Uuid(row(root.updated_by).0),
+                            ])
+                            .expect("inline parent")
+                    })
+                    .collect(),
+                "todo_tags" => {
+                    let children = [(0xd2, "allowed"), (0xd3, "denied")]
+                        .into_iter()
+                        .filter(|(_, title)| {
+                            let denied = self
+                                .denied_child_title
+                                .is_some_and(|denied| denied == "*" || denied == *title);
+                            let authority_excludes = denied
+                                && matches!(
+                                    request.authorization,
+                                    SourceAuthorizationRequest::PolicyFiltered { .. }
+                                );
+                            // Client-local sources are the authority-approved
+                            // closure, never an unfiltered raw table scan.
+                            let admitted_input_excludes = self
+                                .admitted_child_titles
+                                .as_ref()
+                                .is_some_and(|admitted| !admitted.contains(title));
+                            !(authority_excludes || admitted_input_excludes)
+                        })
+                        .collect::<Vec<_>>();
+                    self.prepared_child_titles
+                        .extend(children.iter().map(|(_, title)| *title));
+                    children
+                        .into_iter()
+                        .map(|(id, title)| {
+                            descriptor
+                                .create(&[
+                                    Value::Uuid(row(id).0),
+                                    Value::Nullable(Some(Box::new(Value::String(
+                                        title.to_owned(),
+                                    )))),
+                                    Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
+                                    Value::U64(20),
+                                    Value::Uuid(row(0xa2).0),
+                                    Value::U64(21),
+                                    Value::Uuid(row(0xa2).0),
+                                ])
+                                .expect("inline child")
+                        })
+                        .collect()
+                }
+                "todo_labels" => vec![
                     descriptor
                         .create(&[
-                            Value::Uuid(row(root.id).0),
-                            Value::Nullable(Some(Box::new(Value::String(root.title.to_owned())))),
-                            Value::Nullable(None),
-                            Value::U64(root.created_at),
-                            Value::Uuid(row(root.created_by).0),
-                            Value::U64(root.updated_at),
-                            Value::Uuid(row(root.updated_by).0),
-                        ])
-                        .expect("inline parent")
-                })
-                .collect(),
-            "todo_tags" => [(0xd2, "allowed"), (0xd3, "denied")]
-                .into_iter()
-                .filter(|(_, title)| {
-                    !matches!(
-                        (&request.authorization, self.denied_child_title),
-                        (SourceAuthorizationRequest::PolicyFiltered { .. }, Some(denied))
-                            if denied == "*" || *title == denied
-                    )
-                })
-                .map(|(id, title)| {
-                    descriptor
-                        .create(&[
-                            Value::Uuid(row(id).0),
-                            Value::Nullable(Some(Box::new(Value::String(title.to_owned())))),
+                            Value::Uuid(row(0xd4).0),
+                            Value::Nullable(Some(Box::new(Value::String("label".to_owned())))),
                             Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
-                            Value::U64(20),
-                            Value::Uuid(row(0xa2).0),
-                            Value::U64(21),
-                            Value::Uuid(row(0xa2).0),
+                            Value::U64(30),
+                            Value::Uuid(row(0xa3).0),
+                            Value::U64(31),
+                            Value::Uuid(row(0xa3).0),
                         ])
-                        .expect("inline child")
-                })
-                .collect(),
-            "todo_labels" => vec![
-                descriptor
-                    .create(&[
-                        Value::Uuid(row(0xd4).0),
-                        Value::Nullable(Some(Box::new(Value::String("label".to_owned())))),
-                        Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
-                        Value::U64(30),
-                        Value::Uuid(row(0xa3).0),
-                        Value::U64(31),
-                        Value::Uuid(row(0xa3).0),
-                    ])
-                    .expect("inline sibling child"),
-            ],
-            "tag_notes" => vec![
-                descriptor
-                    .create(&[
-                        Value::Uuid(row(0xd5).0),
-                        Value::Nullable(Some(Box::new(Value::String("note".to_owned())))),
-                        Value::Nullable(Some(Box::new(Value::Uuid(row(0xd2).0)))),
-                        Value::U64(40),
-                        Value::Uuid(row(0xa4).0),
-                        Value::U64(41),
-                        Value::Uuid(row(0xa4).0),
-                    ])
-                    .expect("inline grandchild"),
-            ],
-            other => panic!("unexpected inline collector source {other}"),
-        };
-        Ok(ResolvedSource {
-            table_schema: TableSchema::new(
-                request.source.table.clone(),
-                [
-                    ColumnSchema::new("title", ColumnType::String),
-                    ColumnSchema::new("todo", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
+                        .expect("inline sibling child"),
                 ],
-            ),
-            graph: GraphBuilder::inline_records(descriptor.clone(), rows),
-            row_shape: SourceRowShape {
-                source: request.source.clone(),
-                descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
-                metadata: BTreeMap::new(),
-            },
-            routing_fields: BTreeSet::new(),
-            requires_result_payload: false,
-            content_version: None,
-            deletion_register: None,
+                "tag_notes" => vec![
+                    descriptor
+                        .create(&[
+                            Value::Uuid(row(0xd5).0),
+                            Value::Nullable(Some(Box::new(Value::String("note".to_owned())))),
+                            Value::Nullable(Some(Box::new(Value::Uuid(row(0xd2).0)))),
+                            Value::U64(40),
+                            Value::Uuid(row(0xa4).0),
+                            Value::U64(41),
+                            Value::Uuid(row(0xa4).0),
+                        ])
+                        .expect("inline grandchild"),
+                ],
+                other => panic!("unexpected inline collector source {other}"),
+            };
+            Ok(ResolvedSource {
+                table_schema: TableSchema::new(
+                    request.source.table.clone(),
+                    [
+                        ColumnSchema::new("title", ColumnType::String),
+                        ColumnSchema::new("todo", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
+                    ],
+                ),
+                graph: GraphBuilder::inline_records(descriptor.clone(), rows),
+                row_shape: SourceRowShape {
+                    source: request.source.clone(),
+                    descriptor,
+                    row_uuid_field: "row_uuid".to_owned(),
+                    metadata: BTreeMap::new(),
+                },
+                routing_fields: BTreeSet::new(),
+                requires_result_payload: false,
+                content_version: None,
+                deletion_register: None,
+                authorized_deletion_preimage: None,
+            })
         })
     }
 }
@@ -963,6 +1033,7 @@ pub(super) fn correlated_path_request(
                 auxiliary_sources: BTreeSet::new(),
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
+                inherited_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
                 nodes: BTreeMap::from([
                     (

@@ -110,7 +110,7 @@ pub(super) fn aggregate_query_row_uuid(
     let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
         "aggregate query missing aggregate",
     ))?;
-    let row_value = match &aggregate.group_by {
+    let (row_value, row_type) = match &aggregate.group_by {
         Some(group_by) => {
             let field = user_column_field(group_by);
             let index = record
@@ -120,16 +120,34 @@ pub(super) fn aggregate_query_row_uuid(
                 .ok_or(Error::InvalidStoredValue(
                     "aggregate record is missing group identity",
                 ))?;
-            record.get_idx(index)?
+            (
+                record.get_idx(index)?,
+                record
+                    .descriptor()
+                    .fields()
+                    .get(index)
+                    .ok_or(Error::InvalidStoredValue(
+                        "aggregate group identity field is missing from descriptor",
+                    ))?
+                    .value_type
+                    .clone(),
+            )
         }
-        None => Value::String("global".to_owned()),
+        None => (
+            Value::String("global".to_owned()),
+            groove::records::ValueType::String,
+        ),
     };
-    let row = postcard::to_allocvec(&row_value)
-        .map_err(|_| Error::InvalidStoredValue("aggregate result row encoding failed"))?;
+    let row = super::super::codec::settled_result_value_storage_bytes(&row_value, &row_type)?;
     aggregate_result_member_row_uuid(&ResultMemberEntry::Synthetic {
         table: "aggregate_result".to_owned(),
         row,
-        replacement: SyntheticReplacementToken::from_encoded_record(Vec::new()),
+        replacement: SyntheticReplacementToken::from_encoded_record(
+            super::super::codec::settled_result_value_storage_bytes(
+                &Value::String("identity-only".to_owned()),
+                &groove::records::ValueType::String,
+            )?,
+        ),
     })
 }
 

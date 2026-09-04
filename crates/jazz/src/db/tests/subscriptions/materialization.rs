@@ -45,12 +45,189 @@ fn maintained_physical_point_subscription_stays_live_for_only_its_row() {
         Default::default(),
     )
     .unwrap();
-    let SubscriptionEvent::Delta { updated, .. } = block_on(subscription.next_raw()).unwrap()
+    let SubscriptionEvent::Delta { updated, .. } =
+        block_on(subscription.next_event()).expect("target-row point-subscription delta")
     else {
         panic!("expected target-row point-subscription delta");
     };
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0].row_uuid(), target);
+    assert_eq!(
+        updated[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("changed".to_owned()))
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the physical completion of an unchanged projection is not a public delta"
+    );
+
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("changed again".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    let SubscriptionEvent::Delta { updated, .. } =
+        block_on(subscription.next_event()).expect("second target-row point-subscription delta")
+    else {
+        panic!("expected second target-row point-subscription delta");
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row_uuid(), target);
+    assert_eq!(
+        updated[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("changed again".to_owned()))
+    );
+}
+
+/// A deferred local write refreshes a projected current-view subscription on
+/// its owning tick, even when the stream opened before that tick.
+///
+/// alice ──open projected view──► local current-view collector
+/// alice ──deferred insert──────► owner tick ──reset/delta──► subscription
+#[test]
+fn deferred_local_publication_refreshes_projected_current_view() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let db = open_db(0xc2, author, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default())
+        .expect("open projected local subscription");
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected empty opening projected-subscription delta");
+    };
+    assert!(added.is_empty());
+
+    let inserted = row(0x73);
+    db.insert(
+        "todos",
+        cells("settles after opening", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            ..Default::default()
+        },
+    )
+    .expect("queue deferred local insert");
+    db.tick()
+        .expect("settle deferred publication and refresh subscription");
+
+    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+        panic!("expected projected delta after deferred local insert");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [inserted]
+    );
+    db.tick()
+        .expect("quiet owner tick after projected publication");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the settlement refresh publishes the queued local write once"
+    );
+}
+
+/// Mergeable transaction publication takes the same deferred-local admission
+/// path as a direct write, including projection-only current views.
+#[test]
+fn deferred_mergeable_commit_refreshes_projected_current_view_once() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let db = open_db(0xc3, author, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default())
+        .expect("open projected local subscription");
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected empty opening projected-subscription delta");
+    };
+    assert!(added.is_empty());
+
+    let inserted = row(0x74);
+    let tx = db.mergeable_tx().expect("open mergeable transaction");
+    tx.insert(
+        "todos",
+        cells("mergeable after opening", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            ..Default::default()
+        },
+    )
+    .expect("stage deferred mergeable insert");
+    tx.commit()
+        .expect("admit deferred mergeable publication and refresh subscription");
+
+    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+        panic!("expected projected delta after deferred mergeable commit");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [inserted]
+    );
+    db.tick()
+        .expect("quiet owner tick after projected mergeable publication");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the mergeable settlement refresh publishes the queued local write once"
+    );
+}
+
+/// Exclusive transaction publication takes the same deferred-local admission
+/// path as a direct write, including projection-only current views.
+#[test]
+fn deferred_exclusive_commit_refreshes_projected_current_view_once() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let db = open_db(0xc4, author, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default())
+        .expect("open projected local subscription");
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected empty opening projected-subscription delta");
+    };
+    assert!(added.is_empty());
+
+    let inserted = row(0x75);
+    let tx = db.exclusive_tx().expect("open exclusive transaction");
+    tx.insert(
+        "todos",
+        cells("exclusive after opening", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            ..Default::default()
+        },
+    )
+    .expect("stage deferred exclusive insert");
+    tx.commit()
+        .expect("admit deferred exclusive publication and refresh subscription");
+
+    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+        panic!("expected projected delta after deferred exclusive commit");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [inserted]
+    );
+    db.tick()
+        .expect("quiet owner tick after projected exclusive publication");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the exclusive settlement refresh publishes the queued local write once"
+    );
 }
 
 #[test]
@@ -112,7 +289,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
 }
 
 #[test]
-fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change() {
+fn runtime_reset_rebuilds_occurrence_sidecar_after_order_change() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
@@ -140,7 +317,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             },
         )
         .unwrap();
-    let last_write = client
+    let _last_write = client
         .insert(
             "todos",
             cells("omega", false, client_author),
@@ -164,7 +341,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         vec![first, middle, last]
     );
 
-    let first_updated = client
+    let _first_updated = client
         .update(
             "todos",
             first,
@@ -172,36 +349,11 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             Default::default(),
         )
         .unwrap();
-    let binding_view_key = BindingViewKey::new(
-        prepared.shape().shape_id(),
-        prepared.binding().binding_id(),
-        RegisterShapeOptions {
-            tier: opts.tier,
-            read_view: opts.read_view,
-            ..RegisterShapeOptions::default()
-        }
-        .read_view_key(),
-    );
-    client
-        .node
-        .node
-        .borrow_mut()
-        .inject_pending_authoritative_reset_for_test(
-            binding_view_key,
-            [
-                ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    first,
-                    first_updated.mergeable_tx_id(),
-                )),
-                ResultMemberEntry::row((
-                    "todos".to_owned().into(),
-                    last,
-                    last_write.mergeable_tx_id(),
-                )),
-            ],
-            GlobalTime(42),
-        );
+    // A runtime replacement is a genuine local reset.  The retired test
+    // injected an unscoped authority result to choose a synthetic subset;
+    // INV-SYNC-36 instead requires an exact covered-input receipt for remote
+    // authority changes.
+    client.invalidate_groove_runtime_for_test();
 
     assert_eq!(client.refresh_subscriptions().unwrap(), 1);
     let event = block_on(subscription.next_raw()).unwrap();
@@ -219,7 +371,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
     };
     assert_eq!(
         added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
-        vec![last, first],
+        vec![middle, last, first],
         "the reset wire payload must preserve the maintained snapshot order"
     );
 
@@ -241,8 +393,8 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             .iter()
             .map(|output| output.row_uuid())
             .collect::<Vec<_>>(),
-        vec![last, first],
-        "reset rows reordered after the title update and removed the middle row"
+        vec![middle, last, first],
+        "reset rows reordered after the title update"
     );
     assert_eq!(
         paired
@@ -250,6 +402,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             .map(|output| output.occurrence_id.clone())
             .collect::<Vec<_>>(),
         vec![
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(middle.0)),
             OutputOccurrenceId::single_source(ObjectId::from_uuid(last.0)),
             OutputOccurrenceId::single_source(ObjectId::from_uuid(first.0)),
         ],
@@ -257,173 +410,8 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
     );
     assert_ne!(
         first_write.mergeable_tx_id(),
-        first_updated.mergeable_tx_id()
+        _first_updated.mergeable_tx_id()
     );
-}
-
-#[test]
-fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
-    let schema = schema();
-    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xc1, client_author, &schema);
-
-    let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, client_author);
-
-    let query = Query::from("todos");
-    let prepared = prepared(&client, &query);
-    let opts = global_subscribe_opts();
-    let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
-    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
-    client.tick().unwrap();
-    server.tick().unwrap();
-    client.tick().unwrap();
-    assert!(
-        event_settled(&block_on(subscription.next_raw()).unwrap()),
-        "the injected reset test needs a real current-connection authority receipt"
-    );
-    // Keep the reset-fallback assertion focused on the resulting publication,
-    // while retaining the real connection receipt required by Edge/Global.
-    subscription._state.borrow_mut().settled = false;
-
-    let missing_tx = TxId::new(
-        TxTime(116_898_697_390_129_152),
-        NodeUuid::from_bytes([0x77; 16]),
-    );
-    let binding_view_key = BindingViewKey::new(
-        prepared.shape().shape_id(),
-        prepared.binding().binding_id(),
-        RegisterShapeOptions {
-            tier: opts.tier,
-            read_view: opts.read_view,
-            ..RegisterShapeOptions::default()
-        }
-        .read_view_key(),
-    );
-    client
-        .node
-        .node
-        .borrow_mut()
-        .inject_pending_authoritative_reset_for_test(
-            binding_view_key,
-            [ResultMemberEntry::row((
-                "todos".to_owned().into(),
-                row(0x7a),
-                missing_tx,
-            ))],
-            GlobalTime(42),
-        );
-    client
-        .node
-        .node
-        .borrow_mut()
-        .reset_subscription_snapshot_for_link_call_count();
-
-    let changed = client.refresh_subscriptions().unwrap();
-    assert_eq!(changed, 1);
-    let node = client.node.node.borrow();
-    assert_eq!(
-        node.sync_metrics()
-            .authoritative_reset_missing_payload_fallbacks,
-        1
-    );
-    assert_eq!(node.subscription_snapshot_for_link_call_count(), 1);
-    assert!(
-        node.has_pending_authoritative_reset_for_test(binding_view_key),
-        "missing payload fallback must keep the authoritative reset pending for a later retry"
-    );
-    drop(node);
-    assert!(prepared_all(&client, &query, ReadOpts::default()).is_empty());
-}
-
-#[test]
-fn authoritative_reset_skips_stale_member_without_falling_back() {
-    let schema = schema();
-    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
-
-    let query = Query::from("todos");
-    let prepared = prepared(&client, &query);
-    let opts = global_subscribe_opts();
-    let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
-    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
-
-    let live_row = row(0x7a);
-    let stale_row = row(0x7b);
-    let tx_id = client
-        .node
-        .node
-        .borrow_mut()
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", live_row, client.next_now_ms())
-                .made_by(client_author)
-                .permission_subject(client_author)
-                .cells(cells("live", false, client_author)),
-        )
-        .unwrap();
-
-    let binding_view_key = BindingViewKey::new(
-        prepared.shape().shape_id(),
-        prepared.binding().binding_id(),
-        RegisterShapeOptions {
-            tier: opts.tier,
-            read_view: opts.read_view,
-            ..RegisterShapeOptions::default()
-        }
-        .read_view_key(),
-    );
-    client
-        .node
-        .node
-        .borrow_mut()
-        .inject_pending_authoritative_reset_for_test(
-            binding_view_key,
-            [
-                ResultMemberEntry::row(("todos".to_owned().into(), live_row, tx_id)),
-                ResultMemberEntry::row(("todos".to_owned().into(), stale_row, tx_id)),
-            ],
-            GlobalTime(42),
-        );
-    client
-        .node
-        .node
-        .borrow_mut()
-        .reset_subscription_snapshot_for_link_call_count();
-
-    let changed = client.refresh_subscriptions().unwrap();
-    assert_eq!(changed, 1);
-    assert_eq!(
-        client
-            .node
-            .node
-            .borrow()
-            .subscription_snapshot_for_link_call_count(),
-        0,
-        "stale members with present tx metadata must not force local query fallback"
-    );
-    let event = block_on(subscription.next_raw()).unwrap();
-    let SubscriptionEvent::Delta {
-        reset,
-        added,
-        updated,
-        removed,
-        settled,
-        ..
-    } = event
-    else {
-        panic!("expected subscription delta");
-    };
-    assert!(reset);
-    assert!(
-        !settled,
-        "an injected durable reset is not a fresh current-connection ViewUpdate receipt"
-    );
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
-    assert_eq!(added.len(), 1);
-    assert_eq!(added[0].row_uuid(), live_row);
 }
 
 #[test]
@@ -674,99 +662,6 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
 }
 
 #[test]
-fn propagated_authoritative_reset_uses_delivered_binding_view() {
-    let schema = schema();
-    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
-
-    let query = Query::from("todos");
-    let prepared = prepared(&client, &query);
-    let opts = ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Deferred,
-        propagation: Propagation::Full,
-        include_deleted: false,
-        ..ReadOpts::default()
-    };
-    let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
-    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
-
-    let live_row = row(0x7c);
-    let tx_id = client
-        .node
-        .node
-        .borrow_mut()
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", live_row, client.next_now_ms())
-                .made_by(client_author)
-                .permission_subject(client_author)
-                .cells(cells("delivered reset", false, client_author)),
-        )
-        .unwrap();
-    let delivered_binding_view_key = BindingViewKey::new(
-        prepared.shape().shape_id(),
-        prepared.binding().binding_id(),
-        RegisterShapeOptions {
-            tier: opts.tier,
-            read_view: opts.read_view,
-            ..RegisterShapeOptions::default()
-        }
-        .read_view_key(),
-    );
-    client
-        .node
-        .node
-        .borrow_mut()
-        .inject_pending_authoritative_reset_for_test(
-            delivered_binding_view_key,
-            [ResultMemberEntry::row((
-                "todos".to_owned().into(),
-                live_row,
-                tx_id,
-            ))],
-            GlobalTime(42),
-        );
-    client
-        .node
-        .node
-        .borrow_mut()
-        .reset_subscription_snapshot_for_link_call_count();
-
-    let changed = client.refresh_subscriptions().unwrap();
-    assert_eq!(changed, 1);
-    assert_eq!(
-        client
-            .node
-            .node
-            .borrow()
-            .subscription_snapshot_for_link_call_count(),
-        0,
-        "propagated resets are delivered under the app subscription binding view, not the upstream global coverage key"
-    );
-    let event = block_on(subscription.next_raw()).unwrap();
-    let SubscriptionEvent::Delta {
-        reset,
-        added,
-        updated,
-        removed,
-        settled,
-        ..
-    } = event
-    else {
-        panic!("expected subscription delta");
-    };
-    assert!(reset);
-    assert!(
-        !settled,
-        "this synthetic unit injects only the delivered binding-view reset; real upstream traffic also advances the global coverage settle stamp"
-    );
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
-    assert_eq!(added.len(), 1);
-    assert_eq!(added[0].row_uuid(), live_row);
-}
-
-#[test]
 fn view_update_is_not_empty_when_it_only_carries_program_facts() {
     let subscription = crate::protocol::SubscriptionKey {
         shape_id: crate::query::ShapeId(uuid::Uuid::from_bytes([0x11; 16])),
@@ -778,11 +673,9 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         settled_through: crate::time::GlobalTime(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     });
@@ -793,11 +686,9 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         settled_through: crate::time::GlobalTime(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
         program_fact_adds: vec![crate::protocol::ViewFactEntry::PathCorrelationCoverage(
             crate::protocol::PathCorrelationCoverageEntry {
                 path: "owner".to_owned(),

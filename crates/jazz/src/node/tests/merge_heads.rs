@@ -14,6 +14,154 @@ fn merge_head_branch_schema() -> JazzSchema {
     )
 }
 
+fn assert_authority_publication_reopen_is_atomic(
+    schema: &JazzSchema,
+    publication: &crate::protocol::AuthorityPublication,
+) {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    // Cancel admission at each durable write boundary, including writes that
+    // allocate aliases. Reopening must expose either the whole publication or
+    // none of it, never an accepted prefix that core might merge independently.
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut reached_completion = false;
+    for allowed_writes in 0..12 {
+        let (storage, control) = TestStorage::controlled(&refs);
+        let reopen_handle = storage.clone();
+        let mut receiver = NodeState::new_history_complete(node(0xee), schema.clone(), storage).unwrap();
+        control.take_observed();
+        control.pause_on(TestStorageOperation::WriteMany);
+        let mut admission = Box::pin(receiver.ingest_edge_authority_publication(publication.clone(), 100));
+        let mut released_writes = 0;
+        let mut stopped = false;
+        for _ in 0..50_000 {
+            let poll = std::future::Future::poll(admission.as_mut(),
+                &mut std::task::Context::from_waker(std::task::Waker::noop()));
+            if let std::task::Poll::Ready(result) = poll {
+                assert!(result.unwrap().publications.is_empty());
+                reached_completion = true;
+                stopped = true;
+                break;
+            }
+            let writes = control.observed().iter().filter(|operation|
+                **operation == TestStorageOperation::WriteMany).count();
+            if writes > allowed_writes {
+                stopped = true;
+                break;
+            }
+            if writes > released_writes {
+                control.release_one();
+                released_writes = writes;
+            }
+        }
+        assert!(stopped, "publication did not reach a bounded persistence point");
+        drop(admission);
+        drop(receiver);
+        control.resume();
+        let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
+        let mut reopened = NodeState::new_history_complete(node(0xee), schema.clone(), storage).unwrap();
+        let mut present = 0;
+        for unit in &publication.commits {
+            if let Some(stored) = reopened.query_transaction(unit.tx.tx_id).unwrap() {
+                assert_eq!(stored.fate, Fate::Accepted);
+                assert_eq!(stored.durability, DurabilityTier::Global);
+                present += 1;
+            }
+        }
+        assert!(present == 0 || present == publication.commits.len(),
+            "cancellation after {allowed_writes} writes exposed only {present} publication members");
+        if reached_completion { break; }
+    }
+    assert!(reached_completion, "the persistence-boundary sweep must include completed admission");
+}
+
+#[test]
+fn immediate_branch_commit_unit_matches_durable_replay() {
+    // The wire envelope is the boundary under test: immediate publication must
+    // carry exactly the same generated intent as replay after a process restart.
+    let schema = merge_head_branch_schema();
+    let (dir, mut writer) = open_node_with_schema(node(0xb3), schema.clone());
+    let (tx_id, immediate) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0xbc), 10)
+                .branch(branch_selector(0xa3))
+                .made_by(user(0xb4))
+                .cells(BTreeMap::from([("title".to_owned(), v("retained metadata"))])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = &immediate else {
+        panic!("expected commit unit");
+    };
+    assert_eq!(tx.made_by, user(0xb4));
+    assert_eq!(
+        tx.contribution_merge.as_ref()
+            .expect("immediate publication lost its generated branch-write intent")
+            .branch_write_intents.len(),
+        1,
+        "immediate publication must retain generated branch-write intent"
+    );
+    drop(writer);
+    let mut reopened = reopen_node_at(&dir, node(0xb3), schema);
+    assert_eq!(immediate, reopened.commit_unit_for(tx_id).unwrap());
+}
+
+#[test]
+fn concurrent_branch_inserts_merge_without_bypassing_read_or_update_policy() {
+    for (can_read, can_update) in [(true, true), (false, true), (true, false)] {
+        let policy = |allowed| if allowed { PublicPolicyExpr::True } else { PublicPolicyExpr::False };
+        let schema = build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(public_all_policies()
+                        .with_select(policy(can_read))
+                        .with_update(Some(policy(can_update)), PublicPolicyExpr::True)),
+            ),
+        );
+        let (_left_dir, mut left) = open_node_with_schema(node(0xb5), schema.clone());
+        let (_right_dir, mut right) = open_node_with_schema(node(0xb6), schema.clone());
+        let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0xb7), schema);
+        let shared_row = row(0xbd);
+        let commit = |title| MergeableCommit::new("todos", shared_row, 10)
+            .branch(branch_selector(0xa4))
+            .made_by(user(0xb8))
+            .cells(BTreeMap::from([("title".to_owned(), v(title))]));
+        let (left_tx, left_unit) = left.commit_mergeable_unit_settled(commit("left")).unwrap();
+        let (right_tx, right_unit) = right.commit_mergeable_unit_settled(commit("right")).unwrap();
+        let first = core.apply_sync_message_settled(left_unit).unwrap();
+        assert!(first.iter().any(|receipt| matches!(receipt,
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == left_tx
+        )), "first insert must be admitted without requiring prior read access: {first:?}");
+        let expected = if can_read && can_update {
+            Fate::Accepted
+        } else {
+            Fate::Rejected(RejectionReason::AuthorizationDenied)
+        };
+        let second = core.apply_sync_message_settled(right_unit).unwrap();
+        assert!(second.iter().any(|receipt| matches!(receipt,
+            SyncMessage::FateUpdate { tx_id, fate, .. } if *tx_id == right_tx && *fate == expected
+        )), "read={can_read}, update={can_update}: {second:?}");
+        if expected == Fate::Accepted {
+            let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+            assert_eq!(frontier.len(), 1);
+            let heads = merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap();
+            assert_eq!(heads.len(), 1, "both admitted inserts must produce one merge head");
+            let merge_tx = *heads.iter().next().unwrap();
+            assert_ne!(merge_tx, left_tx);
+            assert_ne!(merge_tx, right_tx);
+            let SyncMessage::CommitUnit { versions, .. } = core.commit_unit_for(merge_tx).unwrap() else {
+                panic!("expected merge commit unit");
+            };
+            assert_eq!(versions.len(), 1);
+            assert_eq!(versions[0].parents(), &[left_tx, right_tx]);
+        } else {
+            assert!(core.query_versions_for_tx(right_tx).unwrap().is_empty());
+        }
+    }
+}
+
 #[test]
 fn merge_heads_match_history_for_first_and_subsequent_authored_versions() {
     let schema = two_column_schema();
@@ -121,6 +269,201 @@ fn merge_heads_match_history_for_edge_accepted_units() {
     settle_outcome(&mut edge, outcome).unwrap();
     edge.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
+}
+
+#[test]
+fn edge_creates_edge_durable_merge_for_concurrent_inserts_and_edits() {
+    for edit_existing in [false, true] {
+        let schema = two_column_schema();
+        let (_left_dir, mut left) = open_node_with_schema(node(0xc1), schema.clone());
+        let (_right_dir, mut right) = open_node_with_schema(node(0xc2), schema.clone());
+        let (edge_dir, mut edge) = open_node_with_schema(node(0xc9), schema.clone());
+        let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0xcf), schema.clone());
+        let shared_row = row(0xca);
+        let admit = |edge: &mut NodeState<RocksDbStorage>, unit| {
+            let SyncMessage::CommitUnit { tx, versions } = unit else {
+                panic!("expected commit unit");
+            };
+            let tx_id = tx.tx_id;
+            let outcome = crate::db::block_on(edge.ingest_edge_authority_mergeable_commit_unit(
+                tx, versions, u64::MAX - SKEW_TOLERANCE_MS,
+            )).unwrap();
+            let receipts = settle_outcome(edge, outcome).unwrap();
+            assert!(receipts.iter().any(|receipt| matches!(receipt,
+                SyncMessage::FateUpdate {
+                    tx_id: accepted_tx, fate: Fate::Accepted,
+                    global_time: None, durability: Some(DurabilityTier::Edge),
+                } if *accepted_tx == tx_id
+            )), "edge admission must remain Edge-only: {receipts:?}");
+        };
+        let parents = if edit_existing {
+            let (seed_tx, seed) = left.commit_mergeable_unit_settled(
+                MergeableCommit::new("todos", shared_row, 10)
+                    .cells(BTreeMap::from([("title".to_owned(), v("seed")), ("body".to_owned(), v("seed"))])),
+            ).unwrap();
+            right.apply_sync_message_settled(seed.clone()).unwrap();
+            admit(&mut edge, seed);
+            vec![seed_tx]
+        } else { Vec::new() };
+        let (left_tx, left_unit) = left.commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", shared_row, 20).parents(parents.clone())
+                .cells(BTreeMap::from([("title".to_owned(), v("left"))])),
+        ).unwrap();
+        let (right_tx, right_unit) = right.commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", shared_row, 20).parents(parents)
+                .cells(BTreeMap::from([("body".to_owned(), v("right"))])),
+        ).unwrap();
+        admit(&mut edge, left_unit.clone());
+        admit(&mut edge, right_unit.clone());
+
+        let frontier = edge.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+        assert_eq!(frontier.len(), 1);
+        let heads = merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap();
+        assert_eq!(heads.len(), 1, "edge must merge both heads before forwarding (edit={edit_existing})");
+        let merge_tx = *heads.iter().next().unwrap();
+        assert_eq!(merge_tx.node, node(0xc9));
+        assert_eq!(edge.transaction_state_settled(merge_tx), Some((Fate::Accepted, None, DurabilityTier::Edge)));
+        let SyncMessage::CommitUnit { versions, .. } = edge.commit_unit_for(merge_tx).unwrap() else {
+            panic!("expected merge unit");
+        };
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].parents(), &[left_tx, right_tx]);
+        admit(&mut edge, left_unit);
+        admit(&mut edge, right_unit);
+        let replayed = edge.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+        assert_eq!(merge_heads_from_value(replayed[0].record().get_idx(3).unwrap()).unwrap(), heads);
+
+        let publication = edge.edge_authority_publication_for(right_tx).unwrap();
+        assert_authority_publication_reopen_is_atomic(&schema, &publication);
+        drop(edge);
+        let mut edge = reopen_node_at(&edge_dir, node(0xc9), schema);
+        assert_eq!(edge.edge_authority_publication_for(right_tx).unwrap(), publication,
+            "publication reconstruction must survive an edge restart");
+        let message = SyncMessage::AuthorityPublication(publication.clone());
+        let bytes = crate::wire::encode_sync_message(&message).unwrap();
+        assert!(crate::wire::decode_sync_message_for_features(&bytes,
+            crate::wire::current_wire_features() & !crate::wire::FEATURE_AUTHORITY_PUBLICATIONS).is_err());
+        let message = crate::wire::decode_sync_message_for_features(&bytes,
+            crate::wire::current_wire_features()).unwrap();
+        assert_eq!(message, SyncMessage::AuthorityPublication(publication.clone()));
+        for trust in [CommitUnitTrust::Session, CommitUnitTrust::Relay,
+            CommitUnitTrust::TrustedBackend] {
+            let result = core.apply_sync_message_with_ingest_context(message.clone(),
+                Some(CommitUnitIngestContext {
+                    identity: AuthorSubject::SYSTEM, trust, edge_authority: false,
+                    admitted_write_authorization: true,
+                })).resolve();
+            assert!(matches!(result, Err(Error::UnsupportedSyncMessage(_))),
+                "{trust:?} must not claim prior edge authorization");
+            for unit in &publication.commits {
+                assert!(core.query_transaction(unit.tx.tx_id).unwrap().is_none());
+            }
+        }
+        let mut malformed = publication.clone();
+        malformed.commits.last_mut().unwrap().tx.n_total_writes += 1;
+        assert!(core.ingest_edge_authority_publication(malformed, 100).is_err());
+        for unit in &publication.commits {
+            assert!(core.query_transaction(unit.tx.tx_id).unwrap().is_none(),
+                "a malformed last member must not admit an earlier member");
+        }
+        for trust in [CommitUnitTrust::TrustedAuthority, CommitUnitTrust::TrustedAdmin] {
+            let outcome = core.apply_sync_message_with_ingest_context(message.clone(),
+                Some(CommitUnitIngestContext {
+                    identity: AuthorSubject::SYSTEM, trust,
+                    edge_authority: false, admitted_write_authorization: false,
+                })).resolve().unwrap();
+            assert!(outcome.publications.is_empty(),
+                "a reconciled edge publication must not generate any new core merge publication");
+            settle_outcome(&mut core, outcome).unwrap();
+            let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+            assert_eq!(frontier.len(), 1);
+            assert_eq!(merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap(), heads,
+                "core must retain the edge's merge, not create a redundant same-frontier merge");
+            assert!(matches!(core.transaction_state_settled(merge_tx),
+                Some((Fate::Accepted, Some(_), DurabilityTier::Global))));
+        }
+    }
+}
+
+#[test]
+fn core_merges_only_residual_heads_from_distinct_edge_publications() {
+    // Internal admission APIs expose merge authorship and parent identities,
+    // which convergence alone cannot distinguish from redundant core merges.
+    for edit_existing in [false, true] {
+        let schema = two_column_schema();
+        let (_left_dir, mut left) = open_node_with_schema(node(0xd1), schema.clone());
+        let (_right_dir, mut right) = open_node_with_schema(node(0xd2), schema.clone());
+        let (_edge_a_dir, mut edge_a) = open_node_with_schema(node(0xd3), schema.clone());
+        let (_edge_b_dir, mut edge_b) = open_node_with_schema(node(0xd4), schema.clone());
+        let (core_dir, mut core) = open_history_complete_node_with_schema(node(0xdf), schema.clone());
+        let shared_row = row(0xda);
+        let admit = |edge: &mut NodeState<RocksDbStorage>, unit| {
+            let SyncMessage::CommitUnit { tx, versions } = unit else {
+                panic!("expected commit unit");
+            };
+            let tx_id = tx.tx_id;
+            let outcome = edge.ingest_edge_authority_mergeable_commit_unit(
+                tx, versions, u64::MAX - SKEW_TOLERANCE_MS,
+            ).unwrap();
+            let receipts = settle_outcome(edge, outcome).unwrap();
+            assert!(receipts.iter().any(|receipt| matches!(receipt,
+                SyncMessage::FateUpdate { tx_id: accepted, fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Edge), global_time: None }
+                    if *accepted == tx_id
+            )));
+        };
+        let parents = if edit_existing {
+            let (seed_tx, seed) = left.commit_mergeable_unit_settled(
+                MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
+                    ("title".to_owned(), v("seed")), ("body".to_owned(), v("seed")),
+                ])),
+            ).unwrap();
+            right.apply_sync_message_settled(seed.clone()).unwrap();
+            admit(&mut edge_a, seed.clone());
+            admit(&mut edge_b, seed);
+            vec![seed_tx]
+        } else { Vec::new() };
+        let (left_tx, left_unit) = left.commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", shared_row, 20).parents(parents.clone())
+                .cells(BTreeMap::from([("title".to_owned(), v("left"))])),
+        ).unwrap();
+        let (right_tx, right_unit) = right.commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", shared_row, 20).parents(parents)
+                .cells(BTreeMap::from([("body".to_owned(), v("right"))])),
+        ).unwrap();
+        admit(&mut edge_a, left_unit);
+        admit(&mut edge_b, right_unit);
+        let first = edge_a.edge_authority_publication_for(left_tx).unwrap();
+        let second = edge_b.edge_authority_publication_for(right_tx).unwrap();
+        let outcome = core.ingest_edge_authority_publication(first.clone(), 100).unwrap();
+        settle_outcome(&mut core, outcome).unwrap();
+        let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+        assert_eq!(frontier.len(), 1);
+        assert_eq!(merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap(),
+            BTreeSet::from([left_tx]));
+        drop(core);
+        let mut core = reopen_node_at(&core_dir, node(0xdf), schema);
+        let outcome = core.ingest_edge_authority_publication(second.clone(), 101).unwrap();
+        settle_outcome(&mut core, outcome).unwrap();
+        let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+        assert_eq!(frontier.len(), 1);
+        let heads = merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap();
+        assert_eq!(heads.len(), 1);
+        let merge_tx = *heads.iter().next().unwrap();
+        assert_eq!(merge_tx.node, node(0xdf), "only residual cross-edge concurrency requires a core merge");
+        let SyncMessage::CommitUnit { versions, .. } = core.commit_unit_for(merge_tx).unwrap() else {
+            panic!("expected merge unit");
+        };
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].parents(), &[left_tx, right_tx]);
+        for publication in [second, first] {
+            let outcome = core.ingest_edge_authority_publication(publication, 102).unwrap();
+            settle_outcome(&mut core, outcome).unwrap();
+            let frontier = core.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+            assert_eq!(frontier.len(), 1);
+            assert_eq!(merge_heads_from_value(frontier[0].record().get_idx(3).unwrap()).unwrap(), heads);
+        }
+    }
 }
 
 #[test]
@@ -349,8 +692,18 @@ fn merge_heads_key_two_nondefault_branches_independently_across_reopen() {
                     .cells(BTreeMap::from([("title".to_owned(), v(format!("bob-{label}")))])),
             )
             .unwrap();
-        core.apply_sync_message_settled(alice_unit).unwrap();
-        core.apply_sync_message_settled(bob_unit).unwrap();
+        for unit in [alice_unit, bob_unit] {
+            let SyncMessage::CommitUnit { tx, .. } = &unit else {
+                panic!("expected commit unit");
+            };
+            let tx_id = tx.tx_id;
+            let receipts = core.apply_sync_message_settled(unit).unwrap();
+            assert!(receipts.iter().any(|receipt| matches!(
+                receipt,
+                SyncMessage::FateUpdate { tx_id: receipt_tx, fate: Fate::Accepted, .. }
+                    if *receipt_tx == tx_id
+            )), "both concurrent branch writes must be admitted: {receipts:?}");
+        }
     }
 
     let table_id = core.catalogue.physical_mappings[&schema.version_id()].tables["todos"].table_id;
@@ -430,7 +783,7 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

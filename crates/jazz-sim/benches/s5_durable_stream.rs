@@ -27,9 +27,11 @@ use jazz::tools::public_schema::{
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
 use jazz_sim::fixture::{
-    apply_sync_message_settled, commit_mergeable_unit_settled, settle_outcome,
+    apply_sync_message_settled, commit_mergeable_unit_settled, register_query_receiver,
+    settle_outcome,
 };
 use jazz_sim::public_schema_fixture::compile_public_schema;
+use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, mem, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -289,10 +291,23 @@ impl Transport for QueueTransport {
 
 fn run_jazz(config: &Config) -> JazzSummary {
     let schema = schema();
+    let shape = Query::from(STREAM_DOCS).validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
     let (core_dir, mut core) = open_node(node(250), schema.clone());
     let mut tailers = (0..config.tailers)
         .map(|idx| {
-            let (dir, node) = open_node(node(30 + idx as u8), schema.clone());
+            let (dir, mut node) = open_node(node(30 + idx as u8), schema.clone());
+            register_query_receiver(
+                &mut node,
+                &shape,
+                &binding,
+                Default::default(),
+                jazz::protocol::DelegatedSessionBinding {
+                    identity: AuthorSubject::SYSTEM,
+                    claims: BTreeMap::new(),
+                },
+            )
+            .unwrap();
             (
                 dir,
                 node,
@@ -306,7 +321,11 @@ fn run_jazz(config: &Config) -> JazzSummary {
     for stream in 0..config.streams {
         seed_stream(&mut core, stream, &mut global_time);
         for (_, tailer, peer, seen) in &mut tailers {
-            let update = block_on(peer.current_rows_update(&mut core, STREAM_DOCS)).unwrap();
+            let update = if stream == 0 {
+                block_on(peer.rehydrate_query(&mut core, &shape, &binding)).unwrap()
+            } else {
+                block_on(peer.query_update(&mut core, &shape, &binding)).unwrap()
+            };
             apply_sync_message_settled(tailer, update).unwrap();
             seen[stream] = Vec::new();
         }
@@ -343,7 +362,7 @@ fn run_jazz(config: &Config) -> JazzSummary {
             core_cpu_us += append_elapsed_us;
             let tail_start = Instant::now();
             for (_, tailer, peer, seen) in &mut tailers {
-                let update = block_on(peer.current_rows_update(&mut core, STREAM_DOCS)).unwrap();
+                let update = block_on(peer.query_update(&mut core, &shape, &binding)).unwrap();
                 sync_bytes += view_update_bytes(&update);
                 apply_sync_message_settled(tailer, update).unwrap();
                 let current = read_doc(tailer, stream);
@@ -372,9 +391,20 @@ fn run_jazz(config: &Config) -> JazzSummary {
         let gap_tokens = config.tokens_per_stream().saturating_sub(known_tokens);
         for idx in 0..config.resumers {
             let (_dir, mut resumer) = open_node(node(90 + idx as u8), schema.clone());
+            register_query_receiver(
+                &mut resumer,
+                &shape,
+                &binding,
+                Default::default(),
+                jazz::protocol::DelegatedSessionBinding {
+                    identity: AuthorSubject::SYSTEM,
+                    claims: BTreeMap::new(),
+                },
+            )
+            .unwrap();
             let mut peer = PeerState::new();
             let resume_start = Instant::now();
-            let update = block_on(peer.current_rows_update(&mut core, STREAM_DOCS)).unwrap();
+            let update = block_on(peer.rehydrate_query(&mut core, &shape, &binding)).unwrap();
             let bytes = view_update_bytes(&update);
             resume_bytes += bytes;
             apply_sync_message_settled(&mut resumer, update).unwrap();
@@ -466,9 +496,22 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let mut edge_hydration_bytes = 0;
     let mut edge_hydration_rows = 0;
     for table in [STREAMS, STREAM_DOCS] {
-        let update = block_on(edge_peer.current_rows_update(&mut core, table)).unwrap();
+        let shape = Query::from(table).validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        register_query_receiver(
+            &mut edge,
+            &shape,
+            &binding,
+            Default::default(),
+            jazz::protocol::DelegatedSessionBinding {
+                identity: AuthorSubject::SYSTEM,
+                claims: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let update = block_on(edge_peer.rehydrate_query(&mut core, &shape, &binding)).unwrap();
         edge_hydration_bytes += view_update_bytes(&update);
-        edge_hydration_rows += result_row_count(&update);
+        edge_hydration_rows += result_row_count(&update, table);
         apply_sync_message_settled(&mut edge, update).unwrap();
     }
 
@@ -568,7 +611,9 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
 
 async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let schema = schema();
-    let (_server_dir, server_state) = open_node(node(180), schema.clone());
+    // This endpoint is the final authority, not a client relay waiting for
+    // an upstream to supply scope. SYSTEM authorship alone does not select it.
+    let (_server_dir, server_state) = open_history_complete_node(node(180), schema.clone());
     let server = Node::new(server_state);
     let (_client_dir, client) = open_db(node(181), schema.clone());
     let streams = config.streams.max(16);
@@ -593,12 +638,7 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
         block_on(client.subscribe(&prepared, ReadOpts::default())).expect("db subscribe");
 
     client.tick().await.expect("client fresh subscribe tick");
-    subscriber
-        .lock()
-        .await
-        .serve_current_rows(STREAM_DOCS)
-        .await
-        .expect("serve fresh rows");
+    server.tick().await.expect("server fresh subscribe tick");
     client.tick().await.expect("client fresh apply tick");
     let mut rows = Vec::new();
     drain_subscription_events(&mut watch, &mut rows);
@@ -657,12 +697,6 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
         server.accept_subscriber_with_resume(server_transport, AuthorSubject::SYSTEM, cursor);
 
     client.tick().await.expect("client resumed subscribe tick");
-    resumed
-        .lock()
-        .await
-        .serve_current_rows(STREAM_DOCS)
-        .await
-        .expect("serve resumed stream rows");
     server.tick().await.expect("server resumed tick");
     client.tick().await.expect("client resumed apply tick");
 
@@ -705,9 +739,17 @@ fn drain_db_route(
             continue;
         };
         let start = Instant::now();
-        let outcome =
-            block_on(edge_peer.ingest_edge_mergeable_commit_unit(edge, tx, versions, u64::MAX))
-                .unwrap();
+        // The locally constructed peer is SYSTEM and has no admitted claims.
+        let policy_claims = BTreeMap::new();
+        let outcome = block_on(edge_peer.ingest_edge_mergeable_commit_unit(
+            edge,
+            tx,
+            versions,
+            u64::MAX,
+            u64::MAX,
+            policy_claims,
+        ))
+        .unwrap();
         settle_outcome(edge, outcome).unwrap();
         edge_acceptance
             .record(start.elapsed().as_micros() as u64)
@@ -1109,12 +1151,31 @@ fn schema() -> JazzSchema {
 }
 
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<RocksDbStorage>) {
+    open_node_with_history_class(node_uuid, schema, false)
+}
+
+fn open_history_complete_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (TempDir, NodeState<RocksDbStorage>) {
+    open_node_with_history_class(node_uuid, schema, true)
+}
+
+fn open_node_with_history_class(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+    history_complete: bool,
+) -> (TempDir, NodeState<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
+    let node = if history_complete {
+        block_on(NodeState::new_history_complete(node_uuid, schema, storage)).unwrap()
+    } else {
+        block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
+    };
     (dir, node)
 }
 
@@ -1169,15 +1230,14 @@ fn commit_unit_bytes(update: &SyncMessage) -> u64 {
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_bundles,
+            version_carriers,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
         }) => {
-            version_bundles
-                .iter()
-                .flat_map(|bundle| bundle.versions.iter())
+            version_bundle_refs(version_carriers)
+                .flat_map(|bundle| bundle.versions)
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
@@ -1187,13 +1247,22 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
     }
 }
 
-fn result_row_count(update: &SyncMessage) -> usize {
+fn result_row_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            result_member_adds,
-            result_member_removes,
-            ..
-        }) => result_member_adds.len() + result_member_removes.len(),
+            program_fact_adds, ..
+        }) => program_fact_adds
+            .iter()
+            .filter_map(|fact| match fact {
+                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.version_table.as_str() == table =>
+                {
+                    Some(input.source_row)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .len(),
         _ => 0,
     }
 }

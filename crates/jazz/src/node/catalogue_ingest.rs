@@ -7,6 +7,37 @@ struct PlannedCatalogueSnapshot {
     activated_lineages: Vec<StagedSchemaLineage>,
 }
 
+/// Returns whether a trusted catalogue replacement changes the *live* Groove
+/// runtime's effective input.  The catalogue is deliberately much larger than
+/// that input: it also retains historical authority schemas, lenses, and
+/// permanent identity manifests for validation and history decoding.  Learning
+/// any of those facts must not tear down subscriptions that are compiled only
+/// against this node's active local/read schema and its local physical layout.
+///
+/// The active schema alias and mapping remain part of the runtime contract:
+/// Groove records use the alias as their variant discriminator, while table,
+/// column, and enum registries in `tables` determine their physical layout.
+/// `identities` are global catalogue evidence, not a Groove layout input.
+pub(super) fn active_runtime_layouts_equal(
+    left: &SchemaCatalogue,
+    right: &SchemaCatalogue,
+) -> bool {
+    if left.current_schema_version_id != right.current_schema_version_id
+        || left.current_schema_version_alias != right.current_schema_version_alias
+        || left.schema != right.schema
+    {
+        return false;
+    }
+
+    let active = left.current_schema_version_id;
+    left.schema_version_aliases.get(&active) == right.schema_version_aliases.get(&active)
+        && left
+            .physical_mappings
+            .get(&active)
+            .zip(right.physical_mappings.get(&active))
+            .is_some_and(|(left, right)| left.tables == right.tables)
+}
+
 fn next_schema_version_alias_in_catalogue(
     catalogue: &SchemaCatalogue,
 ) -> Result<SchemaVersionAlias, Error> {
@@ -36,18 +67,59 @@ where
         let bootstrap_uninitialized =
             self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized;
         let plan = self.plan_trusted_catalogue_snapshot(snapshot)?;
-        let runtime_semantics_changed = self.catalogue.schema != plan.catalogue.schema
-            || self.catalogue.catalogue_schemas != plan.catalogue.catalogue_schemas
-            || self.catalogue.catalogue_lenses != plan.catalogue.catalogue_lenses
-            || self.catalogue.physical_mappings != plan.catalogue.physical_mappings
-            || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
+        let catalogue_genesis = |catalogue: &SchemaCatalogue| {
+            let lineage_targets = catalogue
+                .active_lineages_by_target
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            catalogue
+                .catalogue_schemas
+                .keys()
+                .find(|schema| !lineage_targets.contains(schema))
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "catalogue genesis schema is missing",
+                ))
+        };
+        let planned_genesis = catalogue_genesis(&plan.catalogue)?;
+        let runtime_semantics_changed =
+            !active_runtime_layouts_equal(&self.catalogue, &plan.catalogue);
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
+        let previous_genesis = catalogue_genesis(&previous_catalogue)?;
+        // Historical/import-only snapshot growth must not be visible through
+        // Groove until the catalogue records which explain that registry are
+        // durably activated.  In particular, projection registration mutates
+        // several coupled IVM maps; restoring just table schemas would leave
+        // an old live subscription reading a half-installed case.
+        //
+        // A read-layout change takes the deliberately separate rebuild path
+        // below.  Its replacement is already an all-or-nothing open, while
+        // retaining the existing runtime for history-only growth is exactly
+        // why this in-place checkpoint exists.
+        let runtime_registry_checkpoint =
+            (!runtime_semantics_changed).then(|| self.database.runtime_registry_checkpoint());
         // Snapshot replay can install widened mappings after a persistent edge
         // restart. Rebuild the live projection registry as part of that
         // semantic transition, not after client traffic begins. An identical
         // trusted prefix is idempotent and must retain maintained/query state.
-        if runtime_semantics_changed && self.rebuild_database_slot().await.is_err() {
+        if runtime_semantics_changed {
+            if self.rebuild_database_slot().await.is_err() {
+                self.catalogue = previous_catalogue;
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+        } else if self.synchronize_physical_version_tables().await.is_err() {
+            // A snapshot may extend historical or write-schema variants while
+            // leaving the local read layout unchanged.  Those variants are
+            // not a reason to replace the live runtime (and disconnect its
+            // subscriptions), but their physical columns, indices and
+            // projections must be available before authored history or a
+            // later write-schema pointer can be admitted.
             self.catalogue = previous_catalogue;
+            if let Some(checkpoint) = runtime_registry_checkpoint.clone() {
+                self.database.restore_runtime_registry(checkpoint);
+            }
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);
         }
@@ -58,12 +130,31 @@ where
         {
             self.catalogue_activation_failpoint = None;
             self.catalogue = previous_catalogue;
+            if let Some(checkpoint) = runtime_registry_checkpoint.clone() {
+                self.database.restore_runtime_registry(checkpoint);
+            }
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);
         }
 
         let mut batch = self.database.open_batch();
-        if bootstrap_uninitialized || self.catalogue_bootstrap_marker {
+        // A snapshot's root is the authority's permanent genesis, rather than
+        // its current write schema.  A pre-bootstrap receiver may have opened
+        // against a descendant-shaped local schema; replace that provisional
+        // marker atomically with the authority root before it can be recovered.
+        if previous_genesis != planned_genesis {
+            batch.delete(
+                "jazz_catalogue",
+                groove::db::PrimaryKeyValue::Composite(vec![
+                    groove::db::PrimaryKeyValue::U64(codec::CatalogueRecordKind::Genesis.key()),
+                    groove::db::PrimaryKeyValue::Uuid(previous_genesis.0),
+                ]),
+            );
+        }
+        if bootstrap_uninitialized
+            || self.catalogue_bootstrap_marker
+            || previous_genesis != planned_genesis
+        {
             // This is intentionally in the same batch as every imported
             // schema, physical mapping, lineage activation, and write
             // pointer.  A dynamic edge must never recover an empty local
@@ -75,12 +166,12 @@ where
                 "jazz_catalogue",
                 vec![
                     Value::U64(codec::CatalogueRecordKind::Genesis.key()),
-                    Value::Uuid(plan.catalogue.current_schema_version_id.0),
+                    Value::Uuid(planned_genesis.0),
                     Value::Bytes(Vec::new()),
                 ],
             );
             let ready = CatalogueBootstrapReady {
-                genesis: plan.catalogue.current_schema_version_id,
+                genesis: planned_genesis,
                 current_write_schema: plan.catalogue.current_write_schema,
                 active_catalogue_seq: plan.catalogue.active_catalogue_seq,
             };
@@ -133,6 +224,9 @@ where
         .await;
         if persistence.is_err() {
             self.catalogue = previous_catalogue;
+            if let Some(checkpoint) = runtime_registry_checkpoint {
+                self.database.restore_runtime_registry(checkpoint);
+            }
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);
         }
@@ -147,6 +241,12 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        // A trusted snapshot is a complete replacement of the authority
+        // catalogue. Once its registry and durable receipt have both crossed
+        // the activation boundary, it also proves that a transient earlier
+        // activation failure has been repaired; do not permanently reject
+        // ordinary data ingress after a successful retry.
+        self.catalogue_activation_failed = false;
         self.catalogue_bootstrap_state = CatalogueBootstrapState::Ready;
         self.catalogue_bootstrap_marker |= bootstrap_uninitialized;
         if runtime_semantics_changed {
@@ -175,6 +275,7 @@ where
             ));
         }
 
+        let genesis_physical_identities = snapshot.genesis_physical_identities;
         let mut schemas = BTreeMap::new();
         for schema in snapshot.schemas {
             if schema.id != schema.schema.version_id() {
@@ -247,6 +348,7 @@ where
                 let mut next_physical_column_id = 1;
                 let mapping = allocate_provisional_physical_mapping(
                     &genesis.schema,
+                    genesis_physical_identities.clone(),
                     &mut next_physical_table_id,
                     &mut next_physical_column_id,
                 )?;
@@ -286,6 +388,13 @@ where
             }
             let mapping = allocate_provisional_physical_mapping(
                 &schema.schema,
+                if schema.id == *genesis_id {
+                    genesis_physical_identities.clone()
+                } else {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "trusted catalogue snapshot schema has no identity publication",
+                    ));
+                },
                 &mut planned.next_physical_table_id,
                 &mut planned.next_physical_column_id,
             )?;
@@ -293,6 +402,16 @@ where
             planned.catalogue_schemas.insert(schema.id, schema.clone());
             planned.physical_mappings.insert(schema.id, mapping);
             planned.schema_version_aliases.insert(schema.id, alias);
+        }
+
+        // A pre-bootstrap local node may already have durable rows under its
+        // opening schema.  Its numeric aliases remain local, but its
+        // provisional UUIDs are not an authority fact: install the exact
+        // snapshot genesis manifest before validating descendant publications.
+        // Otherwise a valid authority lineage would be compared to freshly
+        // minted local UUIDs and rejected during snapshot planning.
+        if let Some(mapping) = planned.physical_mappings.get_mut(genesis_id) {
+            mapping.identities = genesis_physical_identities.clone();
         }
 
         for (catalogue_seq, publication) in lineages {
@@ -324,6 +443,25 @@ where
                     "trusted catalogue snapshot lineage source is missing",
                 ))?;
             Self::validate_migration_lens_between(&publication.lens, source, &publication.schema)?;
+            planned
+                .physical_mappings
+                .get(&publication.lens.source)
+                .ok_or(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot source identities missing",
+                ))?
+                .identities
+                .validate_evolution_to_with_history(
+                    &source.schema,
+                    &publication.physical_identities,
+                    &publication.schema.schema,
+                    &publication.lens,
+                    planned
+                        .physical_mappings
+                        .values()
+                        .map(|mapping| mapping.identities.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(Error::InvalidCatalogueUpdate)?;
             Self::validate_lineage_table_partition(
                 &source.schema,
                 &publication.schema.schema,
@@ -333,6 +471,7 @@ where
             )?;
             let fresh = allocate_provisional_physical_mapping(
                 &publication.schema.schema,
+                publication.physical_identities.clone(),
                 &mut planned.next_physical_table_id,
                 &mut planned.next_physical_column_id,
             )?;
@@ -384,8 +523,31 @@ where
         // snapshot arrives, so keep that schema's local storage identity and
         // reconcile the received lineage around it rather than orphaning the
         // pending rows by adopting a newly allocated alias/mapping.
-        if let Some((local_alias, local_mapping)) = local_schema_storage_anchor {
+        if let Some((local_alias, mut local_mapping)) = local_schema_storage_anchor {
             let anchor = planned.current_schema_version_id;
+            let authority_identities = planned
+                .physical_mappings
+                .get(&anchor)
+                .ok_or(Error::InvalidStoredValue(
+                    "snapshot authority mapping missing for local anchor",
+                ))?
+                .identities
+                .clone();
+            authority_identities
+                .validate_for_schema(
+                    &planned
+                        .catalogue_schemas
+                        .get(&anchor)
+                        .ok_or(Error::InvalidStoredValue(
+                            "snapshot authority schema missing for local anchor",
+                        ))?
+                        .schema,
+                )
+                .map_err(Error::InvalidCatalogueUpdate)?;
+            // Preserve only below-semantic-layer aliases. The authority
+            // manifest is the global identity source of truth and replaces
+            // any provisional UUIDs minted while the receiver was offline.
+            local_mapping.identities = authority_identities;
             planned.schema_version_aliases.insert(anchor, local_alias);
             planned.physical_mappings.insert(anchor, local_mapping);
 

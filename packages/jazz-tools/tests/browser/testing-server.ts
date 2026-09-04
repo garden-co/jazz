@@ -17,6 +17,10 @@ export function getJazzServerInfo(appId?: string, schema?: Uint8Array): Promise<
   return jazzServerBrowserCommands().jazzServerInfo(appId, schema ? [...schema] : undefined);
 }
 
+export function stopJazzServer(serverUrl: string): Promise<void> {
+  return jazzServerBrowserCommands().jazzServerStop(serverUrl);
+}
+
 export function blockJazzServerNetwork(serverUrl: string): Promise<void> {
   return jazzServerBrowserCommands().jazzServerBlockNetwork(serverUrl);
 }
@@ -30,5 +34,13 @@ export async function getJazzServerJwtForUser(
   claims?: Record<string, unknown>,
   appId?: string,
 ): Promise<string> {
-  return jazzServerBrowserCommands().jazzServerJwtForUser(userId, claims, appId);
+  // Browser-command argument serialization elides `undefined` array entries.
+  // Keep the optional `appId` in its third position and preserve the test
+  // issuer's documented default claims rather than accidentally signing the
+  // app ID as a scalar `claims` value.
+  return jazzServerBrowserCommands().jazzServerJwtForUser(
+    userId,
+    claims ?? { role: "user" },
+    appId,
+  );
 }

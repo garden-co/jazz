@@ -85,11 +85,11 @@ describe("JazzProvider client acquisition lifecycle", () => {
       serverUrl: "https://jazz.example.com",
       jwtToken: "token",
     };
-    const initialKey = createClientConfigKey("react", initialConfig);
-    const replacementKey = createClientConfigKey("react", replacementConfig);
     const createJazzClient = vi.fn(async () =>
       makeFakeClient({ authMode: "local-first", userId: "browser", claims: {} }),
     );
+    const initialKey = createClientConfigKey("react", initialConfig, [createJazzClient]);
+    const replacementKey = createClientConfigKey("react", replacementConfig, [createJazzClient]);
 
     let result!: RenderResult;
     await act(async () => {
@@ -157,7 +157,6 @@ describe("JazzProvider client acquisition lifecycle", () => {
       serverUrl: "https://jazz.example.com",
       jwtToken: "token",
     };
-    const initialKey = createClientConfigKey("react", initialConfig);
     let resolveRelease!: () => void;
     const releaseGate = new Promise<void>((resolve) => {
       resolveRelease = resolve;
@@ -165,6 +164,7 @@ describe("JazzProvider client acquisition lifecycle", () => {
     const createJazzClient = vi.fn(async () =>
       makeFakeClient({ authMode: "local-first", userId: "browser", claims: {} }),
     );
+    const initialKey = createClientConfigKey("react", initialConfig, [createJazzClient]);
 
     let result!: RenderResult;
     await act(async () => {

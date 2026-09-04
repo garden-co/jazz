@@ -19,13 +19,12 @@ use groove::schema::{ColumnSchema, ColumnType};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
-use crate::node::query_engine::{CoverageScope, FieldRequirement, ProgramFactOutput};
+use crate::node::query_engine::{CoverageScope, FieldRequirement};
 use crate::node::{MergeableCommit, NodeState};
 use crate::peer::PeerState;
 use crate::protocol::{
-    CurrentWriteSchema, MigrationLens, ReadViewSpec, RealRowMemberEntry, RegisterShapeOptions,
-    RelationEdgeEntry, ResultRowLayer, RowVersionRefEntry, SchemaVersion, ShapeAst, Subscribe,
-    SyncMessage, TableLens,
+    CurrentWriteSchema, MigrationLens, ReadViewSpec, RegisterShapeOptions, RelationEdgeEntry,
+    ResultRowLayer, RowVersionRefEntry, SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
 };
 use crate::query::{
     Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, eq, gt, in_list,
@@ -82,6 +81,9 @@ fn collect_binding_source_descriptor_fields(
             collect_binding_source_descriptor_fields(seed, descriptors_by_shape);
             collect_binding_source_descriptor_fields(step, descriptors_by_shape);
         }
+        GraphBuilder::RecursiveStepWitness { recursive } => {
+            collect_binding_source_descriptor_fields(recursive, descriptors_by_shape);
+        }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -108,6 +110,7 @@ fn collect_binding_source_descriptor_fields(
         }
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => {}
     }
@@ -132,6 +135,9 @@ fn collect_binding_source_projected_fields(
         GraphBuilder::Recursive { seed, step, .. } => {
             collect_binding_source_projected_fields(seed, projected_by_shape);
             collect_binding_source_projected_fields(step, projected_by_shape);
+        }
+        GraphBuilder::RecursiveStepWitness { recursive } => {
+            collect_binding_source_projected_fields(recursive, projected_by_shape);
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
@@ -159,6 +165,7 @@ fn collect_binding_source_projected_fields(
         GraphBuilder::BindingSource { .. }
         | GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::InputSource { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => {}
     }
@@ -191,6 +198,16 @@ fn subscribe_query_binding_with_opts(
     binding: &Binding,
     opts: RegisterShapeOptions,
 ) {
+    subscribe_query_binding_with_opts_and_session(node, shape, binding, opts, None);
+}
+
+fn subscribe_query_binding_with_opts_and_session(
+    node: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    opts: RegisterShapeOptions,
+    delegated_session: Option<crate::protocol::DelegatedSessionBinding>,
+) {
     let values = shape
         .params()
         .keys()
@@ -205,6 +222,7 @@ fn subscribe_query_binding_with_opts(
         },
         values,
         known_state: None,
+        delegated_session,
     }))
     .unwrap();
 }
@@ -449,23 +467,27 @@ fn evolved_todos_version() -> (
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            evolved_payload.clone(),
-            MigrationLens::new(
-                base.version_id(),
-                evolved_payload.id,
-                vec![TableLens {
-                    source_table: "todos".to_owned(),
-                    target_table: "todos".to_owned(),
-                    ops: vec![LensOp::AddColumn {
-                        column: "body".to_owned(),
-                        default: Value::String("base-default".to_owned()),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved_payload.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_payload.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String("base-default".to_owned()),
+                        }],
                     }],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .unwrap();
     node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {

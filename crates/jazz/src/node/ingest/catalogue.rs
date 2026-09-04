@@ -50,6 +50,7 @@ where
                 identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::TrustedBackend,
                 edge_authority: false,
+                admitted_write_authorization: false,
             }),
         )
         .await
@@ -76,10 +77,24 @@ where
             if self.catalogue_activation_failed {
                 return Err(Error::CatalogueActivationFailed);
             }
-            let message = message
-                .expand_version_carriers_for_receive()
-                .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
             match message {
+                SyncMessage::AuthorityPublication(publication) => {
+                    if !ingest_context.is_some_and(|context|
+                        matches!(context.trust, CommitUnitTrust::TrustedAuthority | CommitUnitTrust::TrustedAdmin)
+                            && !context.edge_authority)
+                    {
+                        return Err(Error::UnsupportedSyncMessage(
+                            "authority publication requires an authenticated edge-to-core authority link",
+                        ));
+                    }
+                    for unit in &publication.commits {
+                        let descriptors = version_indirect_descriptors(&unit.versions);
+                        self.current_staged_ids_for_descriptors(&descriptors, true).await?;
+                    }
+                    self.ingest_edge_authority_publication(
+                        publication, authority_wall_clock_ms()?,
+                    ).await
+                }
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
                         super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
@@ -230,7 +245,7 @@ where
                 )),
                 SyncMessage::SessionClaims { identity, claims } => {
                     if let Some(context) = ingest_context
-                        && context.trust == CommitUnitTrust::TrustedBackend
+                        && matches!(context.trust, CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority)
                     {
                         self.set_session_claims(identity, claims);
                     }
@@ -243,18 +258,7 @@ where
                             .await?;
                     }
                     let now_ms = if ingest_context.is_some() {
-                        web_time::SystemTime::now()
-                            .duration_since(web_time::UNIX_EPOCH)
-                            .map_err(|_| {
-                                Error::InvalidStoredValue("authority clock precedes Unix epoch")
-                            })?
-                            .as_millis()
-                            .try_into()
-                            .map_err(|_| {
-                                Error::InvalidStoredValue(
-                                    "authority clock exceeds u64 milliseconds",
-                                )
-                            })?
+                        authority_wall_clock_ms()?
                     } else {
                         tx.tx_id.time.physical_ms()
                     };
@@ -277,11 +281,9 @@ where
                     settled_through,
                     reset_result_set,
                     version_carriers,
-                    version_bundles,
                     peer_payload_inventory,
                     result_member_adds,
                     result_member_removes,
-                    terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
                 }) => {
@@ -291,13 +293,11 @@ where
                         defer_settlement: false,
                         reset_result_set,
                         version_carriers,
-                        version_bundles,
                         peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                         authorization_progress: peer_payload_inventory.authorization_progress,
                         opening_pending: peer_payload_inventory.opening_pending,
                         result_member_adds,
                         result_member_removes,
-                        terminal_operations,
                         program_fact_adds,
                         program_fact_removes,
                     })
@@ -312,7 +312,7 @@ where
                     validate_shape_registration_size(&ast, &opts).map_err(|_| {
                         Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
                     })?;
-                    self.register_shape(shape_id, ast)?;
+                    self.register_shape_with_options(shape_id, ast, opts)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
                 SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
@@ -494,6 +494,27 @@ where
         } else {
             if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
                 Self::validate_migration_lens_between(lens, source, schema)?;
+                let identity_history = self.physical_identity_history_for_candidate(
+                    publication.schema.id,
+                    Some(publication.id),
+                );
+                let source_identities = &self
+                    .catalogue
+                    .physical_mappings
+                    .get(&lens.source)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "source physical identity manifest missing",
+                    ))?
+                    .identities;
+                source_identities
+                    .validate_evolution_to_with_history(
+                        &source.schema,
+                        &publication.physical_identities,
+                        &schema.schema,
+                        lens,
+                        identity_history,
+                    )
+                    .map_err(Error::InvalidCatalogueUpdate)?;
                 Self::validate_lineage_table_partition(
                     &source.schema,
                     &schema.schema,
@@ -561,7 +582,7 @@ where
             let Some(pending) = self.catalogue.pending_lineages.get(&next).cloned() else {
                 break;
             };
-            let publication = pending.publication;
+            let publication = &pending.publication;
             let Some(source) = self
                 .catalogue
                 .catalogue_schemas
@@ -583,12 +604,39 @@ where
                     &publication.new_tables,
                     &publication.dropped_tables,
                 )
-            });
+            })
+            .and_then(|()| {
+                let identity_history = self.physical_identity_history_for_candidate(
+                    publication.schema.id,
+                    Some(publication.id),
+                );
+                self.catalogue
+                    .physical_mappings
+                    .get(&publication.lens.source)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "source physical identity manifest missing",
+                    ))?
+                    .identities
+                    .validate_evolution_to_with_history(
+                        &source.schema,
+                        &publication.physical_identities,
+                        &publication.schema.schema,
+                        &publication.lens,
+                        identity_history,
+                    )
+                    .map_err(Error::InvalidCatalogueUpdate)
+            })
+            // A parked sibling was admitted against the catalogue prefix that
+            // existed when it arrived. Reconcile it again only when its
+            // sequence becomes active: an earlier sibling may have widened a
+            // shared scalar registry to the u8 limit in the meantime.
+            .and_then(|()| self.validate_pending_schema_lineage_physical_mapping(&pending));
             if validation.is_err() {
                 self.remove_pending_schema_lineage(next, publication.id)
                     .await?;
                 break;
             }
+            let publication = pending.publication;
             if self
                 .catalogue
                 .active_lineages_by_target
@@ -606,23 +654,66 @@ where
                 }
                 staged.clone()
             } else {
+                // Provisional identities are only candidates. Reconciliation can
+                // replace them with identities inherited from the source schema,
+                // so allocate against copies and commit only identities retained
+                // by the durable staged mapping.
+                let mut provisional_next_table_id =
+                    self.catalogue.next_physical_table_id;
+                let mut provisional_next_column_id =
+                    self.catalogue.next_physical_column_id;
                 let fresh = allocate_provisional_physical_mapping(
                     &publication.schema.schema,
-                    &mut self.catalogue.next_physical_table_id,
-                    &mut self.catalogue.next_physical_column_id,
+                    publication.physical_identities.clone(),
+                    &mut provisional_next_table_id,
+                    &mut provisional_next_column_id,
                 )?;
                 let mapping = self.reconcile_physical_mapping_for_lens_payload(
                     &publication.lens,
                     &publication.schema,
                     &fresh,
                 )?;
+                let mut next_physical_table_id =
+                    self.catalogue.next_physical_table_id;
+                let mut next_physical_column_id =
+                    self.catalogue.next_physical_column_id;
+                for table in mapping.tables.values() {
+                    next_physical_table_id = next_physical_table_id.max(
+                        table
+                            .table_id
+                            .0
+                            .checked_add(1)
+                            .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?,
+                    );
+                    for column in table.columns.values() {
+                        next_physical_column_id = next_physical_column_id.max(
+                            column
+                                .0
+                                .checked_add(1)
+                                .ok_or(Error::InvalidStoredValue(
+                                    "physical column id exhausted",
+                                ))?,
+                        );
+                    }
+                }
                 let staged = StagedSchemaLineage {
                     catalogue_seq: next,
                     publication: publication.clone(),
                     alias: self.next_schema_version_alias()?,
                     mapping,
                 };
+                let mut candidate_mappings = self.catalogue.physical_mappings.clone();
+                candidate_mappings.insert(
+                    staged.publication.schema.id,
+                    staged.mapping.clone(),
+                );
+                let mut candidate_aliases = self.catalogue.schema_version_aliases.clone();
+                candidate_aliases.insert(staged.publication.schema.id, staged.alias);
+                validate_scalar_enum_case_provenance(&candidate_mappings, &candidate_aliases)?;
+                validate_payload_enum_case_provenance(&candidate_mappings, &candidate_aliases)?;
                 self.persist_catalogue_schema_lineage(&staged).await?;
+                self.catalogue.next_physical_table_id = next_physical_table_id;
+                self.catalogue.next_physical_column_id = next_physical_column_id;
                 self.catalogue.staged_lineages.insert(next, staged.clone());
                 staged
             };
@@ -949,7 +1040,7 @@ where
             ingest_context,
             Some(context)
                 if context.identity == AuthorSubject::SYSTEM
-                    && context.trust == CommitUnitTrust::TrustedBackend
+                    && matches!(context.trust, CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority)
         ) {
             Ok(())
         } else {
@@ -1250,6 +1341,10 @@ where
                 "schema lineage publication id mismatch",
             ));
         }
+        publication
+            .physical_identities
+            .validate_for_schema(&publication.schema.schema)
+            .map_err(Error::InvalidCatalogueUpdate)?;
         if publication.schema.id != publication.schema.schema.version_id() {
             return Err(Error::InvalidCatalogueUpdate(
                 "schema id does not match schema payload",

@@ -142,9 +142,10 @@ impl ValidationBench {
 
         for client in &mut self.clients {
             let mut peer = PeerState::new();
-            let update = peer
-                .current_rows_update(&mut self.core, TABLE)
-                .expect("seed view update");
+            let schema = schema();
+            support::register_table_receiver(client, &schema, TABLE, peer.identity());
+            let update =
+                support::table_subscription_update(&mut self.core, &mut peer, &schema, TABLE);
             support::apply_and_settle(client, update);
         }
     }

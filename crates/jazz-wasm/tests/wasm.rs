@@ -143,6 +143,24 @@ fn fixture_db() -> WasmDb {
     .expect("open public WASM memory binding")
 }
 
+/// This is intentionally a binding-level receipt: wasm-bindgen owns the
+/// JavaScript receiver borrow, so Rust callers cannot observe the re-entrant
+/// aliasing failure that occurs when a lifecycle callback closes an otherwise
+/// shared `WasmDb` receiver. `close` must therefore be callable through a
+/// shared reference and remain idempotent.
+#[wasm_bindgen_test]
+async fn close_is_idempotent_without_an_exclusive_wasm_receiver() {
+    let db = fixture_db();
+
+    let closing = db.close();
+    let error = db
+        .set_non_durable_client()
+        .expect_err("an operation admitted after close starts must fail");
+    assert_eq!(error.as_string().as_deref(), Some("WasmDb is closed"));
+    assert_eq!(await_promise(closing).await.as_bool(), Some(true));
+    assert_eq!(await_promise(db.close()).await.as_bool(), Some(false));
+}
+
 #[wasm_bindgen_test]
 fn self_signed_subscriber_admission_requires_the_exact_proof() {
     let seed = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";

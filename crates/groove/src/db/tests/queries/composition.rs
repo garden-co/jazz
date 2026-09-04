@@ -244,6 +244,242 @@ async fn arg_max_by_tracks_union_of_filtered_sources() {
 }
 
 #[futures_test::test]
+async fn arg_max_by_projection_reorder_preserves_tied_winner_and_retraction() {
+    let storage = MemoryStorage::new(&["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage)
+        .await
+        .unwrap();
+    let source = || {
+        GraphBuilder::union([
+            GraphBuilder::table("history_shadow"),
+            GraphBuilder::table("history"),
+        ])
+    };
+    let declared_order_projection = database
+        .subscribe_one_sink(GraphBuilder::arg_max_by(
+            source().project(["row", "stamp", "node", "title"]),
+            ["row"],
+            ["stamp", "node"],
+        ))
+        .await
+        .unwrap();
+    let reordered_projection = database
+        .subscribe_one_sink(GraphBuilder::arg_max_by(
+            source().project(["row", "title", "stamp", "node"]),
+            ["row"],
+            ["stamp", "node"],
+        ))
+        .await
+        .unwrap();
+    assert!(declared_order_projection.recv().unwrap().is_empty());
+    assert!(reordered_projection.recv().unwrap().is_empty());
+
+    let tied_low = history_values(1, 20, 1, "tied-a");
+    let tied_high = history_values(1, 20, 1, "tied-z");
+    let tied_low_reordered = vec![
+        Value::U64(1),
+        Value::String("tied-a".to_owned()),
+        Value::U64(20),
+        Value::U64(1),
+    ];
+    let tied_high_reordered = vec![
+        Value::U64(1),
+        Value::String("tied-z".to_owned()),
+        Value::U64(20),
+        Value::U64(1),
+    ];
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 9, "z-payload"));
+    batch.insert("history", tied_low.clone());
+    batch.insert("history_shadow", tied_high.clone());
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        declared_order_projection
+            .recv()
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(tied_low.clone(), 1)]
+    );
+    assert_eq!(
+        reordered_projection.recv().unwrap().to_values().unwrap(),
+        [(tied_low_reordered.clone(), 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 20, 1));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        declared_order_projection
+            .recv()
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(tied_low, -1), (tied_high, 1)]
+    );
+    assert_eq!(
+        reordered_projection.recv().unwrap().to_values().unwrap(),
+        [(tied_low_reordered, -1), (tied_high_reordered, 1)]
+    );
+}
+
+#[futures_test::test]
+async fn arg_max_by_direct_table_and_noop_filter_publish_same_payload_replacement() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let direct = database
+        .subscribe_one_sink(history_arg_max())
+        .await
+        .unwrap();
+    let filtered = database
+        .subscribe_one_sink(GraphBuilder::arg_max_by(
+            GraphBuilder::table("history").filter(PredicateExpr::And(Vec::new())),
+            ["row"],
+            ["stamp", "node"],
+        ))
+        .await
+        .unwrap();
+    assert!(direct.recv().unwrap().is_empty());
+    assert!(filtered.recv().unwrap().is_empty());
+
+    let before = history_values(1, 20, 1, "before");
+    let after = history_values(1, 20, 1, "after");
+    let mut batch = database.open_batch();
+    batch.insert("history", before.clone());
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        direct.recv().unwrap().to_values().unwrap(),
+        [(before.clone(), 1)]
+    );
+    assert_eq!(
+        filtered.recv().unwrap().to_values().unwrap(),
+        [(before.clone(), 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.update("history", after.clone());
+    database.commit_batch(batch).await.unwrap();
+    let expected = [(before, -1), (after, 1)];
+    assert_eq!(direct.recv().unwrap().to_values().unwrap(), expected);
+    assert_eq!(filtered.recv().unwrap().to_values().unwrap(), expected);
+}
+
+#[futures_test::test]
+async fn arg_by_snapshot_hydration_tie_breaker_is_independent_of_reversed_input_order() {
+    let storage = MemoryStorage::new(&["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage)
+        .await
+        .unwrap();
+    let tied_low = history_values(1, 20, 1, "tied-a");
+    let tied_high = history_values(1, 20, 1, "tied-z");
+    let mut batch = database.open_batch();
+    batch.insert("history_shadow", tied_high);
+    batch.insert("history", tied_low);
+    database.commit_batch(batch).await.unwrap();
+
+    let input = || {
+        GraphBuilder::union([
+            GraphBuilder::table("history_shadow"),
+            GraphBuilder::table("history"),
+        ])
+        .project(["row", "title", "stamp", "node"])
+    };
+    let expected = [(
+        vec![
+            Value::U64(1),
+            Value::String("tied-a".to_owned()),
+            Value::U64(20),
+            Value::U64(1),
+        ],
+        1,
+    )];
+
+    let output = || {
+        RecordDescriptor::new([
+            ("row", ColumnType::U64.clone()),
+            ("title", ColumnType::String.clone()),
+            ("stamp", ColumnType::U64.clone()),
+            ("node", ColumnType::U64.clone()),
+        ])
+    };
+    let frontier = || GraphBuilder::frontier_source("frontier", output());
+    let recursive = |seed| GraphBuilder::recursive(seed, frontier(), "frontier", 4);
+    for graph in [
+        GraphBuilder::arg_min_by(input(), ["row"], ["stamp", "node"]),
+        GraphBuilder::arg_max_by(input(), ["row"], ["stamp", "node"]),
+        recursive(GraphBuilder::arg_min_by(
+            input(),
+            ["row"],
+            ["stamp", "node"],
+        )),
+        recursive(GraphBuilder::arg_max_by(
+            input(),
+            ["row"],
+            ["stamp", "node"],
+        )),
+    ] {
+        assert_eq!(
+            database
+                .query_graph(graph)
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[futures_test::test]
+async fn arg_min_by_reordered_projection_preserves_declared_order_on_retraction() {
+    let storage = MemoryStorage::new(&["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage)
+        .await
+        .unwrap();
+    let input = GraphBuilder::union([
+        GraphBuilder::table("history_shadow"),
+        GraphBuilder::table("history"),
+    ])
+    .project(["row", "title", "stamp", "node"]);
+    let graph = GraphBuilder::arg_min_by(input, ["row"], ["stamp", "node"]);
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let payload_first_but_ordered_higher = history_values(1, 30, 1, "a-payload");
+    let tied_low = history_values(1, 20, 1, "tied-a");
+    let tied_high = history_values(1, 20, 1, "tied-z");
+    let tied_low_output = vec![
+        Value::U64(1),
+        Value::String("tied-a".to_owned()),
+        Value::U64(20),
+        Value::U64(1),
+    ];
+    let tied_high_output = vec![
+        Value::U64(1),
+        Value::String("tied-z".to_owned()),
+        Value::U64(20),
+        Value::U64(1),
+    ];
+    let mut batch = database.open_batch();
+    batch.insert("history_shadow", payload_first_but_ordered_higher);
+    batch.insert("history", tied_low);
+    batch.insert("history_shadow", tied_high);
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(tied_low_output.clone(), 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 20, 1));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(tied_low_output, -1), (tied_high_output, 1)]
+    );
+}
+
+#[futures_test::test]
 async fn arg_max_by_tracks_join_filter_input() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"])
         .expect("valid memory storage families");
@@ -362,7 +598,7 @@ async fn predicate_or_filter_matches_either_branch() {
 }
 
 #[futures_test::test]
-async fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
+async fn arg_by_rejects_bad_primary_keys() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"])
         .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
@@ -376,22 +612,6 @@ async fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("requires primary key"));
-
-    database
-        .subscribe_one_sink(GraphBuilder::recursive(
-            history_arg_max().project(["row", "stamp"]),
-            GraphBuilder::frontier_source(
-                "frontier",
-                RecordDescriptor::new([
-                    ("row", ColumnType::U64.clone()),
-                    ("stamp", ColumnType::U64.clone()),
-                ]),
-            ),
-            "frontier",
-            4,
-        ))
-        .await
-        .unwrap();
 }
 
 #[futures_test::test]

@@ -95,7 +95,7 @@ In TypeScript, committing and waiting for durability are separate steps:
 | ------------------------------------ | ---------------------------------------------------------------------------------- |
 | `await db.transaction(...)`          | The callback finished and Jazz created the committed mergeable transaction locally |
 | `result.value`                       | The value returned by the callback                                                 |
-| `await result.transactionId`         | The committed transaction has an ID                                                |
+| `await result.txId`                  | The committed transaction has an ID                                                |
 | `await result.wait({ tier })`        | The mergeable transaction reached that durability tier, or was rejected            |
 | `await db.exclusiveTransaction(...)` | Jazz created the committed exclusive transaction locally                           |
 | `await result.wait()`                | The authority accepted the exclusive transaction, or rejected it                   |

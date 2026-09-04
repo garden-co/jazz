@@ -14,6 +14,11 @@ import { basename, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { snapshotCorrectnessArtifacts } from "../artifacts/test-artifact-store.mjs";
+import {
+  correctnessArtifactSourceIdentity,
+  verifyCorrectnessArtifactProducer,
+  writeCorrectnessArtifactProducerManifest,
+} from "../artifacts/correctness-artifact-producer.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
@@ -128,24 +133,41 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   try {
     // Hard-linking the fully-written receipt is atomic and unlike rename
     // never replaces an existing live or malformed lock on POSIX/Windows.
-    linkSync(staging, lockPath);
+    //
+    // A previous owner can unlink its receipt after `linkSync` reports
+    // EEXIST but before we read it. That is not an unowned receipt: it is a
+    // completed release, so retry the same atomic publish. In particular,
+    // direct WASM producers may hand the selected CI lock from one producer
+    // to the next without an intermediate coordinator. Any receipt we can
+    // still read remains fail-closed below.
+    for (;;) {
+      try {
+        linkSync(staging, lockPath);
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        const existing = readLockOwner(lockPath);
+        if (existing) {
+          if (!Number.isInteger(existing.pid) || existing.pid <= 0)
+            throw new Error(
+              "test-artifacts: lock has no usable owner metadata; refusing to delete it.",
+            );
+          throw lockError(lockPath, existing);
+        }
+        // The collision vanished before it could be inspected. Retry the
+        // atomic link rather than treating that absence as permission to
+        // remove or overwrite anything.
+      }
+    }
     try {
       rmSync(staging, { force: true });
     } catch (error) {
       throw lockFilesystemError("remove published lock receipt", error);
     }
   } catch (error) {
-    if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") {
-      removeQuietly(staging);
-      throw lockFilesystemError("publish lock receipt", error);
-    }
-    const existing = readLockOwner(lockPath);
-    if (!existing || !Number.isInteger(existing.pid) || existing.pid <= 0) {
-      removeQuietly(staging);
-      throw new Error("test-artifacts: lock has no usable owner metadata; refusing to delete it.");
-    }
     removeQuietly(staging);
-    throw lockError(lockPath, existing);
+    if (error.message?.startsWith("test-artifacts:")) throw error;
+    throw lockFilesystemError("publish lock receipt", error);
   }
   console.log(`test-artifacts: acquired artifact lock (pid ${owner.pid})`);
   let released = false;
@@ -358,7 +380,17 @@ export async function buildTestArtifacts(
   scope = createBuildScope(),
   lease = undefined,
   snapshot = () => {},
+  sealProducerManifest = () => {},
 ) {
+  // Capture before any producer starts.  A dirty checkout is acceptable only
+  // when it remains byte-for-byte the same through publication; otherwise a
+  // manifest could attest new sources while containing binaries built from old
+  // ones.
+  const sourceAtStart = correctnessArtifactSourceIdentity(root);
+  const assertUnchangedSource = () => {
+    if (JSON.stringify(sourceAtStart) !== JSON.stringify(correctnessArtifactSourceIdentity(root)))
+      throw new Error("test-artifacts: source inputs changed during native artifact production");
+  };
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
     scope
@@ -388,17 +420,13 @@ export async function buildTestArtifacts(
   // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
   // discarded that cache and made three cold compilers contend for the same
   // CPUs. NAPI is the long pole and benefits most from running alone. Once it
-  // is complete, CLI and fast WASM can share the remaining compile window;
-  // jazz-tools then consumes both generated prerequisites.
+  // is complete, fast WASM uses the remaining compile window; jazz-tools then
+  // consumes both runtime prerequisites. CLI builds are separate because no
+  // correctness consumer loads the binary at runtime.
   await guardedRun(
     "pnpm",
     ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only"],
     "release NAPI",
-  );
-  const cli = guardedRun(
-    "pnpm",
-    ["exec", "turbo", "run", "build:crates", "--filter=@jazz/rust", "--only"],
-    "CLI",
   );
   const wasm = guardedRun(
     "pnpm",
@@ -406,7 +434,7 @@ export async function buildTestArtifacts(
     "fast WASM",
   );
   try {
-    await Promise.all([cli, wasm]);
+    await wasm;
   } catch (error) {
     await scope.drain();
     throw firstBuildError ?? error;
@@ -418,7 +446,7 @@ export async function buildTestArtifacts(
   );
   try {
     // Validate the mutable producer generation before it can enter the
-    // immutable correctness store. A bad generation must never poison the
+    // content-addressed correctness store. A bad generation must never poison the
     // fingerprint-addressed destination that its repair needs to publish.
     await preflightNapi();
   } catch (error) {
@@ -435,16 +463,12 @@ export async function buildTestArtifacts(
     );
     await preflightNapi();
   }
-  // Seal the exact pair before jazz-tools bundles its broker worker. The
-  // mutable package publication paths are still useful to package builds, but
-  // correctness bundles must never follow a later replacement generation.
-  snapshot(root);
-  // The atomic WASM producer seals its matching manifest before publication.
-  await guardedRun(
-    "pnpm",
-    ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
-    "jazz-tools",
-  );
+  // Seal the exact pair before the separate TypeScript consumer builds its
+  // broker worker. Mutable package publication paths remain useful to package
+  // builds, but correctness consumers must never follow a later replacement.
+  assertUnchangedSource();
+  const correctnessSnapshot = snapshot(root);
+  assertUnchangedSource();
 
   // A manifest is the contract that makes a cached/generated artifact safe to
   // consume. NAPI is built release because that is the loadable Linux mode;
@@ -466,6 +490,14 @@ export async function buildTestArtifacts(
     ["dev/artifacts/provenance.mjs", "verify", "napi", "release"],
     "verify release NAPI provenance",
   );
+  // This is the producer/consumer boundary.  It is written only after every
+  // native artifact has loaded and its provenance has been verified.  The TS
+  // consumer gate validates this sealed receipt before and after it builds tools.
+  sealProducerManifest(root, correctnessSnapshot, sourceAtStart);
+  // The producer itself verifies the exact receipt it just published. This
+  // catches a partial/incorrect write here rather than deferring it to a TS
+  // consumer job that would otherwise report an unrelated build failure.
+  if (correctnessSnapshot) verifyCorrectnessArtifactProducer(root);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -481,7 +513,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exitCode = 1;
   } else
     withArtifactBuildLock((scope, lease) =>
-      buildTestArtifacts(command, scope, lease, snapshotCorrectnessArtifacts),
+      buildTestArtifacts(
+        command,
+        scope,
+        lease,
+        snapshotCorrectnessArtifacts,
+        writeCorrectnessArtifactProducerManifest,
+      ),
     ).catch((error) => {
       console.error(`test-artifacts: ${error.message}`);
       process.exitCode = 1;

@@ -41,7 +41,7 @@ Invariant digest:
 - `INV-TICK-15`: A recursive positive incremental tick MUST emit each newly discovered recursive fact at weight `+1` at most once and MUST collapse duplicate derivations.
 - `INV-TICK-16`: The reference implementation selects recompute for negative table deltas, cached recursive state with table deltas, empty unbound state, or unhydrated step arrangements. This trigger set is broader than the minimum necessary; the contractual result is the minimal diff required by INV-REC-8.
 - `INV-TICK-17`: Recursive recompute and incremental recursion MUST reject non-positive recursive frontier facts instead of assigning bag-recursive semantics.
-- `INV-TICK-18`: Recursive evaluation MUST stop with `RecursiveIterationLimit` when the frontier remains non-empty after `RecursiveOp.max_iters`.
+- `INV-TICK-18`: Fixpoint recursion MUST stop with `RecursiveIterationLimit` when the frontier remains non-empty after its safety `max_iters`; semantic depth bounds MUST truncate instead. The limit is part of recursive-node identity: equal recursive nodes share one success or failure, while distinct limits remain distinct. Failure aborts that node and its downstream closure, including dependent terminals and staged durable writes; independent graph branches may still publish and valid shared upstream state is not duplicated.
 - `INV-TICK-19`: Hydrating or querying a graph MUST NOT perturb an existing subscription stream's future tick deltas.
 - `INV-TICK-20`: Contextual recursive child state MUST NOT be persisted in `operator_states` after recursive recompute; retained child operator state outside `FrontierSource` context remains root-scoped.
 
@@ -109,6 +109,15 @@ deltas, never unchanged matching rows or base-table changes outside the result
 existing subscriptions' future deltas (`INV-TICK-19`). The tick provides that
 isolation with per-tick memoization keyed by `{scope, node, tick, sub_tick}`,
 cleared after the tick (`INV-TICK-5`).
+
+The replacement rule also applies to a collector's resident row weights and
+selected-root state, not only join arrangements. If Alice already subscribes
+to a collector, opening Bob's identical subscription after its disposable
+output memo is evicted must rebuild from the complete snapshot, not insert
+that snapshot into Alice's existing state again. Both subscribers must then
+observe one update or removal for one changed row; a cache miss must never
+leave a phantom second copy which survives a retraction (`INV-TICK-12`,
+`INV-TICK-19`).
 
 **Decision, Anselm 2026-08-05 — narrow output-terminal exception to `INV-INC-1`
 (`INV-INC-2`, target).** A terminal `CollectBy` may retain a complete flat
@@ -216,8 +225,13 @@ is the minimal diff required by `INV-REC-8`. The behavior is covered by
 
 _Further invariants._ `INV-TICK-17` — recursion rejects non-positive frontier
 facts rather than assigning bag-recursive semantics (ch. 6). `INV-TICK-18` —
-recursive evaluation stops with `RecursiveIterationLimit` when the frontier is
-still non-empty after `max_iters` (ch. 6). `INV-TICK-20` — contextual recursive
+fixpoint recursion stops with `RecursiveIterationLimit` when the frontier is
+still non-empty after its safety `max_iters`, while semantic depth bounds
+truncate the out-of-range frontier (ch. 6). The limit participates in recursive
+node identity, so equal nodes share success or failure while different limits
+do not alias. Failure aborts the node and its downstream closure, including
+dependent terminals and staged durable writes; independent branches still
+publish and valid shared upstream state is not duplicated. `INV-TICK-20` — contextual recursive
 child state is not persisted in `operator_states` after recompute (ch. 6).
 
 ### 4.6 The unified arrangement model

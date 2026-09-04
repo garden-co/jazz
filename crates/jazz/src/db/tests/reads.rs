@@ -18,6 +18,234 @@ fn indexed_documents_schema() -> JazzSchema {
     )
 }
 
+fn multi_index_documents_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("team", PublicColumnType::Uuid)
+                .column("active", PublicColumnType::Boolean)
+                .column("title", PublicColumnType::Text)
+                .index_only(["team", "active"]),
+        ),
+    )
+}
+
+/// A maintained equality source is both an indexed hydration source and a
+/// live IVM source. In particular, a row changing either indexed equality must
+/// enter/leave exactly once rather than remaining filtered by the prefix that
+/// selected the initial snapshot.
+#[test]
+fn maintained_multi_index_query_tracks_either_index_transition() {
+    let schema = multi_index_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let db = open_db(0xd1, author, &schema);
+    let team = row(0xa0);
+    let matching = row(1);
+    let inactive = row(2);
+    let other_team = row(3);
+    let cells = |team: RowUuid, active: bool, title: &str| {
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(active)),
+            ("title".to_owned(), Value::String(title.to_owned())),
+        ])
+    };
+    for (id, values) in [
+        (matching, cells(team, true, "matching")),
+        (inactive, cells(team, false, "inactive")),
+        (other_team, cells(row(0xb0), true, "other team")),
+    ] {
+        db.insert(
+            "documents",
+            values,
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("documents")
+        .filter(eq(col("team"), lit(Value::Uuid(team.0))))
+        .filter(eq(col("active"), lit(true)));
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![matching]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 2,
+        "the maintained Local source must probe both equality indices"
+    );
+
+    db.update(
+        "documents",
+        inactive,
+        BTreeMap::from([("active".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![inactive]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.update(
+        "documents",
+        inactive,
+        BTreeMap::from([("team".to_owned(), Value::Uuid(row(0xb0).0))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![inactive]
+    );
+}
+
+/// Empty durable index prefixes remain live sources. The first matching row
+/// must not be lost merely because indexed hydration had no row to materialize.
+#[test]
+fn maintained_empty_index_prefix_delivers_first_matching_insert_once() {
+    let schema = indexed_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd2; 16]);
+    let db = open_db(0xd2, author, &schema);
+    let team = row(0xa2);
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert!(
+        initial.rows.is_empty(),
+        "empty prefix must still open a subscription"
+    );
+
+    let first = row(4);
+    db.insert(
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("first".to_owned())),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(first),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![first]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "first insert must deliver exactly once"
+    );
+}
+
+/// A Local subscription remains complete when its settled source is indexed;
+/// the empty ahead overlay does not replace that indexed snapshot.
+#[test]
+fn maintained_local_index_snapshot_is_complete() {
+    let schema = indexed_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd3; 16]);
+    let db = open_db(0xd3, author, &schema);
+    let team = row(0xa3);
+    let matching = row(5);
+    for (id, row_team) in [(matching, team), (row(6), row(0xb3))] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "documents",
+            id,
+            author,
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(row_team.0)),
+                ("active".to_owned(), Value::Bool(true)),
+                ("title".to_owned(), Value::String("settled".to_owned())),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&snapshot.rows), vec![matching]);
+    let node = db.node.node.borrow();
+    let metrics = node.query_engine_read_metrics();
+    assert!(metrics.source_index_probes >= 1);
+}
+
+/// A Global subscription starts empty until its authority has settled the
+/// indexed source, then installs the same complete indexed snapshot that its
+/// Local counterpart would observe. This exercises the asynchronous delivery
+/// boundary that previously made the direct maintained index experiment lose
+/// fresh snapshots on worker-backed storage.
+#[test]
+fn maintained_global_index_snapshot_waits_for_settled_source() {
+    let schema = indexed_documents_schema();
+    let client_author = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let server = open_core(0xd4, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xd5, client_author, &schema);
+    let team = row(0xa4);
+    let matching = seed(
+        &server,
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("matching".to_owned())),
+        ]),
+    );
+    seed(
+        &server,
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(row(0xb4).0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("unrelated".to_owned())),
+        ]),
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    server.node().borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(
+        opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty(),
+        "Global must not claim a snapshot before the authority settles it"
+    );
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&snapshot.rows), vec![matching]);
+    assert!(
+        server
+            .node()
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 1,
+        "the authority must hydrate the settled Global source through its equality index"
+    );
+}
+
 #[test]
 fn negated_membership_uses_two_valued_null_semantics() {
     let schema = build_public_db_test_schema(
@@ -229,6 +457,122 @@ fn subscription_reset_preserves_ordered_window_rank() {
         vec![row(1), row(3)],
         "reset rows must retain the selected ordered window rather than member-key order"
     );
+}
+
+#[test]
+fn subscription_reset_preserves_ordered_flat_join_window_with_duplicate_roots() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("ownerId", "users"),
+            ),
+    );
+    let db = open_db(0xc4, AuthorSubject::for_test_bytes([0xc4; 16]), &schema);
+    for (id, name) in [(0xa1, "alice"), (0xb1, "maria"), (0xc1, "zoe")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (id, owner) in [(0x11, 0xa1), (0x22, 0xa1), (0x33, 0xb1), (0x44, 0xc1)] {
+        db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(format!("todo-{id:x}"))),
+                (
+                    "ownerId".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::Uuid(row(owner).0)))),
+                ),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    // The selected window is maria, then Alice's two distinct joined
+    // occurrences. Opaque terminal key map order would instead put Alice
+    // before maria, so this specifically proves materialization follows the
+    // lowered CollectBy sequence after custom sort, offset, and limit.
+    let query = Query::from("users")
+        .join_via_column("todos", "ownerId", "id", [])
+        .order_by("name", OrderDirection::Desc)
+        .offset(1)
+        .limit(3);
+    assert_eq!(
+        row_ids(&prepared_read(&db, &query)),
+        vec![row(0xb1), row(0xa1), row(0xa1)],
+        "the direct query establishes the lowered collector order",
+    );
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("flat join subscription must open with a delta");
+    };
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![row(0xb1), row(0xa1), row(0xa1)],
+    );
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xb1).0),
+                [ObjectId::from_uuid(row(0x33).0)],
+            ),
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xa1).0),
+                [ObjectId::from_uuid(row(0x11).0)],
+            ),
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xa1).0),
+                [ObjectId::from_uuid(row(0x22).0)],
+            ),
+        ]
+    );
+    block_on(subscription.close()).unwrap();
+
+    // A non-key order update stays within the unwindowed result but changes
+    // its rank. Groove emits an exact opaque-key Move; the public subscription
+    // reducer consumes root terminal edits into indexed `updated` rows (only
+    // descendant terminal edits cross this API boundary).
+    let move_query = Query::from("users")
+        .join_via_column("todos", "ownerId", "id", [])
+        .order_by("name", OrderDirection::Desc);
+    let mut moved = prepared_subscribe(&db, &move_query, ReadOpts::default()).unwrap();
+    let _initial = block_on(moved.next_raw()).unwrap();
+    db.update(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("zzzz".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta { updated, .. } = block_on(moved.next_raw()).unwrap() else {
+        panic!("rank change must publish a structured delta");
+    };
+    assert!(updated.iter().any(|output| {
+        output.row.row_uuid() == row(0xb1)
+            && output.previous_index == Some(1)
+            && output.index == 0
+            && output.row.cell_at(0) == Some(Value::String("zzzz".to_owned()))
+    }));
 }
 
 #[test]
@@ -1312,22 +1656,28 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        result_member_adds,
+        program_fact_adds,
         ..
     }) = message
     else {
         panic!("expected include subscription view update, got {message:?}");
     };
     assert_eq!(served, subscription);
-    let tables = result_member_adds
+    let tables = program_fact_adds
         .iter()
-        .filter_map(|member| member.as_real_row().map(|row| row.table.as_str()))
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
+                Some(input.version_table.as_str())
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>();
     assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
 
@@ -1336,27 +1686,40 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
         .send(SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        result_member_adds,
+        program_fact_adds,
         ..
     }) = message
     else {
         panic!("expected reopened include subscription view update, got {message:?}");
     };
     assert_eq!(served, subscription);
-    let tables = result_member_adds
+    let tables = program_fact_adds
         .iter()
-        .filter_map(|member| member.as_real_row().map(|row| row.table.as_str()))
+        .filter_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
+                Some(input.version_table.as_str())
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>();
     assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
 }

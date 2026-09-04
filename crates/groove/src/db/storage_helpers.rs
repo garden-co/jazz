@@ -476,6 +476,10 @@ impl<S> OrderedKvStorage for MeteredStorage<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.storage.permits_eager_read_retry()
+    }
+
     fn scan(
         &self,
         request: crate::storage::ScanRequest,

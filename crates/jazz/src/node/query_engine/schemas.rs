@@ -33,6 +33,27 @@ pub(crate) struct AppRowSchema {
     /// with `user_`, which is otherwise the physical CurrentRow source-cell
     /// namespace.
     pub(crate) public_field_names: BTreeMap<String, String>,
+    /// The compiler-owned subscription boundary for this app-row terminal.
+    ///
+    /// A public root collector owns both the initial materialized root state
+    /// and all later `Insert`/`Update`/`Remove`/`Move` operations.  Keeping
+    /// this distinction in lowered metadata prevents Jazz from guessing from
+    /// a query's surface shape (for example, whether it has nested arrays).
+    pub(crate) terminal: AppRowTerminal,
+}
+
+/// How an app-row terminal reaches the subscription boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AppRowTerminal {
+    /// Ordinary relational tuples. Their membership bridge owns materialization.
+    Direct,
+    /// A `CollectBy` public-root terminal. Groove owns root state and positions.
+    RootCollector,
+    /// Aggregate output is a compiler-owned application terminal. Its raw
+    /// graph descriptor is normalized once into a synthetic `CurrentRow`
+    /// before subscription delivery; authority never ships this derived row
+    /// as source input.
+    Aggregate(AggregateResultSchema),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,8 +111,8 @@ pub(crate) enum ProgramFactSchema {
     RelationEdges(RelationEdgeSchema),
     /// Per-path correlation/cardinality coverage rows.
     PathCorrelationCoverage(PathCorrelationCoverageSchema),
-    /// Source/table coverage facts.
-    SourceCoverage(SourceCoverageSchema),
+    /// Complete source-closure receipts.
+    ProgramSourceCoverage(ProgramSourceCoverageSchema),
     /// Settled read-frontier/query coverage signal.
     ReadFrontierSettled(ReadFrontierSettledSchema),
     /// Full transaction payload coverage.
@@ -255,11 +276,17 @@ pub(crate) struct VersionWitnessSchemas {
     pub(crate) content: Option<VersionWitnessSchema>,
     /// Deletion-register witness schema.
     pub(crate) deletion: Option<VersionWitnessSchema>,
+    /// Hidden prepared-binding fields retained only until the maintained
+    /// multisink terminal partitions this source closure. They never cross
+    /// the ProgramFact wire boundary.
+    pub(crate) routing_param_fields: BTreeSet<String>,
 }
 
 /// One version-witness terminal row schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VersionWitnessSchema {
+    /// Frozen normalized source occurrence that emitted this witness.
+    pub(crate) source: crate::protocol::ProgramSourceId,
     /// Record descriptor emitted by the terminal graph.
     pub(crate) descriptor: RecordDescriptor,
     /// Fields that identify the concrete row version.
@@ -318,18 +345,15 @@ pub(crate) struct PolicyWitnessSchema {
     pub(crate) edge_kind_field: String,
 }
 
-/// Source coverage terminal row schema.
+/// Complete source-closure terminal schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourceCoverageSchema {
-    /// Logical source field.
-    pub(crate) source_field: String,
-    /// Logical table field.
-    pub(crate) table_field: String,
-    /// Covered row field, when coverage is row-specific.
-    pub(crate) row_field: Option<String>,
-    /// Coverage mode or key-range field.
-    pub(crate) coverage_field: String,
-    /// Retained binding/routing parameter fields.
+pub(crate) struct ProgramSourceCoverageSchema {
+    /// Exact source occurrence whose closure this terminal certifies.
+    pub(crate) source: crate::protocol::ProgramSourceId,
+    /// This terminal is a complete-closure receipt, not a row/range fact.
+    pub(crate) complete: bool,
+    /// Hidden prepared-binding fields retained only until the maintained
+    /// multisink terminal partitions this source-closure receipt.
     pub(crate) routing_param_fields: BTreeSet<String>,
 }
 

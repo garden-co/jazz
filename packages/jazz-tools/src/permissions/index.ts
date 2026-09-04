@@ -52,7 +52,63 @@ const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT = 10;
 const REACHABLE_POLICY_MAX_DEPTH_DEFAULT = 8;
 const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP = 64;
-const CREATOR_CONDITION = {
+const PERMISSION_EXPRESSION_BRAND: unique symbol = Symbol("jazz.permission-expression");
+const POLICY_EXPRESSION_DISCRIMINATORS: Record<PolicyExpr["type"], true> = {
+  Cmp: true,
+  SessionCmp: true,
+  IsNull: true,
+  SessionIsNull: true,
+  IsNotNull: true,
+  SessionIsNotNull: true,
+  Contains: true,
+  SessionContains: true,
+  In: true,
+  InList: true,
+  SessionInList: true,
+  Exists: true,
+  ExistsRel: true,
+  Inherits: true,
+  InheritsReferencing: true,
+  And: true,
+  Or: true,
+  Not: true,
+  True: true,
+  False: true,
+};
+
+/**
+ * An opaque condition produced by the permissions DSL.
+ *
+ * This is the common input type for policy atoms, compound conditions,
+ * existence checks, session predicates, and resolved condition objects.
+ * Plain objects are deliberately not assignable: they remain row predicates
+ * until a permissions DSL consumer resolves them.
+ */
+export interface PermissionExpressionInput {
+  readonly [PERMISSION_EXPRESSION_BRAND]: true;
+}
+
+/**
+ * A raw policy expression produced by the permissions DSL.
+ *
+ * Use {@link PermissionExpressionInput} for helpers that may return any DSL
+ * condition, and this subtype when the value is specifically policy IR.
+ */
+export type PermissionExpression = PolicyExpr & PermissionExpressionInput;
+
+function brandPermissionExpression<const T extends object>(
+  expression: T,
+): T & PermissionExpressionInput {
+  Object.defineProperty(expression, PERMISSION_EXPRESSION_BRAND, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  return expression as T & PermissionExpressionInput;
+}
+
+const CREATOR_CONDITION: PermissionExpression = brandPermissionExpression({
   type: "Cmp",
   column: "$createdBy",
   op: "Eq",
@@ -60,27 +116,30 @@ const CREATOR_CONDITION = {
     type: "SessionRef",
     path: ["user"],
   },
-} satisfies PolicyExpr;
+} satisfies PolicyExpr);
 
 export interface SessionRefValue {
   readonly __jazzPermissionKind: "session-ref";
   readonly path: string[];
 }
 
-interface SessionWhereCondition {
+interface SessionWhereCondition extends PermissionExpressionInput {
   readonly __jazzPermissionKind: "session-where";
   readonly where: Record<string, unknown>;
 }
 
-interface WhereObjectCondition {
+interface WhereObjectCondition extends PermissionExpressionInput {
   readonly __jazzPermissionKind: "where-object";
   readonly where: Record<string, unknown>;
 }
 
 type SessionWhereBuilder = SessionRefValue &
-  ((input: Record<string, unknown>) => SessionWhereCondition);
+  ((input: Record<string, unknown>) => PermissionExpressionInput);
 
 interface RecursiveDepthOptions {
+  /**
+   * Maximum recursive hops. Zero performs no inheritance hop and cannot grant access.
+   */
   maxDepth?: number;
 }
 
@@ -89,25 +148,31 @@ export interface RowRefValue {
   readonly column: string;
 }
 
-interface ExistsCondition {
+interface ExistsCondition extends PermissionExpressionInput {
   readonly __jazzPermissionKind: "exists";
   readonly table: string;
   readonly where: Record<string, unknown>;
 }
 
-interface ExistsRelationCondition {
+interface ExistsRelationCondition extends PermissionExpressionInput {
   readonly __jazzPermissionKind: "exists-relation";
   readonly relation: PermissionRelation;
 }
 
-interface CompoundCondition {
+interface CompoundCondition extends PermissionExpressionInput {
   readonly __jazzPermissionKind: "compound";
   readonly op: "And" | "Or";
-  readonly conditions: Condition[];
+  readonly conditions: readonly Condition[];
+}
+
+interface CompoundConditionInput extends PermissionExpressionInput {
+  readonly __jazzPermissionKind: "compound-input";
+  readonly op: "And" | "Or";
+  readonly conditions: readonly unknown[];
 }
 
 type Condition =
-  | PolicyExpr
+  | PermissionExpression
   | CompoundCondition
   | ExistsCondition
   | ExistsRelationCondition
@@ -166,6 +231,7 @@ export interface PermissionRelation {
   gather(options: {
     start?: Record<string, unknown> | PermissionRelation;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
+    /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
   }): PermissionRelation;
   reachable_via(
@@ -344,6 +410,7 @@ class PermissionRelationBuilder implements PermissionRelation {
   gather(options: {
     start?: Record<string, unknown> | PermissionRelation;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
+    /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
   }): PermissionRelation {
     if (typeof options.step !== "function") {
@@ -414,28 +481,22 @@ class PermissionRelationBuilder implements PermissionRelation {
     ];
     const stepFiltered = applyRelFilter(stepState.base, stepPredicates);
 
-    const recursiveHopScope = "__recursive_hop_0";
+    // Gather carries only the recursive key across the frontier. The
+    // hopTo(...) validation above proves that stepJoin.left is the foreign key
+    // of the output row, so joining every hop back to the output table would
+    // add an unnecessary existence requirement and prevent an unmaterialized
+    // parent key from authorizing a later access-table join.
     const stepProjected: RelExpr = {
       Project: {
-        input: {
-          Join: {
-            left: stepFiltered,
-            right: {
-              TableScan: {
-                table: this.state.outputTable,
-                alias: recursiveHopScope,
-              },
+        input: stepFiltered,
+        columns: [
+          {
+            alias: "id",
+            expr: {
+              Column: relationColumnRef(stepJoin.left, stepJoin.leftScope),
             },
-            on: [
-              {
-                left: relationColumnRef(stepJoin.left, stepJoin.leftScope),
-                right: { scope: recursiveHopScope, column: "id" },
-              },
-            ],
-            join_kind: "Inner",
           },
-        },
-        columns: projectHopResult(recursiveHopScope),
+        ],
       },
     };
 
@@ -544,7 +605,6 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     team_column: string,
   ): PermissionRelation {
     const accessScope = "__reachable_access_0";
-    const recursiveHopScope = "__recursive_hop_0";
     const seedScope = seed_table;
 
     const seedPredicates: RelPredicateExpr[] = [
@@ -556,7 +616,17 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
         },
       },
     ];
-    const seed: RelExpr = applyRelFilter({ TableScan: { table: seed_table } }, seedPredicates);
+    const seed: RelExpr = {
+      Project: {
+        input: applyRelFilter({ TableScan: { table: seed_table } }, seedPredicates),
+        columns: [
+          {
+            alias: "id",
+            expr: { Column: { scope: seedScope, column: team_column } },
+          },
+        ],
+      },
+    };
 
     const stepPredicates: RelPredicateExpr[] = [
       {
@@ -574,25 +644,18 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     );
     const step: RelExpr = {
       Project: {
-        input: {
-          Join: {
-            left: stepFiltered,
-            right: {
-              TableScan: {
-                table: seed_table,
-                alias: recursiveHopScope,
+        input: stepFiltered,
+        columns: [
+          {
+            alias: "id",
+            expr: {
+              Column: {
+                scope: this.args.edge_table,
+                column: this.args.edge_parent_column,
               },
             },
-            on: [
-              {
-                left: { scope: this.args.edge_table, column: this.args.edge_parent_column },
-                right: { scope: recursiveHopScope, column: team_column },
-              },
-            ],
-            join_kind: "Inner",
           },
-        },
-        columns: projectHopResult(recursiveHopScope),
+        ],
       },
     };
 
@@ -654,6 +717,12 @@ interface Rule {
   action: PolicyAction;
   using?: Condition;
   withCheck?: Condition;
+  /**
+   * A builder that supplied distinct old and new predicates. These rules cannot
+   * safely be OR-merged with another update rule: lowering would otherwise
+   * independently combine their USING and WITH CHECK halves.
+   */
+  asymmetricUpdate?: boolean;
 }
 
 type RuleLike = Rule | UpdateRuleBuilder<unknown, unknown>;
@@ -664,7 +733,26 @@ export type RowContext<Row> = {
 
 export type WhereInputOrCallback<WhereInput, Row> =
   | WhereInput
-  | ((row: RowContext<Row>) => WhereInput | Condition);
+  | PermissionExpressionInput
+  | ((row: RowContext<Row>) => WhereInput | PermissionExpressionInput);
+
+type DirectWhereInputGuard<Input, WhereInput> = [Input] extends [(...args: never[]) => unknown]
+  ? [error: "Callbacks must use the callback overload"]
+  : [Input] extends [PermissionExpressionInput]
+    ? []
+    : [Input, PolicyExpr] extends [PolicyExpr, Input]
+      ? [error: "Unbranded PolicyExpr inputs must be passed through raw(...)"]
+      : [Input] extends [PermissionWhereInput<WhereInput>]
+        ? [Input] extends [readonly unknown[]]
+          ? []
+          : [Input] extends [object]
+            ? string extends keyof Input
+              ? []
+              : Exclude<keyof Input, keyof WhereInput | `${string}.${string}`> extends never
+                ? []
+                : [error: "Input contains keys outside the allowed where input type"]
+            : []
+        : [error: "Input is not assignable to the allowed where input type"];
 
 export type SessionContext = {
   /** Opaque canonical JSON `[iss,sub]` identity used by provenance columns. */
@@ -672,44 +760,45 @@ export type SessionContext = {
   /** Raw provider claims, kept separate from Jazz-owned session identity. */
   readonly claims: Readonly<Record<string, SessionRefValue>>;
   readonly authMode: SessionRefValue;
-  where: SessionWhereBuilder;
+  where: SessionRefValue & ((input: Record<string, unknown>) => PermissionExpressionInput);
 };
 
 export interface AllowedToContext {
-  read(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
-  insert(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
-  update(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
-  delete(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
+  read(fkColumn: string, options?: RecursiveDepthOptions): PermissionExpressionInput;
+  insert(fkColumn: string, options?: RecursiveDepthOptions): PermissionExpressionInput;
+  update(fkColumn: string, options?: RecursiveDepthOptions): PermissionExpressionInput;
+  delete(fkColumn: string, options?: RecursiveDepthOptions): PermissionExpressionInput;
   readReferencing(
     sourceTable: RelationJoinTarget,
     fkColumn: string,
     options?: RecursiveDepthOptions,
-  ): PolicyExpr;
+  ): PermissionExpressionInput;
   insertReferencing(
     sourceTable: RelationJoinTarget,
     fkColumn: string,
     options?: RecursiveDepthOptions,
-  ): PolicyExpr;
+  ): PermissionExpressionInput;
   updateReferencing(
     sourceTable: RelationJoinTarget,
     fkColumn: string,
     options?: RecursiveDepthOptions,
-  ): PolicyExpr;
+  ): PermissionExpressionInput;
   deleteReferencing(
     sourceTable: RelationJoinTarget,
     fkColumn: string,
     options?: RecursiveDepthOptions,
-  ): PolicyExpr;
+  ): PermissionExpressionInput;
 }
 
 interface ExistsBuilder<WhereInput> {
-  where(input: PermissionWhereInput<WhereInput>): ExistsCondition;
+  where(input: PermissionWhereInput<WhereInput>): PermissionExpressionInput;
 }
 
 interface ActionBuilder<WhereInput, Row> {
   where(
-    input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
+    input: (row: RowContext<Row>) => PermissionWhereInput<WhereInput> | PermissionExpressionInput,
   ): Rule;
+  where<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): Rule;
   always(): Rule;
   never(): Rule;
 }
@@ -741,12 +830,14 @@ export type PolicyContext<TApp extends AppLike> = {
       RowFor<QueryBuilderFor<TApp, K>>
     >;
   } & {
-    exists(relation: PermissionRelation): ExistsRelationCondition;
+    exists(relation: PermissionRelation): PermissionExpressionInput;
     union(relations: readonly PermissionRelation[]): PermissionRelation;
   };
-  anyOf: (conditions: readonly unknown[]) => Condition;
-  allOf: (conditions: readonly unknown[]) => Condition;
-  isCreator: Condition;
+  anyOf: typeof anyOf;
+  allOf: typeof allOf;
+  /** Explicit escape hatch for manually-authored policy IR. */
+  raw: typeof rawPermissionExpression;
+  isCreator: PermissionExpressionInput;
   allowedTo: AllowedToContext;
   session: SessionContext;
 };
@@ -767,9 +858,11 @@ type QualifiedPermissionWhereEntries = {
   [K in `${string}.${string}`]?: unknown | SessionRefValue | RowRefValue | RecursiveCurrentValue;
 };
 
-type PermissionWhereObject<T> =
+type PermissionWhereObject<T> = (
   | PermissionWhereObjectBase<T>
-  | (PermissionWhereObjectBase<T> & QualifiedPermissionWhereEntries);
+  | (PermissionWhereObjectBase<T> & QualifiedPermissionWhereEntries)
+) &
+  ("type" extends keyof T ? unknown : { type?: never });
 
 type PermissionWhereInput<T> =
   T extends Array<infer U>
@@ -785,13 +878,16 @@ class UpdateRuleBuilder<WhereInput, Row> {
 
   constructor(
     private readonly table: string,
+    private readonly hasTypeColumn: boolean,
     private readonly registerRule?: (ruleLike: RuleLike) => void,
   ) {}
 
   where(
-    input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
-  ): Rule {
-    const condition = resolveWhereInput(input);
+    input: (row: RowContext<Row>) => PermissionWhereInput<WhereInput> | PermissionExpressionInput,
+  ): Rule;
+  where<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): Rule;
+  where(input: unknown, ..._guard: unknown[]): Rule {
+    const condition = resolveWhereInput(input, this.hasTypeColumn);
     const rule: Rule = {
       table: this.table,
       action: "update",
@@ -811,17 +907,21 @@ class UpdateRuleBuilder<WhereInput, Row> {
   }
 
   whereOld(
-    input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
-  ): this {
-    this.oldCondition = resolveWhereInput(input);
+    input: (row: RowContext<Row>) => PermissionWhereInput<WhereInput> | PermissionExpressionInput,
+  ): this;
+  whereOld<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
+  whereOld(input: unknown, ..._guard: unknown[]): this {
+    this.oldCondition = resolveWhereInput(input, this.hasTypeColumn);
     this.registerBuilder();
     return this;
   }
 
   whereNew(
-    input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
-  ): this {
-    this.newCondition = resolveWhereInput(input);
+    input: (row: RowContext<Row>) => PermissionWhereInput<WhereInput> | PermissionExpressionInput,
+  ): this;
+  whereNew<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
+  whereNew(input: unknown, ..._guard: unknown[]): this {
+    this.newCondition = resolveWhereInput(input, this.hasTypeColumn);
     this.registerBuilder();
     return this;
   }
@@ -843,6 +943,15 @@ class UpdateRuleBuilder<WhereInput, Row> {
       action: "update",
       using: this.oldCondition ?? this.newCondition,
       withCheck: this.newCondition ?? this.oldCondition,
+      // A rule with just one side intentionally uses that predicate for both
+      // halves. Two separately supplied predicates are conservatively treated
+      // as asymmetric, even when their eventual lowered form happens to look
+      // alike: that keeps policy composition fail-closed without requiring a
+      // lossy or exception-prone serialization of policy values.
+      asymmetricUpdate:
+        this.oldCondition !== undefined &&
+        this.newCondition !== undefined &&
+        this.oldCondition !== this.newCondition,
     };
   }
 }
@@ -852,6 +961,7 @@ export function definePermissions<TApp extends AppLike>(
   factory: (ctx: PolicyContext<TApp>) => void,
 ): CompiledPermissions {
   const fkReferencesByTable = collectFkReferencesByTable(app);
+  const tablesWithTypeColumn = collectTablesWithTypeColumn(app);
   const relationsByTable = collectRelationsByTable(app);
   const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
   const rules: RuleLike[] = [];
@@ -864,9 +974,10 @@ export function definePermissions<TApp extends AppLike>(
     rules.push(ruleLike);
   };
   const ctx = {
-    policy: buildPolicyContext(tableNames, relationsByTable, collectRule),
+    policy: buildPolicyContext(tableNames, relationsByTable, tablesWithTypeColumn, collectRule),
     anyOf,
     allOf,
+    raw: rawPermissionExpression,
     isCreator: CREATOR_CONDITION,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
@@ -899,6 +1010,29 @@ function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, strin
   return result;
 }
 
+function collectTablesWithTypeColumn(app: AppLike): ReadonlySet<string> {
+  const result = new Set<string>();
+  if (!("wasmSchema" in app)) {
+    return result;
+  }
+  const schema = app.wasmSchema;
+  if (!schema || typeof schema !== "object") {
+    return result;
+  }
+
+  const typedSchema = schema as WasmSchema;
+  for (const [tableName, table] of Object.entries(typedSchema)) {
+    if (
+      table &&
+      Array.isArray(table.columns) &&
+      table.columns.some(({ name }) => name === "type")
+    ) {
+      result.add(tableName);
+    }
+  }
+  return result;
+}
+
 function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
   const schema = (app as { wasmSchema?: unknown }).wasmSchema;
   if (!schema || typeof schema !== "object") {
@@ -921,16 +1055,23 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
 function buildPolicyContext(
   tableNames: string[],
   relationsByTable: Map<string, Relation[]>,
+  tablesWithTypeColumn: ReadonlySet<string>,
   collectRule: (ruleLike: RuleLike) => void,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const table of tableNames) {
-    context[table] = buildTablePolicyBuilder(table, relationsByTable, collectRule);
+    context[table] = buildTablePolicyBuilder(
+      table,
+      relationsByTable,
+      tablesWithTypeColumn.has(table),
+      collectRule,
+    );
   }
-  context.exists = (relation: PermissionRelation): ExistsRelationCondition => ({
-    __jazzPermissionKind: "exists-relation",
-    relation,
-  });
+  context.exists = (relation: PermissionRelation): ExistsRelationCondition =>
+    brandPermissionExpression({
+      __jazzPermissionKind: "exists-relation",
+      relation,
+    });
   context.union = (relations: readonly PermissionRelation[]): PermissionRelation =>
     createUnionRelation(relations, relationsByTable);
   return context;
@@ -939,6 +1080,7 @@ function buildPolicyContext(
 function buildTablePolicyBuilder(
   table: string,
   relationsByTable: Map<string, Relation[]>,
+  hasTypeColumn: boolean,
   collectRule: (ruleLike: RuleLike) => void,
 ): Record<string, unknown> {
   const registerRule = (rule: Rule): Rule => {
@@ -946,23 +1088,37 @@ function buildTablePolicyBuilder(
     return rule;
   };
   const read: ActionBuilder<unknown, unknown> = {
-    where: (input) => registerRule({ table, action: "read", using: resolveWhereInput(input) }),
+    where: ((input: unknown) =>
+      registerRule({
+        table,
+        action: "read",
+        using: resolveWhereInput(input, hasTypeColumn),
+      })) as ActionBuilder<unknown, unknown>["where"],
     always: () => read.where(alwaysCondition()),
     never: () => read.where(neverCondition()),
   };
   const insert: ActionBuilder<unknown, unknown> = {
-    where: (input) =>
-      registerRule({ table, action: "insert", withCheck: resolveWhereInput(input) }),
+    where: ((input: unknown) =>
+      registerRule({
+        table,
+        action: "insert",
+        withCheck: resolveWhereInput(input, hasTypeColumn),
+      })) as ActionBuilder<unknown, unknown>["where"],
     always: () => insert.where(alwaysCondition()),
     never: () => insert.where(neverCondition()),
   };
   const del: ActionBuilder<unknown, unknown> = {
-    where: (input) => registerRule({ table, action: "delete", using: resolveWhereInput(input) }),
+    where: ((input: unknown) =>
+      registerRule({
+        table,
+        action: "delete",
+        using: resolveWhereInput(input, hasTypeColumn),
+      })) as ActionBuilder<unknown, unknown>["where"],
     always: () => del.where(alwaysCondition()),
     never: () => del.where(neverCondition()),
   };
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
-    new UpdateRuleBuilder(table, collectRule);
+    new UpdateRuleBuilder(table, hasTypeColumn, collectRule);
   const managedByCreator = (): void => {
     read.where(CREATOR_CONDITION);
     insert.where(CREATOR_CONDITION);
@@ -970,11 +1126,12 @@ function buildTablePolicyBuilder(
     del.where(CREATOR_CONDITION);
   };
   const exists: ExistsBuilder<unknown> = {
-    where: (input) => ({
-      __jazzPermissionKind: "exists",
-      table,
-      where: normalizeWhereObject(input),
-    }),
+    where: (input) =>
+      brandPermissionExpression({
+        __jazzPermissionKind: "exists",
+        table,
+        where: normalizeWhereObject(input, hasTypeColumn),
+      }),
   };
 
   return {
@@ -1006,6 +1163,7 @@ function buildTablePolicyBuilder(
     gather(options: {
       start?: Record<string, unknown> | PermissionRelation;
       step: (ctx: { current: unknown }) => PermissionRelation;
+      /** Maximum recursive hops. Zero evaluates the seed only. */
       maxDepth?: number;
     }): PermissionRelation {
       return createTableRelation(table, relationsByTable).gather(options);
@@ -1473,8 +1631,8 @@ function normalizeRecursiveRelationDepth(maxDepth?: number): number {
   if (maxDepth === undefined) {
     return RECURSIVE_POLICY_MAX_DEPTH_DEFAULT;
   }
-  if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
-    throw new Error("gather(...) maxDepth must be a positive integer.");
+  if (!Number.isInteger(maxDepth) || maxDepth < 0) {
+    throw new Error("gather(...) maxDepth must be a non-negative integer.");
   }
   if (maxDepth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP) {
     throw new Error(
@@ -1790,11 +1948,19 @@ export function relationToIr(relation: PermissionRelation): RelExpr {
   return relationStateToRelExpr(getRelationState(relation));
 }
 
-export function relationExistsToPolicy(relation: PermissionRelation): PolicyExpr {
-  return {
+export function relationExistsToPolicy(relation: PermissionRelation): PermissionExpression {
+  return brandPermissionExpression({
     type: "ExistsRel",
     rel: relationToIr(relation),
-  };
+  });
+}
+
+/**
+ * Marks manually-authored policy IR as an expression rather than a row
+ * predicate. Prefer the typed DSL helpers when one is available.
+ */
+export function rawPermissionExpression(expression: PolicyExpr): PermissionExpression {
+  return brandPermissionExpression({ ...expression });
 }
 
 function splitQualifiedColumn(column: string): [string | undefined, string] {
@@ -1816,10 +1982,14 @@ export function createSessionContext(): SessionContext {
     __jazzPermissionKind: "session-ref",
     path,
   });
-  const whereBuilder = ((input: Record<string, unknown>): SessionWhereCondition => ({
-    __jazzPermissionKind: "session-where",
-    where: normalizeWhereObject(input),
-  })) as SessionWhereBuilder;
+  const whereBuilder = Object.assign(
+    (input: Record<string, unknown>): SessionWhereCondition =>
+      brandPermissionExpression({
+        __jazzPermissionKind: "session-where",
+        where: normalizeWhereObject(input),
+      }),
+    claimRef("where"),
+  ) satisfies SessionWhereBuilder;
   return new Proxy({} as SessionContext, {
     get(_target, prop, _receiver) {
       if (typeof prop === "string") {
@@ -1851,11 +2021,11 @@ function createAllowedToContext(): AllowedToContext {
     operation: "Select" | "Insert" | "Update" | "Delete",
     fkColumn: string,
     options?: RecursiveDepthOptions,
-  ): PolicyExpr => {
+  ): PermissionExpression => {
     const maxDepth = options?.maxDepth;
     if (maxDepth !== undefined) {
-      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
-        throw new Error(`allowedTo.*("${fkColumn}") maxDepth must be a positive integer.`);
+      if (!Number.isInteger(maxDepth) || maxDepth < 0) {
+        throw new Error(`allowedTo.*("${fkColumn}") maxDepth must be a non-negative integer.`);
       }
     }
     const expr: PolicyExpr = {
@@ -1866,7 +2036,7 @@ function createAllowedToContext(): AllowedToContext {
     if (maxDepth !== undefined) {
       expr.max_depth = maxDepth;
     }
-    return expr;
+    return brandPermissionExpression(expr);
   };
 
   const inheritsReferencingExpr = (
@@ -1874,12 +2044,12 @@ function createAllowedToContext(): AllowedToContext {
     sourceTable: RelationJoinTarget,
     fkColumn: string,
     options?: RecursiveDepthOptions,
-  ): PolicyExpr => {
+  ): PermissionExpression => {
     const maxDepth = options?.maxDepth;
     if (maxDepth !== undefined) {
-      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      if (!Number.isInteger(maxDepth) || maxDepth < 0) {
         throw new Error(
-          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a positive integer.`,
+          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a non-negative integer.`,
         );
       }
     }
@@ -1892,48 +2062,32 @@ function createAllowedToContext(): AllowedToContext {
     if (maxDepth !== undefined) {
       expr.max_depth = maxDepth;
     }
-    return expr;
+    return brandPermissionExpression(expr);
   };
 
   return {
-    read(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
+    read(fkColumn, options) {
       return inheritsExpr("Select", fkColumn, options);
     },
-    insert(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
+    insert(fkColumn, options) {
       return inheritsExpr("Insert", fkColumn, options);
     },
-    update(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
+    update(fkColumn, options) {
       return inheritsExpr("Update", fkColumn, options);
     },
-    delete(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr {
+    delete(fkColumn, options) {
       return inheritsExpr("Delete", fkColumn, options);
     },
-    readReferencing(
-      sourceTable: RelationJoinTarget,
-      fkColumn: string,
-      options?: RecursiveDepthOptions,
-    ): PolicyExpr {
+    readReferencing(sourceTable, fkColumn, options) {
       return inheritsReferencingExpr("Select", sourceTable, fkColumn, options);
     },
-    insertReferencing(
-      sourceTable: RelationJoinTarget,
-      fkColumn: string,
-      options?: RecursiveDepthOptions,
-    ): PolicyExpr {
+    insertReferencing(sourceTable, fkColumn, options) {
       return inheritsReferencingExpr("Insert", sourceTable, fkColumn, options);
     },
-    updateReferencing(
-      sourceTable: RelationJoinTarget,
-      fkColumn: string,
-      options?: RecursiveDepthOptions,
-    ): PolicyExpr {
+    updateReferencing(sourceTable, fkColumn, options) {
       return inheritsReferencingExpr("Update", sourceTable, fkColumn, options);
     },
-    deleteReferencing(
-      sourceTable: RelationJoinTarget,
-      fkColumn: string,
-      options?: RecursiveDepthOptions,
-    ): PolicyExpr {
+    deleteReferencing(sourceTable, fkColumn, options) {
       return inheritsReferencingExpr("Delete", sourceTable, fkColumn, options);
     },
   };
@@ -1958,17 +2112,25 @@ function createRowContext(): RowContext<Record<string, unknown>> {
   });
 }
 
-function normalizeWhereObject(input: unknown): Record<string, unknown> {
+function normalizeWhereObject(input: unknown, hasTypeColumn?: boolean): Record<string, unknown> {
   if (!isPlainObject(input)) {
     throw new Error("Expected a where-object condition.");
+  }
+  if (hasTypeColumn === false && isPolicyExpressionDiscriminator(input.type)) {
+    throw new Error(
+      `Unbranded permission condition with policy expression discriminator "${input.type}" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).`,
+    );
   }
   return input;
 }
 
-function resolveWhereInput(input: unknown): Condition {
+function resolveWhereInput(input: unknown, hasTypeColumn: boolean): Condition {
   if (typeof input === "function") {
     const result = input(createRowContext());
-    return resolveWhereInput(result);
+    return resolveWhereInput(result, hasTypeColumn);
+  }
+  if (isPolicyExpr(input)) {
+    return input;
   }
   if (isSessionWhereCondition(input)) {
     return input;
@@ -1979,17 +2141,18 @@ function resolveWhereInput(input: unknown): Condition {
   if (isExistsRelationCondition(input)) {
     return input;
   }
-  if (isCompoundCondition(input)) {
-    return input;
-  }
-  if (isPolicyExpr(input)) {
-    return input;
+  if (isCompoundConditionInput(input)) {
+    return brandPermissionExpression({
+      __jazzPermissionKind: "compound",
+      op: input.op,
+      conditions: input.conditions.map((condition) => resolveWhereInput(condition, hasTypeColumn)),
+    });
   }
   if (isPlainObject(input)) {
-    return {
+    return brandPermissionExpression({
       __jazzPermissionKind: "where-object",
-      where: normalizeWhereObject(input),
-    };
+      where: normalizeWhereObject(input, hasTypeColumn),
+    });
   }
   throw new Error("Unsupported permission condition input.");
 }
@@ -2399,33 +2562,33 @@ function andExpr(exprs: PolicyExpr[]): PolicyExpr {
   return { type: "And", exprs };
 }
 
-export function anyOf(conditions: readonly unknown[]): Condition {
+export function anyOf(conditions: readonly unknown[]): PermissionExpressionInput {
   return compoundCondition("Or", conditions);
 }
 
-export function allOf(conditions: readonly unknown[]): Condition {
+export function allOf(conditions: readonly unknown[]): PermissionExpressionInput {
   return compoundCondition("And", conditions);
 }
 
-function alwaysCondition(): Condition {
+function alwaysCondition(): PermissionExpressionInput {
   return allOf([]);
 }
 
-function neverCondition(): Condition {
+function neverCondition(): PermissionExpressionInput {
   return anyOf([]);
 }
 
-function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): CompoundCondition {
+function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): CompoundConditionInput {
   if (!Array.isArray(inputs)) {
     const fnName = op === "And" ? "allOf" : "anyOf";
     throw new Error(`"${fnName}(...)" expects an array of conditions.`);
   }
 
-  return {
-    __jazzPermissionKind: "compound",
+  return brandPermissionExpression({
+    __jazzPermissionKind: "compound-input",
     op,
-    conditions: inputs.map((input) => resolveWhereInput(input)),
-  };
+    conditions: [...inputs],
+  });
 }
 
 function compileRules(
@@ -2434,6 +2597,7 @@ function compileRules(
   relationsByTable: Map<string, Relation[]>,
 ): CompiledPermissions {
   const compiled: CompiledPermissions = {};
+  const updateRuleAsymmetry = new Map<string, boolean>();
   for (const ruleLike of rules) {
     const rule = isUpdateRuleBuilder(ruleLike) ? ruleLike.toRule() : ruleLike;
     if (!compiled[rule.table]) {
@@ -2456,8 +2620,8 @@ function compileRules(
           ),
         });
         break;
-      case "update":
-        tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
+      case "update": {
+        const incoming = {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
           with_check: compileCondition(
             rule.withCheck,
@@ -2465,8 +2629,18 @@ function compileRules(
             fkReferencesByTable,
             relationsByTable,
           ),
-        });
+        };
+        const previousIsAsymmetric = updateRuleAsymmetry.get(rule.table);
+        const isAsymmetric = rule.asymmetricUpdate === true;
+        if (previousIsAsymmetric !== undefined && (previousIsAsymmetric || isAsymmetric)) {
+          throw new Error(
+            `Multiple asymmetric update rules for table "${rule.table}" are unsupported because their USING and WITH CHECK clauses would be ORed independently. Use one symmetric condition, model each transition as a separate record/action, or mediate the transition on a trusted backend.`,
+          );
+        }
+        updateRuleAsymmetry.set(rule.table, previousIsAsymmetric ?? isAsymmetric);
+        tablePolicies.update = mergeOperationPolicy(tablePolicies.update, incoming);
         break;
+      }
       case "delete":
         tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
@@ -2532,6 +2706,10 @@ function compileCondition(
   if (!condition) {
     return undefined;
   }
+  if (isPolicyExpr(condition)) {
+    resolveAndAssertInheritsColumns(condition, table, fkReferencesByTable);
+    return condition;
+  }
   if (isWhereObjectCondition(condition)) {
     const analysis = analyzeQualifiedWhereObject(table, condition.where, relationsByTable);
     if (analysis.hasQualifiedFilters) {
@@ -2547,10 +2725,6 @@ function compileCondition(
     });
     resolveAndAssertInheritsColumns(compiledCondition, table, fkReferencesByTable);
     return compiledCondition;
-  }
-  if (isPolicyExpr(condition)) {
-    resolveAndAssertInheritsColumns(condition, table, fkReferencesByTable);
-    return condition;
   }
   if (isSessionWhereCondition(condition)) {
     return sessionWhereObjectToCondition(condition.where);
@@ -2685,12 +2859,24 @@ function resolveAndAssertInheritsColumns(
   check(expr, table);
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+type PlainObject = Record<PropertyKey, unknown>;
+
+function isPlainObject(value: unknown): value is PlainObject {
   return Object.prototype.toString.call(value) === "[object Object]";
 }
 
-function isPolicyExpr(input: unknown): input is PolicyExpr {
-  return isPlainObject(input) && typeof input.type === "string";
+function isBrandedPermissionExpression(
+  input: unknown,
+): input is PlainObject & PermissionExpressionInput {
+  return isPlainObject(input) && Reflect.get(input, PERMISSION_EXPRESSION_BRAND) === true;
+}
+
+function isPolicyExpr(input: unknown): input is PermissionExpression {
+  return isBrandedPermissionExpression(input) && typeof input.type === "string";
+}
+
+function isPolicyExpressionDiscriminator(input: unknown): input is PolicyExpr["type"] {
+  return typeof input === "string" && Object.hasOwn(POLICY_EXPRESSION_DISCRIMINATORS, input);
 }
 
 function isSessionRefValue(input: unknown): input is SessionRefValue {
@@ -2703,7 +2889,7 @@ function isSessionRefValue(input: unknown): input is SessionRefValue {
 
 function isSessionWhereCondition(input: unknown): input is SessionWhereCondition {
   return (
-    isPlainObject(input) &&
+    isBrandedPermissionExpression(input) &&
     input.__jazzPermissionKind === "session-where" &&
     isPlainObject(input.where)
   );
@@ -2719,7 +2905,7 @@ function isRowRefValue(input: unknown): input is RowRefValue {
 
 function isExistsCondition(input: unknown): input is ExistsCondition {
   return (
-    isPlainObject(input) &&
+    isBrandedPermissionExpression(input) &&
     input.__jazzPermissionKind === "exists" &&
     typeof input.table === "string" &&
     isPlainObject(input.where)
@@ -2728,7 +2914,7 @@ function isExistsCondition(input: unknown): input is ExistsCondition {
 
 function isExistsRelationCondition(input: unknown): input is ExistsRelationCondition {
   return (
-    isPlainObject(input) &&
+    isBrandedPermissionExpression(input) &&
     input.__jazzPermissionKind === "exists-relation" &&
     isPlainObject(input.relation)
   );
@@ -2736,15 +2922,24 @@ function isExistsRelationCondition(input: unknown): input is ExistsRelationCondi
 
 function isWhereObjectCondition(input: unknown): input is WhereObjectCondition {
   return (
-    isPlainObject(input) &&
+    isBrandedPermissionExpression(input) &&
     input.__jazzPermissionKind === "where-object" &&
     isPlainObject(input.where)
   );
 }
 
+function isCompoundConditionInput(input: unknown): input is CompoundConditionInput {
+  return (
+    isBrandedPermissionExpression(input) &&
+    input.__jazzPermissionKind === "compound-input" &&
+    (input.op === "And" || input.op === "Or") &&
+    Array.isArray(input.conditions)
+  );
+}
+
 function isCompoundCondition(input: unknown): input is CompoundCondition {
   return (
-    isPlainObject(input) &&
+    isBrandedPermissionExpression(input) &&
     input.__jazzPermissionKind === "compound" &&
     (input.op === "And" || input.op === "Or") &&
     Array.isArray(input.conditions)

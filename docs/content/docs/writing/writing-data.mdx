@@ -11,7 +11,8 @@ Ordinary mutations execute against the local database first. `insert`, `restore`
 
 - `value`&hairsp;—&hairsp;The local result. `insert` and `restore` return the row; `upsert`, `update`,
   and `delete` return `undefined`.
-- `transactionId`&hairsp;—&hairsp;A promise for the committed transaction ID.
+- `txId`&hairsp;—&hairsp;A promise for the committed transaction ID. This is the durable identity
+  of this write; it does not mean the write has reached a server yet.
 - `wait(...)`&hairsp;—&hairsp;A method that waits for the mutation to reach a specific
   [durability tier](#write-durability-tiers).
 

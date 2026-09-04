@@ -3,6 +3,7 @@ import { MemoryRouter } from "react-router";
 import type { DbConfig, WasmSchema } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 import { DevtoolsProvider } from "./contexts/devtools-context";
+import { defaultRuntimeContextKey } from "./contexts/default-runtime-context";
 import {
   openInspectorRuntimeSession,
   readInspectorHostConfig,
@@ -93,7 +94,7 @@ export function InspectorApp() {
             activeSession = next;
             setSession(next);
             setContexts(next.contexts);
-            setSelectedKey(next.contexts[0]!.key);
+            setSelectedKey(defaultRuntimeContextKey(next.contexts, readInspectorHostConfig()));
             return;
           }
           next?.close();
@@ -119,7 +120,7 @@ export function InspectorApp() {
         setSelectedKey((current) =>
           current && next.some((context) => context.key === current)
             ? current
-            : (next[0]?.key ?? null),
+            : defaultRuntimeContextKey(next, readInspectorHostConfig()),
         );
       });
     }, 1_000);
@@ -146,7 +147,7 @@ export function InspectorApp() {
             ...hostConfig,
             appId: context.appId,
             driver: { type: "persistent", dbName: context.dbName },
-            runtimeSources: { browserWorkerPort },
+            runtimeSources: { ...hostConfig.runtimeSources, browserWorkerPort },
           },
           schema: context.schema,
         });

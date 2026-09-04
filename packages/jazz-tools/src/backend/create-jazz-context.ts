@@ -391,8 +391,7 @@ export class JazzContext {
       return;
     }
     client.connectTransport(this.config.serverUrl, {
-      jwt_token: this.config.jwtToken,
-      admin_secret: this.config.adminSecret,
+      jwt_token: undefined,
       backend_secret: this.config.backendSecret,
       backend_session: this.config.cookieSession,
     });

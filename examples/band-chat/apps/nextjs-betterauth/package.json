@@ -9,9 +9,10 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test:permissions": "vitest run tests/permissions.test.ts",
-    "test:browser": "node ../../../../dev/artifacts/verify-correctness-test-artifacts.mjs && vitest run --config vitest.config.browser.ts",
+    "test:browser": "node ../../../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
-    "test": "pnpm test:permissions && pnpm test:browser"
+    "test:selection": "node --test tests/test-selection.test.mjs",
+    "test": "pnpm test:permissions && pnpm test:selection"
   },
   "dependencies": {
     "better-auth": "1.7.1",

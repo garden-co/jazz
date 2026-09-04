@@ -572,6 +572,8 @@ export class ManagedDevRuntime {
             dataDir,
             inMemory: serverConfig.inMemory,
             jwksUrl: serverConfig.jwksUrl,
+            jwtIssuer: serverConfig.jwtIssuer,
+            jwtAudience: serverConfig.jwtAudience,
             telemetryCollectorUrl,
           });
 

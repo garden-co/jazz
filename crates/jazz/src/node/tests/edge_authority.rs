@@ -116,6 +116,7 @@ fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy(
 
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
+    register_whole_table_receiver(&mut reader, "todos");
     reader.apply_sync_message_settled(update).unwrap();
     assert_current_title(
         &mut reader,
@@ -264,7 +265,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
     ));
 
     let evolved = SchemaVersion::new(catalogue_evolved_schema());
-    let publication = SchemaLineagePublication::new(
+    let publication = edge.author_schema_lineage_publication(
         evolved.clone(),
         MigrationLens::new(
             schema().version_id(),
@@ -277,10 +278,10 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    ).unwrap();
     assert!(matches!(
         edge.apply_sync_message_settled(SyncMessage::PublishSchemaWithLens {
             author: user(0xee),

@@ -1342,16 +1342,23 @@ fn register_shape_binding_for_receiver(
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
-        shape_id: shape.shape_id(),
-        subscription: crate::protocol::SubscriptionKey {
+    node.apply_subscribe_with_admitted_policy_binding(
+        crate::protocol::Subscribe {
             shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
+            subscription: crate::protocol::SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: Default::default(),
+            },
+            values,
+            known_state: None,
+            delegated_session: None,
         },
-        values,
-        known_state: None,
-    }))
+        crate::protocol::PolicyBindingKey::from_canonical_parts(
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+        ),
+    )
     .unwrap();
 }
 
@@ -1384,13 +1391,21 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
         }
     ));
 
-    let mut peer = PeerState::new();
+    let mut peer = relay_with_system_binding(crate::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    });
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let mut version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
+        reset_result_set,
         result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
         ..
     }) = update
     else {
@@ -1406,7 +1421,11 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     );
     assert_eq!(bundle.versions.len(), 1);
     assert_eq!(bundle.versions[0].row_uuid(), row(1));
-    assert_eq!(result_member_adds, vec![("todos".to_owned().into(), row(1), bundle.tx.tx_id)]);
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+    assert!(program_fact_adds.iter().any(|fact| {
+        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(input) if input.source_row == row(1))
+    }));
     assert!(peer.shipped_complete_tx_payloads().is_empty());
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
@@ -1414,15 +1433,13 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles: vec![bundle],
+            reset_result_set,
+            version_carriers: vec![VersionCarrier::Bundle(bundle)],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds,
-            result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
         }))
         .unwrap();
     assert!(reader
@@ -1435,14 +1452,14 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
         .is_empty());
     assert_eq!(
         reader
-            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorSubject::SYSTEM)
             .unwrap(),
         vec![(row(1), title_cells("one"))]
     );
 }
 
 #[test]
-fn malformed_exclusive_partial_result_row_add_is_rejected() {
+fn malformed_exclusive_partial_covered_input_is_rejected() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -1470,47 +1487,63 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
         }
     ));
 
-    let mut peer = PeerState::new();
+    let mut peer = relay_with_system_binding(crate::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    });
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
+        reset_result_set,
+        program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    let tx_id = version_bundles[0].tx.tx_id;
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
+
+    let mut malformed_facts = program_fact_adds;
+    let malformed_input = malformed_facts
+        .iter_mut()
+        .find_map(|fact| match fact {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+            _ => None,
+        })
+        .expect("rehydration must disclose its root source input");
+    malformed_input.source_row = row(2);
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     let err = reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles,
+            reset_result_set,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                version_bundles,
+            )
+            .unwrap(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
+            result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-                terminal_operations: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+            program_fact_adds: malformed_facts,
+            program_fact_removes: Vec::new(),
         }))
         .unwrap_err();
 
     assert!(matches!(
         err,
-        Error::MalformedViewUpdate(
-            "exclusive result row add is not witnessed by partial payload"
-        )
+        Error::InvalidAuthoritySourceClosure { subscription: rejected, transition }
+            if rejected == subscription
+                && transition == "covered input is not witnessed by admitted payload"
     ));
     assert!(reader
-        .query_rows(&shape, &binding, DurabilityTier::Global)
+            .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorSubject::SYSTEM)
         .unwrap()
         .is_empty());
 }
@@ -1590,6 +1623,8 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_reader_a_dir, mut reader_a) = open_node_with_schema(node(3), schema.clone());
     let (_reader_system_dir, mut reader_system) = open_node_with_schema(node(4), schema);
+    register_whole_table_receiver(&mut reader_a, "todos");
+    register_whole_table_receiver(&mut reader_system, "todos");
     let author_a = user(0xa1);
     let author_b = user(0xb2);
     install_test_uuid_sub_claim(&mut core, author_a);
@@ -1618,6 +1653,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let version_bundles = version_bundles_for_update(&update_a);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
+        program_fact_adds,
         ..
     }) = &update_a
     else {
@@ -1632,10 +1668,12 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     );
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
-    assert_eq!(
-        result_member_adds,
-        &vec![("todos".to_owned().into(), row(1), version_bundles[0].tx.tx_id)]
-    );
+    assert!(result_member_adds.is_empty());
+    assert_eq!(program_fact_adds.iter().filter_map(|fact| match fact {
+        crate::protocol::ProgramFactEntry::CoveredInput(input) =>
+            Some((input.version_table.clone(), input.source_row, input.version.tx)),
+        _ => None,
+    }).collect::<Vec<_>>(), vec![("todos".to_owned().into(), row(1), version_bundles[0].tx.tx_id)]);
     assert!(link_a.shipped_complete_tx_payloads().is_empty());
     reader_a.apply_sync_message_settled(update_a).unwrap();
     assert_eq!(
@@ -1677,6 +1715,7 @@ fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
         ])),
     );
     let mut peer = PeerState::new();
+    register_whole_table_receiver(&mut client, "counters");
     client
         .apply_sync_message_settled(peer.current_rows_update(&mut core, "counters").unwrap())
         .unwrap();

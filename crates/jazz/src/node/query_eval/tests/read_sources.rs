@@ -84,23 +84,27 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            evolved_payload.clone(),
-            MigrationLens::new(
-                base.version_id(),
-                evolved_payload.id,
-                vec![TableLens {
-                    source_table: "users".to_owned(),
-                    target_table: "people".to_owned(),
-                    ops: vec![LensOp::RenameTable {
-                        from: "users".to_owned(),
-                        to: "people".to_owned(),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved_payload.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_payload.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
                     }],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .unwrap();
     node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
@@ -144,6 +148,8 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         node: &mut node,
         read_view: &read_view,
         inline_sources: BTreeMap::new(),
+        covered_input_sources: BTreeMap::new(),
+        covered_input_descriptors: BTreeMap::new(),
         access_paths: BTreeMap::new(),
         count_access_path_metrics: true,
         current_projection_targets: BTreeMap::new(),

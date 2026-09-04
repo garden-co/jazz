@@ -20,12 +20,12 @@ use futures::SinkExt as _;
 use jazz::db::{CommitUnitTrust, ConnectionSessionContext};
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
+use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
+use jazz::serving::ServerLinkAdmission;
 use jazz::tools::Session;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint, WireError,
-    WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, current_wire_features,
-    encode_frame, negotiate_wire,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
+    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
 };
 use tokio::sync::mpsc;
 
@@ -73,6 +73,7 @@ struct WebSocketAdmission {
     claims: BTreeMap<String, CoreValue>,
     trust: CommitUnitTrust,
     credential: WebSocketCredential,
+    requested_link: RequestedWebSocketLink,
 }
 
 /// Authentication class selected by the prelude.  `TrustedBackend` is still
@@ -191,6 +192,22 @@ struct WebSocketPrelude {
     /// subscriber session and never admits application frames.
     #[serde(default)]
     bootstrap_catalogue: bool,
+    /// Requested before any wire frame.  It is only a request: after JWT/cookie
+    /// authentication and feature negotiation the server either creates its
+    /// own immutable admitted relay capability or rejects the connection.
+    #[serde(default)]
+    requested_link: RequestedWebSocketLink,
+}
+
+/// The only client-selectable *request* at the WebSocket boundary.  This is
+/// intentionally separate from `WirePeerRole`: a wire hello says what a peer
+/// implements, not what authority it receives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RequestedWebSocketLink {
+    #[default]
+    OrdinarySession,
+    ScopeIsolatedClientRelay,
 }
 
 async fn ws_admission(
@@ -199,6 +216,7 @@ async fn ws_admission(
     state: &Arc<ServerState>,
 ) -> Result<WebSocketAdmission, String> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
+    let requested_link = prelude.requested_link;
     let auth = prelude.auth;
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
@@ -206,21 +224,23 @@ async fn ws_admission(
             .map_err(|(_, message)| message.to_owned())?;
         // An admin credential authenticates Edge's control plane, but ordinary
         // relay commits must retain their transaction permission subject for
-        // application-policy evaluation. Catalogue bootstrap is the sole
-        // privileged admission, and is further checked at the protocol edge.
+        // application-policy evaluation. Complete authority publications have
+        // their own prior-edge-admission capability, never inferred from SYSTEM
+        // or from an ordinary backend credential.
         let trust = if prelude.bootstrap_catalogue
             && peer_identity == AuthorSubject::SYSTEM
             && state.topology == crate::server::ServerTopology::Core
         {
             CommitUnitTrust::TrustedAdmin
         } else {
-            CommitUnitTrust::TrustedBackend
+            CommitUnitTrust::TrustedAuthority
         };
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
             trust,
             credential: WebSocketCredential::Admin,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
         });
     }
 
@@ -250,6 +270,14 @@ async fn ws_admission(
     let backend_secret = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|value| value.to_str().ok());
+    let has_authenticated_backend_session = has_session_header
+        && matches!(
+            (
+                state.auth_config.backend_secret.as_deref(),
+                backend_secret,
+            ),
+            (Some(expected), Some(provided)) if expected == provided
+        );
     if backend_secret.is_some() && !has_jwt && !has_session_header {
         crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
@@ -258,14 +286,15 @@ async fn ws_admission(
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
             credential: WebSocketCredential::Backend,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
         });
     }
 
     if !has_jwt
-        && !has_session_header
+        && !has_authenticated_backend_session
         && ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
     {
-        validate_ws_cookie_origin(&headers)?;
+        validate_ws_cookie_origin(&headers, state.auth_config.trust_forwarded_host)?;
     }
 
     let session = crate::middleware::auth::extract_session(
@@ -289,6 +318,7 @@ async fn ws_admission(
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
         credential: WebSocketCredential::Session,
+        requested_link,
     })
 }
 
@@ -299,7 +329,16 @@ fn session_claims(
         .author_subject()
         .map_err(|error| error.to_string())?;
     let provider_claims = match session.claims {
-        serde_json::Value::Object(map) => map.into_iter().collect(),
+        serde_json::Value::Object(mut map) => {
+            // Middleware exposes these convenient aliases to server handlers,
+            // but they duplicate the verified transport identity. A relay
+            // capability must use the one canonical binding vocabulary: the
+            // shared admission constructor derives `claims.iss`/`claims.sub`,
+            // `user`, and `authMode` from the verified AuthorSubject.
+            map.remove("issuer");
+            map.remove("subject");
+            map.into_iter().collect()
+        }
         _ => BTreeMap::new(),
     };
     let provider_claims =
@@ -347,12 +386,15 @@ fn ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
         })
 }
 
-fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
+fn validate_ws_cookie_origin(
+    headers: &HeaderMap,
+    trust_forwarded_host: bool,
+) -> Result<(), String> {
     let origin = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "cookie websocket auth requires Origin header".to_owned())?;
-    let host = ws_cookie_origin_host(headers)
+    let host = ws_cookie_origin_host(headers, trust_forwarded_host)
         .ok_or_else(|| "cookie websocket auth requires Host header".to_owned())?;
 
     if ws_origin_matches_host(origin, host) {
@@ -361,18 +403,22 @@ fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
     Err("cookie websocket auth Origin does not match Host".to_owned())
 }
 
-fn ws_cookie_origin_host(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("X-Forwarded-Host")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
+fn ws_cookie_origin_host(headers: &HeaderMap, trust_forwarded_host: bool) -> Option<&str> {
+    let forwarded_host = trust_forwarded_host
+        .then(|| {
             headers
-                .get(axum::http::header::HOST)
+                .get("X-Forwarded-Host")
                 .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
         })
+        .flatten();
+    forwarded_host.or_else(|| {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+    })
 }
 
 fn ws_origin_matches_host(origin: &str, host: &str) -> bool {
@@ -540,12 +586,7 @@ async fn handle_ws_connection(
         return;
     };
 
-    let negotiated = match negotiate_wire(
-        &remote_hello,
-        WIRE_PROTOCOL_VERSION,
-        WIRE_PROTOCOL_VERSION,
-        current_wire_features(),
-    ) {
+    let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
         Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
         Ok(_) => {
             send_ws_error(
@@ -652,9 +693,9 @@ async fn handle_ws_connection(
         send_ws_error(
             &mut socket,
             WireError::new(
-                WireErrorCode::Internal,
+                WireErrorCode::NotReady,
                 WireRetry::Later,
-                "edge runtime is bootstrapping its authoritative catalogue; retry shortly",
+                "runtime is bootstrapping its authoritative catalogue; retry shortly",
             ),
         )
         .await;
@@ -684,6 +725,32 @@ async fn handle_ws_connection(
     } else {
         None
     };
+    let link_admission = match admission.requested_link {
+        RequestedWebSocketLink::OrdinarySession => ServerLinkAdmission::OrdinarySession,
+        RequestedWebSocketLink::ScopeIsolatedClientRelay
+            if admission.credential == WebSocketCredential::Session
+                && negotiated.features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
+        {
+            // This epoch was minted by the server for this accepted socket.
+            // Reconnects necessarily get a fresh capability.
+            ServerLinkAdmission::ScopeIsolatedClientRelay {
+                admission_epoch: server_endpoint.epoch,
+            }
+        }
+        RequestedWebSocketLink::ScopeIsolatedClientRelay => {
+            send_ws_error(
+                &mut socket,
+                WireError::new(
+                    WireErrorCode::UnsupportedFeature,
+                    WireRetry::Never,
+                    "scope-isolated client relay requires an authenticated session and negotiated relay feature",
+                ),
+            )
+            .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
     let session = match core_server_shell
         .open_with_session_context(
             admission.identity,
@@ -691,6 +758,7 @@ async fn handle_ws_connection(
             admission.trust,
             negotiated.features,
             session_context,
+            link_admission,
         )
         .await
     {
@@ -882,11 +950,10 @@ async fn drain_ws_outbound(
 }
 
 fn decode_single_ws_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
-    let mut frames = decode_ws_frame_batch(bytes)?;
-    if frames.len() == 1 {
-        Ok(frames.remove(0))
-    } else {
-        postcard::from_bytes(bytes)
+    match decode_ws_frame_batch(bytes) {
+        Ok(mut frames) if frames.len() == 1 => Ok(frames.remove(0)),
+        Ok(_) => Err(postcard::Error::DeserializeBadEncoding),
+        Err(_) => jazz::wire::decode_frame(bytes),
     }
 }
 
@@ -899,19 +966,7 @@ fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error
 }
 
 fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    if bytes.len() > MAX_WIRE_FRAME_BYTES {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
-    }
-    let frames = postcard::from_bytes::<Vec<Vec<u8>>>(bytes)?;
-    if frames.is_empty()
-        || frames.len() > MAX_WIRE_BATCH_FRAMES
-        || frames
-            .iter()
-            .any(|frame| validate_wire_frame_len(frame.len()).is_err())
-    {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
-    }
-    Ok(frames)
+    jazz::wire::decode_websocket_frame_batch(bytes)
 }
 
 async fn send_ws_encoded_frames(
@@ -946,24 +1001,23 @@ fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard:
     let mut batches = Vec::new();
     let mut current = Vec::new();
     for frame in frames {
-        if validate_wire_frame_len(frame.len()).is_err() {
-            return Err(postcard::Error::SerializeBufferFull);
-        }
         let mut candidate = current.clone();
         candidate.push(frame.clone());
-        let encoded = postcard::to_allocvec(&candidate)?;
-        if (current.len() >= MAX_WIRE_BATCH_FRAMES || encoded.len() > MAX_WIRE_FRAME_BYTES)
-            && !current.is_empty()
-        {
-            batches.push(postcard::to_allocvec(&current)?);
+        let candidate_fits = jazz::wire::encode_websocket_frame_batch(&candidate).is_ok();
+        if !candidate_fits && !current.is_empty() {
+            batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
             current.clear();
-        } else if encoded.len() > MAX_WIRE_FRAME_BYTES {
+            // A singleton has its own count and length prefixes. Validate the
+            // actual carrier after the flush instead of assuming a raw frame
+            // at the frame limit can fit by itself.
+            jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))?;
+        } else if !candidate_fits {
             return Err(postcard::Error::SerializeBufferFull);
         }
         current.push(frame.clone());
     }
     if !current.is_empty() {
-        batches.push(postcard::to_allocvec(&current)?);
+        batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
     }
     Ok(batches)
 }
@@ -1003,11 +1057,12 @@ mod tests {
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::NodeUuid;
     use jazz::protocol::SyncMessage;
+    use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
     use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
     use jazz::wire::{
         FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
-        WireMessageFragment, WireTransport,
+        WIRE_PROTOCOL_VERSION, WireMessageFragment, WireTransport,
     };
     use jazz::wire::{WireStreamDecoder, decode_frame, decode_sync_message};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -1048,6 +1103,23 @@ mod tests {
         let batch = postcard::to_allocvec(&encoded).unwrap();
 
         assert_eq!(decode_ws_frame_batch(&batch).unwrap(), frames);
+    }
+
+    #[test]
+    fn raw_handshake_frame_consumes_the_complete_carrier() {
+        let frame = WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            current_wire_features(),
+        ));
+        let raw = encode_frame(&frame).expect("encode raw handshake frame");
+        assert_eq!(decode_single_ws_frame(&raw).unwrap(), frame);
+
+        let mut suffixed = raw;
+        suffixed.push(0);
+        assert!(
+            decode_single_ws_frame(&suffixed).is_err(),
+            "a raw frame plus a suffix must not acquire a second handshake interpretation"
+        );
     }
 
     #[test]
@@ -1113,6 +1185,12 @@ mod tests {
                 "role": "writer",
                 "iss": "spoofed-issuer",
                 "sub": "spoofed-subject",
+                // These are middleware convenience aliases, not provider
+                // policy claims. They must not create a different relay
+                // capability than the JWT-derived browser binding.
+                "issuer": "middleware-issuer",
+                "subject": "middleware-subject",
+                "authMode": "spoofed-mode",
                 "score": 7
             }),
         );
@@ -1133,6 +1211,16 @@ mod tests {
             Some(&CoreValue::String("writer".to_owned()))
         );
         assert_eq!(claims.get("\0claims:score"), Some(&CoreValue::U64(7)));
+        assert_eq!(
+            claims.get("\0claims:authMode"),
+            Some(&CoreValue::String("spoofed-mode".to_owned()))
+        );
+        assert!(!claims.contains_key("\0claims:issuer"));
+        assert!(!claims.contains_key("\0claims:subject"));
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&CoreValue::String("external".to_owned()))
+        );
         assert_eq!(
             claims.get("\0claims:iss"),
             Some(&CoreValue::String("https://issuer.example".to_owned()))
@@ -1164,23 +1252,23 @@ mod tests {
     }
 
     #[test]
-    fn ws_cookie_origin_uses_forwarded_host_before_host() {
+    fn bug_302_cookie_origin_ignores_forwarded_host_without_trusted_proxy() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
-            "https://app.example".parse().unwrap(),
+            "https://evil.example".parse().unwrap(),
         );
-        headers.insert(axum::http::header::HOST, "internal.local".parse().unwrap());
-        headers.insert("X-Forwarded-Host", "app.example".parse().unwrap());
-
-        assert!(validate_ws_cookie_origin(&headers).is_ok());
-
+        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
         headers.insert("X-Forwarded-Host", "evil.example".parse().unwrap());
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+
+        assert!(
+            validate_ws_cookie_origin(&headers, false).is_err(),
+            "an untrusted forwarded host must not bypass the cookie origin guard"
+        );
     }
 
     #[test]
-    fn ws_cookie_origin_uses_first_forwarded_host() {
+    fn ws_cookie_origin_uses_first_forwarded_host_when_trusted_proxy_enabled() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
@@ -1192,7 +1280,7 @@ mod tests {
             "app.example, proxy.local".parse().unwrap(),
         );
 
-        assert!(validate_ws_cookie_origin(&headers).is_ok());
+        assert!(validate_ws_cookie_origin(&headers, true).is_ok());
     }
 
     #[test]
@@ -1204,13 +1292,68 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers, false).is_err());
 
         headers.insert(
             axum::http::header::ORIGIN,
             "https://evil.example".parse().unwrap(),
         );
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn bug_302_orphan_backend_session_cannot_bypass_cookie_origin_check() {
+        let app_id = AppId::random();
+        let state = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                auth_cookie_name: Some("jazz-auth".to_owned()),
+                allow_local_first_auth: true,
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .build()
+            .await
+            .expect("build cookie auth websocket state")
+            .state;
+        let seed = [0x42; 32];
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3_600,
+        )
+        .expect("mint local-first cookie token");
+        let user_id = jazz::tools::identity::derive_user_id(&seed).to_string();
+        let peer_identity = AuthorSubject::from_canonical(
+            &serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, user_id))
+                .expect("encode local-first author"),
+        )
+        .expect("local-first peer identity");
+        let prelude = WebSocketPrelude {
+            peer_identity: peer_identity.canonical().to_owned(),
+            bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
+            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                backend_session: Some(serde_json::json!({ "attacker": true })),
+                ..Default::default()
+            },
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("jazz-auth={token}").parse().unwrap(),
+        );
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example".parse().unwrap(),
+        );
+        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
+
+        let error = ws_admission(prelude, &headers, &state)
+            .await
+            .expect_err("orphan backend session must not suppress cookie origin enforcement");
+        assert!(error.contains("Origin does not match Host"), "{error}");
     }
 
     #[test]
@@ -1305,12 +1448,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_admin_secret_only_elevates_system_catalogue_bootstrap_at_core() {
+    async fn ws_admin_authority_capability_is_distinct_from_backend_attribution() {
         let state = make_ws_test_state().await;
         let relay = ws_admission(
             WebSocketPrelude {
                 peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
                 bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1322,12 +1466,13 @@ mod tests {
         .await
         .expect("admit authenticated edge relay");
         assert_eq!(relay.credential, WebSocketCredential::Admin);
-        assert_eq!(relay.trust, CommitUnitTrust::TrustedBackend);
+        assert_eq!(relay.trust, CommitUnitTrust::TrustedAuthority);
 
         let bootstrap = ws_admission(
             WebSocketPrelude {
                 peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
                 bootstrap_catalogue: true,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1346,6 +1491,7 @@ mod tests {
                     .canonical()
                     .to_owned(),
                 bootstrap_catalogue: true,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     admin_secret: Some("admin-secret".to_owned()),
                     ..Default::default()
@@ -1356,7 +1502,24 @@ mod tests {
         )
         .await
         .expect("admit authentication before protocol bootstrap rejection");
-        assert_eq!(non_system.trust, CommitUnitTrust::TrustedBackend);
+        assert_eq!(non_system.trust, CommitUnitTrust::TrustedAuthority);
+
+        let backend = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::OrdinarySession,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    backend_secret: Some("backend-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("ordinary backend is authenticated, but has no prior-edge-admission proof");
+        assert_eq!(backend.trust, CommitUnitTrust::TrustedBackend);
     }
 
     #[tokio::test]
@@ -1368,6 +1531,7 @@ mod tests {
         let prelude = WebSocketPrelude {
             peer_identity: forged_peer.canonical().to_owned(),
             bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
@@ -1402,6 +1566,7 @@ mod tests {
         let prelude = WebSocketPrelude {
             peer_identity: identity.canonical().to_owned(),
             bootstrap_catalogue: false,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
@@ -1450,7 +1615,17 @@ mod tests {
         );
         assert!(!admission.claims.contains_key("subject"));
         assert!(!admission.claims.contains_key("user_id"));
-        assert!(!admission.claims.contains_key("authMode"));
+        // Auth metadata is derived from the admitted identity, not flattened
+        // from caller claims. Arbitrary claims remain in their own namespace.
+        assert_eq!(
+            admission.claims.get("authMode"),
+            Some(&CoreValue::String("external".to_owned()))
+        );
+        assert_eq!(
+            admission.claims.get("user"),
+            Some(&CoreValue::String(identity.canonical().to_owned()))
+        );
+        assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
 
     // Internal route-boundary test: this proves the reusable core
@@ -1715,12 +1890,6 @@ mod tests {
         (identity, prelude)
     }
 
-    fn ws_client_hello_batch() -> Vec<u8> {
-        ws_client_hello_batch_with_features(
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        )
-    }
-
     fn ws_client_hello_batch_with_features(features: u64) -> Vec<u8> {
         let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, features));
         let encoded = vec![encode_frame(&hello).expect("encode client hello")];
@@ -1828,6 +1997,29 @@ mod tests {
     }
 
     #[test]
+    fn websocket_frame_batches_never_emit_a_carrier_over_the_physical_cap() {
+        let largest_singleton = vec![0x42; MAX_WIRE_FRAME_BYTES - 4];
+        let batches = encode_ws_frame_batches(std::slice::from_ref(&largest_singleton))
+            .expect("largest singleton carrier fits exactly");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), MAX_WIRE_FRAME_BYTES);
+        assert_eq!(
+            decode_ws_encoded_frame_batch(&batches[0]).expect("decode exact carrier"),
+            vec![largest_singleton],
+        );
+
+        let raw_limit = vec![0x42; MAX_WIRE_FRAME_BYTES];
+        assert!(
+            encode_ws_frame_batches(std::slice::from_ref(&raw_limit)).is_err(),
+            "raw limit frame alone cannot fit its carrier prefixes"
+        );
+        assert!(
+            encode_ws_frame_batches(&[vec![0x11], raw_limit]).is_err(),
+            "flushing an earlier frame must still validate the oversized singleton"
+        );
+    }
+
+    #[test]
     fn websocket_frame_batch_decoder_rejects_empty_and_count_floods() {
         let empty = postcard::to_allocvec(&Vec::<Vec<u8>>::new()).expect("encode empty batch");
         assert!(decode_ws_encoded_frame_batch(&empty).is_err());
@@ -1836,6 +2028,27 @@ mod tests {
             .expect("encode count flood below physical byte cap");
         assert!(flood.len() <= MAX_WIRE_FRAME_BYTES);
         assert!(decode_ws_encoded_frame_batch(&flood).is_err());
+    }
+
+    #[test]
+    fn websocket_frame_batch_decoder_consumes_the_complete_carrier() {
+        let valid = [0x01, 0x01, 0x42];
+        assert_eq!(
+            postcard::to_allocvec(&vec![vec![0x42_u8]]).expect("encode valid batch"),
+            valid,
+            "frozen WebSocket batch corpus must remain canonical"
+        );
+        assert_eq!(
+            decode_ws_encoded_frame_batch(&valid).expect("decode complete valid batch"),
+            vec![vec![0x42]]
+        );
+
+        let mut suffixed = valid.to_vec();
+        suffixed.push(0x00);
+        assert!(
+            decode_ws_encoded_frame_batch(&suffixed).is_err(),
+            "a valid batch plus a suffix must not acquire a second interpretation"
+        );
     }
 
     #[test]

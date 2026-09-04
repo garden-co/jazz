@@ -5,7 +5,7 @@ import {
   WriteHandle,
   WriteResult,
   type JazzClient,
-  type BatchId,
+  type TxId,
   type LocalTransactionRecord,
   type MutationErrorEvent,
   type Row,
@@ -13,7 +13,7 @@ import {
 import type { Session } from "./context.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 
-type WaitForTransaction = (batchId: BatchId | Promise<BatchId>, tier: string) => Promise<void>;
+type WaitForTransaction = (txId: TxId | Promise<TxId>, tier: string) => Promise<void>;
 
 class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
@@ -71,12 +71,12 @@ function todoTable() {
 
 function makeLocalTransactionRecord(transactionId: string): LocalTransactionRecord {
   return {
-    transactionId: transactionId as BatchId,
+    transactionId: transactionId as TxId,
     kind: "mergeable",
     sealed: true,
     latestSettlement: {
       kind: "accepted",
-      transactionId: transactionId as BatchId,
+      transactionId: transactionId as TxId,
       confirmedTier: "local",
     },
   };
@@ -96,7 +96,7 @@ function makeValueWriteResult(
 ) {
   const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteResult(value, transactionId as BatchId, client as unknown as JazzClient),
+    handle: new WriteResult(value, transactionId as TxId, client as unknown as JazzClient),
     client,
   };
 }
@@ -107,7 +107,7 @@ function makeVoidWriteHandle(
 ) {
   const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteHandle(transactionId as BatchId, client as unknown as JazzClient),
+    handle: new WriteHandle(transactionId as TxId, client as unknown as JazzClient),
     client,
   };
 }
@@ -145,7 +145,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    await expect(pending.batchId).resolves.toBe("transaction-insert");
+    await expect(pending.txId).resolves.toBe("transaction-insert");
     expect(pending.value).toEqual({
       id: "todo-1",
       title: "Buy milk",
@@ -295,17 +295,17 @@ describe("Db write handles", () => {
 });
 
 describe("Db mutation error handling", () => {
-  function makeRejectedEvent(batchId: BatchId): MutationErrorEvent {
+  function makeRejectedEvent(txId: TxId): MutationErrorEvent {
     return {
       code: "permission_denied",
       reason: "write rejected by policy",
       transaction: {
-        transactionId: batchId,
+        transactionId: txId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          transactionId: batchId,
+          transactionId: txId,
           code: "permission_denied",
           reason: "write rejected by policy",
         },
@@ -315,7 +315,7 @@ describe("Db mutation error handling", () => {
 
   it("replays an unhandled client rejection to the first Db listener and supports unsubscribe", () => {
     let runtimeListener: ((event: MutationErrorEvent) => void) | undefined;
-    const batchId = "mutation-error-batch" as BatchId;
+    const txId = "mutation-error-batch" as TxId;
     let client!: JazzClient;
     const clientImpl = {
       onMutationError: vi.fn((listener: (event: MutationErrorEvent) => void) => {
@@ -331,7 +331,7 @@ describe("Db mutation error handling", () => {
                 { type: "Boolean", value: false },
               ],
             },
-            batchId,
+            txId,
             client,
           ),
       ),
@@ -347,7 +347,7 @@ describe("Db mutation error handling", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
     db.insert(todoTable(), { title: "Buy milk", done: false });
-    const event = makeRejectedEvent(batchId);
+    const event = makeRejectedEvent(txId);
     runtimeListener?.(event);
 
     const listener = vi.fn();
@@ -356,7 +356,7 @@ describe("Db mutation error handling", () => {
     expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
 
     unsubscribe();
-    runtimeListener?.(makeRejectedEvent("later-batch" as BatchId));
+    runtimeListener?.(makeRejectedEvent("later-batch" as TxId));
     expect(listener).toHaveBeenCalledTimes(1);
   });
 });

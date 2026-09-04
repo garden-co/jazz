@@ -10,7 +10,14 @@ import {
   type RowsChangeData,
   type SortColumn,
 } from "react-data-grid";
-import type { ColumnDescriptor, ColumnType, TableProxy, Value } from "jazz-tools";
+import {
+  PersistedWriteRejectedError,
+  type ColumnDescriptor,
+  type ColumnType,
+  type TableProxy,
+  type Value,
+  type WriteResult,
+} from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 import type { DynamicTableRow } from "../../utility/generic-query-builder.js";
 import {
@@ -74,7 +81,6 @@ const EMPTY_ROWS: DynamicTableRow[] = [];
 const CELL_UPDATE_ANIMATION_MS = 1_200;
 const ROW_ADDED_ANIMATION_MS = 2_000;
 const ROW_REMOVED_ANIMATION_MS = 650;
-const STAGED_INSERT_ROW_ID_PREFIX = "__jazz_inspector_staged_insert__";
 const ACTIONS_COLUMN_KEY = "__actions__";
 const COLUMN_PREFERENCES_STORAGE_KEY_PREFIX = "jazz.inspector.dataExplorer.columnPreferences";
 
@@ -148,6 +154,19 @@ export interface TableMutationState {
   queuedDeleteRevisions: Record<string, number>;
 }
 
+interface SubmittedTableSave {
+  submittedQueuedEdits: Record<string, QueuedRowEdits>;
+  submittedStagedInserts: StagedInsert[];
+  submittedQueuedDeletes: Set<string>;
+  submittedQueuedEditRevisions: Record<string, Record<string, number>>;
+  submittedStagedInsertRevisions: Record<string, number>;
+  submittedQueuedDeleteRevisions: Record<string, number>;
+}
+
+export interface PendingTableSave extends SubmittedTableSave {
+  writeResult: WriteResult<void>;
+}
+
 function createTableMutationState(): TableMutationState {
   return {
     queuedEdits: {},
@@ -173,6 +192,136 @@ function queuedRowEditsEqual(a: QueuedRowEdits, b: QueuedRowEdits) {
     aColumns.length === Object.keys(b).length &&
     aColumns.every((key) => queuedCellEditsEqual(a[key], b[key]))
   );
+}
+
+function settleSubmittedTableSave(
+  previous: TableMutationState,
+  settledSave: SubmittedTableSave,
+): TableMutationState {
+  const nextQueuedEdits: Record<string, QueuedRowEdits> = {};
+  const nextQueuedEditRevisions: Record<string, Record<string, number>> = {};
+  for (const [rowId, rowEdits] of Object.entries(previous.queuedEdits)) {
+    const submittedRowEdits = settledSave.submittedQueuedEdits[rowId];
+    const remainingRowEdits: QueuedRowEdits = {};
+    const remainingRowRevisions: Record<string, number> = {};
+    for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
+      const currentRevision = previous.queuedEditRevisions[rowId]?.[columnId];
+      const wasSettled =
+        queuedCellEditsEqual(queuedEdit, submittedRowEdits?.[columnId]) &&
+        currentRevision === settledSave.submittedQueuedEditRevisions[rowId]?.[columnId];
+      if (!wasSettled) {
+        remainingRowEdits[columnId] = queuedEdit;
+        if (currentRevision !== undefined) {
+          remainingRowRevisions[columnId] = currentRevision;
+        }
+      }
+    }
+    if (Object.keys(remainingRowEdits).length > 0) {
+      nextQueuedEdits[rowId] = remainingRowEdits;
+      nextQueuedEditRevisions[rowId] = remainingRowRevisions;
+    }
+  }
+
+  const submittedInsertById = new Map(
+    settledSave.submittedStagedInserts.map((insert) => [insert.id, insert]),
+  );
+  const nextStagedInserts: StagedInsert[] = [];
+  for (const insert of previous.stagedInserts) {
+    const submitted = submittedInsertById.get(insert.id);
+    if (!submitted) {
+      nextStagedInserts.push(insert);
+      continue;
+    }
+
+    // The submitted identity now belongs to a committed row. Never retain it
+    // as a staged insert: a later Save would otherwise call `tx.insert` with
+    // the same UUID. Preserve only changes made after submission as an update
+    // of that committed row.
+    const postSubmissionEdits: QueuedRowEdits = {};
+    for (const [columnId, edit] of Object.entries(insert.edits)) {
+      if (!queuedCellEditsEqual(edit, submitted.edits[columnId])) {
+        postSubmissionEdits[columnId] = edit;
+      }
+    }
+    if (Object.keys(postSubmissionEdits).length > 0) {
+      nextQueuedEdits[insert.id] = {
+        ...nextQueuedEdits[insert.id],
+        ...postSubmissionEdits,
+      };
+      nextQueuedEditRevisions[insert.id] = {
+        ...nextQueuedEditRevisions[insert.id],
+        ...Object.fromEntries(
+          Object.keys(postSubmissionEdits).map((columnId) => [
+            columnId,
+            previous.stagedInsertRevisions[insert.id],
+          ]),
+        ),
+      };
+    }
+  }
+  const nextStagedInsertRevisions: Record<string, number> = {};
+  for (const insert of nextStagedInserts) {
+    const revision = previous.stagedInsertRevisions[insert.id];
+    if (revision !== undefined) {
+      nextStagedInsertRevisions[insert.id] = revision;
+    }
+  }
+
+  const nextQueuedDeletes = new Set(previous.queuedDeletes);
+  const nextQueuedDeleteRevisions = { ...previous.queuedDeleteRevisions };
+  for (const rowId of settledSave.submittedQueuedDeletes) {
+    if (
+      previous.queuedDeleteRevisions[rowId] === settledSave.submittedQueuedDeleteRevisions[rowId]
+    ) {
+      nextQueuedDeletes.delete(rowId);
+      delete nextQueuedDeleteRevisions[rowId];
+    }
+  }
+
+  return {
+    ...previous,
+    queuedEdits: nextQueuedEdits,
+    queuedEditRevisions: nextQueuedEditRevisions,
+    stagedInserts: nextStagedInserts,
+    stagedInsertRevisions: nextStagedInsertRevisions,
+    queuedDeletes: nextQueuedDeletes,
+    queuedDeleteRevisions: nextQueuedDeleteRevisions,
+  };
+}
+
+function discardCanceledRejectedInserts(
+  previous: TableMutationState,
+  rejectedSave: SubmittedTableSave,
+): TableMutationState {
+  const rejectedInsertIds = new Set(rejectedSave.submittedStagedInserts.map((insert) => insert.id));
+  const canceledRejectedInsertIds = new Set(
+    [...previous.queuedDeletes].filter((rowId) => rejectedInsertIds.has(rowId)),
+  );
+  if (canceledRejectedInsertIds.size === 0) {
+    return previous;
+  }
+
+  const nextQueuedEdits = { ...previous.queuedEdits };
+  const nextQueuedEditRevisions = { ...previous.queuedEditRevisions };
+  const nextQueuedDeletes = new Set(previous.queuedDeletes);
+  const nextQueuedDeleteRevisions = { ...previous.queuedDeleteRevisions };
+  for (const rowId of canceledRejectedInsertIds) {
+    delete nextQueuedEdits[rowId];
+    delete nextQueuedEditRevisions[rowId];
+    nextQueuedDeletes.delete(rowId);
+    delete nextQueuedDeleteRevisions[rowId];
+  }
+
+  return {
+    ...previous,
+    queuedEdits: nextQueuedEdits,
+    stagedInserts: previous.stagedInserts.filter(
+      (insert) => !canceledRejectedInsertIds.has(insert.id),
+    ),
+    queuedEditRevisions: nextQueuedEditRevisions,
+    queuedDeletes: nextQueuedDeletes,
+    queuedDeleteRevisions: nextQueuedDeleteRevisions,
+  };
 }
 
 interface EditableGridRow extends AnimatedGridRow {
@@ -396,7 +545,7 @@ function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): Queu
 
 function createStagedInsert(schemaColumns: ColumnDescriptor[]): StagedInsert {
   return {
-    id: `${STAGED_INSERT_ROW_ID_PREFIX}:${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    id: crypto.randomUUID(),
     edits: createInitialStagedInsertEdits(schemaColumns),
   };
 }
@@ -758,6 +907,8 @@ export function TableDataGrid() {
   const explorerContext = useOutletContext<{
     mutationStateByTable: Record<string, TableMutationState>;
     setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
+    pendingSaveByTable: ReadonlyMap<string, PendingTableSave>;
+    setPendingSaveByTable: Dispatch<SetStateAction<Map<string, PendingTableSave>>>;
     beginSave: (table: string) => symbol | null;
     finishSave: (table: string, token: symbol) => boolean;
   } | null>();
@@ -765,10 +916,16 @@ export function TableDataGrid() {
     Record<string, TableMutationState>
   >({});
   const fallbackSaveTokens = useRef(new Map<string, symbol>());
+  const [fallbackPendingSaveByTable, setFallbackPendingSaveByTable] = useState(
+    () => new Map<string, PendingTableSave>(),
+  );
   const mutationStateByTable =
     explorerContext?.mutationStateByTable ?? fallbackMutationStateByTable;
   const setMutationStateByTable =
     explorerContext?.setMutationStateByTable ?? setFallbackMutationStateByTable;
+  const pendingSaveByTable = explorerContext?.pendingSaveByTable ?? fallbackPendingSaveByTable;
+  const setPendingSaveByTable =
+    explorerContext?.setPendingSaveByTable ?? setFallbackPendingSaveByTable;
   const beginSave =
     explorerContext?.beginSave ??
     ((targetTable: string) => {
@@ -908,17 +1065,14 @@ export function TableDataGrid() {
   // whole point is to show the host's local — possibly unsynced — data), so it
   // must not wait for an edge ack or force a server round-trip on reads.
   const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
-  const queryOptions = useMemo(
-    () =>
-      ({
-        propagation: runtime === "standalone" ? "full" : "local-only",
-        visibility: "hidden_from_live_query_list",
-      }) as const,
-    [runtime],
-  );
+  // Overlay Db construction receives an authenticated Inspector worker port.
+  // Jazz Tools turns that handoff into its private local-read query source,
+  // so this UI never imports or manufactures a privileged option itself.
+  const queryOptions: QueryOptions = useMemo(() => ({}), []);
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   // show a grid skeleton while the first result is in flight.
   const isInitialLoading = queryResult.isLoading;
+  const queryError = queryResult.error;
   const rows = queryResult.data ?? EMPTY_ROWS;
 
   const allGridColumns = useMemo<GridColumn[]>(
@@ -965,6 +1119,7 @@ export function TableDataGrid() {
   const stagedInsertCount = stagedInserts.length;
   const hasStagedInserts = stagedInsertCount > 0;
   const hasQueuedChanges = hasQueuedEdits || queuedDeletes.size > 0 || hasStagedInserts;
+  const hasUnresolvedSave = pendingSaveByTable.has(table);
   const isAnyMutationPending = isQueuedSavePending;
   const gridAnimationScopeKey = useMemo(
     () => `${table}:${builtQuery}:${gridColumns.map((column) => column.id).join("|")}`,
@@ -1030,10 +1185,33 @@ export function TableDataGrid() {
     );
   };
   const handleDiscardQueuedEdits = (): void => {
+    if (pendingSaveByTable.has(table)) return;
     setQueuedEdits({});
     setStagedInserts([]);
     setQueuedDeletes(new Set());
     setQueuedSaveError(null);
+  };
+  const cancelStagedInserts = (stagedInsertIds: ReadonlySet<string>): void => {
+    if (stagedInsertIds.size === 0) return;
+
+    setQueuedSaveError(null);
+    const pendingSave = pendingSaveByTable.get(table);
+    const submittedInsertIds = new Set(
+      pendingSave?.submittedStagedInserts.map((insert) => insert.id) ?? [],
+    );
+    const cancellationDeleteIds = [...stagedInsertIds].filter((id) => submittedInsertIds.has(id));
+    setStagedInserts((currentStagedInserts) =>
+      currentStagedInserts.filter((stagedInsert) => !stagedInsertIds.has(stagedInsert.id)),
+    );
+    if (cancellationDeleteIds.length > 0) {
+      setQueuedDeletes((currentQueuedDeletes) => {
+        const nextQueuedDeletes = new Set(currentQueuedDeletes);
+        for (const rowId of cancellationDeleteIds) {
+          nextQueuedDeletes.add(rowId);
+        }
+        return nextQueuedDeletes;
+      });
+    }
   };
   const handleQueueSelectedDeletes = (): void => {
     if (selectedVisibleRowIds.size === 0) {
@@ -1048,11 +1226,7 @@ export function TableDataGrid() {
         .map((stagedInsert) => stagedInsert.id),
     );
     if (selectedStagedInsertIds.size > 0) {
-      setStagedInserts((currentStagedInserts) =>
-        currentStagedInserts.filter(
-          (stagedInsert) => !selectedStagedInsertIds.has(stagedInsert.id),
-        ),
-      );
+      cancelStagedInserts(selectedStagedInsertIds);
     }
 
     const selectedRealRowIds = visibleRows
@@ -1071,19 +1245,14 @@ export function TableDataGrid() {
     setSelectedRowIds(new Set());
   };
   const handleSaveQueuedEdits = async (): Promise<void> => {
-    if (!hasQueuedChanges) {
+    const mutationTable = table;
+    let pendingSave = pendingSaveByTable.get(mutationTable);
+    if (!hasQueuedChanges && !pendingSave) {
       return;
     }
 
-    const mutationTable = table;
     const saveToken = beginSave(mutationTable);
     if (!saveToken) return;
-    const submittedQueuedEdits = queuedEdits;
-    const submittedStagedInserts = stagedInserts;
-    const submittedQueuedDeletes = queuedDeletes;
-    const submittedQueuedEditRevisions = mutationState.queuedEditRevisions;
-    const submittedStagedInsertRevisions = mutationState.stagedInsertRevisions;
-    const submittedQueuedDeleteRevisions = mutationState.queuedDeleteRevisions;
     try {
       setMutationStateByTable((current) => ({
         ...current,
@@ -1094,98 +1263,114 @@ export function TableDataGrid() {
         },
       }));
 
-      const rowUpdates = Object.entries(queuedEdits)
-        .filter(([rowId]) => !queuedDeletes.has(rowId))
-        .map(([rowId, rowEdits]) => {
-          const updates: Record<string, unknown> = {};
-          for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
-            const schemaColumn = schemaColumnById.get(columnId);
-            if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
-              continue;
+      if (!pendingSave) {
+        const submittedQueuedEdits = queuedEdits;
+        const submittedStagedInserts = stagedInserts;
+        const submittedQueuedDeletes = queuedDeletes;
+        const submittedQueuedEditRevisions = mutationState.queuedEditRevisions;
+        const submittedStagedInsertRevisions = mutationState.stagedInsertRevisions;
+        const submittedQueuedDeleteRevisions = mutationState.queuedDeleteRevisions;
+        const rowUpdates = Object.entries(submittedQueuedEdits)
+          .filter(([rowId]) => !submittedQueuedDeletes.has(rowId))
+          .map(([rowId, rowEdits]) => {
+            const updates: Record<string, unknown> = {};
+            for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
+              const schemaColumn = schemaColumnById.get(columnId);
+              if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
+                continue;
+              }
+              updates[columnId] = parseQueuedEditForColumn(schemaColumn, queuedEdit);
             }
-            updates[columnId] = parseQueuedEditForColumn(schemaColumn, queuedEdit);
-          }
-          return { rowId, updates };
-        })
-        .filter(({ updates }) => Object.keys(updates).length > 0);
-      const insertValues = stagedInserts.map((stagedInsert) =>
-        buildQueuedInsertValues(schemaColumns, stagedInsert.edits),
-      );
+            return { rowId, updates };
+          })
+          .filter(({ updates }) => Object.keys(updates).length > 0);
+        const inserts = submittedStagedInserts.map((stagedInsert) => ({
+          id: stagedInsert.id,
+          values: buildQueuedInsertValues(schemaColumns, stagedInsert.edits),
+        }));
 
-      await Promise.all([
-        ...rowUpdates.map(async ({ rowId, updates }) => {
-          const handle = await db.update(tableProxy, rowId, updates);
-          await handle.wait({ tier: mutationDurabilityTier });
-        }),
-        ...[...queuedDeletes].map(async (rowId) => {
-          const handle = await db.delete(tableProxy, rowId);
-          await handle.wait({ tier: mutationDurabilityTier });
-        }),
-        ...insertValues.map(async (values) => {
-          const handle = await db.insert(tableProxy, values);
-          await handle.wait({ tier: mutationDurabilityTier });
-        }),
-      ]);
-
-      setMutationStateByTable((current) => ({
-        ...current,
-        [mutationTable]: {
-          ...(() => {
+        const submittedSave: SubmittedTableSave = {
+          submittedQueuedEdits,
+          submittedStagedInserts,
+          submittedQueuedDeletes,
+          submittedQueuedEditRevisions,
+          submittedStagedInsertRevisions,
+          submittedQueuedDeleteRevisions,
+        };
+        if (rowUpdates.length === 0 && submittedQueuedDeletes.size === 0 && inserts.length === 0) {
+          setMutationStateByTable((current) => {
             const previous = current[mutationTable] ?? createTableMutationState();
-            const nextQueuedEdits: Record<string, QueuedRowEdits> = {};
-            for (const [rowId, rowEdits] of Object.entries(previous.queuedEdits)) {
-              const submittedRowEdits = submittedQueuedEdits[rowId];
-              const remainingRowEdits = { ...rowEdits };
-              for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
-                if (
-                  queuedCellEditsEqual(queuedEdit, submittedRowEdits?.[columnId]) &&
-                  previous.queuedEditRevisions[rowId]?.[columnId] ===
-                    submittedQueuedEditRevisions[rowId]?.[columnId]
-                ) {
-                  delete remainingRowEdits[columnId];
-                }
-              }
-              if (Object.keys(remainingRowEdits).length > 0)
-                nextQueuedEdits[rowId] = remainingRowEdits;
-            }
-            const submittedInsertById = new Map(
-              submittedStagedInserts.map((insert) => [insert.id, insert]),
-            );
-            const nextStagedInserts = previous.stagedInserts.filter((insert) => {
-              const submitted = submittedInsertById.get(insert.id);
-              return (
-                !submitted ||
-                !queuedRowEditsEqual(insert.edits, submitted.edits) ||
-                previous.stagedInsertRevisions[insert.id] !==
-                  submittedStagedInsertRevisions[insert.id]
-              );
-            });
-            const nextQueuedDeletes = new Set(previous.queuedDeletes);
-            for (const rowId of submittedQueuedDeletes) {
-              if (previous.queuedDeleteRevisions[rowId] === submittedQueuedDeleteRevisions[rowId]) {
-                nextQueuedDeletes.delete(rowId);
-              }
-            }
             return {
-              ...previous,
-              queuedEdits: nextQueuedEdits,
-              stagedInserts: nextStagedInserts,
-              queuedDeletes: nextQueuedDeletes,
+              ...current,
+              [mutationTable]: settleSubmittedTableSave(previous, submittedSave),
             };
-          })(),
-        },
-      }));
+          });
+          return;
+        }
+
+        const writeResult = await db.transaction((tx) => {
+          for (const { rowId, updates } of rowUpdates) {
+            tx.update(tableProxy, rowId, updates);
+          }
+          for (const rowId of submittedQueuedDeletes) {
+            tx.delete(tableProxy, rowId);
+          }
+          for (const insert of inserts) {
+            tx.insert(tableProxy, insert.values, { id: insert.id });
+          }
+        });
+        pendingSave = { writeResult, ...submittedSave };
+        const retainedSave = pendingSave;
+        setPendingSaveByTable((current) => {
+          const next = new Map(current);
+          next.set(mutationTable, retainedSave);
+          return next;
+        });
+      }
+
+      await pendingSave.writeResult.wait({ tier: mutationDurabilityTier });
+      const settledSave = pendingSave;
+      setPendingSaveByTable((current) => {
+        if (current.get(mutationTable) !== settledSave) return current;
+        const next = new Map(current);
+        next.delete(mutationTable);
+        return next;
+      });
+      setMutationStateByTable((current) => {
+        const previous = current[mutationTable] ?? createTableMutationState();
+        return {
+          ...current,
+          [mutationTable]: settleSubmittedTableSave(previous, settledSave),
+        };
+      });
     } catch (error) {
-      setMutationStateByTable((current) => ({
-        ...current,
-        [mutationTable]: {
-          ...(current[mutationTable] ?? createTableMutationState()),
-          queuedSaveError:
-            error instanceof Error || (typeof Error.isError === "function" && Error.isError(error))
-              ? error.message
-              : "Could not persist queued cell edits.",
-        },
-      }));
+      const rejectedSave =
+        pendingSave && error instanceof PersistedWriteRejectedError ? pendingSave : undefined;
+      if (rejectedSave) {
+        setPendingSaveByTable((current) => {
+          if (current.get(mutationTable) !== rejectedSave) return current;
+          const next = new Map(current);
+          next.delete(mutationTable);
+          return next;
+        });
+      }
+      setMutationStateByTable((current) => {
+        const previous = current[mutationTable] ?? createTableMutationState();
+        const next = rejectedSave
+          ? discardCanceledRejectedInserts(previous, rejectedSave)
+          : previous;
+        return {
+          ...current,
+          [mutationTable]: {
+            ...next,
+            queuedSaveError:
+              error instanceof Error ||
+              (typeof Error.isError === "function" && Error.isError(error))
+                ? error.message
+                : "Could not persist queued cell edits.",
+          },
+        };
+      });
     } finally {
       setMutationStateByTable((current) => ({
         ...current,
@@ -1270,7 +1455,11 @@ export function TableDataGrid() {
       />
       <div className={styles.contentArea}>
         <div className={styles.gridFrame}>
-          {isInitialLoading ? (
+          {queryError ? (
+            <div className={styles.emptyState} role="alert">
+              Could not load rows: {queryError.message}
+            </div>
+          ) : isInitialLoading ? (
             <GridSkeleton />
           ) : (
             <PlainTableView
@@ -1289,6 +1478,7 @@ export function TableDataGrid() {
               onSortColumnsChange={handleSortColumnsChange}
               onQueuedEditsChange={setQueuedEdits}
               onStagedInsertsChange={setStagedInserts}
+              onCancelStagedInserts={cancelStagedInserts}
               onSelectedRowIdsChange={setSelectedRowIds}
               onQueuedSaveErrorChange={setQueuedSaveError}
               onQueuedDeletesChange={setQueuedDeletes}
@@ -1298,7 +1488,7 @@ export function TableDataGrid() {
         </div>
       </div>
       <div className={styles.bottomRail}>
-        {hasQueuedChanges || queuedSaveError ? (
+        {hasQueuedChanges || queuedSaveError || hasUnresolvedSave ? (
           <div
             className={styles.queuedBanner}
             role={queuedSaveError ? "alert" : "status"}
@@ -1307,10 +1497,21 @@ export function TableDataGrid() {
             <div className={styles.queuedBannerCopy}>
               <span
                 className={styles.queuedBannerLabel}
-                title="These changes are staged locally. Click Save changes to apply them, or Discard to drop them."
+                title={
+                  hasUnresolvedSave
+                    ? "This save may already be committed and cannot be discarded. Retry confirmation checks the retained result without submitting it again."
+                    : "These changes are staged locally. Click Save changes to apply them, or Discard to drop them."
+                }
               >
-                Queued
+                {hasUnresolvedSave ? "Confirmation pending" : "Queued"}
               </span>
+              {hasUnresolvedSave ? (
+                <span>
+                  This save may already be committed and cannot be discarded. Retry confirmation
+                  checks the existing submission; edits made afterward stay queued for the next
+                  save.
+                </span>
+              ) : null}
               {hasQueuedEdits ? (
                 <span>
                   {queuedEditCount} edit{queuedEditCount === 1 ? "" : "s"} across{" "}
@@ -1336,7 +1537,12 @@ export function TableDataGrid() {
                 type="button"
                 className={`${styles.secondaryButton} ${styles.queuedBannerButton}`}
                 onClick={handleDiscardQueuedEdits}
-                disabled={isQueuedSavePending}
+                disabled={isQueuedSavePending || hasUnresolvedSave}
+                title={
+                  hasUnresolvedSave
+                    ? "Discard is unavailable because the pending save may already be committed."
+                    : undefined
+                }
               >
                 Discard
               </button>
@@ -1348,7 +1554,13 @@ export function TableDataGrid() {
                 }}
                 disabled={isQueuedSavePending}
               >
-                {isQueuedSavePending ? "Saving..." : "Save changes"}
+                {isQueuedSavePending
+                  ? hasUnresolvedSave
+                    ? "Confirming..."
+                    : "Saving..."
+                  : hasUnresolvedSave
+                    ? "Retry confirmation"
+                    : "Save changes"}
               </button>
             </div>
           </div>
@@ -1794,7 +2006,7 @@ function RelationCell({
   schema: Record<string, { columns: ColumnDescriptor[] }>;
   relationTable: string;
   relationId: string;
-  queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
+  queryOptions: QueryOptions;
 }) {
   const queryBuilder = useMemo(
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
@@ -1891,6 +2103,7 @@ function PlainTableView({
   onSortColumnsChange,
   onQueuedEditsChange,
   onStagedInsertsChange,
+  onCancelStagedInserts,
   onSelectedRowIdsChange,
   onQueuedSaveErrorChange,
   onQueuedDeletesChange,
@@ -1900,7 +2113,7 @@ function PlainTableView({
   gridColumns: GridColumn[];
   sorting: readonly SortColumn[];
   schema: Record<string, { columns: ColumnDescriptor[] }>;
-  queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
+  queryOptions: QueryOptions;
   schemaColumnById: Map<string, ColumnDescriptor>;
   queuedEdits: Record<string, QueuedRowEdits>;
   stagedInserts: StagedInsert[];
@@ -1911,6 +2124,7 @@ function PlainTableView({
   onSortColumnsChange: (sortColumns: SortColumn[]) => void;
   onQueuedEditsChange: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>>;
   onStagedInsertsChange: Dispatch<SetStateAction<StagedInsert[]>>;
+  onCancelStagedInserts: (stagedInsertIds: ReadonlySet<string>) => void;
   onSelectedRowIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onQueuedSaveErrorChange: (value: string | null) => void;
   onQueuedDeletesChange: Dispatch<SetStateAction<Set<string>>>;
@@ -2191,6 +2405,12 @@ function PlainTableView({
           schemaColumn && isEditable
             ? (props) => <QueuedCellEditor {...props} schemaColumn={schemaColumn} />
             : undefined,
+        // Live query delivery and row-change animations can replace an otherwise
+        // unchanged row object. Queued editors own their draft until commit, so
+        // those external identity changes must not close the editor.
+        editorOptions: {
+          closeOnExternalRowChange: false,
+        },
       };
     });
 
@@ -2218,12 +2438,9 @@ function PlainTableView({
                 }}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onQueuedSaveErrorChange(null);
-                  onStagedInsertsChange((currentStagedInserts) =>
-                    currentStagedInserts.filter(
-                      (stagedInsert) => stagedInsert.id !== row.stagedInsertId,
-                    ),
-                  );
+                  if (row.stagedInsertId) {
+                    onCancelStagedInserts(new Set([row.stagedInsertId]));
+                  }
                 }}
               >
                 <CrossIcon className={styles.buttonIcon} />
@@ -2264,6 +2481,7 @@ function PlainTableView({
     return [...dataColumns, actionsColumn];
   }, [
     gridColumns,
+    onCancelStagedInserts,
     onStagedInsertsChange,
     onQueuedSaveErrorChange,
     queueCellEdit,
@@ -2378,12 +2596,9 @@ function PlainTableView({
 
           event.preventGridDefault();
           if (args.row?.isStagedInsert) {
-            onQueuedSaveErrorChange(null);
             const stagedInsertId = args.row.stagedInsertId;
             if (stagedInsertId) {
-              onStagedInsertsChange((currentStagedInserts) =>
-                currentStagedInserts.filter((stagedInsert) => stagedInsert.id !== stagedInsertId),
-              );
+              onCancelStagedInserts(new Set([stagedInsertId]));
             }
           } else {
             toggleQueuedDelete(rowId);

@@ -121,14 +121,14 @@ impl Database {
             let key = staged_large_value_key(*staged_id);
             let encoded = self
                 .storage
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key)
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await?
                 .ok_or_else(|| {
                     Error::InvalidLargeValueMetadata(
                         "accepted staging id is missing or already consumed".to_owned(),
                     )
                 })?;
-            let staged = decode_staged_large_value(&encoded)?;
+            let staged = decode_staged_large_value_at_key(&key, &encoded)?;
             accepted_staging.push(staged);
         }
         for staged in &accepted_staging {
@@ -268,6 +268,15 @@ impl Database {
                 return Err(Error::IvmRuntime(error));
             }
         };
+        // The public direct write APIs are themselves the runtime owner for
+        // CPU-only continuations which this tick scheduled.  In particular,
+        // a bounded recursive evaluation may yield after making resident
+        // progress and self-wake for another slice.  Finish those slices
+        // before returning the publication so its subscription output is
+        // observable in the same direct write turn. A genuinely cold input
+        // remains pending for an external owner even if its storage future
+        // eagerly wakes, rather than making a write wait on storage.
+        self.drain_self_scheduled_resident_progress()?;
         let ivm_tick_time = tick_start.elapsed();
         // The IVM's resident observer uses the staged overlay. It takes the
         // lifecycle lock itself only when another resident publication does

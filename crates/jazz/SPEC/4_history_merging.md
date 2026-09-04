@@ -92,6 +92,24 @@ content version with the same sorted parent set already exists (`INV-HIST-5`).
 The merge version dominates all of its parent heads and becomes the current
 content winner when present and accepted (`INV-HIST-6`).
 
+Edges reconcile concurrent mergeable writes as they admit them, including
+independent inserts of the same row ID. An edge's merge is accepted at Edge
+durability and has no global timestamp. Core must not be the first place where
+concurrency already observed by one edge is reconciled: it merges only the
+concurrent heads that remain across edge publications, then establishes Global
+durability. Replaying an edge's already reconciled frontier must not create a
+redundant merge of that frontier.
+
+An edge forwards each admitted transaction together with any merge versions it
+generated as one coherent authority publication. This is a logical admission
+boundary, not a guarantee that a transport delivers everything in one physical
+frame. Core admits the complete publication before looking for remaining
+concurrent heads. In particular, it must not process `A`, then `B`, eagerly
+create its own `M(A,B)`, and only afterward admit the edge's already-generated
+`M(A,B)` from that same publication. Dependency repair and reconnect replay must
+preserve this boundary. Separate edge publications may still leave concurrent
+heads, which core reconciles through the same merge machinery.
+
 The cells of a merge version are computed per column. The default strategy
 (`MergeStrategy::Lww`) fills each column independently: it takes the value from
 the highest-sort-key head that sets that column; if no head sets it, it falls
@@ -157,6 +175,49 @@ helper. The helper is nevertheless durable whenever retained, so an existing
 storage root must first pass the top-level epoch-manifest admission gate before
 any row is decoded: an unsupported former-alpha opaque payload must not be
 guessed as the new untagged array (`INV-HIST-19`; Groove storage §2).
+
+### Durable codec profile
+
+Every persistent Jazz root supplies one closed epoch-one codec profile when it
+opens its ordered-KV adapter. It contains Groove's mandatory base codecs:
+generic ordered-KV, V1 large-value descriptor/immutable-node envelopes, and
+the ordered-chunk-storage install-receipt wrapper; plus the Jazz-owned byte
+families for branch keys; catalogue schemas, mappings, lineages, bootstrap
+receipts, lenses, activations, and write pointers; and persisted
+result-member, result-row-source, and program-fact keys. The profile is sorted, pinned by the adapter manifest,
+and checked before any ordinary record is decoded or mutated. Groove carries
+these identifiers as opaque metadata: it does not import or interpret Jazz
+schemas. A missing, duplicate, substituted, or future ID therefore fails open
+admission rather than leaving a `Bytes` field to a codec-specific fallback.
+
+This inventory names encoding families, not user tables or individual values.
+Ordinary scalar/record representation remains Groove's one typed record codec;
+a distinct durable root composes this base with its own root-local codec family
+before opening. Adding a new Jazz-owned durable byte family requires a new
+storage epoch, golden fixtures, and an explicit decoder/migration decision.
+
+The native whole-root compatibility receipt is
+`fixtures/native_storage_corpus.md` and its executable tests in
+`node/tests/native_storage_corpus.rs`. It complements the per-family goldens:
+the receipt pins one authority-issued catalogue snapshot, immutable and
+current physical rows, transaction/merge metadata, and an indirect content
+tree together through both SQLite and RocksDB. Current Jazz must first inspect
+the committed backend store read-only, then open that same logical snapshot
+without writes, materialize its content tree, and preserve it across a mixed
+current-format write and a third-process reopen. Regeneration produces fresh
+backend-owned candidate bytes which are copied/unpacked into independent roots
+and put through that same full receipt before their checksums can be promoted;
+only the logical pack is deterministic. This corpus is storage-epoch evidence,
+not a compatibility decoder for pre-epoch-alpha roots.
+
+Corpus regeneration stages candidates in implementation-owned private temporary
+roots; a maintainer-supplied path is only a create-new publication destination.
+Before verification and publication, the producer rejects path/root/dot and
+symlink aliases and rejects a staged regular file that has the same stable
+physical identity as the live SQLite image or any regular RocksDB member. This
+is an accidental-alias guard for a trusted maintainer filesystem, not a hostile
+concurrent-filesystem/TOCTOU security boundary. Existing output paths are never
+overwritten: regeneration requires explicit deletion or a fresh output path.
 
 ### 4.4 Deletion as a separate layer
 

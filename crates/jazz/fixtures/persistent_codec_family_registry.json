@@ -1,0 +1,603 @@
+{
+  "schema_version": 1,
+  "purpose": "Epoch-one authoritative codec-family inventory. A family is not frozen merely by appearing in source: it must name its normative boundary, exact semantic-to-byte receipt, malformed/canonical rejection receipt, and reopen or backend evidence.",
+  "families": [
+    {
+      "id": "groove.ordered-kv.v1",
+      "boundary": "durable-storage",
+      "profile": "groove-root",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### Storage epoch manifest"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/fixtures/storage_epoch_1_codec_corpus.md",
+        "anchor": "committed bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/storage/manifest.rs",
+        "anchor": "epoch_1_codec_corpus_rejects_malformed_trailing_noncanonical_and_unknown_versions"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz-storage-sqlite/tests/ordered_kv.rs",
+          "anchor": "physical_header_ddl_and_jazz_blobs_are_pinned_across_reopen"
+        }
+      ]
+    },
+    {
+      "id": "groove.ordered-chunk-storage.v1",
+      "boundary": "durable-storage",
+      "profile": "groove-root",
+      "spec": {
+        "path": "crates/groove/SPEC/9_large_values.md",
+        "anchor": "## 9.2 Tree and chunk format"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/db/tests/mod.rs",
+        "anchor": "large_value_metadata_keys_use_the_canonical_node_ref_record"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/db/tests/batches.rs",
+        "anchor": "malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging"
+      },
+      "evidence": [
+        {
+          "path": "crates/groove/src/db/tests/batches.rs",
+          "anchor": "raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survives_reopen"
+        }
+      ]
+    },
+    {
+      "id": "groove.large-value.v1",
+      "boundary": "durable-storage",
+      "profile": "groove-root",
+      "spec": {
+        "path": "crates/groove/SPEC/9_large_values.md",
+        "anchor": "### V1 codec dispatch and permanent layout"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/db/tests/mod.rs",
+        "anchor": "large_value_metadata_records_are_canonical_groove_records"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/db/tests/batches.rs",
+        "anchor": "malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging"
+      },
+      "evidence": [
+        {
+          "path": "crates/groove/src/db/tests/batches.rs",
+          "anchor": "raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survives_reopen"
+        }
+      ]
+    },
+    {
+      "id": "groove.typed-record.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### 2.9 Canonical row storage"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/records/tests.rs",
+        "anchor": "epoch_1_scalar_record_fixture_is_exact"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/records/tests.rs",
+        "anchor": "epoch_1_record_fixture_decodes_hard_coded_bytes_and_rejects_noncanonical_forms"
+      },
+      "evidence": [
+        {
+          "path": "crates/groove/src/storage/manifest.rs",
+          "anchor": "epoch_1_codec_corpus_round_trips_committed_bytes_exactly"
+        }
+      ]
+    },
+    {
+      "id": "groove.storage-epoch-manifest.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### Storage epoch manifest"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/storage/manifest.rs",
+        "anchor": "epoch_1_manifest_has_frozen_golden_bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/storage/manifest.rs",
+        "anchor": "missing_unknown_inconsistent_and_corrupt_manifests_fail_closed"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz-storage-sqlite/tests/ordered_kv.rs",
+          "anchor": "rejects_wrong_sqlite_header_before_changing_foreign_store"
+        }
+      ]
+    },
+    {
+      "id": "groove.jazz-physical-class.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### Durable backend physical boundary"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/storage/mod.rs",
+        "anchor": "class_layout_isolates_every_jazz_physical_class"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/storage/mod.rs",
+        "anchor": "class_layout_rejects_missing_marker_with_legacy_mapped_families"
+      },
+      "evidence": [
+        {
+          "path": "crates/groove/src/storage/mod.rs",
+          "anchor": "class_layout_isolates_every_jazz_physical_class"
+        }
+      ]
+    },
+    {
+      "id": "jazz.branch-key.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/11_branch_views_time_travel.md",
+        "anchor": "#### Canonical branch-coordinate codec"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/branch_views.rs",
+        "anchor": "branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/branch_views.rs",
+        "anchor": "malformed_branch_key_rejects_multi_key_commit_without_residue"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/branch_views.rs",
+          "anchor": "branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen"
+        }
+      ]
+    },
+    {
+      "id": "jazz.catalogue.activation.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/10_lenses_migrations.md",
+        "anchor": "#### Epoch-pinned catalogue kernel"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "reopen_rejects_active_catalogue_marker_without_canonical_payload"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+          "anchor": "dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
+        }
+      ]
+    },
+    {
+      "id": "jazz.catalogue.bootstrap-ready.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/10_lenses_migrations.md",
+        "anchor": "#### Epoch-pinned catalogue kernel"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "dynamic_edge_reopen_rejects_catalogue_prefix_without_bootstrap_marker"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+          "anchor": "dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
+        }
+      ]
+    },
+    {
+      "id": "jazz.catalogue.lens.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/10_lenses_migrations.md",
+        "anchor": "#### Epoch-pinned catalogue kernel"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
+        "anchor": "durable_catalogue_values_pointer_and_physical_mappings_survive_restart"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "reopen_rejects_standalone_lens_semantic_tamper"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
+          "anchor": "durable_catalogue_values_pointer_and_physical_mappings_survive_restart"
+        }
+      ]
+    },
+    {
+      "id": "jazz.catalogue.lineage.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/10_lenses_migrations.md",
+        "anchor": "#### Epoch-pinned catalogue kernel"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/lineage.rs",
+        "anchor": "physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "reopen_rejects_zero_sequence_staged_lineage"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/catalogue_lenses/lineage.rs",
+          "anchor": "physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata"
+        }
+      ]
+    },
+    {
+      "id": "jazz.catalogue.physical-mapping.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "### 2.7 Reference implementation: identity encoding & storage lowering"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/physical_storage.rs",
+        "anchor": "table_and_column_rename_reuses_the_existing_physical_identities"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/recovery.rs",
+        "anchor": "reopen_rejects_unknown_contribution_physical_column_id_before_residency"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/catalogue_lenses/physical_storage.rs",
+          "anchor": "rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen"
+        }
+      ]
+    },
+    {
+      "id": "jazz.catalogue.schema.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/10_lenses_migrations.md",
+        "anchor": "#### Epoch-pinned catalogue kernel"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "schema_version_id_round_trips_through_wire_ingest_and_recovery"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "noncanonical_catalogue_public_schema_rejects_reopen_before_resident_mutation"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+          "anchor": "schema_version_id_round_trips_through_wire_ingest_and_recovery"
+        }
+      ]
+    },
+    {
+      "id": "jazz.catalogue.write-pointer.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/10_lenses_migrations.md",
+        "anchor": "#### Epoch-pinned catalogue kernel"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
+        "anchor": "catalogue_current_write_schema_revision_is_core_ordered"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "anchor": "pending_catalogue_write_pointer_reopen_rejects_duplicate_revision"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
+          "anchor": "durable_catalogue_values_pointer"
+        }
+      ]
+    },
+    {
+      "id": "jazz.result-member-key.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
+        "anchor": "#### Durable settled-program-fact keys"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/codec.rs",
+        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/codec.rs",
+        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+          "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
+        }
+      ]
+    },
+    {
+      "id": "jazz.result-row-source.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/8_sync_protocol.md",
+        "anchor": "### 8.4 Downstream: query-driven view updates"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+        "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+        "anchor": "corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+          "anchor": "storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement"
+        }
+      ]
+    },
+    {
+      "id": "jazz.subscription-program-fact-key.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
+        "anchor": "#### Durable settled-program-fact keys"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+        "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/codec.rs",
+        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+          "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
+        }
+      ]
+    },
+    {
+      "id": "jazz.server-catalogue-entry.v1",
+      "boundary": "durable-storage",
+      "profile": "server-catalogue-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/4_history_merging.md",
+        "anchor": "### Durable codec profile"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz-server/src/server/catalogue_entry.rs",
+        "anchor": "storage_row_v1_golden_is_exact_and_rejects_alternates"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz-server/src/server/catalogue_storage.rs",
+        "anchor": "scan_rejects_one_malformed_entry_before_returning_partial_catalogue"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_storage.rs",
+          "anchor": "adapter_catalogue_reopens_only_the_v1_default_cf_layout"
+        },
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "anchor": "storage_epoch_one_catalogue_envelopes_reject_pre_freeze_outer_labels"
+        }
+      ]
+    },
+    {
+      "id": "jazz.history-version-current.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "### 2.7.1 Settled history layout and canonical receipts"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/general.rs",
+        "anchor": "policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/general.rs",
+        "anchor": "local_history_rejects_noncanonical_parent_order_before_persistence"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/recovery.rs",
+          "anchor": "row_history_reports_versions_flags_and_audit_records_across_restart"
+        }
+      ]
+    },
+    {
+      "id": "jazz.contribution-provenance.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/18_representation_ownership.md",
+        "anchor": "## Non-negotiable representation rules"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/recovery.rs",
+        "anchor": "contribution_operation_payloads_use_physical_columns_and_canonical_groove_bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/recovery.rs",
+        "anchor": "reopen_rejects_noncanonical_contribution_source_dots"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/recovery.rs",
+          "anchor": "contribution_merge_provenance_survives_reopen"
+        }
+      ]
+    },
+    {
+      "id": "jazz.merge-heads.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/4_history_merging.md",
+        "anchor": "#### Durable content-frontier helper"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/merge_heads.rs",
+        "anchor": "merge_heads_match_history_across_restart_between_concurrent_units"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/general.rs",
+        "anchor": "stored_merge_heads_require_a_canonical_transaction_id_array"
+      },
+      "evidence": [
+        { "path": "crates/jazz/src/node/tests/merge_heads.rs", "anchor": "across_reopen" }
+      ]
+    },
+    {
+      "id": "jazz.idb-page.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### IndexedDB page-store physical format"
+      },
+      "semantic_fixture": {
+        "path": "crates/idb-tree/fixtures/page-v1-leaf.hex",
+        "anchor": "49444254524545"
+      },
+      "rejection_receipt": {
+        "path": "crates/idb-tree/src/page.rs",
+        "anchor": "page_v1_decoder_rejects_noncanonical_or_malformed_payloads"
+      },
+      "evidence": [
+        {
+          "path": "packages/jazz-tools/tests/browser/indexeddb-physical-epoch.test.ts",
+          "anchor": "opens a manually committed epoch-one page-v1 fixture read-only, writes current data, and reopens"
+        }
+      ]
+    },
+    {
+      "id": "jazz.native-root-corpus.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/4_history_merging.md",
+        "anchor": "The native whole-root compatibility receipt is"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+        "anchor": "settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+        "anchor": "committed_native_jazz_physical_corpus_rejects_corruption_before_materialization"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+          "anchor": "committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
+        },
+        {
+          "path": "crates/jazz/fixtures/native_storage_corpus.md",
+          "anchor": "# Native Jazz epoch-1 compatibility corpus"
+        }
+      ]
+    },
+    {
+      "id": "jazz.wire-frame.v1",
+      "boundary": "wire-binding-abi",
+      "spec": {
+        "path": "crates/jazz/SPEC/8_sync_protocol.md",
+        "anchor": "### 8.1 One protocol, roles not code"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/fixtures/wire_message_frames.json",
+        "anchor": "fixture_set"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/tests/wire_fixtures.rs",
+        "anchor": "fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed()"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/tests/wire_fixtures.rs",
+          "anchor": "fn wire_message_frame_fixtures_are_current()"
+        },
+        {
+          "path": "crates/jazz/tests/wire_fixtures.rs",
+          "anchor": "fn wire_hello_frame_fixtures_are_current()"
+        },
+        {
+          "path": "packages/jazz-tools/src/runtime/native-runtime/wire-frame-artifact-corpus.test.ts",
+          "anchor": "describe(\"wire frame artifact corpus\""
+        }
+      ]
+    },
+    {
+      "id": "jazz.binding-abi.v1",
+      "boundary": "wire-binding-abi",
+      "spec": { "path": "crates/jazz/SPEC/13_db_api.md", "anchor": "#### 13.7.2 Binding Payloads" },
+      "semantic_fixture": {
+        "path": "crates/jazz/fixtures/binding_codec_golden.json",
+        "anchor": "jazz-binding-codec-golden-v1"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/tests/wire_fixtures.rs",
+        "anchor": "fn binding_codec_golden_fixture_is_current()"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/tests/wire_fixtures.rs",
+          "anchor": "native_row_codec_fixture_round_trips_every_groove_value_type"
+        }
+      ]
+    },
+    {
+      "id": "jazz.local-auth-secret.v1",
+      "boundary": "local-auth-secret",
+      "spec": {
+        "path": "crates/jazz/SPEC/7_authorization.md",
+        "anchor": "### Local-first identity root format"
+      },
+      "semantic_fixture": {
+        "path": "packages/jazz-tools/src/runtime/auth-secret-store.test.ts",
+        "anchor": "produces the versioned canonical 256-bit representation"
+      },
+      "rejection_receipt": {
+        "path": "packages/jazz-tools/src/runtime/auth-secret-store.test.ts",
+        "anchor": "rejects unversioned, padded, and noncanonical payloads"
+      },
+      "evidence": [
+        {
+          "path": "packages/jazz-tools/src/expo/auth-secret-store.test.ts",
+          "anchor": "fails closed for present empty or malformed values without generating over them"
+        }
+      ]
+    }
+  ]
+}

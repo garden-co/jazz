@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import type { NativeTerminalOperation } from "../../drivers/types.js";
-import { PostcardReader } from "./native-codec.js";
+import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
 } from "./native-row-codec.js";
+import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-utils.js";
+import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 
 type BindingCodecGoldenFixture = {
   format: string;
@@ -26,6 +28,38 @@ type BindingCodecGoldenFixture = {
 // encoder. This keeps byte-level representations and the actual TS reducer in
 // one fast contract, rather than waiting for a browser integration failure.
 describe("binding codec golden contract", () => {
+  it.skipIf(!hasJazzNapiBuild() || !hasJazzWasmBuild())(
+    "executes the Rust-owned corpus through both generated native artifacts",
+    async () => {
+      const expected = bindingCodecGoldenFixture();
+      const napi = (await loadNapiModule()) as typeof import("jazz-napi") & {
+        __testBindingCodecGoldenFixture(): string;
+      };
+      const wasm = (await loadWasmModuleForTest()) as {
+        __testBindingCodecGoldenFixture(): string;
+      };
+      const corpus = [
+        napi.__testBindingCodecGoldenFixture(),
+        wasm.__testBindingCodecGoldenFixture(),
+      ].map((encoded) => JSON.parse(encoded) as BindingCodecGoldenFixture);
+
+      expect(corpus).toEqual([expected, expected]);
+      for (const nativeFixture of corpus) {
+        for (const relation of nativeFixture.relation_snapshots) {
+          const snapshot = readNativeRelationSubscriptionSnapshot(
+            new PostcardReader(hexToBytes(relation.payload_hex)),
+          );
+          expect(snapshot.rootCount).toBeGreaterThanOrEqual(0);
+        }
+        for (const delta of nativeFixture.subscription_deltas) {
+          expect(
+            readNativeSubscriptionDelta(new PostcardReader(hexToBytes(delta.payload_hex))),
+          ).toBeDefined();
+        }
+      }
+    },
+  );
+
   it("decodes empty, adjacent, nonadjacent, and deleted-row relation snapshots", () => {
     const fixture = bindingCodecGoldenFixture();
     expect(fixture.format).toBe("jazz-binding-codec-golden-v1");
@@ -89,7 +123,104 @@ describe("binding codec golden contract", () => {
       { type: "ServerFailure", code: "TableNotFound" },
     ]);
   });
+
+  it("rejects trailing bytes after a complete binding payload", () => {
+    const fixture = bindingCodecGoldenFixture();
+    const relation = relationCase(fixture, "empty_root_count_zero");
+    const relationWithSuffix = Uint8Array.from([...hexToBytes(relation.payload_hex), 0]);
+    expect(() =>
+      readNativeRelationSubscriptionSnapshot(new PostcardReader(relationWithSuffix)),
+    ).toThrow("relation snapshot has trailing postcard bytes");
+
+    const delta = fixture.subscription_deltas.find(
+      (candidate) => candidate.name === "added_updated_removed_with_v1_and_v2_occurrence_keys",
+    )!;
+    const deltaWithSuffix = Uint8Array.from([...hexToBytes(delta.payload_hex), 0]);
+    expect(() => readNativeSubscriptionDelta(new PostcardReader(deltaWithSuffix))).toThrow(
+      "subscription delta has trailing postcard bytes",
+    );
+
+    expect(() => new PostcardReader(Uint8Array.from([1, 0xff])).string()).toThrow();
+  });
+
+  it("rejects alternate and unsafe number u64 spellings while retaining canonical full-width bigint", () => {
+    const maxSafe = Number.MAX_SAFE_INTEGER;
+    for (const rootCount of [maxSafe - 1, maxSafe]) {
+      expect(
+        readNativeRelationSubscriptionSnapshot(
+          new PostcardReader(encodeEmptyRelationSnapshot(rootCount)),
+        ).rootCount,
+      ).toBe(rootCount);
+    }
+
+    expect(() =>
+      readNativeRelationSubscriptionSnapshot(
+        new PostcardReader(encodeEmptyRelationSnapshot(BigInt(maxSafe) + 1n)),
+      ),
+    ).toThrow("postcard u64 exceeds Number.MAX_SAFE_INTEGER");
+
+    const maxU64 = (1n << 64n) - 1n;
+    const maxU64Writer = new PostcardWriter();
+    maxU64Writer.u64(maxU64);
+    const maxU64Bytes = maxU64Writer.finish();
+    expect(maxU64Bytes).toEqual(Uint8Array.from([...Array(9).fill(0xff), 0x01]));
+    const maxU64Reader = new PostcardReader(maxU64Bytes);
+    expect(maxU64Reader.u64BigInt()).toBe(maxU64);
+    expect(maxU64Reader.done()).toBe(true);
+
+    expect(() => new PostcardReader(Uint8Array.from([0x82, 0x00])).u64()).toThrow(
+      "postcard u64 is not minimally encoded",
+    );
+    expect(() =>
+      new PostcardReader(Uint8Array.from([...Array(9).fill(0x80), 0x02])).u64BigInt(),
+    ).toThrow("postcard u64 overflow");
+    expect(() =>
+      new PostcardReader(Uint8Array.from([...Array(9).fill(0x80), 0x00])).u64BigInt(),
+    ).toThrow("postcard u64 is not minimally encoded");
+  });
+
+  it("writes only exact signed i64 values and round-trips their ZigZag boundaries", () => {
+    const minI64 = -(1n << 63n);
+    const maxI64 = (1n << 63n) - 1n;
+    for (const value of [minI64, maxI64, -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]) {
+      const writer = new PostcardWriter();
+      writer.i64(value);
+      const reader = new PostcardReader(writer.finish());
+      expect(reader.i64()).toBe(BigInt(value));
+      expect(reader.done()).toBe(true);
+    }
+
+    expect(() => new PostcardWriter().i64(Number.MAX_SAFE_INTEGER + 1)).toThrow(
+      "i64 must be a safe integer when passed as a number",
+    );
+    expect(() => new PostcardWriter().i64(-(Number.MAX_SAFE_INTEGER + 1))).toThrow(
+      "i64 must be a safe integer when passed as a number",
+    );
+    expect(() => new PostcardWriter().i64(minI64 - 1n)).toThrow(
+      "i64 must be a signed 64-bit integer",
+    );
+    expect(() => new PostcardWriter().i64(maxI64 + 1n)).toThrow(
+      "i64 must be a signed 64-bit integer",
+    );
+
+    const u32Writer = new PostcardWriter();
+    u32Writer.u32Le(0xffff_ffff);
+    expect(u32Writer.finish()).toEqual(Uint8Array.of(0xff, 0xff, 0xff, 0xff));
+    expect(() => new PostcardWriter().u32Le(-1)).toThrow(
+      "u32Le must be an unsigned 32-bit integer",
+    );
+    expect(() => new PostcardWriter().u32Le(0x1_0000_0000)).toThrow(
+      "u32Le must be an unsigned 32-bit integer",
+    );
+  });
 });
+
+function encodeEmptyRelationSnapshot(rootCount: number | bigint): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(rootCount);
+  writer.vec(() => {}, 0);
+  return writer.finish();
+}
 
 function bindingCodecGoldenFixture(): BindingCodecGoldenFixture {
   return JSON.parse(

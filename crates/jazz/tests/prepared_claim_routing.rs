@@ -8,9 +8,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion, TableLens,
-};
+use jazz::protocol::{CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
@@ -1208,12 +1206,17 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
                 ops: Vec::new(),
             },
         ],
-    );
-    block_on(db.publish_schema_with_lens(
-        1,
-        SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
-    ))
-    .expect("publish v1-to-v2 lineage");
+    )
+    .expect("valid migration lens");
+    let publication = db
+        .author_schema_lineage_publication(
+            v2.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .expect("authority authors v1-to-v2 lineage");
+    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v1-to-v2 lineage");
     block_on(db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
@@ -1329,12 +1332,17 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
                 ops: Vec::new(),
             },
         ],
-    );
-    block_on(db.publish_schema_with_lens(
-        1,
-        SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
-    ))
-    .expect("publish v1-to-v2 lineage");
+    )
+    .expect("valid migration lens");
+    let publication = db
+        .author_schema_lineage_publication(
+            v2.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .expect("authority authors v1-to-v2 lineage");
+    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v1-to-v2 lineage");
     block_on(db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
@@ -1472,12 +1480,17 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
                 }],
             },
         ],
-    );
-    block_on(db.publish_schema_with_lens(
-        1,
-        SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
-    ))
-    .expect("publish v2 with lineage lens");
+    )
+    .expect("valid migration lens");
+    let publication = db
+        .author_schema_lineage_publication(
+            v2.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .expect("authority authors v1-to-v2 lineage");
+    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v2 with lineage lens");
     block_on(db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,

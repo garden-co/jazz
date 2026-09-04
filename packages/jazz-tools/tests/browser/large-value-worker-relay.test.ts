@@ -10,7 +10,7 @@ import { createDb, type Db } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { TestCleanup, uniqueDbName, waitForQuery, withTimeout } from "./support.js";
+import { TestCleanup, sleep, uniqueDbName, waitForQuery, withTimeout } from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
 const app = s.defineApp({
@@ -27,6 +27,35 @@ const permissions = s.definePermissions(app, ({ policy }) => [
   policy.values.allowInsert.always(),
   policy.values.allowUpdate.always(),
   policy.values.allowDelete.always(),
+]);
+
+// This deliberately keeps the ordinary write API: `body` crosses Groove's
+// automatic 64 KiB promotion boundary during one user transaction which also
+// authors a referenced project. It is distinct from the streaming receipts
+// below, which each create one row in their own transaction.
+const transactionApp = s.defineApp({
+  projects: s.table({
+    name: s.string(),
+  }),
+  documents: s
+    .table({
+      branch: s.string(),
+      title: s.string(),
+      projectId: s.ref("projects"),
+      body: s.string(),
+    })
+    .branchBy("branch"),
+});
+
+const transactionPermissions = s.definePermissions(transactionApp, ({ policy }) => [
+  policy.projects.allowRead.always(),
+  policy.projects.allowInsert.always(),
+  policy.projects.allowUpdate.always(),
+  policy.projects.allowDelete.always(),
+  policy.documents.allowRead.always(),
+  policy.documents.allowInsert.always(),
+  policy.documents.allowUpdate.always(),
+  policy.documents.allowDelete.always(),
 ]);
 
 describe("browser persistent-worker large-value relay", () => {
@@ -132,11 +161,92 @@ describe("browser persistent-worker large-value relay", () => {
     expect(receivedBytes?.bytes).toEqual(bytes);
   }, 90_000);
 
+  /**
+   * A foreground tab sends this as exactly one CommitUnit after its worker has
+   * staged the promoted `body` tree. The relay must not reconstruct a second,
+   * incompatible payload for the same transaction while forwarding it to the
+   * server.
+   *
+   * tab transaction(project + large document) -> SharedWorker -> server
+   */
+  it("settles an ordinary multi-row transaction with an automatic large value", async () => {
+    const server = await withTimeout(
+      getJazzServerInfo(uniqueDbName("large-value-transaction-relay")),
+      10_000,
+      "test server did not become available",
+    );
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: transactionApp.wasmSchema,
+      permissions: transactionPermissions,
+    });
+
+    const secret = generateAuthSecret();
+    const writerDbName = uniqueDbName("large-value-transaction-writer");
+    const writer = await withTimeout(
+      openSyncedBrowserDb("large-value-transaction-writer", secret, server, true, writerDbName),
+      10_000,
+      "writer tab did not attach to its persistent worker",
+    );
+
+    // 240 KB crosses the inline boundary and needs multiple tree chunks.
+    // Keep this identical to the historical browser-corpus producer.
+    const body = "large value ".repeat(20_000);
+    const initial = await writer.transaction((tx) => {
+      const project = tx.insert(transactionApp.projects, { name: "relay project" });
+      const document = tx.insert(
+        transactionApp.documents,
+        {
+          branch: "main",
+          title: "relay document",
+          projectId: project.id,
+          body,
+        },
+        { branch: "main" },
+      );
+      return { project, document };
+    });
+
+    await withTimeout(
+      initial.wait({ tier: "global" }),
+      20_000,
+      "ordinary multi-row large-value transaction conflicted through the persistent worker",
+    );
+
+    const documents = await withTimeout(
+      writer.all(transactionApp.documents, { branch: "main", tier: "edge" }),
+      20_000,
+      "writer could not read its globally settled large document",
+    );
+    expect(documents).toEqual([expect.objectContaining({ title: "relay document", body })]);
+
+    // Reopen the persistent worker from IndexedDB, rather than merely reading
+    // the warm worker cache. This is the path that previously encountered the
+    // oversized settled-program-fact key after an apparently successful write.
+    await writer.shutdown();
+    cleanup.untrack(writer);
+    await sleep(100);
+    const reopened = await withTimeout(
+      openSyncedBrowserDb("large-value-transaction-reopen", secret, server, true, writerDbName),
+      10_000,
+      "reopened writer did not attach to persisted IndexedDB storage",
+    );
+    const reopenedDocuments = await withTimeout(
+      reopened.all(transactionApp.documents, { branch: "main", tier: "edge" }),
+      20_000,
+      "reopened writer could not hydrate the settled large document",
+    );
+    expect(reopenedDocuments).toEqual([expect.objectContaining({ title: "relay document", body })]);
+  }, 90_000);
+
   async function openSyncedBrowserDb(
     label: string,
     secret: string,
     server: Awaited<ReturnType<typeof getJazzServerInfo>>,
     persistent = true,
+    dbName = uniqueDbName(label),
   ): Promise<Db> {
     return cleanup.track(
       await createDb({
@@ -146,9 +256,7 @@ describe("browser persistent-worker large-value relay", () => {
         // The focused harness forwards the bounded redacted SharedWorker
         // flight recorder to Vitest, making a receipt failure inspectable.
         logLevel: "trace",
-        driver: persistent
-          ? { type: "persistent", dbName: uniqueDbName(label) }
-          : { type: "memory" },
+        driver: persistent ? { type: "persistent", dbName } : { type: "memory" },
       }),
     );
   }

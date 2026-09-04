@@ -11,8 +11,8 @@ fn public_api_uses_transaction_id_vocabulary() {
     assert_eq!(context.transaction_id, Some(open_transaction_id));
     assert_eq!(context.transaction_id(), Some(open_transaction_id));
     let wire = serde_json::to_value(context).expect("serialise write context");
-    assert_eq!(wire["batch_id"], open_transaction_id.to_string());
-    assert!(wire.get("transaction_id").is_none());
+    assert_eq!(wire["transaction_id"], open_transaction_id.to_string());
+    assert!(wire.get("batch_id").is_none());
 
     let transaction_id = "00000000000000000000000000000000"
         .parse::<TransactionId>()
