@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
 use futures::lock::Mutex as LocalMutex;
@@ -3071,9 +3071,27 @@ impl NativeRelayClient {
                 .clients
                 .get(&id)
                 .ok_or(RelayError::UnknownClient(id))?;
-            client.db.set_tick_scheduler(wake.map(|wake| {
-                Rc::new(ForegroundWakeScheduler { wake, foreground }) as Rc<dyn TickScheduler>
-            }));
+            let scheduler = wake.map(|wake| ForegroundWakeScheduler { wake, foreground });
+            let has_foreground_scheduler = {
+                let mut foregrounds = worker
+                    .wake
+                    .foregrounds
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                foregrounds.remove(&id);
+                if let Some(scheduler) = &scheduler {
+                    foregrounds.insert(id, scheduler.clone());
+                }
+                !foregrounds.is_empty()
+            };
+            worker
+                .persistent
+                .set_tick_scheduler(has_foreground_scheduler.then(|| {
+                    Rc::new(RelayWakeScheduler(Arc::clone(&worker.wake))) as Rc<dyn TickScheduler>
+                }));
+            client.db.set_tick_scheduler(
+                scheduler.map(|scheduler| Rc::new(scheduler) as Rc<dyn TickScheduler>),
+            );
             Ok(())
         })
     }
@@ -3116,6 +3134,18 @@ impl NativeRelayClient {
     pub fn close(self) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run_teardown(move |worker| {
+            let no_foreground_scheduler = {
+                let mut foregrounds = worker
+                    .wake
+                    .foregrounds
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                foregrounds.remove(&id);
+                foregrounds.is_empty()
+            };
+            if no_foreground_scheduler {
+                worker.persistent.set_tick_scheduler(None);
+            }
             let mut client = worker
                 .clients
                 .remove(&id)
@@ -3339,6 +3369,7 @@ impl NativeRelayClient {
     }
 }
 
+#[derive(Clone)]
 struct ForegroundWakeScheduler {
     wake: Arc<ForegroundWakeState>,
     foreground: u64,
@@ -3364,6 +3395,71 @@ impl TickScheduler for ForegroundWakeScheduler {
     }
     fn schedule_tick_after(&self, delay_ms: u64) {
         self.wake(FOREGROUND_WAKE_AFTER, delay_ms)
+    }
+
+    fn query_runtime_waker(&self) -> Option<Waker> {
+        Some(Waker::from(Arc::new(self.clone())))
+    }
+}
+
+impl Wake for ForegroundWakeScheduler {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        ForegroundWakeScheduler::wake(self, FOREGROUND_WAKE_AFTER, 0);
+    }
+}
+
+/// A retained relay future can become ready after the foreground which
+/// started its tick has closed. Wake all remaining leases of this scope;
+/// each platform callback already coalesces turns and has an inert teardown
+/// guard. Never keep the registry mutex held while calling the platform.
+#[derive(Default)]
+struct RelayWake {
+    foregrounds: Mutex<BTreeMap<u64, ForegroundWakeScheduler>>,
+}
+
+impl RelayWake {
+    fn signal(&self, delay_ms: u64) {
+        let foregrounds = self
+            .foregrounds
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for foreground in foregrounds {
+            foreground.wake(FOREGROUND_WAKE_AFTER, delay_ms);
+        }
+    }
+}
+
+impl Wake for RelayWake {
+    fn wake(self: Arc<Self>) {
+        self.signal(0);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.signal(0);
+    }
+}
+
+struct RelayWakeScheduler(Arc<RelayWake>);
+
+impl TickScheduler for RelayWakeScheduler {
+    fn schedule_tick(&self, _urgency: TickUrgency) {
+        // All persistent work is driven on a later bounded host turn.
+        self.0.signal(0);
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        self.0.signal(delay_ms);
+    }
+
+    fn query_runtime_waker(&self) -> Option<Waker> {
+        Some(Waker::from(Arc::clone(&self.0)))
     }
 }
 
@@ -4034,8 +4130,8 @@ impl RelayPeerIo {
         }
     }
 
-    fn poll(&mut self) -> Result<(), RelayError> {
-        let mut context = Context::from_waker(Waker::noop());
+    fn poll(&mut self, waker: &Waker) -> Result<(), RelayError> {
+        let mut context = Context::from_waker(waker);
         for _ in 0..NATIVE_RELAY_DRAIN_MAX_MESSAGES {
             if self.incoming.is_none() {
                 let message = self
@@ -4085,6 +4181,7 @@ impl RelayPeerIo {
 fn poll_relay_tick<S>(
     db: &Rc<Db<S>>,
     pending: &mut Option<RelayTickFuture>,
+    waker: &Waker,
 ) -> Result<(), RelayError>
 where
     S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
@@ -4093,7 +4190,7 @@ where
         let db = Rc::clone(db);
         Box::pin(async move { db.tick().await })
     });
-    let mut context = Context::from_waker(Waker::noop());
+    let mut context = Context::from_waker(waker);
     match tick.as_mut().poll(&mut context) {
         Poll::Ready(result) => {
             *pending = None;
@@ -4191,6 +4288,7 @@ fn decode_foreground_command(bytes: &[u8]) -> Result<ForegroundDbCommandRequest,
 }
 
 struct RelayWorker {
+    wake: Arc<RelayWake>,
     persistent: Rc<Db<SqliteStorage>>,
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
@@ -4232,7 +4330,9 @@ impl RelayWorker {
         let upstream =
             block_on(persistent.connect_upstream(Box::new(QueueTransport { wire: wire.clone() })));
         let upstream_io = RelayPeerIo::new(block_on(upstream.lock()).io_pump(), wire);
+        let wake = Arc::new(RelayWake::default());
         Ok(Self {
+            wake,
             persistent,
             persistent_tick: None,
             upstream_io,
@@ -4314,6 +4414,7 @@ impl RelayWorker {
     }
 
     fn pump(&mut self) -> Result<(), RelayError> {
+        let waker = Waker::from(Arc::clone(&self.wake));
         // One fair relay turn has exactly three protocol phases. A UI upload
         // becomes relay input, the relay applies/forwards it, then UI clients
         // observe resulting view/fate messages. More cascades schedule another
@@ -4325,17 +4426,17 @@ impl RelayWorker {
         }
         for id in &client_ids {
             let client = self.clients.get_mut(id).expect("selected client exists");
-            client.upstream_io.poll()?;
-            poll_relay_tick(&client.db, &mut client.tick)?;
-            client.served_io.poll()?;
+            client.upstream_io.poll(&waker)?;
+            poll_relay_tick(&client.db, &mut client.tick, &waker)?;
+            client.served_io.poll(&waker)?;
         }
-        self.upstream_io.poll()?;
-        poll_relay_tick(&self.persistent, &mut self.persistent_tick)?;
+        self.upstream_io.poll(&waker)?;
+        poll_relay_tick(&self.persistent, &mut self.persistent_tick, &waker)?;
         for id in &client_ids {
             let client = self.clients.get_mut(id).expect("selected client exists");
-            client.served_io.poll()?;
-            client.upstream_io.poll()?;
-            poll_relay_tick(&client.db, &mut client.tick)?;
+            client.served_io.poll(&waker)?;
+            client.upstream_io.poll(&waker)?;
+            poll_relay_tick(&client.db, &mut client.tick, &waker)?;
         }
         Ok(())
     }
@@ -4601,8 +4702,8 @@ impl RelayWorker {
                 "unknown foreground operation {operation}"
             )));
         };
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
+        let waker = Waker::from(Arc::clone(&self.wake));
+        let mut context = Context::from_waker(&waker);
         match pending_operation.future.as_mut().poll(&mut context) {
             Poll::Ready(Ok(result)) => Ok(ForegroundOperationPoll::Ready(result)),
             Poll::Ready(Err(error)) => Ok(ForegroundOperationPoll::Error {
@@ -7073,6 +7174,136 @@ mod tests {
         let old_first_foreground = NodeUuid::from_bytes(deterministic);
         assert_ne!(before_restart.node, old_first_foreground);
         assert_ne!(after_restart.node, old_first_foreground);
+    }
+
+    #[test]
+    fn structured_foreground_read_progresses_without_blocking_the_owner() {
+        // This native-boundary receipt needs the actual owner queue: a Rust
+        // client executor would keep polling the read itself and hide a host
+        // Tick which blocks the only thread able to resume or cancel it.
+        let (done_tx, done_rx) = mpsc::channel();
+        let receipt = thread::spawn(move || {
+            use jazz::query::{ArraySubquery, ArraySubqueryRequirement};
+            let directory = tempfile::tempdir().unwrap();
+            let allow = PolicyExpr::True;
+            let policies = TablePolicies::new()
+                .with_select(allow.clone())
+                .with_insert(allow.clone())
+                .with_update(Some(allow.clone()), allow.clone())
+                .with_delete(allow);
+            let mut relay_config = config(
+                directory.path().join("structured.sqlite"),
+                Some("structured"),
+            );
+            relay_config.schema = JazzSchema::new(
+                &SchemaBuilder::new()
+                    .table(
+                        TableSchemaBuilder::new("groups")
+                            .column("title", ColumnType::Text)
+                            .policies(policies.clone()),
+                    )
+                    .table(
+                        TableSchemaBuilder::new("tasks")
+                            .column("title", ColumnType::Text)
+                            .fk_column("group_id", "groups")
+                            .policies(policies.clone()),
+                    )
+                    .table(
+                        TableSchemaBuilder::new("notes")
+                            .column("title", ColumnType::Text)
+                            .fk_column("task_id", "tasks")
+                            .policies(policies),
+                    )
+                    .build(),
+            )
+            .unwrap();
+            let relay = NativeRelay::spawn(relay_config).unwrap();
+            let client = relay
+                .attach_client(
+                    DbIdentity {
+                        node: NodeUuid::from_bytes([0x91; 16]),
+                        author: AuthorSubject::for_test_bytes([0x92; 16]),
+                    },
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            let group = client
+                .with_db(|db| {
+                    let group = block_on(db.insert(
+                        "groups",
+                        BTreeMap::from([("title".into(), Value::String("group".into()))]),
+                        Default::default(),
+                    ))
+                    .map_err(RelayError::Db)?
+                    .row_uuid();
+                    let task = block_on(db.insert(
+                        "tasks",
+                        BTreeMap::from([
+                            ("title".into(), Value::String("task".into())),
+                            ("group_id".into(), Value::Uuid(group.0)),
+                        ]),
+                        Default::default(),
+                    ))
+                    .map_err(RelayError::Db)?
+                    .row_uuid();
+                    block_on(db.insert(
+                        "notes",
+                        BTreeMap::from([
+                            ("title".into(), Value::String("note".into())),
+                            ("task_id".into(), Value::Uuid(task.0)),
+                        ]),
+                        Default::default(),
+                    ))
+                    .map_err(RelayError::Db)?;
+                    Ok(group)
+                })
+                .unwrap();
+            let query = Query::from("groups").array_subquery(
+                ArraySubquery::new("tasksViaGroup", "tasks", "group_id", "id")
+                    .select(["title"])
+                    .requirement(ArraySubqueryRequirement::AtLeastOne)
+                    .nested(ArraySubquery::new("notesViaTask", "notes", "task_id", "id")),
+            );
+            let prepared = client
+                .prepare_foreground_query(postcard::to_allocvec(&query).unwrap())
+                .unwrap();
+            let mut response = client
+                .start_foreground_read_with_options(prepared, "{}".into(), None, true)
+                .unwrap();
+            let mut turns = 0;
+            let bytes = loop {
+                match response {
+                    ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(bytes)) => {
+                        break bytes;
+                    }
+                    ForegroundOperationPoll::Pending { operation } => {
+                        assert!(
+                            turns < 512,
+                            "structured read must finish through bounded host turns"
+                        );
+                        relay.pump().unwrap();
+                        response = client.poll_foreground_operation(operation).unwrap();
+                        turns += 1;
+                    }
+                    _ => panic!("structured read returned an unexpected response"),
+                }
+            };
+            #[derive(serde::Deserialize)]
+            struct Snapshot {
+                root_count: u64,
+                rows: Vec<DecodedForegroundRowBatch>,
+            }
+            let snapshot: Snapshot = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(snapshot.root_count, 1);
+            assert_eq!(snapshot.rows[0].rows[0].row_id, group);
+            client.close().unwrap();
+            drop(relay);
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("native owner must return from Tick and finish the structured read");
+        receipt.join().unwrap();
     }
 
     #[test]
