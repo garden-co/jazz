@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
+import { encodeNativeForegroundCommand, decodeNativeForegroundResponse } from "jazz-rn/relay";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({ notes: schema.table({ title: schema.string() }) });
@@ -40,8 +41,27 @@ it("disconnects before any query and reconnects using only native credentials", 
       { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
       async (fixture) => {
         const db = await fixture.createDb();
+        const nativeStatus = () => {
+          const foreground = fixture.nativeHost.openAttached(fixture.capability);
+          try {
+            return decodeNativeForegroundResponse(
+              foreground.execute(encodeNativeForegroundCommand({ type: "nativeConnectionStatus" })),
+            );
+          } finally {
+            foreground.close();
+          }
+        };
+        await expect
+          .poll(nativeStatus)
+          .toMatchObject({ type: "nativeConnectionStatus", connected: true });
         // No schema runtime exists yet: offline must still stop the admitted socket.
         await db.disconnect();
+        expect(nativeStatus()).toEqual({
+          type: "nativeConnectionStatus",
+          configured: true,
+          explicitlyOffline: true,
+          connected: false,
+        });
         const write = db.insert(app.notes, { title: "before first query" });
         const row = await write.wait({ tier: "local" });
         let globallyAccepted = false;
