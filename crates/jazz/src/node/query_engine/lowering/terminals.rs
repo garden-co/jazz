@@ -21,8 +21,9 @@ fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<S
     source
         .row_shape
         .descriptor
-        .field_index(field)
-        .and_then(|index| source.row_shape.descriptor.fields().get(index))
+        .fields()
+        .iter()
+        .find(|candidate| candidate.name.as_deref() == Some(field))
         .and_then(crate::node::query_engine::descriptor_public_name)
         .map(str::to_owned)
 }
@@ -1036,12 +1037,7 @@ fn lower_collect_by_app_rows(
             .root_fields
             .iter()
             .filter(|field| field.is_output && !field.is_row_id)
-            .map(|field| {
-                (
-                    field.output.clone(),
-                    public_root_field_name(root_source, field),
-                )
-            })
+            .map(|field| (field.output.clone(), public_root_field_name(field)))
             .collect();
         let anchor = collect_anchor_graph(visible_root, root_source, &layout)?;
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
@@ -1130,12 +1126,7 @@ fn lower_collect_by_app_rows(
         .root_fields
         .iter()
         .filter(|field| field.is_output && !field.is_row_id)
-        .map(|field| {
-            (
-                field.output.clone(),
-                public_root_field_name(root_source, field),
-            )
-        })
+        .map(|field| (field.output.clone(), public_root_field_name(field)))
         .collect::<BTreeMap<_, _>>();
     public_field_names.extend(layout.slots.iter().map(|slot| {
         // Collection field names are public query-path identities. They are

@@ -19,15 +19,12 @@ use closure::{
 // Groove returns RecursiveIterationLimit instead of silently truncating when
 // this bound is reached before convergence.
 const FIXPOINT_MAX_ITERS: usize = 128;
-fn public_root_field_name(source: &ResolvedSource, field: &CollectFlatField) -> String {
-    let source_field = field.source_field.as_deref().unwrap_or(&field.output);
-    source
-        .row_shape
-        .descriptor
-        .field_index(source_field)
-        .and_then(|index| source.row_shape.descriptor.fields().get(index))
-        .and_then(crate::node::query_engine::descriptor_public_name)
-        .map(str::to_owned)
+fn public_root_field_name(field: &CollectFlatField) -> String {
+    // Layout construction binds the public identity before collector fields
+    // are renamed. Its stored carrier is not a logical lookup key.
+    field
+        .source_public_name
+        .clone()
         .unwrap_or_else(|| field.output.clone())
 }
 

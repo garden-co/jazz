@@ -22,8 +22,9 @@ fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<S
     source
         .row_shape
         .descriptor
-        .field_index(field)
-        .and_then(|index| source.row_shape.descriptor.fields().get(index))
+        .fields()
+        .iter()
+        .find(|candidate| candidate.name.as_deref() == Some(field))
         .and_then(crate::node::query_engine::descriptor_public_name)
         .map(str::to_owned)
 }
