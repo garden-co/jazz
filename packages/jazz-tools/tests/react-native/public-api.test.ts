@@ -32,16 +32,25 @@ it("runs public CRUD, query, subscription and foreground propagation through the
       .wait({ tier: "local" });
     await expect.poll(async () => observer.all(open, { tier: "local" })).toEqual([survivor]);
     await expect.poll(() => snapshots.at(-1)).toEqual([survivor]);
+    // Keep independent delivery interest while retiring the original stream.
+    // A local-only snapshot after the sole subscription closes may stay stale.
+    let deliveryMarker: { id: string; title: string; done: boolean }[] = [];
+    const stopMarker = observer.subscribe(app.todos.where({ id: survivor.id }), (rows) => {
+      deliveryMarker = rows;
+    });
+    await expect.poll(() => deliveryMarker).toEqual([survivor]);
     unsubscribe();
     const cancelledSnapshotCount = snapshots.length;
     await writer
       .update(app.todos, survivor.id, { title: "after cancellation" })
       .wait({ tier: "local" });
     const afterCancellation = { ...survivor, title: "after cancellation" };
+    await expect.poll(() => deliveryMarker).toEqual([afterCancellation]);
     await expect
       .poll(async () => observer.all(open, { tier: "local" }))
       .toEqual([afterCancellation]);
     expect(snapshots).toHaveLength(cancelledSnapshotCount);
+    stopMarker();
     await Promise.all([writer.shutdown(), writer.shutdown()]);
     // Shared NativeRuntimeAdapter semantics return no rows after shutdown.
     expect(await writer.all(open, { tier: "local" })).toEqual([]);
