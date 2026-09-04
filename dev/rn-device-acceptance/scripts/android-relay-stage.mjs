@@ -13,7 +13,6 @@ if (!Number.isSafeInteger(nativeRelayAbi))
 export const androidRelayFiles = Object.freeze([
   "arm64-v8a/libjazz_native_relay.a",
   "armeabi-v7a/libjazz_native_relay.a",
-  "x86/libjazz_native_relay.a",
   "x86_64/libjazz_native_relay.a",
 ]);
 
@@ -62,11 +61,11 @@ export function verifyAndroidRelayStage({ packageRoot, sourceRevision }) {
     expected.size !== androidRelayFiles.length ||
     androidRelayFiles.some((file) => !expected.has(file))
   )
-    throw new Error("Android relay manifest must contain exactly the four supported ABI slices");
+    throw new Error("Android relay manifest must contain exactly the three supported ABI slices");
   const libraries = join(root, "android/src/main/jniLibs");
   const actual = filesUnder(libraries);
   if (actual.length !== androidRelayFiles.length || actual.some((file) => !expected.has(file)))
-    throw new Error("staged Android relay inventory differs from the exact four-ABI manifest");
+    throw new Error("staged Android relay inventory differs from the exact three-ABI manifest");
   for (const [file, hash] of expected) {
     const observed = createHash("sha256")
       .update(readFileSync(join(libraries, file)))

@@ -196,7 +196,7 @@ jobs:
           cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
           export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk"
           export PATH="$cache/cargo/bin:$PATH"
-          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
           export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION=4.1.2
           pnpm --filter jazz-rn build:relay:android

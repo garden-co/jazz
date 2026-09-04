@@ -39,10 +39,10 @@ function staged({ omit = false, corrupt = false } = {}) {
   return root;
 }
 
-test("accepts a staged manifest only with the exact four Android ABI libraries", () => {
+test("accepts a staged manifest only with the exact three supported Android ABI libraries", () => {
   assert.equal(
     verifyAndroidRelayStage({ packageRoot: staged(), sourceRevision: revision }).files.length,
-    4,
+    3,
   );
 });
 test("rejects a manifest that stages only the emulator ABI", () => {

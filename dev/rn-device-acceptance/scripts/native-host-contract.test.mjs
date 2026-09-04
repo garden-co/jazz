@@ -80,6 +80,55 @@ function assertRnDeviceWorkflowContract(workflow) {
   );
 }
 
+test("Android relay artifact contract retires 32-bit x86 consistently", () => {
+  const sources = new Map([
+    [
+      "artifact builder",
+      fs.readFileSync(
+        path.resolve(root, "../../crates/jazz-rn/scripts/build-relay-artifacts.sh"),
+        "utf8",
+      ),
+    ],
+    [
+      "artifact verifier",
+      fs.readFileSync(
+        path.resolve(root, "../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs"),
+        "utf8",
+      ),
+    ],
+    [
+      "Android package metadata",
+      fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/android/build.gradle"), "utf8"),
+    ],
+    ["Android acceptance metadata", read("android/gradle.properties")],
+    ["Android stage verifier", read("scripts/android-relay-stage.mjs")],
+    ["RN dependency bootstrap", fs.readFileSync(path.resolve(root, "../../dev/scripts/install-jazz-rn-deps.sh"), "utf8")],
+    [
+      "Android device workflow",
+      fs.readFileSync(path.resolve(root, "../../.github/workflows/rn-device-acceptance.yml"), "utf8"),
+    ],
+    [
+      "Android artifact workflow",
+      fs.readFileSync(path.resolve(root, "../../.github/workflows/rn-native-artifacts.yml"), "utf8"),
+    ],
+    [
+      "Android publication workflow",
+      fs.readFileSync(path.resolve(root, "../../.github/workflows/build-jazz-packages.yml"), "utf8"),
+    ],
+  ]);
+  for (const [name, source] of sources) {
+    assert.doesNotMatch(
+      source,
+      /i686-linux-android|\[x86\]|"x86\/libjazz_native_relay\.a"|,x86,|x86,x86_64/,
+      `${name} must not revive the retired Android x86 slice`,
+    );
+  }
+  const builder = sources.get("artifact builder");
+  assert.match(builder, /\[arm64-v8a\]=aarch64-linux-android/);
+  assert.match(builder, /\[armeabi-v7a\]=armv7-linux-androideabi/);
+  assert.match(builder, /\[x86_64\]=x86_64-linux-android/);
+});
+
 function assertAtomicAndroidDiagnostic(fixture) {
   assert.match(fixture, /private fun writeAtomicDiagnostic\(code: String\)/);
   assert.match(fixture, /File\.createTempFile\("\.\$\{target\.name\}\."/);

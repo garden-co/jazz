@@ -1652,7 +1652,7 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   );
 });
 
-test("relay artifact staging targets every Android ABI and iOS framework slice", async () => {
+test("relay artifact staging targets every supported Android ABI and iOS framework slice", async () => {
   const [script, stagedHeader, sourceHeader] = await Promise.all([
     readFile(
       new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
@@ -1675,8 +1675,8 @@ test("relay artifact staging targets every Android ABI and iOS framework slice",
   assert.equal(packageJson.scripts["build:relay:ios"], "bash scripts/build-relay-artifacts.sh ios");
   assert.match(script, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(script, /\[armeabi-v7a\]=armv7-linux-androideabi/);
-  assert.match(script, /\[x86\]=i686-linux-android/);
   assert.match(script, /\[x86_64\]=x86_64-linux-android/);
+  assert.doesNotMatch(script, /i686-linux-android|\[x86\]/);
   assert.match(script, /JazzNativeRelay\.xcframework/);
   assert.match(script, /aarch64-apple-ios-sim x86_64-apple-ios/);
   assert.match(script, /simulator_stage=.*simulator/);
@@ -1777,7 +1777,6 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
   const androidFiles = [
     "arm64-v8a/libjazz_native_relay.a",
     "armeabi-v7a/libjazz_native_relay.a",
-    "x86/libjazz_native_relay.a",
     "x86_64/libjazz_native_relay.a",
   ];
   const iosFiles = [

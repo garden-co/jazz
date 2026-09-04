@@ -98,7 +98,6 @@ case "$platform" in
     declare -A rust_targets=(
       [arm64-v8a]=aarch64-linux-android
       [armeabi-v7a]=armv7-linux-androideabi
-      [x86]=i686-linux-android
       [x86_64]=x86_64-linux-android
     )
     for android_abi in "${!rust_targets[@]}"; do

@@ -235,7 +235,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
-          rust-targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          rust-targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
           sccache: "true"
           sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 

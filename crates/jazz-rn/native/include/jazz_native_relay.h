@@ -56,6 +56,10 @@ jazz_native_relay_status jazz_native_relay_host_execute(
     size_t request_len,
     jazz_native_relay_bytes *out);
 
+/* Trusted platform-only two phase admission. Setup receives serverUrl, appId,
+ * jwt, and the platform-selected storage root; JWT payload decoding only
+ * selects a local cache scope and is never authentication. Attach receives
+ * only the opaque setup capability and canonical schema JSON. */
 jazz_native_relay_status jazz_native_relay_host_begin_private_session_json(
     jazz_native_relay_host *host, const uint8_t *request, size_t request_len,
     jazz_native_relay_bytes *out);

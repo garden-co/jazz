@@ -98,7 +98,10 @@ android {
 
 }
 
-def relayNativeArtifactsPresent = ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"].every { abi ->
+// 32-bit x86 is retired: it is neither a supported Android device target nor
+// the x86_64 emulator ABI used by the installed-app receipt. Keep this list
+// aligned with the sealed artifact manifest before enabling the CMake host.
+def relayNativeArtifactsPresent = ["arm64-v8a", "armeabi-v7a", "x86_64"].every { abi ->
   file("src/main/jniLibs/${abi}/libjazz_native_relay.a").isFile()
 } && file("../native/include/jazz_native_relay.h").isFile()
 

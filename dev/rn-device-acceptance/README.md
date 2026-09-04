@@ -72,7 +72,7 @@ Google APIs x86_64 image. The cache is ignored and never needs system Java,
 Android SDK, adb, or a global cargo-ndk installation. `device:android` compares
 the fixture's immutable `Build.FINGERPRINT` with adb's `ro.build.fingerprint`;
 it also rejects a staged relay unless its manifest names the supplied source
-revision and exactly the arm64-v8a, armeabi-v7a, x86, and x86_64 static-library
+revision and exactly the arm64-v8a, armeabi-v7a, and x86_64 static-library
 slices with matching hashes. The receipt's artifact fingerprint is SHA-256
 computed by trusted Android code from its installed `applicationInfo.sourceDir`;
 the driver independently hashes that same package-manager path after install.
