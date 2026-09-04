@@ -1,7 +1,10 @@
 import { expect, it } from "vitest";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
-import { encodeNativeForegroundCommand, decodeNativeForegroundResponse } from "jazz-rn/relay";
+import * as nativeCommands from "jazz-rn/relay";
+import type { NativeForegroundModule } from "../../src/react-native/native-foreground-db.js";
+const { encodeNativeForegroundCommand, decodeNativeForegroundResponse } =
+  nativeCommands as unknown as NativeForegroundModule;
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({ notes: schema.table({ title: schema.string() }) });
