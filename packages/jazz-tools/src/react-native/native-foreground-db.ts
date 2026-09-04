@@ -132,7 +132,14 @@ export class NativeForegroundDb {
     return { nativeForegroundQuery: response.query };
   }
 
-  all(query: object, opts: unknown): Uint8Array | { poll(): Uint8Array | null } {
+  all(
+    query: object,
+    opts: unknown,
+    openTransactionId?: string,
+  ): Uint8Array | { poll(): Uint8Array | null } {
+    // ABI V1 cannot select a transaction snapshot for an all command. Fail
+    // before ticking or issuing a read rather than silently reading outside it.
+    if (openTransactionId !== undefined) return unsupported("transaction reads");
     assertLocalReadOptions(opts);
     // An attached foreground is an ordinary peer of the native relay. One
     // bounded relay turn admits already-persisted rows before materializing a
@@ -145,8 +152,12 @@ export class NativeForegroundDb {
     return unexpected("all", response.type);
   }
 
-  allAsync(query: object, opts: unknown): Uint8Array | { poll(): Uint8Array | null } {
-    return this.all(query, opts);
+  allAsync(
+    query: object,
+    opts: unknown,
+    openTransactionId?: string,
+  ): Uint8Array | { poll(): Uint8Array | null } {
+    return this.all(query, opts, openTransactionId);
   }
 
   allForIdentity(): never {
