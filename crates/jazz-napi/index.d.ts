@@ -66,7 +66,7 @@ export declare class NapiDb {
   rollbackTransaction(openTransactionId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
-  prepareQuery(query: Uint8Array, kind: 'query' | 'relation'): PreparedQuery
+  prepareQuery(query: Uint8Array, kind: 'query' | 'relation', author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PreparedQuery | PendingNativePreparation
   /**
    * Execute any prepared read. The prepared handle selects flat rows,
    * relation output, or a relation snapshot; transaction and authorization
@@ -75,7 +75,7 @@ export declare class NapiDb {
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
-  subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Subscription
+  subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Subscription | PendingNativeSubscription
   tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
@@ -98,6 +98,13 @@ export declare class PendingNativePermissionAdvice {
   cancel(): void
 }
 
+/** Thread-affine query preparation waiting for the core owner. */
+export declare class PendingNativePreparation {
+  setWake(callback: ((err: Error | null, arg: string) => void)): void
+  poll(): PreparedQuery | null
+  cancel(): void
+}
+
 /**
  * A JavaScript-thread-owned binding read waiting for query coverage or
  * asynchronous large-value storage. NAPI promises execute on a Send worker
@@ -107,6 +114,13 @@ export declare class PendingNativePermissionAdvice {
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
+}
+
+/** Thread-affine subscription opening waiting for the core owner. */
+export declare class PendingNativeSubscription {
+  setWake(callback: ((err: Error | null, arg: string) => void)): void
+  poll(): Subscription | null
+  cancel(): void
 }
 
 /**

@@ -83,7 +83,7 @@ use jazz::ids::{
 use jazz::protocol::{
     BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
     PermissionAdvice as CorePermissionAdvice, PermissionAdviceAction as CorePermissionAdviceAction,
-    ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
+    ReadViewSpec as CoreReadViewSpec,
 };
 use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
@@ -362,6 +362,96 @@ type NativeReadCleanup = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
 pub struct PendingNativeRead {
     future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
     cleanup: NativeReadCleanup,
+}
+
+/// Thread-affine query preparation waiting for the core owner.
+#[napi]
+pub struct PendingNativePreparation {
+    future: RefCell<Option<LocalBoxFuture<'static, napi::Result<PreparedQuery>>>>,
+    wake: RefCell<Option<Waker>>,
+}
+
+#[napi]
+impl PendingNativePreparation {
+    #[napi(js_name = "setWake")]
+    pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
+        *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: std::sync::Arc::new(callback),
+        })));
+    }
+
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<PreparedQuery>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "query preparation is complete or cancelled",
+            ));
+        };
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
+    }
+}
+
+/// Thread-affine subscription opening waiting for the core owner.
+#[napi]
+pub struct PendingNativeSubscription {
+    future: RefCell<Option<LocalBoxFuture<'static, napi::Result<Subscription>>>>,
+    wake: RefCell<Option<Waker>>,
+}
+
+#[napi]
+impl PendingNativeSubscription {
+    #[napi(js_name = "setWake")]
+    pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
+        *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: std::sync::Arc::new(callback),
+        })));
+    }
+
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<Subscription>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "subscription opening is complete or cancelled",
+            ));
+        };
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
+    }
 }
 
 /// A JavaScript-thread-owned permission preflight which is waiting for an
@@ -2119,36 +2209,38 @@ impl NapiDb {
         Ok(())
     }
 
-    #[napi(js_name = "prepareQuery")]
+    #[napi(
+        js_name = "prepareQuery",
+        ts_return_type = "PreparedQuery | PendingNativePreparation"
+    )]
     pub fn prepare_query(
         &self,
         query: Uint8Array,
         #[napi(ts_arg_type = "'query' | 'relation'")] kind: String,
-    ) -> napi::Result<PreparedQuery> {
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let inner = match kind.as_str() {
-            "query" => {
-                let query: CoreQuery = postcard::from_bytes(&query)
-                    .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
-                match db {
-                    NapiDbInnerStorage::Memory(db) => db.prepare_query(&query),
-                    NapiDbInnerStorage::Persistent(db) => db.prepare_query(&query),
-                }
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?
-            }
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+    ) -> napi::Result<Either<PreparedQuery, PendingNativePreparation>> {
+        enum Input {
+            Query(CoreQuery),
+            Relation(CoreRelationQuery),
+        }
+
+        let admission = author
+            .map(|author| {
+                let author = core_author_id_from_bytes(&author)?;
+                Ok::<_, napi::Error>((author, core_claims_from_json(author, claims)?))
+            })
+            .transpose()?;
+        let input = match kind.as_str() {
+            "query" => Input::Query(
+                postcard::from_bytes(&query)
+                    .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?,
+            ),
             "relation" => {
                 let query_json = std::str::from_utf8(&query).map_err(|error| {
                     napi::Error::from_reason(format!("decode relation query UTF-8: {error}"))
                 })?;
-                let query = core_relation_query_from_json(query_json)?;
-                match db {
-                    NapiDbInnerStorage::Memory(db) => db.prepare_relation_query(&query),
-                    NapiDbInnerStorage::Persistent(db) => db.prepare_relation_query(&query),
-                }
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?
+                Input::Relation(core_relation_query_from_json(query_json)?)
             }
             _ => {
                 return Err(napi::Error::from_reason(
@@ -2156,7 +2248,38 @@ impl NapiDb {
                 ));
             }
         };
-        Ok(PreparedQuery { inner })
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! prepare {
+            ($db:expr) => {{
+                let db = Rc::clone($db);
+                let pending = PendingNativePreparation {
+                    wake: RefCell::new(None),
+                    future: RefCell::new(Some(Box::pin(async move {
+                        let inner = match input {
+                            Input::Query(query) => db.prepare_query_async(&query).await,
+                            Input::Relation(query) => db.prepare_relation_query_async(&query).await,
+                        }
+                        .map_err(napi_error)?;
+                        let inner = match admission {
+                            Some((author, claims)) => inner.with_identity_claims(author, claims),
+                            None => inner,
+                        };
+                        Ok(PreparedQuery { inner })
+                    }))),
+                };
+                match pending.poll()? {
+                    Some(query) => Ok(Either::A(query)),
+                    None => Ok(Either::B(pending)),
+                }
+            }};
+        }
+        match db {
+            NapiDbInnerStorage::Memory(db) => prepare!(db),
+            NapiDbInnerStorage::Persistent(db) => prepare!(db),
+        }
     }
 
     /// Execute any prepared read. The prepared handle selects flat rows,
@@ -2206,36 +2329,10 @@ impl NapiDb {
                         || (opts.tier >= jazz::tx::DurabilityTier::Edge
                             && opts.propagation == CorePropagation::Full);
                     if !synchronous && requires_coverage {
-                        let coverage_opts = match open_tx {
-                            Some(open_tx) => {
-                                let snapshot = db
-                                    .enqueue_open_transaction_snapshot(open_tx)
-                                    .await
-                                    .map_err(|_| {
-                                        napi::Error::from_reason(
-                                            "transaction snapshot request was dropped",
-                                        )
-                                    })?
-                                    .map_err(napi_error)?;
-                                let mut coverage_opts = opts.clone();
-                                coverage_opts.read_view = CoreReadViewSpec {
-                                    source: CoreReadViewSourceSpec::Snapshot {
-                                        snapshot: snapshot.into(),
-                                    },
-                                };
-                                coverage_opts
-                            }
-                            None => opts.clone(),
-                        };
-                        let attached = match author {
-                            Some(author) => db.attach_query_with_opts_for_identity(
-                                &query,
-                                coverage_opts,
-                                author,
-                            ),
-                            None => db.attach_query_with_opts(&query, coverage_opts),
-                        }
-                        .map_err(napi_error)?;
+                        let attached = db
+                            .attach_query_with_opts_async(&query, opts.clone(), open_tx, author)
+                            .await
+                            .map_err(napi_error)?;
                         *attachment.borrow_mut() = Some(attached);
                         let coverage_deadline = Instant::now() + Duration::from_secs(15);
                         futures::future::poll_fn(|_| {
@@ -2363,7 +2460,7 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Subscription | PendingNativeSubscription")]
     pub fn subscribe(
         &self,
         query: &PreparedQuery,
@@ -2372,8 +2469,8 @@ impl NapiDb {
         )]
         opts: Option<JsonValue>,
         author: Option<Uint8Array>,
-    ) -> napi::Result<Subscription> {
-        let query = &query.inner;
+    ) -> napi::Result<Either<Subscription, PendingNativeSubscription>> {
+        let query = query.inner.clone();
         let author = match author {
             Some(author) => Some(core_author_id_from_bytes(&author)?),
             None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
@@ -2386,24 +2483,35 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         macro_rules! subscribe {
             ($db:expr, $variant:ident) => {{
-                let stream = match author {
-                    Some(author) => core_block_on($db.subscribe_for_identity(query, opts, author)),
-                    None => core_block_on($db.subscribe(query, opts)),
-                }
-                .map_err(napi_error)?;
-                NapiSubscription::$variant {
-                    db: Rc::clone($db),
-                    stream,
-                    pending_events: VecDeque::new(),
-                    pending_batch: None,
+                let db = Rc::clone($db);
+                let pending = PendingNativeSubscription {
+                    wake: RefCell::new(None),
+                    future: RefCell::new(Some(Box::pin(async move {
+                        let stream = match author {
+                            Some(author) => db.subscribe_for_identity(&query, opts, author).await,
+                            None => db.subscribe(&query, opts).await,
+                        }
+                        .map_err(napi_error)?;
+                        Ok(Subscription {
+                            inner: Some(NapiSubscription::$variant {
+                                db,
+                                stream,
+                                pending_events: VecDeque::new(),
+                                pending_batch: None,
+                            }),
+                        })
+                    }))),
+                };
+                match pending.poll()? {
+                    Some(subscription) => Ok(Either::A(subscription)),
+                    None => Ok(Either::B(pending)),
                 }
             }};
         }
-        let inner = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => subscribe!(db, Memory),
             NapiDbInnerStorage::Persistent(db) => subscribe!(db, Persistent),
-        };
-        Ok(Subscription { inner: Some(inner) })
+        }
     }
 
     #[napi]

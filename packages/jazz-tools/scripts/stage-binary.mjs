@@ -1,5 +1,4 @@
-import { chmod, copyFile, mkdir, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { chmod, copyFile, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TARGETS, keyFor } from "./targets.mjs";
@@ -7,7 +6,7 @@ import { TARGETS, keyFor } from "./targets.mjs";
 const thisFile = fileURLToPath(import.meta.url);
 const scriptsDir = dirname(thisFile);
 const packageDir = resolve(scriptsDir, "..");
-const nativeDir = join(packageDir, "bin", "native");
+const defaultNativeDir = join(packageDir, "bin", "native");
 
 function parseArgs(argv) {
   const parsed = {};
@@ -25,7 +24,7 @@ function parseArgs(argv) {
   return parsed;
 }
 
-export async function stageBinary({ source, platform, arch }) {
+export async function stageBinary({ source, platform, arch, nativeDir = defaultNativeDir }) {
   const targetKey = keyFor(platform, arch);
   const fileName = TARGETS[targetKey];
   if (!fileName) {
@@ -33,12 +32,48 @@ export async function stageBinary({ source, platform, arch }) {
   }
 
   const sourcePath = resolve(source);
-  if (!existsSync(sourcePath)) {
-    throw new Error(`Source binary does not exist: ${sourcePath}`);
+  const destination = resolve(nativeDir, fileName);
+  let sourceStats;
+  try {
+    sourceStats = await stat(sourcePath, { bigint: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(`Source binary does not exist: ${sourcePath}`);
+    }
+    throw error;
+  }
+  if (!sourceStats.isFile()) {
+    throw new Error(`Source binary is not a file: ${sourcePath}`);
   }
 
   await mkdir(nativeDir, { recursive: true });
-  const destination = join(nativeDir, fileName);
+
+  let destinationStats;
+  try {
+    destinationStats = await stat(destination, { bigint: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const sameCanonicalPath =
+    destinationStats !== undefined &&
+    (await realpath(sourcePath)) === (await realpath(destination));
+  const hasStableIdentity =
+    sourceStats.ino !== 0n && destinationStats !== undefined && destinationStats.ino !== 0n;
+  const sourceAndDestinationMatch =
+    sourcePath === destination ||
+    sameCanonicalPath ||
+    (hasStableIdentity &&
+      sourceStats.dev === destinationStats.dev &&
+      sourceStats.ino === destinationStats.ino);
+
+  if (sourceAndDestinationMatch) {
+    if (!fileName.endsWith(".exe")) {
+      await chmod(destination, 0o755);
+    }
+    console.log(`Staged ${destination}`);
+    return;
+  }
+
   // Remove first: overwriting in place keeps the vnode, and the macOS
   // kernel SIGKILLs a cached executable whose content changed under it.
   await rm(destination, { force: true });

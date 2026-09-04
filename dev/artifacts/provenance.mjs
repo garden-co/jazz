@@ -108,7 +108,7 @@ function files(root, paths) {
         visit(child);
       }
     else if (stat.isFile()) {
-      const repoPath = relative(root, path);
+      const repoPath = relative(root, path).replaceAll("\\", "/");
       if (
         repoPath.endsWith(".node") ||
         repoPath.endsWith(".jazz-artifact-manifest.json") ||
@@ -148,7 +148,7 @@ function trackedFiles(root, paths) {
     const path = resolve(root, rawPath);
     if (relative(root, path).startsWith("..") || !existsSync(path) || !statSync(path).isFile())
       continue;
-    const repoPath = relative(root, path);
+    const repoPath = relative(root, path).replaceAll("\\", "/");
     if (
       repoPath.endsWith(".node") ||
       repoPath.endsWith(".jazz-artifact-manifest.json") ||
@@ -163,6 +163,87 @@ function trackedFiles(root, paths) {
     found.push(repoPath);
   }
   return found.sort();
+}
+
+// Git's clean tracked blobs are the portable source identity. In particular,
+// a Windows checkout may smudge those blobs to CRLF while macOS and Linux keep
+// LF; hashing working-tree bytes would make the same committed source appear
+// to have a different ABI. Dirty files remain working-tree inputs so local
+// edits still invalidate the provenance they produced.
+function trackedInputContents(root, paths) {
+  const repository = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (repository.status !== 0 || repository.stdout.trim() !== "true")
+    return new Map(paths.map((path) => [path, readFileSync(join(root, path))]));
+  const autocrlf = spawnSync("git", ["config", "--bool", "core.autocrlf"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  const crlfSmudge = autocrlf.status === 0 && autocrlf.stdout.trim().toLowerCase() === "true";
+
+  const dirtyPaths = new Set();
+  for (const args of [
+    ["diff", "--name-only", "-z", "--cached", "HEAD", "--", ...paths],
+    ["diff", "--name-only", "-z", "--", ...paths],
+  ]) {
+    const dirty = spawnSync("git", args, { cwd: root, encoding: "buffer" });
+    if (dirty.status !== 0) throw new Error("artifact provenance: could not inspect dirty inputs");
+    for (const path of dirty.stdout.toString("utf8").split("\0")) if (path) dirtyPaths.add(path);
+  }
+  const cleanPaths = paths.filter(
+    (path) => !dirtyPaths.has(path) && !lstatSync(join(root, path)).isSymbolicLink(),
+  );
+  const contents = new Map();
+  const batchLimit = 256 * 1024;
+  for (let start = 0; start < cleanPaths.length; ) {
+    let bytes = 0;
+    let end = start;
+    while (end < cleanPaths.length) {
+      const size = lstatSync(join(root, cleanPaths[end])).size;
+      if (end > start && bytes + size > batchLimit) break;
+      bytes += size;
+      end += 1;
+    }
+    const batch = cleanPaths.slice(start, end);
+    const objects = spawnSync("git", ["cat-file", "--batch"], {
+      cwd: root,
+      input: Buffer.from(batch.map((path) => `:${path}\n`).join("")),
+      encoding: "buffer",
+      maxBuffer: bytes + batch.length * 128 + 1,
+    });
+    if (objects.status !== 0)
+      throw new Error(`artifact provenance: could not read ${batch.length} clean Git inputs`);
+    let offset = 0;
+    for (const path of batch) {
+      const headerEnd = objects.stdout.indexOf(0x0a, offset);
+      const header =
+        headerEnd === -1 ? "" : objects.stdout.subarray(offset, headerEnd).toString("utf8");
+      const match = /^[a-f0-9]+ blob (\d+)$/.exec(header);
+      if (!match) throw new Error(`artifact provenance: Git input is not a blob (${path})`);
+      const size = Number(match[1]);
+      offset = headerEnd + 1;
+      if (offset + size >= objects.stdout.length)
+        throw new Error(`artifact provenance: truncated Git input (${path})`);
+      const blob = objects.stdout.subarray(offset, offset + size);
+      const working = readFileSync(join(root, path));
+      const onlyExpectedLineEndings =
+        crlfSmudge &&
+        Buffer.from(working.toString("latin1").replaceAll("\r\n", "\n"), "latin1").equals(blob);
+      // A Git clean filter can hide bytes that the compiler will still read.
+      // The index blob is authoritative only when the worktree matches it, or
+      // when core.autocrlf accounts for the entire difference.
+      contents.set(path, working.equals(blob) || onlyExpectedLineEndings ? blob : working);
+      offset += size + 1;
+    }
+    if (offset !== objects.stdout.length)
+      throw new Error("artifact provenance: malformed Git input batch");
+    start = end;
+  }
+  for (const path of paths.filter((path) => !contents.has(path)))
+    contents.set(path, readFileSync(join(root, path)));
+  return contents;
 }
 
 const sharedInputs = [
@@ -304,12 +385,10 @@ function packageInputsFingerprint(root, kind) {
     ...inputsFor[kind],
     ...workspaceDependencyInputs(root, kind),
   ]);
+  const contents = trackedInputContents(root, trackedInputs);
   const inputHash = createHash("sha256");
   for (const path of trackedInputs) {
-    inputHash
-      .update(`${path}\0`)
-      .update(readFileSync(join(root, path)))
-      .update("\0");
+    inputHash.update(`${path}\0`).update(contents.get(path)).update("\0");
   }
   return inputHash.digest("hex");
 }
@@ -382,10 +461,14 @@ export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
     kind === "napi"
       ? ["crates/jazz-napi/index.cjs", "crates/jazz-napi/index.mjs"]
       : ["packages/jazz-tools/src/types/jazz-wasm.d.ts"];
+  const surfaceContents = trackedInputContents(
+    root,
+    surface.filter((path) => existsSync(join(root, path))),
+  );
   const surfaceHash = createHash("sha256");
   for (const path of surface) {
     surfaceHash.update(`${path}\0`);
-    surfaceHash.update(existsSync(join(root, path)) ? readFileSync(join(root, path)) : "missing");
+    surfaceHash.update(surfaceContents.get(path) ?? "missing");
     surfaceHash.update("\0");
   }
   return sha256(`${packageInputs}\0${surfaceHash.digest("hex")}`);

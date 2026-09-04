@@ -697,7 +697,16 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
               },
             ]);
           },
-          prepareQuery: () => ({}),
+          prepareQuery: (
+            _query: Uint8Array,
+            _kind: "query" | "relation",
+            identity: Uint8Array,
+            claims: unknown,
+          ) => {
+            expect(new TextDecoder().decode(identity)).toBe(`["${issuer}","${alice}"]`);
+            expect(claims).toMatchObject({ team: "opening-team" });
+            return {};
+          },
           tick: () => undefined,
         }),
       openBrowser: async () => {
@@ -713,12 +722,20 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
   );
 
   const transactionId = createOpenTransactionId();
-  runtime.beginTransaction("exclusive", transactionId, JSON.stringify({ issuer, user_id: alice }));
+  runtime.beginTransaction(
+    "exclusive",
+    transactionId,
+    JSON.stringify({ issuer, user_id: alice, claims: { team: "opening-team" } }),
+  );
 
   await expect(
     runtime.query(
       JSON.stringify({ table: "todos" }),
-      JSON.stringify({ issuer, user_id: "00000000-0000-0000-0000-0000000000b2" }),
+      JSON.stringify({
+        issuer,
+        user_id: "00000000-0000-0000-0000-0000000000b2",
+        claims: { team: "later-team" },
+      }),
       "local",
       JSON.stringify({ transaction_id: transactionId }),
     ),

@@ -69,3 +69,48 @@ test("identity reads survive a container checkout ownership boundary", () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("untracked nested repository sources retain tracked and untracked byte identity", () => {
+  const root = fixture();
+  try {
+    const clean = sourceIdentity(root);
+    const nested = path.join(root, "nested");
+    fs.mkdirSync(nested);
+    git(nested, ["init", "--quiet"]);
+    fs.writeFileSync(path.join(nested, "tracked.rs"), "original source");
+    git(nested, ["add", "tracked.rs"]);
+    fs.writeFileSync(path.join(nested, "untracked.rs"), "untracked source");
+    const initial = sourceIdentity(root);
+    assert.equal(initial.dirty, true);
+    assert.notEqual(initial.fingerprint, clean.fingerprint);
+    fs.writeFileSync(path.join(nested, "tracked.rs"), "changed source");
+    const changedTracked = sourceIdentity(root);
+    assert.notEqual(changedTracked.fingerprint, initial.fingerprint);
+    fs.writeFileSync(path.join(nested, "untracked.rs"), "changed untracked source");
+    assert.notEqual(sourceIdentity(root).fingerprint, changedTracked.fingerprint);
+    fs.rmSync(nested, { recursive: true });
+    assert.equal(sourceIdentity(root).fingerprint, clean.fingerprint);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("nested repository identity applies root-relative exclusions at every depth", () => {
+  const root = fixture();
+  try {
+    const nested = path.join(root, "nested", "deeper");
+    fs.mkdirSync(nested, { recursive: true });
+    git(path.join(root, "nested"), ["init", "--quiet"]);
+    git(nested, ["init", "--quiet"]);
+    fs.writeFileSync(path.join(nested, "source.rs"), "source");
+    fs.writeFileSync(path.join(nested, "generated.bin"), "first output");
+    const options = { excludePathspecs: ["nested/**/generated.bin"] };
+    const before = sourceIdentity(root, options);
+    fs.writeFileSync(path.join(nested, "generated.bin"), "second output");
+    assert.equal(sourceIdentity(root, options).fingerprint, before.fingerprint);
+    fs.writeFileSync(path.join(nested, "source.rs"), "changed source");
+    assert.notEqual(sourceIdentity(root, options).fingerprint, before.fingerprint);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -206,12 +206,20 @@ type NativeDb = {
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
-  prepareQuery(query: Uint8Array, kind: "query" | "relation"): PreparedQuery;
+  prepareQuery(
+    query: Uint8Array,
+    kind: "query" | "relation",
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): PreparedQuery | PendingNativeOperation<PreparedQuery>;
   subscribe?(
     query: PreparedQuery,
     opts: unknown,
     author?: Uint8Array,
-  ): ReadableStream<unknown> | Subscription;
+  ):
+    | ReadableStream<unknown>
+    | Subscription
+    | PendingNativeOperation<ReadableStream<unknown> | Subscription>;
   insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write | Uint8Array;
   update(
     table: string,
@@ -350,6 +358,7 @@ type PendingTx = {
   id: OpenTransactionId;
   kind: TransactionKind;
   identity?: Uint8Array;
+  requestSession?: RuntimeSession;
   /** External provenance fixed at begin, never supplied per staged operation. */
   attribution?: Uint8Array;
   writes: PendingTxWrite[];
@@ -416,7 +425,25 @@ type RuntimeSession = {
   backendAuthority: boolean;
 };
 
+type PendingNativeOperation<T> = {
+  poll(): T | null | undefined;
+  cancel(): void;
+  setWake(callback: () => void): void;
+};
+
+function isPendingNativeOperation<T>(value: unknown): value is PendingNativeOperation<T> {
+  const candidate = value as Partial<PendingNativeOperation<T>> | null;
+  return (
+    typeof candidate?.poll === "function" &&
+    typeof candidate.cancel === "function" &&
+    typeof candidate.setWake === "function"
+  );
+}
+
 type SubscriptionState = {
+  openingAbort?: AbortController;
+  terminalError?: Error;
+  terminalErrorDelivered?: boolean;
   sources: SubscriptionSourceState[];
   queryJson: string;
   query: PreparedQuery | null;
@@ -547,6 +574,7 @@ function openMemoryDb(
 }
 
 export class NativeRuntimeAdapter implements Runtime {
+  private readonly pendingNativeAdmissionCancels = new Set<() => void>();
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
@@ -986,6 +1014,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
+    for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     await this.foregroundLeaseCapture?.catch(() => undefined);
     if (this.pendingStreamingMutations.size > 0) {
       await Promise.all(this.pendingStreamingMutations);
@@ -1013,7 +1042,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private closeRuntimeState(alreadyMarkedClosed = false): boolean {
     if (this.closed && !alreadyMarkedClosed) return false;
     this.closed = true;
+    for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const subscription of this.subscriptions.values()) {
+      subscription.openingAbort?.abort();
       for (const source of subscription.sources) {
         closeSubscriptionSource(source.source);
       }
@@ -1565,6 +1596,7 @@ export class NativeRuntimeAdapter implements Runtime {
       id,
       kind,
       identity: admission,
+      requestSession: admission ? (session ?? undefined) : undefined,
       attribution,
       writes: [],
     });
@@ -1660,10 +1692,10 @@ export class NativeRuntimeAdapter implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
-    this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
+    const requestSession = pendingTx?.identity ? (pendingTx.requestSession ?? session) : session;
     // Relation IR is normalized by prepareQuery into the same native handle
     // as ordinary queries. Transaction overlays for this syntax remain
     // unsupported until its semantics are defined.
@@ -1677,7 +1709,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
-    const query = this.prepareQuery(coreQueryJson);
+    const query = await this.prepareQueryForRead(coreQueryJson, requestSession);
     await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed) return [];
@@ -1720,28 +1752,17 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime does not support include_deleted subscriptions yet");
     }
     const session = readSession(sessionJson);
-    this.applySessionClaims(session);
     const readContext = this.nativeReadContext(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const usesNativeRelationApi = queryUsesNativeRelationApi(queryJson);
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
-    let nativeSubscription: ReadableStream<unknown> | Subscription;
-    let preparedQuery: PreparedQuery;
-    try {
-      preparedQuery = this.prepareQuery(queryJson);
-      nativeSubscription = this.subscribeForContext(preparedQuery, opts, readContext);
-    } catch (error) {
-      const nativeStack = error instanceof Error ? error.stack : undefined;
-      throw new Error(
-        `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
-      );
-    }
     this.subscriptions.set(handle, {
-      sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
+      sources: [],
+      openingAbort: new AbortController(),
       queryJson,
-      query: preparedQuery,
+      query: null,
       identity,
       rows: [],
       rowIndexByKey: new Map(),
@@ -1761,6 +1782,38 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredPlaceholderBytes: 0,
       cancelled: false,
     });
+    const subscription = this.subscriptions.get(handle)!;
+    const install = (native: ReadableStream<unknown> | Subscription) => {
+      subscription.sources = [{ source: subscriptionSource(native), reading: false }];
+      if (subscription.cancelled || this.closed) {
+        closeSubscriptionSourceState(subscription);
+        return;
+      }
+      if (subscription.callback) this.startSubscriptionReader(handle, subscription);
+    };
+    const fail = (error: unknown) => {
+      if (!subscription.cancelled && !this.closed)
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+    };
+    const open = (query: PreparedQuery) => {
+      if (subscription.cancelled || this.closed) throw new Error("native operation was cancelled");
+      subscription.query = query;
+      const native = this.subscribeForContext(query, opts, readContext);
+      return isPendingNativeOperation<ReadableStream<unknown> | Subscription>(native)
+        ? this.awaitNativeOperation(native, subscription.openingAbort!.signal)
+        : native;
+    };
+    try {
+      const query = this.prepareQueryForRead(queryJson, session, subscription.openingAbort!.signal);
+      const opening = query instanceof Promise ? query.then(open) : open(query);
+      if (opening instanceof Promise) void opening.then(install).catch(fail);
+      else install(opening);
+    } catch (error) {
+      fail(error);
+    }
     return handle;
   }
 
@@ -1773,6 +1826,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.callback = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
+    if (subscription.terminalError) {
+      this.deliverSubscriptionFailure(subscription);
+      return;
+    }
     if (subscription.visibleOpened) {
       subscription.callback(
         runtimeResetDeltaFromRows(
@@ -1789,6 +1846,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.cancelled = true;
+    subscription.openingAbort?.abort();
     clearDeferredPlaceholderBuffer(subscription);
     closeSubscriptionSourceState(subscription);
     this.subscriptions.delete(handle);
@@ -2274,7 +2332,10 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     opts: unknown,
     context: NativeReadContext,
-  ): ReadableStream<unknown> | Subscription {
+  ):
+    | ReadableStream<unknown>
+    | Subscription
+    | PendingNativeOperation<ReadableStream<unknown> | Subscription> {
     if (!this.db.subscribe) throw new Error("Native runtime does not support subscriptions");
     const author = context.kind === "session-authority" ? context.identity : undefined;
     return this.db.subscribe(query, opts, author);
@@ -2352,6 +2413,97 @@ export class NativeRuntimeAdapter implements Runtime {
     console.warn(`[jazz native-runtime] ${message}`);
   }
 
+  private awaitNativeOperation<T>(
+    pending: PendingNativeOperation<T>,
+    signal?: AbortSignal,
+  ): T | Promise<T> {
+    let wakeVersion = 0;
+    let resume: (() => void) | undefined;
+    let cancelled = false;
+    let progressError: unknown;
+    const wake = () => {
+      wakeVersion += 1;
+      resume?.();
+    };
+    const cancel = () => {
+      cancelled = true;
+      pending.cancel();
+      wake();
+    };
+    this.pendingNativeAdmissionCancels.add(cancel);
+    signal?.addEventListener("abort", cancel, { once: true });
+    const cleanup = () => {
+      this.pendingNativeAdmissionCancels.delete(cancel);
+      signal?.removeEventListener("abort", cancel);
+      pending.cancel();
+    };
+    const advance = (): T | Promise<T> => {
+      for (;;) {
+        if (this.closed || cancelled || signal?.aborted)
+          throw new Error("native operation was cancelled");
+        if (progressError) throw progressError;
+        const observed = wakeVersion;
+        const result = pending.poll();
+        if (result !== null && result !== undefined) return result;
+        // A pending operation can own the core. Transport must run alongside
+        // its woken continuation, never become a prerequisite for polling it.
+        void this.pumpServerTransport().catch((error) => {
+          progressError = error;
+          wake();
+        });
+        if (wakeVersion !== observed) continue;
+        return new Promise<void>((resolve) => {
+          resume = resolve;
+          if (wakeVersion !== observed) resolve();
+        }).then(() => {
+          resume = undefined;
+          return advance();
+        });
+      }
+    };
+    try {
+      pending.setWake(wake);
+      const result = advance();
+      if (result instanceof Promise) return result.finally(cleanup);
+      cleanup();
+      return result;
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+  }
+
+  private prepareQueryForRead(
+    queryJson: string,
+    session: RuntimeSession | null,
+    signal?: AbortSignal,
+  ): PreparedQuery | Promise<PreparedQuery> {
+    const contextual =
+      session && !session.backendAuthority && this.readAuthorizationHost === "trusted-serving";
+    const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
+    const queryBytes =
+      kind === "relation"
+        ? new TextEncoder().encode(queryJson)
+        : encodeQueryJson(queryJson, this.schema);
+    const key = `${kind}:${bytesKey(queryBytes)}`;
+    const cached = contextual ? undefined : this.preparedQueries.get(key);
+    if (cached) return cached;
+    const started = this.db.prepareQuery(
+      queryBytes,
+      kind,
+      contextual ? session.identity : undefined,
+      contextual ? session.claims : undefined,
+    );
+    const remember = (query: PreparedQuery) => {
+      if (!contextual) this.preparedQueries.set(key, query);
+      return query;
+    };
+    const query = isPendingNativeOperation<PreparedQuery>(started)
+      ? this.awaitNativeOperation(started, signal)
+      : started;
+    return query instanceof Promise ? query.then(remember) : remember(query);
+  }
+
   private prepareQuery(queryJson: string): PreparedQuery {
     const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
     const queryBytes =
@@ -2362,7 +2514,12 @@ export class NativeRuntimeAdapter implements Runtime {
     let query = this.preparedQueries.get(key);
     if (!query) {
       try {
-        query = this.db.prepareQuery(queryBytes, kind);
+        const started = this.db.prepareQuery(queryBytes, kind);
+        if (isPendingNativeOperation<PreparedQuery>(started)) {
+          started.cancel();
+          throw new Error("native query preparation requires the asynchronous read boundary");
+        }
+        query = started;
       } catch (error) {
         throw new Error(`Core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
       }
@@ -2370,7 +2527,6 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     return query;
   }
-
   /**
    * A strict remote query cannot materialize its local snapshot before an
    * in-flight server handshake has either admitted its authority transport or
@@ -3245,10 +3401,23 @@ export class NativeRuntimeAdapter implements Runtime {
   private failSubscription(subscription: SubscriptionState, error: Error): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
+    subscription.openingAbort?.abort();
+    subscription.terminalError = error;
     clearDeferredPlaceholderBuffer(subscription);
     closeSubscriptionSourceState(subscription);
+    this.deliverSubscriptionFailure(subscription);
+  }
+
+  private deliverSubscriptionFailure(subscription: SubscriptionState): void {
+    if (
+      !subscription.callback ||
+      !subscription.terminalError ||
+      subscription.terminalErrorDelivered
+    )
+      return;
+    subscription.terminalErrorDelivered = true;
     try {
-      subscription.callback?.(error);
+      subscription.callback(subscription.terminalError);
     } catch (callbackError) {
       setTimeout(() => {
         throw callbackError;

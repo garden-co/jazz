@@ -843,6 +843,21 @@ where
         }
     }
 
+    pub(crate) fn scoped_optional_session_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: Option<BTreeMap<String, Value>>,
+    ) -> ActiveSessionClaimsScope<'_, S> {
+        let previous = self.active_session_claims.clone();
+        if let Some(claims) = claims {
+            self.active_session_claims = Some((identity, claims));
+        }
+        ActiveSessionClaimsScope {
+            node: self,
+            previous,
+        }
+    }
+
     /// Return an opaque, domain-separated identity for the active session
     /// scope. It is runtime-only and deliberately never formats raw claims.
     pub(crate) fn active_session_claim_scope_key(&self, identity: AuthorSubject) -> Option<String> {

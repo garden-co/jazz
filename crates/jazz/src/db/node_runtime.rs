@@ -1159,7 +1159,11 @@ where
                     owner,
                 )
             } else {
-                (command.opening_local.take(), Vec::new(), Weak::new())
+                (
+                    command.opening_local.take(),
+                    std::mem::take(&mut command.opening_upstream),
+                    Weak::new(),
+                )
             };
             if let Some((runtime_token, subscription_id)) = local
                 && node.groove_runtime_token() == runtime_token
@@ -1234,6 +1238,7 @@ where
             state.borrow().closed.set(true);
             pending.push_back(PendingSubscriptionFinalization {
                 state: Some(state),
+                opening_upstream: Vec::new(),
                 opening_local: None,
                 acknowledgement: None,
             });
@@ -2892,7 +2897,12 @@ where
                 state.upstream_subscription_handles.clone(),
             )
         };
-        let groove_runtime_token = node.borrow().groove_runtime_token();
+        let request_claims = state
+            .borrow()
+            .request_identity_claims
+            .as_ref()
+            .map(|(_, claims)| claims.clone());
+        let groove_runtime_token = node.lock().await.groove_runtime_token();
         if state.borrow().groove_runtime_token != groove_runtime_token {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                 eprintln!(
@@ -2929,17 +2939,20 @@ where
                     .await
                     .unsubscribe_groove_subscription(subscription_id);
             }
-            let (shape, binding, prepared_plan) = node
-                .lock()
-                .await
-                .prepare_query_binding_for_link_in_authorization_mode(
-                    &shape,
-                    &binding,
-                    read_tier,
-                    author,
-                    authorization_mode,
-                )
-                .await?;
+            let (shape, binding, prepared_plan) = {
+                let mut owner = node.lock().await;
+                let mut scoped =
+                    owner.scoped_optional_session_claims(author, request_claims.clone());
+                scoped
+                    .prepare_query_binding_for_link_in_authorization_mode(
+                        &shape,
+                        &binding,
+                        read_tier,
+                        author,
+                        authorization_mode,
+                    )
+                    .await?
+            };
             let (previous_snapshot, previous_snapshot_index) = {
                 let state_ref = state.borrow();
                 (
@@ -2950,21 +2963,24 @@ where
                     state_ref.snapshot_index.clone(),
                 )
             };
-            let (maintained, mut snapshot) = node
-                .lock()
-                .await
-                .open_maintained_view_subscription_in_authorization_mode_with_waker(
-                    &shape,
-                    &binding,
-                    author,
-                    read_tier,
-                    &read_view,
-                    Some(prepared_plan),
-                    authorization_mode,
-                    pending_overlay,
-                    progress_waker,
-                )
-                .await?;
+            let (maintained, mut snapshot) = {
+                let mut owner = node.lock().await;
+                let mut scoped =
+                    owner.scoped_optional_session_claims(author, request_claims.clone());
+                scoped
+                    .open_maintained_view_subscription_in_authorization_mode_with_waker(
+                        &shape,
+                        &binding,
+                        author,
+                        read_tier,
+                        &read_view,
+                        Some(prepared_plan),
+                        authorization_mode,
+                        pending_overlay,
+                        progress_waker,
+                    )
+                    .await?
+            };
             if state.borrow().closed.get() {
                 node.lock()
                     .await
