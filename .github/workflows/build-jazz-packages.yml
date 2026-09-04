@@ -557,7 +557,8 @@ jobs:
             const fs = require("fs");
             const path = require("path");
             const installed = fs.realpathSync(require.resolve("jazz-rn/package.json", { paths: [path.join(process.env.FIXTURE, "app")] }));
-            if (!installed.startsWith(path.join(process.env.FIXTURE, "app", "node_modules"))) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
+            const modules = fs.realpathSync(path.join(process.env.FIXTURE, "app", "node_modules"));
+            if (!installed.startsWith(modules + path.sep)) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
           '
           echo "JAZZ_RN_CONSUMER_FIXTURE=${FIXTURE}/app" >> "$GITHUB_ENV"
 
@@ -601,7 +602,8 @@ jobs:
             const fs = require("fs");
             const path = require("path");
             const installed = fs.realpathSync(require.resolve("jazz-rn/package.json", { paths: [path.join(process.env.FIXTURE, "app")] }));
-            if (!installed.startsWith(path.join(process.env.FIXTURE, "app", "node_modules"))) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
+            const modules = fs.realpathSync(path.join(process.env.FIXTURE, "app", "node_modules"));
+            if (!installed.startsWith(modules + path.sep)) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
           '
           echo "JAZZ_RN_CONSUMER_FIXTURE=${FIXTURE}/app" >> "$GITHUB_ENV"
 

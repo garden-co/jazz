@@ -1519,6 +1519,50 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
   }
 });
 
+test("packaged consumer containment accepts fixture aliases and rejects escaped packages", async () => {
+  const workflow = parse(
+    await readFile(
+      new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url),
+      "utf8",
+    ),
+  );
+  const directory = await mkdtemp(join(tmpdir(), "jazz-rn-containment-"));
+  try {
+    const fixture = join(directory, "fixture");
+    const alias = join(directory, "alias");
+    const modules = join(fixture, "app", "node_modules");
+    await mkdir(modules, { recursive: true });
+    await symlink(fixture, alias, "dir");
+    for (const job of ["verify-jazz-rn-android-consumer", "verify-jazz-rn-ios-consumer"]) {
+      const step = workflow.jobs[job].steps.find(
+        (step) => step.name === "Install the packed relay into an isolated Expo fixture",
+      );
+      const script = step.run.match(/node -e '([\s\S]*?)'/)[1];
+      const installed = join(modules, "jazz-rn");
+      // Model pnpm's package symlink, including a symlinked temporary root like macOS /var.
+      for (const [target, accepted] of [
+        [join(modules, ".pnpm", job, "node_modules", "jazz-rn"), true],
+        [join(fixture, "app", "node_modules-escaped", job), false],
+        [join(directory, "outside", job), false],
+      ]) {
+        await mkdir(target, { recursive: true });
+        await writeFile(join(target, "package.json"), JSON.stringify({ name: "jazz-rn" }));
+        await symlink(target, installed, "dir");
+        const verify = () =>
+          execFileSync(process.execPath, ["-e", script], {
+            env: { ...process.env, FIXTURE: alias },
+            stdio: "pipe",
+          });
+        if (accepted) verify();
+        else assert.throws(verify, /jazz-rn resolved outside the fixture/);
+        await rm(installed);
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("the packaged Expo consumer fixture materializes catalog specs before isolated install", async () => {
   const directory = await mkdtemp(join(tmpdir(), "jazz-rn-consumer-fixture-"));
   const fixtureSource = new URL("../../../examples/todo-client-localfirst-expo/", import.meta.url)
@@ -2708,34 +2752,33 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     fixturePreparation,
     artifactScript,
     verifier,
-  ] =
-    await Promise.all([
-      readFile(
-        new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
-        "utf8",
-      ),
-      readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
-      readFile(
-        new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../dev/scripts/prepare-jazz-rn-consumer-fixture.mjs", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs", import.meta.url),
-        "utf8",
-      ),
-    ]);
+  ] = await Promise.all([
+    readFile(
+      new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../dev/scripts/prepare-jazz-rn-consumer-fixture.mjs", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs", import.meta.url),
+      "utf8",
+    ),
+  ]);
   const packageBuildWorkflow = parse(packageBuild);
   const previewBuildWorkflow = parse(previewBuild);
 
