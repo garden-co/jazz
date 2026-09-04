@@ -34,7 +34,6 @@ function fakeDb() {
     rollbackTransaction: unused,
     attachMergeableTx: unused,
     all: unused,
-    allForIdentity: unused,
     prepareQuery: unused,
     insertEncoded: unused,
     insertWithIdEncoded: unused,

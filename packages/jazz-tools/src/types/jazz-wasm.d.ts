@@ -225,31 +225,28 @@ declare module "jazz-wasm" {
     attachExclusiveTx(openTransactionId: string): WasmTx;
 
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
-    all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
-    /** All backend read entrypoints require openMemoryAsBackend. */
-    allForBackend(query: WasmPreparedQuery, opts: unknown): Promise<Uint8Array>;
-    allInTransactionForBackend(
+    all(
       query: WasmPreparedQuery,
-      tx: WasmTx,
       opts: unknown,
-    ): Promise<Uint8Array>;
-    allRelationSnapshotForBackend(query: WasmPreparedQuery, opts: unknown): Promise<Uint8Array>;
-    allRelationSnapshotInTransactionForBackend(
+      openTransactionId?: string,
+      author?: Uint8Array,
+    ): Uint8Array | Promise<Uint8Array>;
+    allAsync(
       query: WasmPreparedQuery,
-      tx: WasmTx,
       opts: unknown,
+      openTransactionId?: string,
+      author?: Uint8Array,
     ): Promise<Uint8Array>;
-    allRelationQueryForBackend(queryJson: string, opts: unknown): Promise<Uint8Array>;
+    allRelationSnapshot(
+      query: WasmPreparedQuery,
+      opts: unknown,
+      openTransactionId?: string,
+      author?: Uint8Array,
+    ): Promise<Uint8Array>;
+    allRelationQuery(queryJson: string, opts: unknown, author?: Uint8Array): Promise<Uint8Array>;
     subscribeForBackend(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
     subscribeRelationQueryForBackend(queryJson: string, opts: unknown): ReadableStream<unknown>;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
-    allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-    allRelationQuery(queryJson: string, opts: unknown): Promise<Uint8Array>;
-    allRelationQueryForIdentity(
-      queryJson: string,
-      author: Uint8Array,
-      opts: unknown,
-    ): Promise<Uint8Array>;
     /** Attach coverage, optionally at an open transaction snapshot and/or explicit identity. */
     attachQuery(
       query: WasmPreparedQuery,

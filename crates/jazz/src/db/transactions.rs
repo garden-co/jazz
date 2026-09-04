@@ -1021,6 +1021,26 @@ where
         .await
     }
 
+    /// Binding-facing transaction read selected by open id, with an optional
+    /// trusted-serving identity. The open transaction itself determines its
+    /// mergeable or exclusive semantics.
+    #[doc(hidden)]
+    pub async fn all_in_open_transaction(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: Option<AuthorSubject>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        match author {
+            Some(author) => {
+                self.transaction_all_for_identity(tx_id, prepared, author, opts)
+                    .await
+            }
+            None => self.transaction_all(tx_id, prepared, opts).await,
+        }
+    }
+
     pub(super) async fn transaction_relation_snapshot(
         &self,
         tx_id: OpenTransactionId,
@@ -1052,6 +1072,27 @@ where
             QueryAuthorizationMode::TrustedServing,
         )
         .await
+    }
+
+    /// Binding-facing relation snapshot selected by open transaction id.
+    #[doc(hidden)]
+    pub async fn relation_snapshot_in_open_transaction(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: Option<AuthorSubject>,
+    ) -> Result<RelationSnapshot, Error> {
+        match author {
+            Some(author) => {
+                self.transaction_relation_snapshot_for_identity(tx_id, prepared, author, opts)
+                    .await
+            }
+            None => {
+                self.transaction_relation_snapshot(tx_id, prepared, opts)
+                    .await
+            }
+        }
     }
 
     async fn transaction_relation_snapshot_in_authorization_mode(
