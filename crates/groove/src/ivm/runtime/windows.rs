@@ -288,9 +288,17 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
     // consumers and cancels transient insert/delete pairs within one batch.
     let deltas =
         canonical_collect_by_terminal_deltas(input_desc, collect_by, direct_tree_slot, deltas)?;
+    // Only a group named by this batch can enter or leave the terminal.  Do
+    // not snapshot every existing group just to discover that fact.
+    let touched_group_keys = deltas
+        .iter()
+        .map(|delta| {
+            encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
     let root_groups_before = direct_tree_slot
         .is_none()
-        .then(|| state.groups.keys().cloned().collect::<BTreeSet<_>>());
+        .then(|| touched_group_keys.clone());
     let mut operations = Vec::new();
     for delta in &deltas {
         let group_key =
@@ -368,7 +376,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             sort_directions,
         )?;
         let state_key = (sort_key, delta.record.clone());
-        let group = state.groups.entry(group_key.clone()).or_default();
+        let group = state.groups.get_or_default(group_key.clone());
         let before_weight = group.get(&state_key).copied().unwrap_or_default();
         let before_index = (before_weight > 0).then(|| group.count_before(&state_key));
         let after_weight = before_weight + delta.weight;
@@ -423,9 +431,15 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             debug_assert!(before_index.is_some());
         }
     }
-    state.groups.retain(|_, group| !group.is_empty());
+    state
+        .groups
+        .remove_empty_touched_groups(touched_group_keys.iter().cloned());
     if let Some(root_groups_before) = root_groups_before {
-        let root_groups_after = state.groups.keys().cloned().collect::<BTreeSet<_>>();
+        let root_groups_after = touched_group_keys
+            .iter()
+            .filter(|key| state.groups.get(key).is_some())
+            .cloned()
+            .collect::<BTreeSet<_>>();
         operations.retain(|operation| {
             root_groups_before.contains(&operation.root_key)
                 && root_groups_after.contains(&operation.root_key)
@@ -578,11 +592,13 @@ fn update_collect_by_root_terminal_state(
         }
         let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
         let state_key = (sort_key, delta.record.clone());
-        let group = state.groups.entry(group_key.clone()).or_default();
+        let group = state.groups.get_or_default(group_key.clone());
         let weight = group.get(&state_key).copied().unwrap_or_default() + delta.weight;
         group.set(state_key, weight);
     }
-    state.groups.retain(|_, group| !group.is_empty());
+    state
+        .groups
+        .remove_empty_touched_groups(before.keys().cloned());
     if !emit {
         return Ok(Vec::new());
     }

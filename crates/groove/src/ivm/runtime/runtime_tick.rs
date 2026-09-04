@@ -727,9 +727,7 @@ impl IncrementalEvaluation<'_> {
                 anti_join.commit_published_overlay();
             }
             if let OperatorState::CollectBy(collect_by) = state {
-                for group in collect_by.groups.values_mut() {
-                    group.commit_overlay();
-                }
+                collect_by.groups.commit_overlay();
             }
         }
         runtime
@@ -737,8 +735,8 @@ impl IncrementalEvaluation<'_> {
             .extend(std::mem::take(&mut self.operator_states));
 
         for (key, state) in &mut self.arrangement_states {
-            state.value_mut().commit_overlay();
             runtime.arrangement_states.remove(key);
+            state.value_mut().commit_overlay();
         }
         runtime
             .arrangement_states
@@ -1555,9 +1553,7 @@ impl<'a> EvaluationSession<'a> {
                 anti_join.commit_published_overlay();
             }
             if let OperatorState::CollectBy(collect_by) = state {
-                for group in collect_by.groups.values_mut() {
-                    group.commit_overlay();
-                }
+                collect_by.groups.commit_overlay();
             }
         }
         runtime.operator_states.extend(self.operator_states);

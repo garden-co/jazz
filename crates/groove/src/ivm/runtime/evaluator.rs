@@ -115,11 +115,125 @@ mod collect_by_state_tests {
         assert_eq!(staged.get(&first), Some(&1));
         assert_eq!(staged.get(&second), Some(&1));
     }
+
+    #[test]
+    fn sparse_groups_stage_one_group_without_cloning_the_outer_index() {
+        let first = b"first".to_vec();
+        let second = b"second".to_vec();
+        let order = (Vec::new(), Bytes::from_static(b"record"));
+        let mut live = SparseGroups::default();
+        live.get_or_default(first.clone()).set(order.clone(), 1);
+        live.commit_overlay();
+
+        let mut staged = live.clone();
+        staged.get_or_default(second.clone()).set(order, 1);
+
+        // This is the scale canary: a tick changing one group must retain the
+        // installed outer map, rather than cloning every unrelated group.
+        assert!(Rc::ptr_eq(&live.base, &staged.base));
+        assert_eq!(live.keys(), BTreeSet::from([first.clone()]));
+        assert_eq!(
+            staged.keys(),
+            BTreeSet::from([first.clone(), second.clone()])
+        );
+        assert!(staged.get(&first).is_some());
+        assert!(staged.get(&second).is_some());
+
+        drop(live);
+        staged.commit_overlay();
+        assert!(staged.overlay.is_empty());
+        assert_eq!(staged.keys(), BTreeSet::from([first, second]));
+    }
 }
 
 pub(super) type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
-type TopByGroups = BTreeMap<Vec<u8>, CollectByGroup>;
-type CollectByGroups = BTreeMap<Vec<u8>, CollectByGroup>;
+type TopByGroups = SparseGroups;
+type CollectByGroups = SparseGroups;
+
+/// Copy-on-write ordered map for the outer window-group index.  Like
+/// [`CollectByGroup`], a speculative tick owns only its changed entries; the
+/// (potentially very large) untouched group index remains shared with the
+/// installed state until the successful install boundary.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SparseGroups {
+    base: Rc<BTreeMap<Vec<u8>, CollectByGroup>>,
+    overlay: Rc<BTreeMap<Vec<u8>, Option<CollectByGroup>>>,
+}
+
+impl SparseGroups {
+    pub(super) fn get(&self, key: &[u8]) -> Option<&CollectByGroup> {
+        self.overlay.get(key).and_then(Option::as_ref).or_else(|| {
+            (!self.overlay.contains_key(key))
+                .then(|| self.base.get(key))
+                .flatten()
+        })
+    }
+
+    pub(super) fn get_or_default(&mut self, key: Vec<u8>) -> &mut CollectByGroup {
+        let base = &self.base;
+        Rc::make_mut(&mut self.overlay)
+            .entry(key.clone())
+            .or_insert_with(|| Some(base.get(&key).cloned().unwrap_or_default()))
+            .as_mut()
+            .expect("present group is never removed before mutation")
+    }
+
+    pub(super) fn remove_empty_touched_groups<I>(&mut self, keys: I)
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        for key in keys {
+            if self.get(&key).is_some_and(CollectByGroup::is_empty) {
+                Rc::make_mut(&mut self.overlay).insert(key, None);
+            }
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.base = Rc::default();
+        self.overlay = Rc::default();
+    }
+
+    #[cfg(test)]
+    pub(super) fn keys(&self) -> BTreeSet<Vec<u8>> {
+        let mut keys = self.base.keys().cloned().collect::<BTreeSet<_>>();
+        for (key, value) in self.overlay.iter() {
+            if value.is_some() {
+                keys.insert(key.clone());
+            } else {
+                keys.remove(key);
+            }
+        }
+        keys
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.keys().len()
+    }
+
+    /// Fold after the installed state was removed, so both outer and inner
+    /// bases are uniquely owned on the normal commit path.
+    pub(super) fn commit_overlay(&mut self) {
+        if self.overlay.is_empty() {
+            return;
+        }
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|value| (*value).clone());
+        let base = Rc::make_mut(&mut self.base);
+        for (key, group) in overlay {
+            match group {
+                Some(mut group) => {
+                    group.commit_overlay();
+                    base.insert(key, group);
+                }
+                None => {
+                    base.remove(&key);
+                }
+            }
+        }
+    }
+}
 
 /// A collector group is copied between a live evaluator and its staged tick.
 /// Keep its long-lived occurrence map immutable and record only touched keys
@@ -252,15 +366,13 @@ impl TopByIncrementalState {
                 .get(&group)
                 .is_some_and(CollectByGroup::is_empty)
             {
-                self.groups.remove(&group);
+                self.groups.remove_empty_touched_groups([group]);
             }
         }
     }
 
     pub(super) fn commit_overlays(&mut self) {
-        for group in self.groups.values_mut() {
-            group.commit_overlay();
-        }
+        self.groups.commit_overlay();
     }
 
     #[cfg(test)]
@@ -1935,8 +2047,7 @@ impl TickEvaluator<'_> {
             let group = state
                 .value_mut()
                 .groups
-                .entry(group_prefix.clone())
-                .or_default();
+                .get_or_default(group_prefix.clone());
             for delta in group_deltas {
                 let order_key = (
                     top_by_sort_key(output_desc, delta.raw(), top_by)?,
