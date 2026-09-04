@@ -173,3 +173,20 @@ ResultCurrent payloads, root-layout hashes, descriptor serde in peer VersionReco
 messages, and full database write/open/write/reopen in both directions remain
 unproven. Execution Slot/NamedSlot recovery must be demonstrated at those owners;
 this trial must not be described as a completed format freeze.
+
+### Native publication proof before migration
+
+`publication_compatibility_proof_pins_stored_id_and_nested_descriptor_gaps`
+independently declares the contained publication enum and pins its postcard
+bytes. Stored column ID7 exposed as `score` is `00 07 05 73 63 6f 72 65`;
+a derived result named `_app_score` is `01 0a 5f 61 70 70 5f 73 63 6f 72 65`.
+The typed physical-name-only variant fails decoding under that frozen contract.
+
+The recursive type envelope is a second independent gap. Contained
+`Record([score: U64])` is `10 01 01 05 73 63 6f 72 65 03`; typed `ValueType`
+serde additionally serializes `DescriptorField.identity` and rejects the
+contained bytes. Restoring only the publication enum therefore cannot establish
+nested includes or enum payload compatibility. A role-specific recursive native
+wire type must omit execution bindings while preserving exact durable names,
+ordered field types, and enum metadata. Generic execution-descriptor serde must
+retain its compiler bindings; changing it globally is not this migration.

@@ -243,6 +243,51 @@ mod tests {
     use crate::node::CurrentRowBindingField;
     use groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 
+    /// The contained 4c6eafaef5 binding enum, independently declared to pin
+    /// its postcard variant order and fields before migrating publication.
+    #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    enum FrozenPublicationField {
+        StoredColumn { id: u64, output_name: String },
+        ResultField { name: String },
+    }
+
+    #[test]
+    fn publication_compatibility_proof_pins_stored_id_and_nested_descriptor_gaps() {
+        let stored = FrozenPublicationField::StoredColumn {
+            id: 7,
+            output_name: "score".to_owned(),
+        };
+        let result = FrozenPublicationField::ResultField {
+            name: "_app_score".to_owned(),
+        };
+        let stored_bytes = postcard::to_allocvec(&stored).unwrap();
+        let result_bytes = postcard::to_allocvec(&result).unwrap();
+        // Exact contained bytes: variant0, physicalid7, UTF-8 length5, score.
+        assert_eq!(stored_bytes, b"\x00\x07\x05score");
+        assert_eq!(result_bytes, b"\x01\x0a_app_score");
+        assert_eq!(
+            postcard::from_bytes::<FrozenPublicationField>(&stored_bytes).unwrap(),
+            stored
+        );
+        assert_eq!(
+            postcard::from_bytes::<FrozenPublicationField>(&result_bytes).unwrap(),
+            result
+        );
+
+        let execution_bytes =
+            postcard::to_allocvec(&RowDescriptorFieldName::PhysicalColumn("_app_score")).unwrap();
+        assert_ne!(execution_bytes, stored_bytes);
+        assert!(postcard::from_bytes::<FrozenPublicationField>(&execution_bytes).is_err());
+
+        // The same native type envelope recursively serializes DescriptorField.
+        // Contained Record([score: U64]) is tag16, one named field, U64 tag3.
+        let contained_nested = b"\x10\x01\x01\x05score\x03";
+        let descriptor = RecordDescriptor::new([("score".to_owned(), ValueType::U64)]);
+        let nested = ValueType::Record(Box::new(descriptor));
+        assert_ne!(postcard::to_allocvec(&nested).unwrap(), contained_nested);
+        assert!(postcard::from_bytes::<ValueType>(contained_nested).is_err());
+    }
+
     #[test]
     fn tagged_descriptor_preserves_hybrid_physical_and_logical_user_check_fields() {
         // The field tags exist only at this internal host ABI boundary. Keep
