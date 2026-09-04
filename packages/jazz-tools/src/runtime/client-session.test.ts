@@ -165,12 +165,17 @@ describe("client session resolution", () => {
     }
   });
 
-  it("exposes the complete verified JWT payload without a nested-claims path", () => {
-    const session = resolveClientSessionSync({
+  it("projects every registered external JWT claim with its original JSON shape", () => {
+    const stringAudience = resolveClientSessionSync({
       appId: "app-jwt-policy-claim-corpus",
       jwtToken: makeJwt({
         iss: "https://issuer.example",
         sub: "alice",
+        aud: "jazz-web",
+        exp: 4_102_444_800,
+        nbf: 0,
+        iat: 1_706_000_000,
+        jti: "token-123",
         role: "top-level",
         issuer: "custom-provider-issuer",
         flags: ["writer", "beta"],
@@ -181,8 +186,16 @@ describe("client session resolution", () => {
       }),
     });
 
-    expect(session).toMatchObject({
+    expect(stringAudience).toEqual({
+      user: '["https://issuer.example","alice"]',
       claims: {
+        iss: "https://issuer.example",
+        sub: "alice",
+        aud: "jazz-web",
+        exp: 4_102_444_800,
+        nbf: 0,
+        iat: 1_706_000_000,
+        jti: "token-123",
         role: "top-level",
         issuer: "custom-provider-issuer",
         flags: ["writer", "beta"],
@@ -190,9 +203,18 @@ describe("client session resolution", () => {
         revoked_at: null,
         claims: { role: "nested" },
       },
+      authMode: "external",
     });
-    expect(session?.claims.iss).toBe("https://issuer.example");
-    expect(session?.claims.sub).toBe("alice");
+
+    const arrayAudience = resolveClientSessionSync({
+      appId: "app-jwt-array-audience",
+      jwtToken: makeJwt({
+        iss: "https://issuer.example",
+        sub: "alice",
+        aud: ["jazz-web", "jazz-mobile"],
+      }),
+    });
+    expect(arrayAudience?.claims.aud).toEqual(["jazz-web", "jazz-mobile"]);
   });
 
   it("preserves prototype-named flat claims as own data properties through public cloning", () => {
@@ -431,13 +453,16 @@ describe("resolveJwtSession — reserved issuer admission", () => {
         )!,
       }),
     ).toEqual(localFirst);
-    expect(
-      sessionFromVerifiedReservedJwtPayload({ sub: "u1", iss: ANONYMOUS_JWT_ISSUER }, "anonymous"),
-    ).toMatchObject({
+    const anonymous = sessionFromVerifiedReservedJwtPayload(
+      { sub: "u1", iss: ANONYMOUS_JWT_ISSUER, jazz_pub_key: "anonymous-proof" },
+      "anonymous",
+    );
+    expect(anonymous).toEqual({
       user: '["urn:jazz:anonymous","u1"]',
-      claims: {},
+      claims: { iss: ANONYMOUS_JWT_ISSUER, sub: "u1" },
       authMode: "anonymous",
     });
+    expect(anonymous?.claims).not.toHaveProperty("jazz_pub_key");
     expect(
       sessionFromVerifiedReservedJwtPayload(
         { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER },
