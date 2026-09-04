@@ -17,6 +17,21 @@ const packageJson = JSON.parse(
 const withJazzRn = require("../../../crates/jazz-rn/app.plugin.js");
 const androidRelayArchitectures = "armeabi-v7a,arm64-v8a,x86_64";
 
+function parseExpoMachineJson(stdout, label) {
+  // Expo's autolinker normally writes one JSON document. Some Expo releases
+  // prefix it with structured informational lines, however; accept only that
+  // known prelude and keep arbitrary stdout a hard failure.
+  const jsonStart = stdout.search(/^[{[]/m);
+  assert.notEqual(jsonStart, -1, `${label} did not emit a JSON document`);
+  const prelude = stdout.slice(0, jsonStart);
+  assert.match(
+    prelude,
+    /^(?:(?:ℹ \[[^\]\r\n]+\][^\r\n]*)?\r?\n)*$/,
+    `${label} may prefix JSON only with Expo informational lines`,
+  );
+  return JSON.parse(stdout.slice(jsonStart));
+}
+
 function assertRelayAndroidArchitectures(gradleProperties, label) {
   const architectures = gradleProperties.match(/^reactNativeArchitectures=(.*)$/m)?.[1];
   assert.equal(
@@ -25,6 +40,21 @@ function assertRelayAndroidArchitectures(gradleProperties, label) {
     `${label} must request exactly the three sealed relay ABIs`,
   );
 }
+
+test("Expo machine JSON accepts its informational prelude but no arbitrary stdout", () => {
+  assert.deepEqual(
+    parseExpoMachineJson(
+      'ℹ [module] inspecting React Native configuration\n{"relay":"packed"}\n',
+      "Expo",
+    ),
+    { relay: "packed" },
+  );
+  assert.throws(
+    () => parseExpoMachineJson('warning: unexpected output\n{"relay":"packed"}\n', "Expo"),
+    /only with Expo informational lines/,
+    "unstructured stdout must not be mistaken for an Expo JSON prelude",
+  );
+});
 
 function productionDependencyNames(metadata, rootPackageName) {
   const packageById = new Map(metadata.packages.map((pkg) => [pkg.id, pkg]));
@@ -586,7 +616,7 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   }
 
   const autolink = (platform) =>
-    JSON.parse(
+    parseExpoMachineJson(
       execFileSync(
         process.execPath,
         [
@@ -604,6 +634,7 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
           encoding: "utf8",
         },
       ),
+      `canonical Expo ${platform} autolinking`,
     );
   const androidAutolink = autolink("android");
   const iosAutolink = autolink("ios");
@@ -1329,7 +1360,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     assert.match(iosPodfile, /use_native_modules!/);
 
     const expoAutolink = (platform) =>
-      JSON.parse(
+      parseExpoMachineJson(
         execFileSync(
           process.execPath,
           [
@@ -1344,6 +1375,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
           ],
           { cwd: appDirectory, encoding: "utf8" },
         ),
+        `packed Expo ${platform} autolinking`,
       );
     const androidAutolink = expoAutolink("android");
     const iosAutolink = expoAutolink("ios");
