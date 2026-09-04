@@ -16,7 +16,7 @@ vi.mock("jazz-wasm", async () => {
   };
 });
 
-import { loadWasmModule } from "./client.js";
+import { loadWasmModule } from "./wasm-loader.js";
 
 const originalProcess = globalThis.process;
 const originalLocation = globalThis.location;

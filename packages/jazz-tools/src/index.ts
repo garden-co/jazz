@@ -1,37 +1,5 @@
 // Public exports
 
-import {
-  col,
-  getCollectedSchema,
-  resetCollectedState,
-  table,
-  allowExternalProvenanceName,
-} from "./dsl.js";
-import { defineMigration, renameTableFrom } from "./migrations.js";
-import { definePermissions } from "./permissions/index.js";
-import {
-  defineApp,
-  defineSchema,
-  defineSliceableApp,
-  defineTable,
-  TypedTableQueryBuilder,
-} from "./typed-app.js";
-import type {
-  App as TypedApp,
-  InsertOf as TypedInsertOf,
-  LargeValueUpdateOf as TypedLargeValueUpdateOf,
-  StreamingInsertOf as TypedStreamingInsertOf,
-  StreamingUpdateOf as TypedStreamingUpdateOf,
-  StreamingUpsertOf as TypedStreamingUpsertOf,
-  RowOf as TypedRowOf,
-  Schema as TypedSchema,
-  SchemaDefinition as TypedSchemaDefinition,
-  SliceableApp as TypedSliceableApp,
-  TableDefinition as TypedTableDefinition,
-  TableMetaOf as TypedTableMetaOf,
-  WhereOf as TypedWhereOf,
-} from "./typed-app.js";
-
 // DSL for schema definitions
 export {
   table,
@@ -167,68 +135,7 @@ export type {
   RemovedTableShape,
 } from "./migrations.js";
 
-type RuntimeSchemaNamespace = typeof col & {
-  table: typeof defineTable;
-  defineSchema: typeof defineSchema;
-  defineApp: typeof defineApp;
-  defineSliceableApp: typeof defineSliceableApp;
-  defineMigration: typeof defineMigration;
-  renameTableFrom: typeof renameTableFrom;
-  definePermissions: typeof definePermissions;
-  allowExternalProvenanceName: typeof allowExternalProvenanceName;
-};
-
-export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
-  table: defineTable,
-  defineSchema,
-  defineApp,
-  defineSliceableApp,
-  defineMigration,
-  renameTableFrom,
-  definePermissions,
-  allowExternalProvenanceName,
-} as const);
-
-export namespace schema {
-  export type TableDefinition = TypedTableDefinition;
-  export type SchemaDefinition = TypedSchemaDefinition;
-  /**
-   * Normalized type for a schema definition.
-   */
-  export type Schema<TSchema extends TypedSchemaDefinition = TypedSchemaDefinition> =
-    TypedSchema<TSchema>;
-  /**
-   * App for a given schema.
-   */
-  export type App<TSchema extends TypedSchema<any> | TypedSchemaDefinition> = TypedApp<TSchema>;
-  /**
-   * App factory for deriving typed slices over one full runtime schema.
-   */
-  export type SliceableApp<TSchema extends TypedSchema<any> | TypedSchemaDefinition> =
-    TypedSliceableApp<TSchema>;
-  /**
-   * Row type for a given table (all columns, `id` included)
-   */
-  export type RowOf<TTable> = TypedRowOf<TTable>;
-  /**
-   * Input type for new rows inserted into a table (no `id`, respects optionals and defaults)
-   */
-  export type InsertOf<TTable> = TypedInsertOf<TTable>;
-  /** Input type for updating a row, including typed partial large-value descriptors. */
-  export type LargeValueUpdateOf<TTable> = TypedLargeValueUpdateOf<TTable>;
-  /** Input type for inserting a row with one streamed Text, JSON, or Bytea column. */
-  export type StreamingInsertOf<TTable> = TypedStreamingInsertOf<TTable>;
-  export type StreamingUpdateOf<TTable> = TypedStreamingUpdateOf<TTable>;
-  export type StreamingUpsertOf<TTable> = TypedStreamingUpsertOf<TTable>;
-  /**
-   * Metadata for a given table.
-   */
-  export type TableMetaOf<TTable> = TypedTableMetaOf<TTable>;
-  /**
-   * The `where(...)` input shape for that table
-   */
-  export type WhereOf<TQuery> = TypedWhereOf<TQuery>;
-}
+export { schema } from "./schema-namespace.js";
 
 // Storage drivers
 export * from "./drivers/index.js";

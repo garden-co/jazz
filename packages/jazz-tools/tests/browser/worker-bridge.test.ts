@@ -8,8 +8,8 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { createDb } from "../../src/runtime/default-create-db.js";
 import {
-  createDb,
   Db,
   getDbSubscriptionSource,
   resolveDefaultPersistentDbName,

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 
 describe("createDb — anonymous mode", () => {
   it("mints an anonymous JWT when no credential is provided", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     const db = await createDb({
       appId: "test-app",
       driver: { type: "memory" },
@@ -14,7 +14,7 @@ describe("createDb — anonymous mode", () => {
   });
 
   it("keeps the anonymous identity stable across multiple getAuthState() calls", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     const db = await createDb({
       appId: "test-app",
       driver: { type: "memory" },
@@ -28,7 +28,7 @@ describe("createDb — anonymous mode", () => {
   });
 
   it("does not mint an anonymous identity when adminSecret is provided", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     const db = await createDb({
       appId: "test-app",
       driver: { type: "memory" },

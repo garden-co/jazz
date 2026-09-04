@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { BrowserAuthSecretStore } from "./auth-secret-store.js";
 import { formatAuthSecret } from "./auth-secret-codec.js";
 import { RecoveryPhrase } from "./recovery-phrase.js";
-import { createDb } from "./db.js";
+import { createDb } from "./default-create-db.js";
 
 function createMockStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
   const map = new Map<string, string>();

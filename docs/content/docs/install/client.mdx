@@ -12,7 +12,7 @@ import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.md
 
 Start with a fresh app. If you already have one, skip to [Install](#install).
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     ```bash title="Terminal"
     pnpm create vite my-jazz-app --template react-ts
@@ -46,12 +46,6 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     pnpm install
     ```
   </Tab>
-  <Tab value="Expo">
-    ```bash title="Terminal"
-    npx create-expo-app my-jazz-app --template blank-typescript
-    cd my-jazz-app
-    ```
-  </Tab>
   <Tab value="TypeScript">
     ```bash title="Terminal"
     mkdir my-jazz-app && cd my-jazz-app
@@ -63,100 +57,29 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 
 ## Install
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
-  <Tab value="React">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-  <Tab value="Vue">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-  <Tab value="Svelte">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-  <Tab value="Solid">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-  <Tab value="Expo">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha jazz-rn@alpha expo
-    pnpm add -D @babel/plugin-transform-flow-strip-types
-    ```
-
-    `jazz-rn` is the native relay package and must be installed directly alongside
-    `jazz-tools`. React Native runtime support is currently under restoration:
-    this setup can be prebuilt into a development build, but the embedded Rust
-    relay artifact is not available yet, so it is not a usable Jazz client.
-
-    <Accordions type="single">
-    <Accordion title="Expo setup: entry point, Babel, and Metro config">
-
-    Create `index.js` at the project root, and set `"main": "./index.js"` in your `package.json`. Import polyfills as the very first line, before any other code:
-
-    ```js title="index.js"
-    import "jazz-tools/expo/polyfills";
-    import { registerRootComponent } from "expo";
-    import { App } from "./App";
-    registerRootComponent(App);
-    ```
-
-    Keep this import first in the app entry point. It installs `ReadableStream` when React Native
-    does not provide it.
-
-    Update `babel.config.js` to enable the `import.meta` transform and strip Flow types:
-
-    ```js title="babel.config.js"
-    module.exports = function (api) {
-      api.cache(true);
-      return {
-        presets: [["babel-preset-expo", { unstable_transformImportMeta: true }]],
-        plugins: [
-          ["@babel/plugin-transform-flow-strip-types", { allowDeclareFields: true }],
-        ],
-      };
-    };
-    ```
-
-    Replace `metro.config.js` with `metro.config.mjs` so Metro can top-level `await` the Jazz dev server (it injects `EXPO_PUBLIC_JAZZ_*` env vars that Metro inlines into your bundle):
-
-    ```js title="metro.config.mjs"
-    import path from "node:path";
-    import { fileURLToPath } from "node:url";
-    import { createRequire } from "node:module";
-    import { withJazz } from "jazz-tools/dev/expo";
-
-    const require = createRequire(import.meta.url);
-    const { getDefaultConfig } = require("expo/metro-config");
-
-    const projectRoot = path.dirname(fileURLToPath(import.meta.url));
-
-    const config = await withJazz(getDefaultConfig(projectRoot), {
-      schemaDir: projectRoot,
-    });
-
-    // pnpm uses symlinks for hoisted packages
-    config.resolver.unstable_enableSymlinks = true;
-
-    export default config;
-    ```
-
-    </Accordion>
-    </Accordions>
-
-  </Tab>
-  <Tab value="TypeScript">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
+  persist
+  updateAnchor
+>
+  <Tab value="React">```bash title="Terminal" pnpm add jazz-tools@alpha ```</Tab>
+  <Tab value="Vue">```bash title="Terminal" pnpm add jazz-tools@alpha ```</Tab>
+  <Tab value="Svelte">```bash title="Terminal" pnpm add jazz-tools@alpha ```</Tab>
+  <Tab value="Solid">```bash title="Terminal" pnpm add jazz-tools@alpha ```</Tab>
+  <Tab value="TypeScript">```bash title="Terminal" pnpm add jazz-tools@alpha ```</Tab>
 </Tabs>
+
+<Callout type="warn">
+  React Native and Expo are intentionally not part of this application quickstart yet. The
+  installable `jazz-rn` native-relay package has a narrow, capability-gated foreground alpha. It is
+  not a supported React Native Jazz client or a general application setup. It requires a matching
+  native development/release build and trusted platform admission; Expo Go is unsupported. Do not
+  adapt the browser/TypeScript snippets below to React Native. For the current native package
+  boundary, including bare React Native and Expo development-build requirements and unsupported
+  operation families, see the [`jazz-rn` install
+  guide](https://github.com/garden-co/jazz/tree/main/crates/jazz-rn#readme).
+</Callout>
 
 ## Get an app ID
 
@@ -180,7 +103,7 @@ Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for Svelt
 
 Create the basic structure for your app with Jazz and a to-do list.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="src/App.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
@@ -201,11 +124,6 @@ Create the basic structure for your app with Jazz and a to-do list.
       ../examples/docs/todo-client-localfirst-solid/src/App.tsx
     </include>
   </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
-    </include>
-  </Tab>
   <Tab value="TypeScript">
     <include cwd lang="html" meta='title="index.html"'>
       ../examples/docs/todo-client-localfirst-ts/src/quickstart-setup.html
@@ -219,17 +137,6 @@ Create the basic structure for your app with Jazz and a to-do list.
 
   </Tab>
 </Tabs>
-
-<Callout type="warn">
-  The Expo/React Native binding is compile-level scaffolding in this alpha. Persistent client
-  storage is not supported. Explicit memory mode has not passed Metro/Hermes device validation and
-  is not a supported persistence alternative.
-</Callout>
-
-For local-first identity on plain React Native, pass an explicit `AuthSecretStore` backed by that
-platform's secure storage to `useLocalFirstAuth({ store })`; the React Native binding deliberately
-does not fall back to browser `localStorage`. Expo apps can use `ExpoAuthSecretStore` from
-`jazz-tools/expo`.
 
 <Accordions type="single">
   <Accordion title="Client Config">
@@ -246,7 +153,7 @@ Use `db.insert` to create a new row.
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -270,11 +177,6 @@ Use `db.insert` to create a new row.
       ../examples/docs/todo-client-localfirst-solid/src/quickstart-add.tsx
     </include>
   </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="src/AddTodo.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/AddTodo.tsx
-    </include>
-  </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="src/main.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#add-ts
@@ -288,7 +190,7 @@ Display a to-do with toggle and delete controls.
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -312,11 +214,6 @@ Display a to-do with toggle and delete controls.
       ../examples/docs/todo-client-localfirst-solid/src/quickstart-item.tsx
     </include>
   </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="src/TodoItem.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/TodoItem.tsx
-    </include>
-  </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="src/TodoItem.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/TodoItem.ts
@@ -337,7 +234,7 @@ Full mutation API: [Writing Data](/docs/writing/writing-data).
 
 Subscribe to a query to get real-time updates as data changes, regardless of where the change originates.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/quickstart-list.tsx
@@ -356,11 +253,6 @@ Subscribe to a query to get real-time updates as data changes, regardless of whe
   <Tab value="Solid">
     <include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
       ../examples/docs/todo-client-localfirst-solid/src/quickstart-list.tsx
-    </include>
-  </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/quickstart-list.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">

@@ -7,6 +7,7 @@
  * match this checkout's C ABI and source revision.
  */
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
@@ -29,8 +30,40 @@ if (!/^[0-9a-f]{40}$/i.test(sourceRevision ?? ""))
   throw new Error("JAZZ_NATIVE_RELAY_SOURCE_REVISION must be the exact 40-character source commit");
 
 const abiSource = readFileSync(join(relaySource, "src/lib.rs"), "utf8");
-const abi = Number(/pub const NATIVE_RELAY_ABI_VERSION: u16 = (\d+);/.exec(abiSource)?.[1]);
+const abi = Number(/pub const NATIVE_RELAY_ABI_V1: u16 = (\d+);/.exec(abiSource)?.[1]);
 if (!Number.isSafeInteger(abi)) throw new Error("could not read native relay ABI from Rust source");
+const tsAbiSource = readFileSync(join(root, "crates/jazz-rn/src/native-relay-abi.ts"), "utf8");
+const tsAbi = Number(/export const NATIVE_RELAY_ABI_V1 = (\d+) as const;/.exec(tsAbiSource)?.[1]);
+if (tsAbi !== abi)
+  throw new Error(
+    `TypeScript native relay ABI ${Number.isSafeInteger(tsAbi) ? tsAbi : "is invalid"} differs from Rust ABI ${abi}; regenerate crates/jazz-rn/src/native-relay-abi.ts`,
+  );
+const nativeSourceFingerprint = createHash("sha256")
+  .update(
+    execFileSync(
+      "git",
+      [
+        "-C",
+        root,
+        "ls-tree",
+        "-r",
+        "--full-tree",
+        "HEAD",
+        "--",
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/groove",
+        "crates/idb-tree",
+        "crates/jazz",
+        "crates/jazz-compression",
+        "crates/jazz-native-relay",
+        "crates/jazz-storage-sqlite",
+        "crates/jazz-rn/scripts/build-relay-artifacts.sh",
+      ],
+      { encoding: "utf8" },
+    ),
+  )
+  .digest("hex");
 
 const targets = {
   android: {
@@ -39,7 +72,6 @@ const targets = {
     required: [
       "arm64-v8a/libjazz_native_relay.a",
       "armeabi-v7a/libjazz_native_relay.a",
-      "x86/libjazz_native_relay.a",
       "x86_64/libjazz_native_relay.a",
     ],
   },
@@ -264,6 +296,10 @@ function requireArchitectures(file, expected, label) {
         `${label} is missing ${architecture}; found ${[...actual].sort().join(", ")}`,
       );
   }
+  if (actual.size !== expected.length)
+    throw new Error(
+      `${label} has unexpected architectures; expected ${[...expected].sort().join(", ")}, found ${[...actual].sort().join(", ")}`,
+    );
 }
 
 function verifyIosSlices(expected) {
@@ -331,12 +367,13 @@ for (const requested of requestedTargets) {
     throw new Error(`usage: verify-relay-artifacts.mjs <android|ios>... (unknown ${requested})`);
   const manifest = JSON.parse(readFileSync(target.manifest, "utf8"));
   if (
-    manifest.format !== 1 ||
+    manifest.format !== 2 ||
     manifest.nativeRelayAbi !== abi ||
-    manifest.sourceRevision !== sourceRevision
+    manifest.sourceRevision !== sourceRevision ||
+    manifest.nativeSourceFingerprint !== nativeSourceFingerprint
   )
     throw new Error(
-      `${requested} relay manifest does not match source revision ${sourceRevision} and ABI ${abi}`,
+      `${requested} relay manifest does not match source revision ${sourceRevision}, native source fingerprint ${nativeSourceFingerprint}, and ABI ${abi}`,
     );
   if (
     requested === "android" &&
@@ -373,10 +410,16 @@ for (const requested of requestedTargets) {
     for (const [architecture, path] of [
       ["arm64", "arm64-v8a/libjazz_native_relay.a"],
       ["armv7", "armeabi-v7a/libjazz_native_relay.a"],
-      ["x86", "x86/libjazz_native_relay.a"],
       ["x86_64", "x86_64/libjazz_native_relay.a"],
     ])
       requireArchitectures(join(target.root, path), [architecture], `Android ${path}`);
+    if (expected.has("x86/libjazz_native_relay.a")) {
+      requireArchitectures(
+        join(target.root, "x86/libjazz_native_relay.a"),
+        ["x86"],
+        "Android x86/libjazz_native_relay.a",
+      );
+    }
   }
   if (requested === "ios") verifyIosSlices(expected);
 }

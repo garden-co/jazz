@@ -16,6 +16,7 @@ import {
   type AuthSecretStore,
   type DbConfig,
   type JazzClient,
+  type JazzClientConfig,
   type ReactNativeSqliteConnection,
   type ReactNativeSqliteStorageDriver,
 } from "./index.js";
@@ -35,6 +36,20 @@ const config: DbConfig = {
   appId: "rn-typecheck",
   serverUrl: "https://sync.example.test",
   sqliteStorage,
+};
+
+// Persistent RN admission is intentionally a field on the ordinary public
+// client config. It does not expose JSI factories, byte encoders, or a
+// JavaScript-selectable durable path.
+const admittedConfig: JazzClientConfig = {
+  appId: "rn-native-relay-typecheck",
+  nativeRelay: { capability: new Uint8Array(32) },
+  cookieSession: {
+    issuer: "https://sync.example.test",
+    user_id: "admitted-user",
+    claims: {},
+    authMode: "external",
+  },
 };
 
 async function clientFactory(): Promise<JazzClient> {
@@ -87,3 +102,4 @@ async function storageDriverShape(connection: ReactNativeSqliteConnection) {
 void clientFactory;
 void Hooks;
 void storageDriverShape;
+void admittedConfig;

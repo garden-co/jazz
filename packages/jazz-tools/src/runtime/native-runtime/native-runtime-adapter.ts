@@ -182,6 +182,8 @@ type NativeDb = {
   // report whether they transitioned state. The adapter awaits either form and
   // owns idempotence, so callers never observe that implementation detail.
   close?(): void | boolean | Promise<void | boolean>;
+  /** Native foreground capabilities are bound to admission-time auth. */
+  rejectAuthUpdate?(): never;
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openTransactionId: string, kind: TransactionKind, author?: Uint8Array): void;
   beginTransactionAttributed?(openTransactionId: string, attribution: Uint8Array): void;
@@ -2318,6 +2320,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   updateAuth(authJson: string): Promise<void> | void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
+    if (this.db?.rejectAuthUpdate) return this.db.rejectAuthUpdate();
     if (!this.serverEndpointUrl) return;
     return this.connect(this.serverEndpointUrl, authJson);
   }

@@ -1,4 +1,5 @@
-import { createDb, type Db, type QueryBuilder } from "../../src/runtime/db.js";
+import { createDb } from "../../src/runtime/default-create-db.js";
+import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 import type { DbConfig } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 

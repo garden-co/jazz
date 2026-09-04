@@ -69,7 +69,7 @@ use crate::query::{
 };
 pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
 use crate::schema::{JazzSchema, TableSchema};
-use crate::time::GlobalTime;
+use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
@@ -2553,6 +2553,27 @@ pub struct DbTickStats {
     pub subscription_events: usize,
     /// Number of connection ticks that applied remote sync state locally.
     pub remote_sync_applied: usize,
+}
+
+impl<S> Db<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// Reserve local transaction-clock positions through `high_water` before a
+    /// trusted native foreground host reuses a node identity.
+    pub async fn reserve_minted_tx_time_after(&self, high_water: TxTime) -> Result<(), Error> {
+        self.node
+            .node()
+            .lock()
+            .await
+            .reserve_tx_time_after(high_water)?;
+        Ok(())
+    }
+
+    /// Return the HLC high-water mark for locally minted transactions.
+    pub async fn minted_tx_time_high_water(&self) -> TxTime {
+        self.node.node().lock().await.tx_time_high_water()
+    }
 }
 
 mod node_runtime;
