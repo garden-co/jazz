@@ -6,6 +6,7 @@
 //! Swift, and Kotlin bindings put their ABI-specific command codecs above this
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::future::Future;
@@ -4062,6 +4063,8 @@ struct ConnectedClient {
     prepared_queries: BTreeMap<u64, PreparedQuery>,
     subscriptions: BTreeMap<u64, SubscriptionStream>,
     pending_operations: BTreeMap<u64, ForegroundPendingOperation>,
+    read_cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
+    read_cleanup: Option<Pin<Box<dyn Future<Output = ()>>>>,
     transactions: BTreeMap<u64, ForegroundTransaction>,
     /// Public transaction ids are opaque digests, while only the foreground
     /// owner may retain the core causal id needed for a settlement wait.
@@ -4080,9 +4083,28 @@ struct ForegroundTransaction {
 }
 
 impl ConnectedClient {
+    fn poll_read_cleanup(&mut self, waker: &Waker) {
+        if self.read_cleanup.is_none()
+            && let Some(attachment) = self.read_cleanups.borrow_mut().pop_front()
+        {
+            let db = Rc::clone(&self.db);
+            self.read_cleanup = Some(Box::pin(async move {
+                db.detach_query_async(attachment).await;
+            }));
+        }
+        if let Some(cleanup) = self.read_cleanup.as_mut() {
+            let mut context = Context::from_waker(waker);
+            if cleanup.as_mut().poll(&mut context).is_ready() {
+                self.read_cleanup = None;
+            }
+        }
+    }
+
     fn cancel_pending_work(&mut self) {
-        self.pending_operations.clear();
         self.tick = None;
+        self.pending_operations.clear();
+        self.read_cleanup = None;
+        self.read_cleanups.borrow_mut().clear();
         self.upstream_io.incoming = None;
         self.served_io.incoming = None;
     }
@@ -4406,6 +4428,8 @@ impl RelayWorker {
                 prepared_queries: BTreeMap::new(),
                 subscriptions: BTreeMap::new(),
                 pending_operations: BTreeMap::new(),
+                read_cleanups: Rc::new(RefCell::new(VecDeque::new())),
+                read_cleanup: None,
                 transactions: BTreeMap::new(),
                 committed_transactions: BTreeMap::new(),
                 next_foreground_handle: 1,
@@ -4432,6 +4456,7 @@ impl RelayWorker {
             client.upstream_io.poll(&waker)?;
             poll_relay_tick(&client.db, &mut client.tick, &waker)?;
             client.served_io.poll(&waker)?;
+            client.poll_read_cleanup(&waker);
         }
         self.upstream_io.poll(&waker)?;
         poll_relay_tick(&self.persistent, &mut self.persistent_tick, &waker)?;
@@ -4440,6 +4465,7 @@ impl RelayWorker {
             client.served_io.poll(&waker)?;
             client.upstream_io.poll(&waker)?;
             poll_relay_tick(&client.db, &mut client.tick, &waker)?;
+            client.poll_read_cleanup(&waker);
         }
         Ok(())
     }
@@ -4514,6 +4540,19 @@ impl RelayWorker {
         transaction: Option<u64>,
         structured: bool,
     ) -> Result<ForegroundOperationPoll, RelayError> {
+        let cleanups = {
+            let client = self.foreground_client(client)?;
+            if client.read_cleanups.borrow().len()
+                + usize::from(client.read_cleanup.is_some())
+                + client.pending_operations.len()
+                >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
+            {
+                return Err(RelayError::ForegroundCommand(
+                    "foreground read cleanup capacity exceeded".to_owned(),
+                ));
+            }
+            Rc::clone(&client.read_cleanups)
+        };
         let opts = foreground_read_opts_from_json(&options_json)?;
         let open_tx = transaction
             .map(|handle| {
@@ -4535,6 +4574,7 @@ impl RelayWorker {
                 .map_err(RelayError::Db)?;
             let coverage = ForegroundReadCoverage {
                 db: Rc::clone(&db),
+                cleanups,
                 attachment: Some(attachment),
             };
             std::future::poll_fn(|_| {
@@ -5137,13 +5177,15 @@ impl RelayWorker {
 /// representation; it does not invent a React-Native row/value object shape.
 struct ForegroundReadCoverage {
     db: Rc<Db<MemoryStorage>>,
+    cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
     attachment: Option<jazz::db::QueryAttachment>,
 }
 
 impl Drop for ForegroundReadCoverage {
     fn drop(&mut self) {
         if let Some(attachment) = self.attachment.take() {
-            self.db.detach_query(attachment);
+            self.cleanups.borrow_mut().push_back(attachment);
+            self.db.schedule_tick(TickUrgency::Immediate);
         }
     }
 }
@@ -7177,6 +7219,73 @@ mod tests {
         let old_first_foreground = NodeUuid::from_bytes(deterministic);
         assert_ne!(before_restart.node, old_first_foreground);
         assert_ne!(after_restart.node, old_first_foreground);
+    }
+
+    // Cancellation has no public TypeScript one-shot API. This host-boundary
+    // test uses the existing test-only owner suspension to make contention
+    // deterministic, then observes successful cancellation and released pins.
+    #[test]
+    fn cancelled_read_releases_coverage_after_contended_owner_resumes() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("coverage-cleanup.sqlite"),
+            Some("cleanup"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x45; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let query = client
+            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .unwrap();
+        let read = match client
+            .start_foreground_read_with_options(query, "{\"tier\":\"edge\"}".into(), None, false)
+            .unwrap()
+        {
+            ForegroundOperationPoll::Pending { operation } => operation,
+            _ => panic!("remote coverage without an authority must remain pending"),
+        };
+        let id = client.id;
+        let holder = relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                let future: ForegroundOperationFuture = Box::pin(async move {
+                    db.hold_node_owner_for_test().await;
+                    unreachable!("owner holder ends only on cancellation")
+                });
+                worker.start_foreground_operation(id, None, future)
+            })
+            .unwrap();
+        let ForegroundOperationPoll::Pending { operation: holder } = holder else {
+            panic!("owner holder must remain pending");
+        };
+        assert!(client.cancel_foreground_operation(read).unwrap());
+        relay
+            .pump()
+            .expect("cleanup cannot wait synchronously for the held owner");
+        assert_eq!(
+            relay
+                .run(move |worker| Ok(worker
+                    .foreground_client(id)?
+                    .db
+                    .query_coverage_attachment_counts_for_test()))
+                .unwrap(),
+            (1, 1)
+        );
+        assert!(client.cancel_foreground_operation(holder).unwrap());
+        relay.pump().unwrap();
+        assert_eq!(
+            relay
+                .run(move |worker| Ok(worker
+                    .foreground_client(id)?
+                    .db
+                    .query_coverage_attachment_counts_for_test()))
+                .unwrap(),
+            (0, 0)
+        );
     }
 
     #[test]

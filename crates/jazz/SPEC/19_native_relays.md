@@ -416,7 +416,11 @@ foreground-owned transaction handle selects the opening snapshot and staged
 write overlay through the existing transaction read APIs; it cannot select a
 sibling foreground's transaction or replace its opening identity/claims.
 The pending future awaits owner admission and coverage without blocking the
-owner thread; completion or cancellation detaches its coverage. Relation
+owner thread. Completion or cancellation queues a bounded coverage cleanup;
+ordinary owner turns acquire the node asynchronously before releasing its pins.
+The read admission budget includes retained reads and queued cleanups, and
+foreground retirement cancels those local obligations after cancelling retained
+ticks and reads. Relation
 snapshots use `binding_codec::encode_relation_snapshot`. Subscription event 3,
 `StructuredDelta`, appends the existing terminal-operation JSON codec to the
 ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
