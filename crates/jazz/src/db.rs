@@ -4114,7 +4114,7 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
                 format!("invalid scalar projection from Groove terminal: {error}"),
             )
         })?;
-        let row = CurrentRow::new_logical(table, OwnedRecord::new(raw, scalar_descriptor));
+        let row = CurrentRow::new(table, OwnedRecord::new(raw, scalar_descriptor));
         let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
         Ok(ResultNode {
             occurrence,
