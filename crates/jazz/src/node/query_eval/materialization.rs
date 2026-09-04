@@ -291,6 +291,20 @@ where
         local: &LocalMaintainedViewSubscription,
         member: &ResultMemberEntry,
     ) -> Result<Option<CurrentRow>, Error> {
+        let mut row = self
+            .materialize_local_maintained_view_result_member_unbound(local, member)
+            .await?;
+        if let Some(row) = &mut row {
+            self.bind_current_row_columns_in_schema(local.result_schema_version, row)?;
+        }
+        Ok(row)
+    }
+
+    async fn materialize_local_maintained_view_result_member_unbound(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+        member: &ResultMemberEntry,
+    ) -> Result<Option<CurrentRow>, Error> {
         if is_public_aggregate_result_member(
             member,
             local.result_table.as_str(),
@@ -633,7 +647,9 @@ where
             return Ok(None);
         };
         let read_table = self.table_in_schema(&projected_table, read_schema)?.clone();
-        current_row_from_materialized_cells(&read_table, version, &cells).map(Some)
+        let mut row = current_row_from_materialized_cells(&read_table, version, &cells)?;
+        self.bind_current_row_columns_in_schema(read_schema, &mut row)?;
+        Ok(Some(row))
     }
 
     fn current_row_from_aggregate_result_payload(
@@ -701,7 +717,11 @@ where
         let raw = descriptor.create(&values)?;
         let row = CurrentRow::new(table.name.clone(), OwnedRecord::new(raw, descriptor));
         if row.raw_field("__flat_join_row_1").is_some() {
-            return Ok(row);
+            return Ok(CurrentRow::new_with_binding_fields(
+                table.name.clone(),
+                (*row.record).clone(),
+                CurrentRowBindingField::ResultField,
+            ));
         }
         self.materialize_current_row(table, row)
     }
@@ -1008,8 +1028,49 @@ where
         }
         // Multisink records are transport-key ordered. Restore public root rank
         // while retaining the lowered program's membership and window.
+        for row in &mut rows {
+            self.bind_current_row_columns_in_schema(shape.schema_version(), row)?;
+        }
         self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         Ok(rows)
+    }
+
+    /// Complete metadata for physical current rows at the schema-aware producer
+    /// boundary. Exact catalogue column slots identify stored cells; all other
+    /// slots retain their result names. Already explicit terminal bindings survive.
+    fn bind_current_row_columns_in_schema(
+        &self,
+        schema_version: SchemaVersionId,
+        row: &mut CurrentRow,
+    ) -> Result<(), Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(row.table()))
+            .ok_or(Error::InvalidStoredValue(
+                "native row has no read-schema physical mapping",
+            ))?;
+        let fields = row.record.descriptor().fields();
+        let bindings = std::sync::Arc::make_mut(&mut row.binding_fields);
+        let names = std::sync::Arc::make_mut(&mut row.binding_field_names);
+        let ids = std::sync::Arc::make_mut(&mut row.binding_field_column_ids);
+        for (index, field) in fields.iter().enumerate() {
+            if bindings[index] != CurrentRowBindingField::StoredColumn || ids[index].is_some() {
+                continue;
+            }
+            let stored = mapping.columns.iter().find(|(name, _)| {
+                names[index].as_deref() == Some(name.as_str())
+                    || field.name.as_deref() == Some(app_column_field(name).as_str())
+            });
+            if let Some((name, id)) = stored {
+                names[index] = Some(name.clone());
+                ids[index] = Some(*id);
+            } else {
+                bindings[index] = CurrentRowBindingField::ResultField;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn finish_engine_query_rows_in_schema(
@@ -1018,6 +1079,9 @@ where
         schema_version: SchemaVersionId,
         rows: &mut Vec<CurrentRow>,
     ) -> Result<(), Error> {
+        for row in rows.iter_mut() {
+            self.bind_current_row_columns_in_schema(schema_version, row)?;
+        }
         if query.aggregate.is_some() {
             self.apply_query_order_in_schema(query, schema_version, rows)?;
             apply_query_window(query, rows);
@@ -1225,7 +1289,7 @@ where
                                 "collector terminal key cannot identify its root occurrence",
                             )
                         })?,
-                        CurrentRow::new_with_explicit_binding_fields_and_names(
+                        CurrentRow::new_with_explicit_binding_fields_and_names_and_ids(
                             local.result_table.clone(),
                             record,
                             crate::db::terminal_root_binding_fields(
@@ -1236,6 +1300,13 @@ where
                                     ))?,
                             ),
                             crate::db::terminal_root_binding_field_names(
+                                local
+                                    .terminal_root_layout()
+                                    .ok_or(Error::InvalidStoredValue(
+                                        "collector terminal has no root layout",
+                                    ))?,
+                            ),
+                            crate::db::terminal_root_binding_field_column_ids(
                                 local
                                     .terminal_root_layout()
                                     .ok_or(Error::InvalidStoredValue(
@@ -1322,6 +1393,9 @@ where
                 rows.push(row);
             }
             edges.push(read_edge);
+        }
+        for row in &mut rows {
+            self.bind_current_row_columns_in_schema(local.result_schema_version, row)?;
         }
         Ok(LocalMaintainedRelationSnapshot {
             snapshot: RelationSnapshot {

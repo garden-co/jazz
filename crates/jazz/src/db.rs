@@ -5610,12 +5610,10 @@ fn terminal_subscription_output_row(
 pub(crate) fn terminal_root_binding_fields(
     layout: &TerminalRootLayout,
 ) -> Vec<CurrentRowBindingField> {
-    let binding_for_carrier = |carrier| match carrier {
-        TerminalRootCarrier::CurrentRow => CurrentRowBindingField::StoredColumn,
-        TerminalRootCarrier::Logical => CurrentRowBindingField::ResultField,
-    };
+    // Only explicit column bindings identify stored cells. Root keys and
+    // bookkeeping slots are result fields, irrespective of their value carrier.
     let mut fields =
-        vec![binding_for_carrier(layout.carrier); layout.root_descriptor.fields().len()];
+        vec![CurrentRowBindingField::ResultField; layout.root_descriptor.fields().len()];
     for field in &layout.public_fields {
         fields[field.slot] = match field.binding {
             AppRowFieldBinding::StoredColumn { .. } => CurrentRowBindingField::StoredColumn,

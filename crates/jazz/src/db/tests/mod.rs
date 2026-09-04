@@ -118,7 +118,8 @@ fn terminal_root_binding_fields_preserve_hybrid_public_slot_provenance() {
                 },
             },
         ],
-        carrier: TerminalRootCarrier::Logical,
+        // A physical value carrier does not make the root UUID a stored column.
+        carrier: TerminalRootCarrier::CurrentRow,
     };
 
     assert_eq!(

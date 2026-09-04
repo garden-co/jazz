@@ -1571,9 +1571,10 @@ where
                 .iter()
                 .filter(|(_, weight)| *weight > 0)
                 .map(|(record, _)| {
-                    CurrentRow::new(
+                    CurrentRow::new_with_binding_fields(
                         shape.query().table.clone(),
                         OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                        CurrentRowBindingField::ResultField,
                     )
                 })
                 .collect()
@@ -1599,7 +1600,10 @@ where
         // silently discard the recursive payload before the client can read
         // it.  Flat rows still need this boundary to remove materializer-only
         // physical fields.
-        if shape.query().flat_join.is_none() && shape.query().array_subqueries.is_empty() {
+        if shape.query().aggregate.is_none()
+            && shape.query().flat_join.is_none()
+            && shape.query().array_subqueries.is_empty()
+        {
             normalize_public_current_rows(&table_schema, &mut rows)?;
         }
         let query = shape.query();
@@ -3948,6 +3952,8 @@ fn aggregate_current_row_from_record(
 ) -> Result<CurrentRow, Error> {
     let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
     let mut values = vec![Value::Uuid(row_uuid.0)];
+    let mut bindings = vec![CurrentRowBindingField::ResultField];
+    let mut names = vec![None];
     let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
         "aggregate record has no aggregate query shape",
     ))?;
@@ -3970,6 +3976,8 @@ fn aggregate_current_row_from_record(
             ))?;
         fields.push((logical, field.value_type.clone()));
         values.push(record.get_idx(index)?);
+        bindings.push(CurrentRowBindingField::StoredColumn);
+        names.push(Some(group_by.clone()));
     }
 
     for output in &aggregate.aggregates {
@@ -3991,15 +3999,19 @@ fn aggregate_current_row_from_record(
             ))?;
         fields.push((app_field, field.value_type.clone()));
         values.push(record.get_idx(index)?);
+        bindings.push(CurrentRowBindingField::ResultField);
+        names.push(Some(output.alias.clone()));
     }
     let descriptor = RecordDescriptor::new(fields);
     let raw = descriptor.create(&values)?;
     // This synthetic descriptor deliberately uses `_app_{column}` names for
     // the grouped source column and aggregate outputs. Those are internal
     // application slots, not public result fields named `_app_{column}`.
-    Ok(CurrentRow::new(
+    Ok(CurrentRow::new_with_explicit_binding_fields_and_names(
         query.table.clone(),
         OwnedRecord::new(raw, descriptor),
+        bindings,
+        names,
     ))
 }
 

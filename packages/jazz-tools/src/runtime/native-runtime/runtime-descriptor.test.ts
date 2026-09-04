@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { col } from "../../dsl.js";
+import { defineApp } from "../../typed-app.js";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord } from "./native-codec.js";
 import { decodeNestedRowBytes, formatUuid, rowsFromBatches } from "./native-runtime-adapter.js";
@@ -488,3 +490,35 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   }
   return out;
 }
+
+it("preserves stored application columns named like internal metadata", () => {
+  const app = defineApp({
+    notes: { parents: col.string(), schema_version: col.string(), authored_columns: col.string() },
+  });
+  const names = ["parents", "schema_version", "authored_columns"];
+  const rows = rowsFromBatches(
+    [
+      {
+        table: "notes",
+        descriptor: names.map((outputName, id) => ({
+          kind: "stored-column" as const,
+          id,
+          outputName,
+          valueType: { tag: 8 } as const,
+        })),
+        rows: [
+          {
+            rowId: new Uint8Array(16),
+            deleted: false,
+            raw: createRecord(
+              names.map((name) => ({ name: `_app_${name}`, valueType: { tag: 8 } as const })),
+              names.map(() => Uint8Array.from([2, ...new TextEncoder().encode("kept")])),
+            ),
+          },
+        ],
+      },
+    ],
+    app.wasmSchema,
+  );
+  expect([...rows[0]!.valuesByColumn!.keys()]).toEqual(names);
+});

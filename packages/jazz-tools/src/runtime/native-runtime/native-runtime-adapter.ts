@@ -5916,7 +5916,7 @@ function nativeRowFieldPlans(
   for (let index = 0; index < batch.descriptor.length; index += 1) {
     const field = batch.descriptor[index];
     const fieldName = field?.kind === "stored-column" ? field.outputName : field?.name;
-    if (!fieldName || isInternalField(fieldName)) {
+    if (!fieldName || (field?.kind === "result-field" && isInternalField(fieldName))) {
       continue;
     }
 

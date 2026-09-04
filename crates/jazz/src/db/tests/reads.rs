@@ -1961,6 +1961,8 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
         .limit(1);
     let prepared = db.prepare_query(&query).unwrap();
     let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    crate::binding_codec::encode_relation_snapshot(&snapshot)
+        .expect("structured snapshot retains complete native field provenance");
 
     assert_eq!(row_ids(&snapshot.rows), vec![project]);
     assert!(snapshot.edges.is_empty());
@@ -2600,4 +2602,46 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
         ),
         vec![write.row_uuid()]
     );
+}
+
+/// Alice reads stored and derived fields through Db and the native binding codec.
+#[test]
+fn native_binding_encodes_plain_projected_and_aggregate_public_reads() {
+    let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("binding_todos").column("title", PublicColumnType::Text),
+    ));
+    let alice = AuthorSubject::for_test_bytes([0xea; 16]);
+    let db = open_db(0xea, alice, &schema);
+    db.insert(
+        "binding_todos",
+        BTreeMap::from([("title".to_owned(), Value::String("hello".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    for query in [
+        Query::from("binding_todos"),
+        Query::from("binding_todos").select(["title"]),
+        Query::from("binding_todos").count(),
+        Query::from("binding_todos").count().group_by("title"),
+    ] {
+        let prepared = db.prepare_query(&query).unwrap();
+        let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+        assert_eq!(rows.len(), 1);
+        crate::binding_codec::encode_rows(&rows)
+            .expect("public read must encode at native boundary");
+        let batches = crate::binding_codec::row_batches(&rows);
+        assert!(matches!(
+            batches[0].descriptor[0].name,
+            crate::binding_codec::RowDescriptorFieldName::ResultField { name: "row_uuid" }
+        ));
+        if query.aggregate.is_none() {
+            assert!(batches[0].descriptor.iter().any(|field| matches!(
+                field.name,
+                crate::binding_codec::RowDescriptorFieldName::StoredColumn {
+                    output_name: "title",
+                    ..
+                }
+            )));
+        }
+    }
 }

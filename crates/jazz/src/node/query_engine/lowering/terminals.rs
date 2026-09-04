@@ -3016,6 +3016,15 @@ fn aggregate_app_row_field_bindings(
     let mut bindings = BTreeMap::new();
     for value in group_by {
         let field = aggregate_source_field_name(value, source)?;
+        if matches!(value, NormalizedValueRef::RowId(_)) {
+            bindings.insert(
+                field,
+                AppRowFieldBinding::ResultField {
+                    name: "id".to_owned(),
+                },
+            );
+            continue;
+        }
         let output_name = logical_app_column(field.as_str()).to_owned();
         let id = source
             .stored_column_ids

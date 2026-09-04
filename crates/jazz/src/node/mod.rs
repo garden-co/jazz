@@ -1935,6 +1935,31 @@ impl CurrentRow {
             .enumerate()
             .filter_map(move |(idx, (field, (binding, public_name)))| {
                 let raw_name = field.name.as_ref()?.as_str();
+                if public_name.is_none()
+                    && (matches!(
+                        raw_name,
+                        "$createdBy"
+                            | "$createdAt"
+                            | "$updatedBy"
+                            | "$updatedAt"
+                            | "created_by"
+                            | "created_at"
+                            | "updated_by"
+                            | "updated_at"
+                            | "branch_key"
+                            | "row_uuid"
+                            | "tx_time"
+                            | "tx_node_id"
+                            | "schema_version"
+                            | "parents"
+                            | "authored_columns"
+                            | "global_time"
+                            | "settle_position"
+                    ) || (raw_name.starts_with("__jazz_")
+                        && self::query_engine::aggregate_output_logical_name(raw_name).is_none()))
+                {
+                    return None;
+                }
                 // Descriptor provenance is part of the public field identity:
                 // a stored `_app_check` denotes application column `check`,
                 // while a result field legitimately named `_app_check` must
