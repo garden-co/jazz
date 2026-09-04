@@ -21,7 +21,7 @@ describe("auth-state", () => {
       jwtToken: makeJwt({
         iss: "https://issuer.example",
         sub: "alice",
-        claims: { role: "reader" },
+        role: "reader",
       }),
     });
 
