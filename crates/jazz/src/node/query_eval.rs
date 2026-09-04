@@ -3953,7 +3953,7 @@ fn aggregate_current_row_from_record(
 ) -> Result<CurrentRow, Error> {
     let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
     let mut values = vec![Value::Uuid(row_uuid.0)];
-    let mut bindings = vec![CurrentRowBindingField::ResultField];
+    let mut bindings = vec![CurrentRowBindingField::HiddenMetadata];
     let mut names = vec![None];
     let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
         "aggregate record has no aggregate query shape",

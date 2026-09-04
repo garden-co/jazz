@@ -1422,6 +1422,20 @@ pub enum CurrentRowBindingField {
     StoredColumn,
     /// A query, relation, collector, or synthetic result field.
     ResultField,
+    /// Public magic provenance; published, but excluded from application-cell equality.
+    PublicProvenance,
+    /// Engine-owned bookkeeping, never an application output.
+    HiddenMetadata,
+}
+
+impl CurrentRowBindingField {
+    /// Called only by source/terminal producers for their explicitly public slots.
+    pub(crate) fn public_result(name: &str) -> Self {
+        match name {
+            "$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt" => Self::PublicProvenance,
+            _ => Self::ResultField,
+        }
+    }
 }
 
 /// Work performed by the durable local-write replay lookup.
@@ -1477,7 +1491,25 @@ pub struct RelationSnapshot {
 impl CurrentRow {
     /// Construct a current row from an encoded projection record.
     pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
-        Self::new_with_binding_fields(table, record, CurrentRowBindingField::StoredColumn)
+        // This constructor owns the physical current-row layout; application
+        // columns are separate `_app_*` slots, so metadata ownership is known here.
+        let bindings = record
+            .descriptor()
+            .fields()
+            .iter()
+            .map(|field| match field.name.as_deref() {
+                Some("$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt") => {
+                    CurrentRowBindingField::PublicProvenance
+                }
+                Some(
+                    "row_uuid" | "tx_time" | "tx_node_id" | "schema_version" | "parents"
+                    | "authored_columns" | "branch_key" | "created_by" | "created_at"
+                    | "updated_by" | "updated_at" | "global_time" | "settle_position",
+                ) => CurrentRowBindingField::HiddenMetadata,
+                _ => CurrentRowBindingField::StoredColumn,
+            })
+            .collect();
+        Self::new_with_explicit_binding_fields(table, record, bindings)
     }
 
     pub(crate) fn new_with_binding_fields(
@@ -1793,7 +1825,7 @@ impl CurrentRow {
             .descriptor()
             .field_index("row_uuid")
             .and_then(|index| self.binding_fields.get(index).copied())
-            .unwrap_or(CurrentRowBindingField::ResultField);
+            .unwrap_or(CurrentRowBindingField::HiddenMetadata);
         let mut binding_fields = vec![row_uuid_field];
         let mut binding_field_names = vec![None];
         let mut binding_field_column_ids = vec![None];
@@ -1823,7 +1855,9 @@ impl CurrentRow {
                 CurrentRowBindingField::StoredColumn => {
                     self.binding_field_column_id_for_column(table, &column.name)
                 }
-                CurrentRowBindingField::ResultField => None,
+                CurrentRowBindingField::ResultField
+                | CurrentRowBindingField::PublicProvenance
+                | CurrentRowBindingField::HiddenMetadata => None,
             });
         }
         if let Some(provenance) = self.provenance()? {
@@ -1837,7 +1871,7 @@ impl CurrentRow {
                     .map(|column| {
                         self.provenance_field_index(column)
                             .and_then(|index| self.binding_fields.get(index).copied())
-                            .unwrap_or(CurrentRowBindingField::ResultField)
+                            .unwrap_or(CurrentRowBindingField::PublicProvenance)
                     }),
             );
             binding_field_names.extend(std::iter::repeat_n(None, 4));
@@ -1847,7 +1881,7 @@ impl CurrentRow {
             values.push(Value::U64(0));
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
-            binding_fields.extend([CurrentRowBindingField::ResultField; 4]);
+            binding_fields.extend([CurrentRowBindingField::PublicProvenance; 4]);
             binding_field_names.extend(std::iter::repeat_n(None, 4));
             binding_field_column_ids.extend(std::iter::repeat_n(None, 4));
         }
@@ -1858,7 +1892,7 @@ impl CurrentRow {
             values.push(Value::U64(0));
             values.push(Value::U64(0));
         }
-        binding_fields.extend([CurrentRowBindingField::ResultField; 2]);
+        binding_fields.extend([CurrentRowBindingField::HiddenMetadata; 2]);
         binding_field_names.extend(std::iter::repeat_n(None, 2));
         binding_field_column_ids.extend(std::iter::repeat_n(None, 2));
         let raw = descriptor.create(&values)?;
@@ -1951,29 +1985,11 @@ impl CurrentRow {
             .enumerate()
             .filter_map(move |(idx, (field, (binding, public_name)))| {
                 let raw_name = field.name.as_ref()?.as_str();
-                if public_name.is_none()
-                    && (matches!(
-                        raw_name,
-                        "$createdBy"
-                            | "$createdAt"
-                            | "$updatedBy"
-                            | "$updatedAt"
-                            | "created_by"
-                            | "created_at"
-                            | "updated_by"
-                            | "updated_at"
-                            | "branch_key"
-                            | "row_uuid"
-                            | "tx_time"
-                            | "tx_node_id"
-                            | "schema_version"
-                            | "parents"
-                            | "authored_columns"
-                            | "global_time"
-                            | "settle_position"
-                    ) || (raw_name.starts_with("__jazz_")
-                        && self::query_engine::aggregate_output_logical_name(raw_name).is_none()))
-                {
+                if matches!(
+                    binding,
+                    CurrentRowBindingField::HiddenMetadata
+                        | CurrentRowBindingField::PublicProvenance
+                ) {
                     return None;
                 }
                 // Descriptor provenance is part of the public field identity:

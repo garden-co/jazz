@@ -1069,12 +1069,18 @@ where
                     ids.push(Some(*id));
                 }
                 Some(AppRowFieldBinding::ResultField { name }) => {
-                    bindings.push(CurrentRowBindingField::ResultField);
+                    bindings.push(CurrentRowBindingField::public_result(name));
                     names.push(Some(name.clone()));
                     ids.push(None);
                 }
                 None => {
-                    bindings.push(CurrentRowBindingField::ResultField);
+                    bindings.push(
+                        schema
+                            .public_field_names
+                            .get(name)
+                            .map(|name| CurrentRowBindingField::public_result(name))
+                            .unwrap_or(CurrentRowBindingField::HiddenMetadata),
+                    );
                     names.push(schema.public_field_names.get(name).cloned());
                     ids.push(None);
                 }
@@ -1118,7 +1124,14 @@ where
                 names[index] = Some(name.clone());
                 ids[index] = Some(*id);
             } else {
-                bindings[index] = CurrentRowBindingField::ResultField;
+                // This path owns a physical source row: catalogue cells were
+                // handled above, and the remaining source slots are metadata.
+                bindings[index] = match field.name.as_deref() {
+                    Some("$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt") => {
+                        CurrentRowBindingField::PublicProvenance
+                    }
+                    _ => CurrentRowBindingField::HiddenMetadata,
+                };
             }
         }
         Ok(())

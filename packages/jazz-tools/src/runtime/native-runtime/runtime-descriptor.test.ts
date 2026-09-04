@@ -522,3 +522,53 @@ it("preserves stored application columns named like internal metadata", () => {
   );
   expect([...rows[0]!.valuesByColumn!.keys()]).toEqual(names);
 });
+
+it("keeps a public metadata-shaped alias beside explicit hidden metadata and public provenance", () => {
+  const schema = {
+    notes: {
+      columns: [{ name: "schema_version", column_type: { type: "Text" }, nullable: false }],
+    },
+  } satisfies WasmSchema;
+  const rawDescriptor = [
+    { name: "schema_version", valueType: { tag: 8 } as const },
+    { name: "schema_version", valueType: { tag: 8 } as const },
+    { name: "$createdAt", valueType: { tag: 3 } as const },
+    { name: "tx_time", valueType: { tag: 3 } as const },
+  ];
+  const timestamp = new Uint8Array(8);
+  new DataView(timestamp.buffer).setBigUint64(0, 123n, true);
+  const rows = rowsFromBatches(
+    [
+      {
+        table: "notes",
+        descriptor: [
+          { kind: "result-field", name: "schema_version", valueType: rawDescriptor[0]!.valueType },
+          {
+            kind: "hidden-metadata",
+            name: "schema_version",
+            valueType: rawDescriptor[1]!.valueType,
+          },
+          { kind: "result-field", name: "$createdAt", valueType: rawDescriptor[2]!.valueType },
+          { kind: "hidden-metadata", name: "tx_time", valueType: rawDescriptor[3]!.valueType },
+        ],
+        rows: [
+          {
+            rowId: new Uint8Array(16),
+            deleted: false,
+            raw: createRecord(rawDescriptor, [
+              Uint8Array.from([2, ...new TextEncoder().encode("public")]),
+              Uint8Array.from([2, ...new TextEncoder().encode("private")]),
+              timestamp,
+              timestamp,
+            ]),
+          },
+        ],
+      },
+    ],
+    schema,
+  );
+  const named = (rows[0] as { valuesByColumn?: Map<string, unknown> }).valuesByColumn!;
+  expect(named.get("schema_version")).toEqual({ type: "Text", value: "public" });
+  expect(named.has("$createdAt")).toBe(true);
+  expect([...named.keys()]).toEqual(["schema_version", "$createdAt"]);
+});

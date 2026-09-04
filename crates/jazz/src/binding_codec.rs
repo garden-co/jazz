@@ -38,6 +38,11 @@ pub enum RowDescriptorFieldName<'a> {
         /// Public result-field name exposed to the native host.
         name: &'a str,
     },
+    /// Producer-owned metadata. Native consumers suppress only this tag (2).
+    HiddenMetadata {
+        /// Engine-owned field name, retained for aligned descriptor decoding.
+        name: &'a str,
+    },
 }
 
 /// One native binding descriptor entry.
@@ -192,9 +197,17 @@ pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
                             .expect("stored native binding fields must carry a physical column id"),
                         output_name: public_name.as_deref().unwrap_or(name),
                     },
-                    CurrentRowBindingField::ResultField => RowDescriptorFieldName::ResultField {
-                        name: public_name.as_deref().unwrap_or(name),
-                    },
+                    CurrentRowBindingField::ResultField
+                    | CurrentRowBindingField::PublicProvenance => {
+                        RowDescriptorFieldName::ResultField {
+                            name: public_name.as_deref().unwrap_or(name),
+                        }
+                    }
+                    CurrentRowBindingField::HiddenMetadata => {
+                        RowDescriptorFieldName::HiddenMetadata {
+                            name: public_name.as_deref().unwrap_or(name),
+                        }
+                    }
                 };
                 RowDescriptorField {
                     name,
@@ -332,5 +345,50 @@ mod tests {
             batches[0].descriptor[1].name,
             RowDescriptorFieldName::ResultField { name: "title" }
         ));
+    }
+    #[test]
+    fn explicit_hidden_metadata_preserves_alias_without_name_override() {
+        // Roles are internal host-ABI metadata, so a row map cannot expose this
+        // distinction. Exercise the real codec and pin the exact native tags.
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("schema_version", ValueType::U64),
+            ("schema_version", ValueType::U64),
+            ("$createdAt", ValueType::U64),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(uuid::Uuid::from_bytes([0x63; 16])),
+                Value::U64(99),
+                Value::U64(1),
+                Value::U64(123),
+            ])
+            .unwrap();
+        let row = CurrentRow::new_with_explicit_binding_fields(
+            "items",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                CurrentRowBindingField::HiddenMetadata,
+                CurrentRowBindingField::HiddenMetadata,
+                CurrentRowBindingField::ResultField,
+                CurrentRowBindingField::PublicProvenance,
+            ],
+        );
+        assert_eq!(row.binding_field_names(), &[None, None, None, None]);
+        let rows = [row];
+        let batches = row_batches(&rows);
+        assert_eq!(
+            postcard::to_allocvec(&batches[0].descriptor[1].name).unwrap(),
+            b"\x02\x0eschema_version"
+        );
+        assert_eq!(
+            postcard::to_allocvec(&batches[0].descriptor[2].name).unwrap(),
+            b"\x01\x0eschema_version"
+        );
+        assert_eq!(
+            batches[0].descriptor[3].name,
+            RowDescriptorFieldName::ResultField { name: "$createdAt" }
+        );
+        assert!(!encode_rows(&rows).unwrap().is_empty());
     }
 }

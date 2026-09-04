@@ -2746,3 +2746,114 @@ fn relation_alias_cannot_replace_internal_root_row_key() {
         "{error}"
     );
 }
+
+/// Alice's real Db preserves source IDs, hidden metadata, visible aliases and
+/// public provenance across reads and subscription resets. Native descriptors
+/// are inspected because ordinary Rust value access cannot observe host tags.
+#[test]
+fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joined_rows() {
+    use crate::binding_codec::{
+        RowDescriptorFieldName, encode_relation_snapshot, encode_rows, row_batches,
+    };
+    let schema = relation_schema();
+    let db = open_db(0x91, AuthorSubject::for_test_bytes([0x91; 16]), &schema);
+    for (table, id, fields) in [
+        (
+            "users",
+            0xa1,
+            BTreeMap::from([("name".to_owned(), Value::String("reader".to_owned()))]),
+        ),
+        (
+            "todos",
+            0x11,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("task".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+            ]),
+        ),
+    ] {
+        db.insert(
+            table,
+            fields,
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let current = prepared_all(&db, &Query::from("todos"), ReadOpts::default());
+    let current_batches = row_batches(&current);
+    let title_id = current_batches[0]
+        .descriptor
+        .iter()
+        .find_map(|field| match field.name {
+            RowDescriptorFieldName::StoredColumn {
+                id,
+                output_name: "title",
+            } => Some(id),
+            _ => None,
+        })
+        .expect("title has a stored binding");
+    // Grouped one-shot publication is covered here. Grouped reset currently
+    // fails earlier in the existing aggregate group-identity regression set;
+    // that compiler repair and reset receipt are tracked separately.
+    let grouped = prepared_all(
+        &db,
+        &Query::from("todos").count().group_by("title"),
+        ReadOpts::default(),
+    );
+    let grouped_batches = row_batches(&grouped);
+    assert!(
+        grouped_batches[0]
+            .descriptor
+            .iter()
+            .any(|field| matches!(field.name,
+        RowDescriptorFieldName::StoredColumn { id, output_name: "title" } if id == title_id))
+    );
+    assert!(current_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::HiddenMetadata { name: "tx_time" }
+    )));
+    assert!(current_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::ResultField { name: "$createdAt" }
+    )));
+    for query in [
+        Query::from("todos").select(["title", "$createdAt", "$updatedBy"]),
+        Query::from("todos").aggregate([crate::query::Aggregate::count().alias("schema_version")]),
+        Query::from("users").array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id")),
+        Query::from("users").join_via_column("todos", "owner_id", "id", []),
+    ] {
+        let rows = prepared_all(&db, &query, ReadOpts::default());
+        assert!(!rows.is_empty());
+        assert!(
+            !encode_rows(&rows)
+                .expect("all returned rows have finalized native bindings")
+                .is_empty()
+        );
+        if let Some(aggregate) = &query.aggregate {
+            let batches = row_batches(&rows);
+            if aggregate.group_by.is_some() {
+                assert!(batches[0].descriptor.iter().any(|field| matches!(field.name,
+                    RowDescriptorFieldName::StoredColumn { id, output_name: "title" } if id == title_id)));
+            }
+            assert!(batches[0].descriptor.iter().any(|field| matches!(field.name,
+                RowDescriptorFieldName::ResultField { name } if name == aggregate.aggregates[0].alias)));
+        }
+        if query.table == "todos" && query.aggregate.is_none() {
+            let batches = row_batches(&rows);
+            for name in ["$createdAt", "$updatedBy"] {
+                assert!(batches[0].descriptor.iter().any(|field| matches!(field.name, RowDescriptorFieldName::ResultField { name: published } if published == name)), "projected public provenance {name} remains visible");
+            }
+        }
+        let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+        let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+        assert!(!snapshot.rows.is_empty());
+        assert!(
+            !encode_relation_snapshot(&snapshot)
+                .expect("reset producer retains finalized bindings")
+                .is_empty()
+        );
+    }
+}

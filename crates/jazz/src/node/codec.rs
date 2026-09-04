@@ -6025,10 +6025,16 @@ pub(super) fn current_row_from_positional_cells(
     // This app-facing positional projection uses logical schema names, not
     // private `_app_{column}` storage carriers. Preserve that distinction for
     // any later source re-encoding.
-    Ok(CurrentRow::new_with_binding_fields(
+    let bindings = std::iter::once(CurrentRowBindingField::HiddenMetadata)
+        .chain(std::iter::repeat_n(
+            CurrentRowBindingField::ResultField,
+            table.columns.len(),
+        ))
+        .collect();
+    Ok(CurrentRow::new_with_explicit_binding_fields(
         table.name.clone(),
         OwnedRecord::new(raw, descriptor),
-        CurrentRowBindingField::ResultField,
+        bindings,
     ))
 }
 

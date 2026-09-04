@@ -5634,11 +5634,13 @@ pub(crate) fn terminal_root_binding_fields(
     // Only explicit column bindings identify stored cells. Root keys and
     // bookkeeping slots are result fields, irrespective of their value carrier.
     let mut fields =
-        vec![CurrentRowBindingField::ResultField; layout.root_descriptor.fields().len()];
+        vec![CurrentRowBindingField::HiddenMetadata; layout.root_descriptor.fields().len()];
     for field in &layout.public_fields {
         fields[field.slot] = match field.binding {
             AppRowFieldBinding::StoredColumn { .. } => CurrentRowBindingField::StoredColumn,
-            AppRowFieldBinding::ResultField { .. } => CurrentRowBindingField::ResultField,
+            AppRowFieldBinding::ResultField { ref name } => {
+                CurrentRowBindingField::public_result(name)
+            }
         };
     }
     fields
