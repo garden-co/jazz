@@ -5475,10 +5475,14 @@ fn materialize_subscription_terminal_record(
                 "retained terminal root position is outside snapshot",
             )
         })?;
-        *root = CurrentRow::new_with_explicit_binding_fields(
-            root.table().to_owned(),
+        let table = root.table().to_owned();
+        let binding_fields = root.binding_fields().to_vec();
+        let binding_field_names = root.binding_field_names().to_vec();
+        *root = CurrentRow::new_with_explicit_binding_fields_and_names(
+            table,
             record.record()?,
-            root.binding_fields().to_vec(),
+            binding_fields,
+            binding_field_names,
         );
     }
     Ok(())
@@ -5579,10 +5583,11 @@ fn terminal_subscription_output_row(
 
     Ok(SubscriptionOutputRow {
         occurrence_id,
-        row: CurrentRow::new_with_explicit_binding_fields(
+        row: CurrentRow::new_with_explicit_binding_fields_and_names(
             table.to_owned(),
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
             terminal_root_binding_fields(layout),
+            terminal_root_binding_field_names(layout),
         ),
         previous_index,
         index,
@@ -5608,6 +5613,23 @@ pub(crate) fn terminal_root_binding_fields(
         fields[field.slot] = binding_for_carrier(field.carrier);
     }
     fields
+}
+
+/// Public logical names for the same terminal descriptor slots.  A terminal
+/// projection can retain its source's `user_{column}` carrier name while its
+/// public output is simply `{column}`.  Native hosts must receive the latter
+/// without guessing from a prefix, while truly logical `user_*` fields remain
+/// untouched.
+pub(crate) fn terminal_root_binding_field_names(
+    layout: &TerminalRootLayout,
+) -> Vec<Option<String>> {
+    let mut names = vec![None; layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        if field.carrier == TerminalRootCarrier::Logical {
+            names[field.slot] = Some(field.name.clone());
+        }
+    }
+    names
 }
 
 /// Decode the Groove ordered key used to address one root output occurrence.

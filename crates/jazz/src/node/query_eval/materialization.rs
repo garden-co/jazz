@@ -1225,10 +1225,17 @@ where
                                 "collector terminal key cannot identify its root occurrence",
                             )
                         })?,
-                        CurrentRow::new_with_explicit_binding_fields(
+                        CurrentRow::new_with_explicit_binding_fields_and_names(
                             local.result_table.clone(),
                             record,
                             crate::db::terminal_root_binding_fields(
+                                local
+                                    .terminal_root_layout()
+                                    .ok_or(Error::InvalidStoredValue(
+                                        "collector terminal has no root layout",
+                                    ))?,
+                            ),
+                            crate::db::terminal_root_binding_field_names(
                                 local
                                     .terminal_root_layout()
                                     .ok_or(Error::InvalidStoredValue(

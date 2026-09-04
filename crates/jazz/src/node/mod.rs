@@ -1383,6 +1383,11 @@ pub struct CurrentRow {
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
     binding_fields: std::sync::Arc<Vec<CurrentRowBindingField>>,
+    /// Public logical names for descriptor slots whose internal carrier name
+    /// is not itself the query-visible field name.  A projected terminal can
+    /// carry a logical `user_title` slot while exposing it as `title`; this
+    /// mapping belongs to the producer boundary, not host-side inference.
+    binding_field_names: std::sync::Arc<Vec<Option<String>>>,
 }
 
 /// The native-host interpretation of one materialized record-descriptor field.
@@ -1473,16 +1478,39 @@ impl CurrentRow {
         record: OwnedRecord,
         binding_fields: Vec<CurrentRowBindingField>,
     ) -> Self {
+        let binding_field_names = vec![None; binding_fields.len()];
+        Self::new_with_explicit_binding_fields_and_names(
+            table,
+            record,
+            binding_fields,
+            binding_field_names,
+        )
+    }
+
+    /// Construct a row with explicit binding provenance and any logical
+    /// descriptor-name overrides supplied by its producer.
+    pub(crate) fn new_with_explicit_binding_fields_and_names(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        binding_fields: Vec<CurrentRowBindingField>,
+        binding_field_names: Vec<Option<String>>,
+    ) -> Self {
         assert_eq!(
             binding_fields.len(),
             record.descriptor().fields().len(),
             "native binding fields must align with their record descriptor"
+        );
+        assert_eq!(
+            binding_field_names.len(),
+            binding_fields.len(),
+            "native binding field names must align with their record descriptor"
         );
         Self {
             table: groove::Intern::new(table.into()),
             record: std::sync::Arc::new(record),
             deleted: false,
             binding_fields: std::sync::Arc::new(binding_fields),
+            binding_field_names: std::sync::Arc::new(binding_field_names),
         }
     }
 
@@ -1500,6 +1528,12 @@ impl CurrentRow {
     #[doc(hidden)]
     pub fn binding_fields(&self) -> &[CurrentRowBindingField] {
         &self.binding_fields
+    }
+
+    /// Producer-supplied public logical names, aligned with [`Self::binding_fields`].
+    #[doc(hidden)]
+    pub fn binding_field_names(&self) -> &[Option<String>] {
+        &self.binding_field_names
     }
 
     /// Logical table name.
