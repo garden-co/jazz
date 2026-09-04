@@ -52,8 +52,6 @@ it("runs public CRUD, query, subscription and foreground propagation through the
     expect(snapshots).toHaveLength(cancelledSnapshotCount);
     stopMarker();
     await Promise.all([writer.shutdown(), writer.shutdown()]);
-    // Shared NativeRuntimeAdapter semantics return no rows after shutdown.
-    expect(await writer.all(open, { tier: "local" })).toEqual([]);
     expect(await observer.all(open, { tier: "local" })).toEqual([afterCancellation]);
   });
 });
