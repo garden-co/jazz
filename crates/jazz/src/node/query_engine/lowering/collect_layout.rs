@@ -104,6 +104,7 @@ pub(super) fn collect_layout(
     }
     let mut next_slot = 0usize;
     let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
+    disambiguate_collect_fields(&mut root_fields, &slots);
     Ok(CollectLayout {
         root_fields,
         root_occurrence_inputs,
@@ -113,6 +114,29 @@ pub(super) fn collect_layout(
         root_limit: TopByLimit::Unbounded,
         slots,
     })
+}
+
+// Public collection aliases may equal a stored column's internal carrier name.
+// Keep aliases intact and move only the carrier; binding metadata retains the
+// stored column's source identity and public name.
+fn disambiguate_collect_fields(fields: &mut [CollectFlatField], slots: &[CollectSlotLayout]) {
+    let mut occupied = fields
+        .iter()
+        .map(|field| field.output.clone())
+        .chain(slots.iter().map(|slot| slot.collection_field.clone()))
+        .collect::<BTreeSet<_>>();
+    for (index, field) in fields.iter_mut().enumerate() {
+        if slots
+            .iter()
+            .any(|slot| slot.collection_field == field.output)
+        {
+            let mut candidate = format!("__collect_stored_{index}");
+            while !occupied.insert(candidate.clone()) {
+                candidate.push('_');
+            }
+            field.output = candidate;
+        }
+    }
 }
 
 fn collect_unwrapped_output_type(

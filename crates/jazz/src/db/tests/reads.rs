@@ -2651,3 +2651,54 @@ fn native_binding_encodes_plain_projected_and_aggregate_public_reads() {
         }
     }
 }
+
+#[test]
+fn relation_alias_does_not_collide_with_stored_column_carrier() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("review_parents")
+                    .column("check", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("review_children")
+                    .nullable_fk_column("parent", "review_parents"),
+            ),
+    );
+    let db = open_db(0xed, AuthorSubject::for_test_bytes([0xed; 16]), &schema);
+    let parent = db
+        .insert(
+            "review_parents",
+            BTreeMap::from([("check".to_owned(), Value::String("stored".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    db.insert(
+        "review_children",
+        BTreeMap::from([(
+            "parent".to_owned(),
+            Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    let query = Query::from("review_parents").array_subquery(
+        ArraySubquery::new("_app_check", "review_children", "parent", "id").select(["id"]),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    let batches = crate::binding_codec::row_batches(&snapshot.rows);
+    eprintln!("ALIAS_DESCRIPTOR {:?}", batches[0].descriptor);
+    assert!(batches[0].descriptor.iter().any(|f| matches!(
+        f.name,
+        crate::binding_codec::RowDescriptorFieldName::StoredColumn {
+            output_name: "check",
+            ..
+        }
+    )));
+    assert!(batches[0].descriptor.iter().any(|f| matches!(
+        f.name,
+        crate::binding_codec::RowDescriptorFieldName::ResultField { name: "_app_check" }
+    )));
+}

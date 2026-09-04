@@ -28,7 +28,7 @@ fn public_root_field_name(source: &ResolvedSource, field: &CollectFlatField) -> 
         .iter()
         .any(|column| column.name == logical)
     {
-        logical_app_column(&field.output).to_owned()
+        logical.to_owned()
     } else {
         // Collector slots already carry their public path field as their
         // physical descriptor name. Do not infer from a reserved-looking

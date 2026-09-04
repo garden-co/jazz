@@ -28,26 +28,26 @@ use super::maintained_subscription_view::{
 use super::query_engine::BranchViewSourceBase;
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
-    AppProjectionTree, AppRowOutputRequest, AppRowSchema, CapabilityReport, ClaimPath, ClosurePath,
-    ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
-    ContentVersionSource, CorrelationRequirement, DataSource, DeletionRegisterSource,
-    FieldProjection, FieldRequirement, FrontierId, JoinContribution,
-    JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape, NormalizedShapeIdentity,
-    NormalizedValueRef, OrderKey as NormalizedOrderKey, OutputTerminalSchema, OverlayRef,
-    OverlayStack, PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext,
-    PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
-    ProgramBinding, ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId,
-    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramRequest, QueryReadSet,
-    ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
-    ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
-    RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
-    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
-    SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
-    SourceGraphPreparer, SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath,
-    SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
-    StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
-    aggregate_output_column, aggregate_output_field, app_column_field,
+    AppProjectionTree, AppRowFieldBinding, AppRowOutputRequest, AppRowSchema, CapabilityReport,
+    ClaimPath, ClosurePath, ClosurePathSegment, ClosureRootGate,
+    ComparisonOp as NormalizedComparisonOp, ContentVersionSource, CorrelationRequirement,
+    DataSource, DeletionRegisterSource, FieldProjection, FieldRequirement, FrontierId,
+    JoinContribution, JoinMode as NormalizedJoinMode, LensSelection, NormalizedRowSetShape,
+    NormalizedShapeIdentity, NormalizedValueRef, OrderKey as NormalizedOrderKey,
+    OutputTerminalSchema, OverlayRef, OverlayStack, PathCardinality, PathHolePolicy,
+    PayloadProjection, PolicyContext, PolicyDecisionRole, PolicyEnforcementMode,
+    PredicateExpr as NormalizedPredicateExpr, ProgramBinding, ProgramClaimParam, ProgramFactKey,
+    ProgramOutputSchemas, ProgramPathId, ProvenanceField, QueryAuthorizationMode, QueryProgram,
+    QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView, RequestedReadSet,
+    RequestedSourceStage, ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef,
+    RowIdRef, RowProjection, RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId,
+    RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
+    SchemaProjection, SortDirection as NormalizedSortDirection, SourceAuthorizationRequest,
+    SourceExpr, SourceGap, SourceGraphPreparer, SourceId, SourceMetadataFields,
+    SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
+    SourceResolutionError, SourceRole, SourceRowShape, StorageSchemaSelection, TypedOutputField,
+    UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
+    aggregate_output_app_field, aggregate_output_column, aggregate_output_field, app_column_field,
     authorized_deletion_preimage_source_request, claim_param_field, claim_path_from_param_field,
     left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
     route_param_field,
@@ -2406,7 +2406,7 @@ where
         };
         let snapshots = snapshots_result?;
         retire_result?;
-        self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots)
+        self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots, &program)
             .await
     }
 
@@ -3015,6 +3015,7 @@ where
                 shape,
                 &ReadViewSpec::default(),
                 &snapshots,
+                &program,
             )
             .await?;
         let predicate_read = PredicateRead {

@@ -731,8 +731,9 @@ where
         shape: &ValidatedQuery,
         read_view: &ReadViewSpec,
         snapshots: &MultisinkDeltas,
+        program: &QueryProgram,
     ) -> Result<RelationSnapshot, Error> {
-        let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots)?;
+        let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots, program)?;
         let root_count = root_rows.len();
         // Groove's app-rows terminal is the sole structured-output owner.
         // Jazz transports its recursive roots; relation facts are not a second
@@ -1010,6 +1011,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         snapshots: &MultisinkDeltas,
+        program: &QueryProgram,
     ) -> Result<Vec<CurrentRow>, Error> {
         let Some(app_rows) = snapshots.get(JAZZ_APP_ROWS_SINK) else {
             return Err(Error::QueryLowering(
@@ -1029,10 +1031,59 @@ where
         // Multisink records are transport-key ordered. Restore public root rank
         // while retaining the lowered program's membership and window.
         for row in &mut rows {
-            self.bind_current_row_columns_in_schema(shape.schema_version(), row)?;
+            if shape.query().array_subqueries.is_empty() {
+                self.bind_current_row_columns_in_schema(shape.schema_version(), row)?;
+            } else {
+                Self::bind_compiled_app_row_fields(row, program)?;
+            }
         }
         self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         Ok(rows)
+    }
+
+    fn bind_compiled_app_row_fields(
+        row: &mut CurrentRow,
+        program: &QueryProgram,
+    ) -> Result<(), Error> {
+        let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+        let schema = outputs
+            .iter()
+            .find_map(|output| match output {
+                OutputTerminalSchema::AppRows(schema) => Some(schema),
+                _ => None,
+            })
+            .ok_or(Error::InvalidStoredValue(
+                "compiled query has no application row schema",
+            ))?;
+        let mut bindings = Vec::new();
+        let mut names = Vec::new();
+        let mut ids = Vec::new();
+        for field in row.record.descriptor().fields() {
+            let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                "application row field is unnamed",
+            ))?;
+            match schema.field_bindings.get(name) {
+                Some(AppRowFieldBinding::StoredColumn { id, output_name }) => {
+                    bindings.push(CurrentRowBindingField::StoredColumn);
+                    names.push(Some(output_name.clone()));
+                    ids.push(Some(*id));
+                }
+                Some(AppRowFieldBinding::ResultField { name }) => {
+                    bindings.push(CurrentRowBindingField::ResultField);
+                    names.push(Some(name.clone()));
+                    ids.push(None);
+                }
+                None => {
+                    bindings.push(CurrentRowBindingField::ResultField);
+                    names.push(schema.public_field_names.get(name).cloned());
+                    ids.push(None);
+                }
+            }
+        }
+        row.binding_fields = std::sync::Arc::new(bindings);
+        row.binding_field_names = std::sync::Arc::new(names);
+        row.binding_field_column_ids = std::sync::Arc::new(ids);
+        Ok(())
     }
 
     /// Complete metadata for physical current rows at the schema-aware producer
