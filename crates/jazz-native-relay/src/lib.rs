@@ -4874,8 +4874,20 @@ mod tests {
     #[derive(serde::Deserialize)]
     struct DecodedForegroundRowBatch {
         table: String,
-        descriptor: RecordDescriptor,
+        descriptor: Vec<DecodedForegroundDescriptorField>,
         rows: Vec<DecodedForegroundRow>,
+    }
+
+    #[derive(serde::Deserialize)]
+    enum DecodedForegroundFieldName {
+        StoredColumn { id: u64, output_name: String },
+        ResultField { name: String },
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DecodedForegroundDescriptorField {
+        name: DecodedForegroundFieldName,
+        value_type: ValueType,
     }
 
     #[derive(serde::Deserialize)]
@@ -4906,7 +4918,25 @@ mod tests {
             "the exact row identity survives relay delivery"
         );
         assert!(!row.deleted, "the persisted row remains live");
-        let record = BorrowedRecord::new(&row.raw, &batch.descriptor);
+        assert!(matches!(&batch.descriptor[0].name,
+            DecodedForegroundFieldName::ResultField { name } if name == "row_uuid"));
+        assert!(matches!(&batch.descriptor[1].name,
+            DecodedForegroundFieldName::StoredColumn { output_name, .. } if output_name == "title"));
+        let mut stored_ids = std::collections::BTreeSet::new();
+        let descriptor = RecordDescriptor::new(batch.descriptor.iter().map(|field| {
+            let name = match &field.name {
+                DecodedForegroundFieldName::StoredColumn { id, output_name } => {
+                    assert!(
+                        stored_ids.insert(*id),
+                        "fixture stored columns have distinct physical ids"
+                    );
+                    output_name.as_str()
+                }
+                DecodedForegroundFieldName::ResultField { name } => name.as_str(),
+            };
+            (name, field.value_type.clone())
+        }));
+        let record = BorrowedRecord::new(&row.raw, &descriptor);
         let values = record
             .to_values()
             .expect("the row decodes through its binding descriptor");
