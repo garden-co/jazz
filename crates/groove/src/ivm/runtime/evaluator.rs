@@ -121,28 +121,43 @@ mod collect_by_state_tests {
         let first = b"first".to_vec();
         let second = b"second".to_vec();
         let order = (Vec::new(), Bytes::from_static(b"record"));
+        let changed_order = (Vec::new(), Bytes::from_static(b"changed-record"));
         let mut live = SparseGroups::default();
         live.get_or_default(first.clone()).set(order.clone(), 1);
+        live.get_or_default(second.clone()).set(order.clone(), 1);
         live.commit_overlay();
+        let first_base = Rc::as_ptr(&live.get(&first).expect("installed first group").base);
 
         let mut staged = live.clone();
-        staged.get_or_default(second.clone()).set(order, 1);
+        staged
+            .get_or_default(first.clone())
+            .set(changed_order.clone(), 1);
 
         // This is the scale canary: a tick changing one group must retain the
         // installed outer map, rather than cloning every unrelated group.
         assert!(Rc::ptr_eq(&live.base, &staged.base));
-        assert_eq!(live.keys(), BTreeSet::from([first.clone()]));
+        assert_eq!(live.keys(), BTreeSet::from([first.clone(), second.clone()]));
         assert_eq!(
             staged.keys(),
             BTreeSet::from([first.clone(), second.clone()])
         );
-        assert!(staged.get(&first).is_some());
+        assert_eq!(
+            staged
+                .get(&first)
+                .and_then(|group| group.get(&changed_order)),
+            Some(&1)
+        );
         assert!(staged.get(&second).is_some());
 
         drop(live);
         staged.commit_overlay();
         assert!(staged.overlay.is_empty());
         assert_eq!(staged.keys(), BTreeSet::from([first, second]));
+        assert_eq!(
+            Rc::as_ptr(&staged.get(b"first").expect("committed first group").base),
+            first_base,
+            "folding a changed group must not copy its untouched occurrences"
+        );
     }
 }
 
@@ -171,11 +186,21 @@ impl SparseGroups {
 
     pub(super) fn get_or_default(&mut self, key: Vec<u8>) -> &mut CollectByGroup {
         let base = &self.base;
-        Rc::make_mut(&mut self.overlay)
-            .entry(key.clone())
-            .or_insert_with(|| Some(base.get(&key).cloned().unwrap_or_default()))
-            .as_mut()
-            .expect("present group is never removed before mutation")
+        let overlay = Rc::make_mut(&mut self.overlay);
+        let group = match overlay.entry(key.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                // A previous retraction can leave a tombstone in the staged
+                // overlay. A later delta in the same tick must revive it.
+                if entry.get().is_none() {
+                    entry.insert(Some(base.get(&key).cloned().unwrap_or_default()));
+                }
+                entry.into_mut()
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(base.get(&key).cloned().unwrap_or_default()))
+            }
+        };
+        group.as_mut().expect("revived group is present")
     }
 
     pub(super) fn remove_empty_touched_groups<I>(&mut self, keys: I)
@@ -192,6 +217,22 @@ impl SparseGroups {
     pub(super) fn clear(&mut self) {
         self.base = Rc::default();
         self.overlay = Rc::default();
+    }
+
+    /// Rank a present group in the merged ordered map without constructing a
+    /// combined snapshot of all groups.
+    pub(super) fn count_before(&self, key: &[u8]) -> usize {
+        let retained_base = self
+            .base
+            .range(..key.to_vec())
+            .filter(|(candidate, _)| self.overlay.get(*candidate).is_none_or(Option::is_some))
+            .count();
+        let inserted_overlay = self
+            .overlay
+            .range(..key.to_vec())
+            .filter(|(candidate, group)| group.is_some() && !self.base.contains_key(*candidate))
+            .count();
+        retained_base + inserted_overlay
     }
 
     #[cfg(test)]
@@ -212,26 +253,28 @@ impl SparseGroups {
         self.keys().len()
     }
 
-    /// Fold after the installed state was removed, so both outer and inner
-    /// bases are uniquely owned on the normal commit path.
+    /// Fold after the installed state was removed.  Remove a replaced group
+    /// from the uniquely-owned outer map *before* folding its inner overlay:
+    /// the staged group shares that inner base with the old map entry, so
+    /// folding first would make `Rc::make_mut` clone every occurrence.
     pub(super) fn commit_overlay(&mut self) {
         if self.overlay.is_empty() {
             return;
         }
         let overlay = std::mem::take(&mut self.overlay);
         let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|value| (*value).clone());
-        let base = Rc::make_mut(&mut self.base);
+        let mut base =
+            Rc::try_unwrap(std::mem::take(&mut self.base)).unwrap_or_else(|value| (*value).clone());
         for (key, group) in overlay {
-            match group {
-                Some(mut group) => {
-                    group.commit_overlay();
-                    base.insert(key, group);
-                }
-                None => {
-                    base.remove(&key);
-                }
+            // Dropping the pre-image first makes an existing staged group's
+            // occurrence base uniquely owned on the successful install path.
+            base.remove(&key);
+            if let Some(mut group) = group {
+                group.commit_overlay();
+                base.insert(key, group);
             }
         }
+        self.base = Rc::new(base);
     }
 }
 

@@ -296,9 +296,13 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let root_groups_before = direct_tree_slot
-        .is_none()
-        .then(|| touched_group_keys.clone());
+    let root_groups_before = direct_tree_slot.is_none().then(|| {
+        touched_group_keys
+            .iter()
+            .filter(|key| state.groups.get(key).is_some())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    });
     let mut operations = Vec::new();
     for delta in &deltas {
         let group_key =
@@ -470,7 +474,10 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                             "new collect root did not render a terminal row".to_owned(),
                         )
                     })?;
-            let index = root_groups_after.range(..root_key.clone()).count();
+            // Rank against the complete merged group index: untouched parents
+            // remain in the immutable base and still determine terminal
+            // insertion position.
+            let index = state.groups.count_before(root_key);
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
                 root_key: root_key.clone(),
@@ -1512,6 +1519,67 @@ mod root_terminal_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unbounded_collect_insert_keeps_global_parent_order() {
+        let input = record_descriptor();
+        let child = RecordDescriptor::new([("id", ValueType::Uuid)]);
+        let output = RecordDescriptor::new([
+            ("root", ValueType::Uuid),
+            ("joined", ValueType::Uuid),
+            ("rank", ValueType::String),
+            (
+                "children",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+            ),
+        ]);
+        let mut collect_by = collector();
+        collect_by.mode = CollectByMode::Collect;
+        collect_by.child_descriptor = child;
+        collect_by.child_fields = vec![CollectByProjection {
+            field: "root".to_owned(),
+            field_idx: 0,
+            output_name: "id".to_owned(),
+            unwrap_nullable: false,
+        }];
+        collect_by.collection_field = "children".to_owned();
+        collect_by.collection_field_index = 3;
+        let mut state = CollectByIncrementalState::default();
+
+        let opened = update_unbounded_collect_by_terminal_state(
+            input,
+            output,
+            &collect_by,
+            None,
+            &mut state,
+            &[delta(1, 1, "one", 1), delta(3, 3, "three", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(opened.iter().any(|operation| operation.path.is_empty()));
+
+        let inserted = update_unbounded_collect_by_terminal_state(
+            input,
+            output,
+            &collect_by,
+            None,
+            &mut state,
+            &[delta(2, 2, "two", 1)],
+            true,
+        )
+        .unwrap();
+        let inserted_roots = inserted
+            .iter()
+            .filter(|operation| operation.path.is_empty())
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            inserted_roots.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Insert { index: 1, .. },
+                ..
+            }]
+        ));
     }
 
     #[test]
