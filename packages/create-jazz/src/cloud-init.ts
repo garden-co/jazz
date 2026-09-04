@@ -96,6 +96,13 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
   // completed configuration: provision again so writeHostedEnv can fill only
   // the missing/empty placeholders while retaining deliberate user values.
   if (keys.every((key) => existing[key] && existing[key].length > 0)) {
+    try {
+      // This is normally a content no-op, but it tightens an older managed
+      // file's POSIX permissions through the same writer used for updates.
+      writeHostedEnv({ dir, values: existing, keys });
+    } catch {
+      emitWarn("[jazz] Could not secure existing hosted .env permissions.");
+    }
     return;
   }
 

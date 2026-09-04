@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -243,14 +243,14 @@ describe("runHostedInit", () => {
         .spyOn(cloudProvision, "provisionHostedApp")
         .mockResolvedValue({ appId: "should-not-be-used", adminSecret: "x", backendSecret: "y" });
 
-      writeFileSync(
-        join(dir, ".env"),
+      const envPath = join(dir, ".env");
+      const existing =
         "NEXT_PUBLIC_JAZZ_APP_ID=existing-app\n" +
-          "NEXT_PUBLIC_JAZZ_SERVER_URL=https://existing.example.com\n" +
-          "JAZZ_ADMIN_SECRET=some-secret\n" +
-          "BACKEND_SECRET=some-backend-secret\n",
-        "utf8",
-      );
+        "NEXT_PUBLIC_JAZZ_SERVER_URL=https://existing.example.com\n" +
+        "JAZZ_ADMIN_SECRET=some-secret\n" +
+        "BACKEND_SECRET=some-backend-secret\n";
+      writeFileSync(envPath, existing, "utf8");
+      if (process.platform !== "win32") chmodSync(envPath, 0o644);
 
       await runHostedInit({
         dir,
@@ -260,6 +260,12 @@ describe("runHostedInit", () => {
       });
 
       expect(provisionSpy).not.toHaveBeenCalled();
+      expect(readEnv(dir)).toBe(existing);
+      // Windows uses ACLs rather than POSIX mode bits, so this assertion is
+      // intentionally limited to platforms where chmod is the security model.
+      if (process.platform !== "win32") {
+        expect(statSync(envPath).mode & 0o777).toBe(0o600);
+      }
     });
 
     it("does not short-circuit when all hosted keys are empty placeholders", async () => {
