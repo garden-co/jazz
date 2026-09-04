@@ -109,3 +109,30 @@ Existing indexed backfill across schema variants, catalogue restart, and
 rename/physical-ID reuse tests pass in the typed implementation. These are
 same-version behavioral checks, **not** cross-version database receipts. The
 descriptor-codec and payload/digest gaps documented above remain open in #2558.
+
+## Canonical semantic-value and revision boundary
+
+The explicit persisted descriptor helpers now emit/read the existing v1 grammar
+and preserve exact stored names, field order, nested types and enum registry IDs.
+They omit execution bindings without attempting public-name inference. The
+independent contained encoder and decoder agree with these helpers, including
+nested records whose execution bindings differ from their durable names.
+
+Only `settled_result_value_storage_bytes` (and its canonical validator) and
+`flat_join_row_digest_preimage` adopt this boundary in this step. Their outer
+field names (`value` and `flat_join_payload_{ordinal}`) and authoritative value
+types already determine the persisted descriptor; runtime aliases and source
+column IDs do not determine the synthetic key. A U64 group value 4 therefore has
+the original descriptor+value identity bytes. Joined public tuples retain their
+original `JFRD`, version 1, count/length framing and hash, including the existing
+nullable-value normalization.
+
+The original `result_member_storage_codec_has_permanent_tags_and_golden_bytes`
+and `flat_join_row_digest_uses_the_v1_groove_record_envelope` tests now pass
+without changing their golden bytes. The new canonical descriptor proof pins
+the original nested descriptor hash `e7fcf66bb23dd514678c3b3960b69f020935d01a366c83d7b6fda963d2346e0a`.
+The existing broader nested-settled test still calls the experimental execution
+descriptor codec directly when constructing a result payload; that known failing
+boundary remains visible. `ResultCurrent`, aggregate payload recovery, root-layout
+hashes, the binding ABI, and both cross-version database directions remain
+unproven. There is no shared-format-complete claim.

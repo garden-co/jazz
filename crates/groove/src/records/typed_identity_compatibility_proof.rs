@@ -191,3 +191,73 @@ fn physical_index_spelling_changes_the_durable_key_namespace() {
     assert_eq!(contained, b"jazz_1_global_current\0by_physical_app_v1_7\0");
     assert_eq!(typed, b"jazz_1_global_current\0by_physical_user_v1_7\0");
 }
+
+#[test]
+fn canonical_persisted_descriptor_preserves_frozen_names_and_nested_value_bytes() {
+    let descriptor = RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("labels", ValueType::Array(Box::new(ValueType::String))),
+        (
+            "optional_count",
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ),
+    ]);
+    let encoded = encode_persisted_record_descriptor(&descriptor).unwrap();
+    // Existing Jazz durable golden, unchanged from the contained implementation.
+    assert_eq!(
+        blake3::hash(&encoded).to_hex().as_str(),
+        "e7fcf66bb23dd514678c3b3960b69f020935d01a366c83d7b6fda963d2346e0a"
+    );
+    assert_eq!(
+        encoded,
+        contained::encode_record_descriptor(&descriptor).unwrap()
+    );
+    assert_eq!(
+        decode_persisted_record_descriptor(&encoded).unwrap(),
+        descriptor
+    );
+    assert_eq!(
+        contained::decode_record_descriptor(&encoded).unwrap(),
+        descriptor
+    );
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert!(decode_persisted_record_descriptor(&trailing).is_err());
+
+    // Retain exact durable names, even when execution uses distinct logical
+    // bindings; there is deliberately no generic public-name normalization here.
+    let child = typed_child(7);
+    let parent = RecordDescriptor::new([(
+        "children",
+        ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+    )]);
+    let child_raw = child
+        .create(&[Value::U64(4), Value::String("payload".into())])
+        .unwrap();
+    let raw = parent
+        .create(&[Value::Array(vec![Value::Record(OwnedRecord::new(
+            child_raw, child,
+        ))])])
+        .unwrap();
+    let encoded = encode_persisted_record_descriptor(&parent).unwrap();
+    assert_eq!(
+        encoded,
+        contained::encode_record_descriptor(&parent).unwrap()
+    );
+    let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
+    assert_ne!(decoded, parent); // executable bindings are deliberately absent
+    assert_eq!(
+        encode_persisted_record_descriptor(&decoded).unwrap(),
+        encoded
+    );
+    assert_eq!(
+        decoded
+            .create(&decoded.bind(&raw).to_values().unwrap())
+            .unwrap(),
+        raw
+    );
+    assert_eq!(
+        contained::decode_record_descriptor(&encoded).unwrap(),
+        decoded
+    );
+}

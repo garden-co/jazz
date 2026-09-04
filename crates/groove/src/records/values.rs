@@ -1040,6 +1040,129 @@ pub fn decode_record_descriptor(encoded: &[u8]) -> Result<RecordDescriptor, Erro
     Ok(descriptor)
 }
 
+// The persisted descriptor grammar is distinct from execution bindings. Its
+// node record is frozen: tag, name, registry_id, children, strings. FieldIdentity
+// is compiler state and never adds a field to this authoritative encoding.
+fn persisted_descriptor_node() -> &'static RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("tag", ValueType::U8),
+            (
+                "name",
+                ValueType::Nullable(Box::new(ValueType::raw_string())),
+            ),
+            ("registry_id", ValueType::U64),
+            ("children", ValueType::U32),
+            (
+                "strings",
+                ValueType::Array(Box::new(ValueType::raw_string())),
+            ),
+        ])
+    })
+}
+
+fn persisted_descriptor_envelope() -> &'static RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([(
+            "nodes",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(
+                *persisted_descriptor_node(),
+            )))),
+        )])
+    })
+}
+
+/// Encode a canonical persisted descriptor using exact durable field names and
+/// types. Names are taken from `DescriptorField::name`, never inferred from
+/// execution identities or stripped prefixes. Callers must establish that these
+/// names/types are the authoritative value schema before crossing this boundary.
+/// Runtime Name/Slot/NamedSlot bindings are not persisted. Nested descriptors
+/// follow the same rule, preserving enum registry identities and field order.
+pub fn encode_persisted_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, Error> {
+    let mut nodes = Vec::new();
+    descriptor_codec_push_descriptor(&mut nodes, descriptor)?;
+    let node_descriptor = *persisted_descriptor_node();
+    let nodes = nodes
+        .into_iter()
+        .map(|node| {
+            let raw = node_descriptor.create(&[
+                Value::U8(node.tag),
+                Value::Nullable(node.name.map(|name| Box::new(Value::String(name)))),
+                Value::U64(node.registry_id),
+                Value::U32(node.children),
+                Value::Array(node.strings.into_iter().map(Value::String).collect()),
+            ])?;
+            Ok(Value::Record(OwnedRecord::new(raw, node_descriptor)))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    persisted_descriptor_envelope().create(&[Value::Array(nodes)])
+}
+
+/// Decode the canonical persisted descriptor grammar. Execution bindings are
+/// reconstructed by their owning catalogue/query boundary, not by this reader.
+/// The reader accepts one exact canonical tree and rejects trailing bytes.
+pub fn decode_persisted_record_descriptor(encoded: &[u8]) -> Result<RecordDescriptor, Error> {
+    let envelope = persisted_descriptor_envelope();
+    let values = envelope.bind(encoded).to_values()?;
+    if envelope.create(&values)? != encoded {
+        return Err(Error::NonCanonicalRecord);
+    }
+    let [Value::Array(records)] = values.as_slice() else {
+        return Err(Error::NonCanonicalRecord);
+    };
+    if records.len() > DESCRIPTOR_CODEC_MAX_NODES {
+        return Err(Error::LengthOverflow);
+    }
+    let nodes = records
+        .iter()
+        .map(|record| {
+            let Value::Record(record) = record else {
+                return Err(Error::NonCanonicalRecord);
+            };
+            let values = record.to_values()?;
+            let [
+                Value::U8(tag),
+                Value::Nullable(name),
+                Value::U64(registry_id),
+                Value::U32(children),
+                Value::Array(strings),
+            ] = values.as_slice()
+            else {
+                return Err(Error::NonCanonicalRecord);
+            };
+            let name = match name.as_deref() {
+                None => None,
+                Some(Value::String(name)) => Some(name.clone()),
+                Some(_) => return Err(Error::NonCanonicalRecord),
+            };
+            let strings = strings
+                .iter()
+                .map(|value| match value {
+                    Value::String(value) => Ok(value.clone()),
+                    _ => Err(Error::NonCanonicalRecord),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DescriptorCodecNode {
+                tag: *tag,
+                name,
+                identity_name: None,
+                identity_slot: None,
+                registry_id: *registry_id,
+                children: *children,
+                strings,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let mut cursor = 0;
+    let descriptor = descriptor_codec_decode_descriptor(&nodes, &mut cursor)?;
+    if cursor != nodes.len() || encode_persisted_record_descriptor(&descriptor)? != encoded {
+        return Err(Error::NonCanonicalRecord);
+    }
+    Ok(descriptor)
+}
+
 /// Whether a value can be used as an ordered `collect_by` key.
 ///
 /// Nullable values retain the ordering of their inner scalar. Composite values

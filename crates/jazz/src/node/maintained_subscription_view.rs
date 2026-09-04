@@ -2304,7 +2304,7 @@ fn flat_join_row_digest_preimage(
             .enumerate()
             .map(|(index, field)| (format!("flat_join_payload_{index}"), field.ty.clone())),
     );
-    let descriptor_bytes = encode_record_descriptor(&descriptor)?;
+    let descriptor_bytes = groove::records::encode_persisted_record_descriptor(&descriptor)?;
     // The public payload descriptor is the durable contract. An inner join may
     // nevertheless tighten a proven-present `Nullable(T)` runtime field to
     // `T` before the terminal sees it. Restore that wrapper here so the same

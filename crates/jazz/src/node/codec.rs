@@ -3685,7 +3685,7 @@ pub(super) fn settled_result_value_storage_bytes(
     value_type: &records::ValueType,
 ) -> Result<Vec<u8>, Error> {
     let value_descriptor = records::RecordDescriptor::new([("value", value_type.clone())]);
-    let descriptor = records::encode_record_descriptor(&value_descriptor)?;
+    let descriptor = records::encode_persisted_record_descriptor(&value_descriptor)?;
     let value = value_descriptor.create(std::slice::from_ref(value))?;
     let layout = result_member_storage_layout();
     let encoded = layout
@@ -3717,7 +3717,7 @@ fn validate_settled_result_value_storage_bytes(encoded: &[u8]) -> Result<(), Err
             "settled result value encoding is invalid",
         ));
     };
-    let descriptor = records::decode_record_descriptor(descriptor)?;
+    let descriptor = records::decode_persisted_record_descriptor(descriptor)?;
     let [field] = descriptor.fields() else {
         return Err(Error::InvalidStoredValue(
             "settled result value descriptor is invalid",
