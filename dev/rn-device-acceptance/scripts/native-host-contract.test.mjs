@@ -99,6 +99,29 @@ function assertAndroidRelayAssemblyAbiContract(libraryBuild, workflow) {
   );
 }
 
+function assertAndroidHarnessStartupContract(driver) {
+  const build = driver.indexOf('execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]');
+  const spawn = driver.indexOf('spawn("cargo", ["run", "--quiet", ...harnessCargoArgs]');
+  const readinessTimeout = driver.indexOf("60_000");
+  assert.ok(build >= 0, "the local Edge/Core harness must be built before it is started");
+  assert.ok(spawn > build, "the readiness process must start only after its Cargo build succeeds");
+  assert.ok(
+    readinessTimeout > spawn,
+    "the 60-second readiness allowance must not include cold Cargo compilation",
+  );
+  assert.match(
+    driver,
+    /stdio: \["ignore", "pipe", "pipe"\]/,
+    "harness stdout and stderr must both be retained for a bounded failure diagnostic",
+  );
+  assert.match(driver, /child\.once\("exit", \(code, signal\) =>/);
+  assert.match(driver, /adb\(\["get-state"\]\)/);
+  assert.match(driver, /retainHarnessOutput\(stdout, chunk\)/);
+  assert.match(driver, /retainHarnessOutput\(stderr, chunk\)/);
+  assert.match(driver, /JAZZ_RN_EDGE_SESSION \[redacted\]/);
+  assert.match(driver, /\[redacted-token\]/);
+}
+
 function assertPackedJvmAdmissionWorkflowContract(workflow, packagingReceipt) {
   const assembly = jobSection(workflow, "android-device-acceptance");
   assert.match(
@@ -563,6 +586,21 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
 test("Android acceptance reads only bounded receipt and allowlisted diagnostic tags", () => {
   const driver = read("scripts/run-android.mjs");
   const fixture = read("native/android/JazzDeviceFixtureModule.kt");
+  assertAndroidHarnessStartupContract(driver);
+  // A planted return to `cargo run` in place of the explicit build puts cold
+  // compilation back inside the quiet readiness window. The structural receipt
+  // must reject that regression before an Android runner spends a minute with
+  // no useful process output.
+  assert.throws(
+    () =>
+      assertAndroidHarnessStartupContract(
+        driver.replace(
+          'execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]',
+          'execFileSync("cargo", ["run", "--quiet", ...harnessCargoArgs]',
+        ),
+      ),
+    /must be built before it is started/,
+  );
   assert.match(driver, /rn_edge_session_harness/);
   assert.match(driver, /http:\/\/10\.0\.2\.2:\$\{session\.edge_port\}/);
   for (const input of ["jazzDeviceEdgeEndpoint", "jazzDeviceBearerA", "jazzDeviceBearerB"]) {
