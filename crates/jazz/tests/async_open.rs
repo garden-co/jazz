@@ -173,6 +173,60 @@ fn concurrent_cold_reads_and_subscription_wait_for_the_async_node_owner() {
     assert_eq!(added.len(), 1);
 }
 
+/// Alice prepares a second query while her first cold read owns the async node
+/// turn. This isolates #2497 below NAPI and the TypeScript adapter: query
+/// preparation is still a synchronous entry point, so it must not re-enter a
+/// node operation suspended on storage.
+///
+/// alice/read A ──cold scan──► node mutex
+/// alice/prepare B ──────────► same database
+#[test]
+fn reproduces_sync_query_preparation_reentering_a_cold_read() {
+    let schema = schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(config(storage.clone()))).expect("open test db");
+    block_on(db.insert(
+        "todos",
+        [("title".to_owned(), Value::String("cold read".to_owned()))].into(),
+        Default::default(),
+    ))
+    .expect("seed todo");
+    let table = db.table("todos");
+    let prepared = db.prepare_query(&table).expect("prepare first query");
+
+    storage.evict_all();
+    control.pause();
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut first = Box::pin(db.all(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Immediate,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ));
+    assert!(matches!(
+        Pin::new(&mut first).poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(
+        control.observed().iter().any(|operation| matches!(
+            operation,
+            TestStorageOperation::ScanOpen | TestStorageOperation::Get
+        )),
+        "the first query must own a cold storage operation"
+    );
+
+    let _ = db.prepare_query(&table);
+}
+
 /// Transaction relation reads use the same async owner/query path as ordinary
 /// relation reads. A cold storage operation must suspend the caller rather
 /// than falling back to a synchronous owner view.
