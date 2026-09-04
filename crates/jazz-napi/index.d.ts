@@ -24,17 +24,17 @@ export declare class NapiDb {
   requestReadPermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
   requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
   requestDeletePermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
-  insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
-  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
+  insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write | Uint8Array
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write | null
   /**
    * Binding-only entrypoint for typed partial-value updates. The public
    * TypeScript API validates column-kind-specific descriptors before they
    * reach this encoded boundary.
    */
   updateLargeValues(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
-  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
-  delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
-  restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write | null
+  delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write | null
+  restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write | null
   beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
@@ -58,14 +58,7 @@ export declare class NapiDb {
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /** Register and return a typed view backed by this same runtime owner. */
   registerSchema(schema: Uint8Array): NapiDb
-  /**
-   * Attach a schema view to an owner-wide mergeable transaction without opening,
-   * committing, or abandoning that transaction.
-   */
-  attachMergeableTx(openTransactionId: string): Tx
-  /** Attach a schema view to an existing owner-wide exclusive transaction. */
-  attachExclusiveTx(openTransactionId: string): Tx
-  /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
+  /** Begin one owner-wide transaction. */
   beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
@@ -105,8 +98,6 @@ export declare class NapiDb {
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
-  mergeableTx(openTransactionId: string): Tx
-  mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
   close(): Promise<undefined>
 }
 
@@ -196,22 +187,6 @@ export declare class Transport {
   close(): boolean
 }
 
-export declare class Tx {
-  insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
-  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
-  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
-  delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
-  restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
-  commit(): Write
-  rollback(): void
-  /**
-   * Release this transaction view's core reference. Attached views do not
-   * own the batch lifetime, while owning views abandon an uncommitted batch
-   * just as their Drop implementation does.
-   */
-  close(): boolean
-}
-
 export declare class Write {
   get txId(): string
   get payload(): Uint8Array
@@ -222,6 +197,7 @@ export declare class Write {
 }
 
 export interface DeleteOptions {
+  transactionId?: string
   author?: Uint8Array
   attribution?: Uint8Array
   head?: JsonValue
@@ -230,6 +206,7 @@ export interface DeleteOptions {
 }
 
 export interface InsertOptions {
+  transactionId?: string
   rowId?: Uint8Array
   author?: Uint8Array
   attribution?: Uint8Array
@@ -254,6 +231,7 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 export declare function nativeArtifactFingerprint(): string
 
 export interface RestoreOptions {
+  transactionId?: string
   author?: Uint8Array
   attribution?: Uint8Array
   branch?: JsonValue
@@ -360,6 +338,7 @@ export interface SubscriptionUnsupportedShapeCapabilityReason {
 }
 
 export interface UpdateOptions {
+  transactionId?: string
   author?: Uint8Array
   attribution?: Uint8Array
   head?: JsonValue
@@ -368,6 +347,7 @@ export interface UpdateOptions {
 }
 
 export interface UpsertOptions {
+  transactionId?: string
   author?: Uint8Array
   attribution?: Uint8Array
   head?: JsonValue

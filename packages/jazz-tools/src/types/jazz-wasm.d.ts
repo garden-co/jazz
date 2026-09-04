@@ -52,6 +52,7 @@ declare module "jazz-wasm" {
   }
 
   export type WriteOptions = {
+    transactionId?: string;
     author?: Uint8Array;
     attribution?: Uint8Array;
     updatedAtMs?: number;
@@ -73,16 +74,6 @@ declare module "jazz-wasm" {
   export type RestoreOptions = WriteOptions & {
     branch?: unknown;
   };
-
-  export class WasmTx {
-    insert(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
-    update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions): void;
-    upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions): void;
-    delete(table: string, rowId: Uint8Array, options?: DeleteOptions): void;
-    restore(table: string, rowId: Uint8Array, cells: Uint8Array, options?: RestoreOptions): void;
-    commit(): WasmWrite;
-    rollback(): void;
-  }
 
   export class WasmDb {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
@@ -174,8 +165,6 @@ declare module "jazz-wasm" {
     ): void;
     commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
     rollbackTransaction(openTransactionId: string): void;
-    attachMergeableTx(openTransactionId: string): WasmTx;
-    attachExclusiveTx(openTransactionId: string): WasmTx;
 
     prepareQuery(query: Uint8Array, kind: "query" | "relation"): WasmPreparedQuery;
     all(
@@ -199,11 +188,16 @@ declare module "jazz-wasm" {
       author?: Uint8Array,
     ): ReadableStream<unknown>;
 
-    insert(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite;
+    insert(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite | Uint8Array;
     canInsert(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
     requestInsertPermissionAdvice(table: string, cells: Uint8Array): WasmPermissionAdviceRequest;
     requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions): WasmWrite;
+    update(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      options?: UpdateOptions,
+    ): WasmWrite | undefined;
     updateLargeValues(
       table: string,
       rowId: Uint8Array,
@@ -217,14 +211,19 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
     ): WasmPermissionAdviceRequest;
     requestDeletePermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions): WasmWrite;
-    delete(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite;
+    upsert(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      options?: UpsertOptions,
+    ): WasmWrite | undefined;
+    delete(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite | undefined;
     restore(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
       options?: RestoreOptions,
-    ): WasmWrite;
+    ): WasmWrite | undefined;
     setTickScheduler(
       callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
     ): void;
@@ -254,8 +253,5 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmTransport;
-    mergeableTx(openTransactionId: string): WasmTx;
-    mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): WasmTx;
-    exclusiveTx(openTransactionId: string): WasmTx;
   }
 }

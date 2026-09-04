@@ -96,6 +96,13 @@ where
         }
     }
 
+    pub(crate) fn transaction_is_exclusive(&self, id: OpenTransactionId) -> Result<bool, Error> {
+        Ok(matches!(
+            self.open_tx(id)?.kind,
+            OpenTransactionKind::Exclusive { .. }
+        ))
+    }
+
     /// Return the permission subject bound to an open exclusive transaction.
     pub(crate) fn exclusive_transaction_permission_subject(
         &self,

@@ -1103,32 +1103,6 @@ fn transaction_read_cancelled(_: oneshot::Canceled) -> Error {
 }
 
 #[wasm_bindgen]
-pub struct WasmTx {
-    db: WasmDbInner,
-    kind: WasmTxKind,
-    open_tx: Option<OpenTransactionId>,
-    owns_lifetime: bool,
-}
-
-impl Drop for WasmTx {
-    fn drop(&mut self) {
-        if !self.owns_lifetime {
-            return;
-        }
-        let Some(open_tx) = self.open_tx.take() else {
-            return;
-        };
-        let _ = self.db.abandon_transaction(open_tx);
-    }
-}
-
-#[derive(Clone, Copy)]
-enum WasmTxKind {
-    Mergeable,
-    Exclusive,
-}
-
-#[wasm_bindgen]
 impl WasmDb {
     fn open_inner(&self) -> Result<WasmDbInner, JsValue> {
         self.inner
@@ -1167,24 +1141,41 @@ impl WasmDb {
         table: String,
         cells: Vec<u8>,
         options: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
+    ) -> Result<JsValue, JsValue> {
         let cells = decode_cells(&cells)?;
+        let open_transaction_id = transaction_id_from_write_options(&options)?;
         let options = insert_options_from_js(options)?;
         let inner = self.open_inner()?;
         match &inner {
             WasmDbInner::Memory(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    let row = db
+                        .enqueue_transaction_insert(open_transaction_id, table, cells, options)
+                        .map_err(to_js_error)?;
+                    db.drive_queued_mutation_once();
+                    return Ok(js_sys::Uint8Array::from(row.to_bytes().as_slice()).into());
+                }
                 let write = db
                     .enqueue_insert(table, cells, options)
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
+                wasm_write_memory(Rc::clone(db), write).map(Into::into)
             }
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_insert(table, cells, options)
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    let row = db
+                        .enqueue_transaction_insert(open_transaction_id, table, cells, options)
+                        .map_err(to_js_error)?;
+                    return Ok(js_sys::Uint8Array::from(row.to_bytes().as_slice()).into());
+                }
+                wasm_write_browser(
+                    Rc::clone(db),
+                    db.enqueue_insert(table, cells, options)
+                        .map_err(to_js_error)?,
+                )
+                .map(Into::into)
+            }
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
@@ -1196,25 +1187,52 @@ impl WasmDb {
         row_id: Vec<u8>,
         patch: Vec<u8>,
         options: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
+    ) -> Result<JsValue, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let patch = decode_cells(&patch)?;
+        let open_transaction_id = transaction_id_from_write_options(&options)?;
         let options = update_options_from_js(options)?;
         let inner = self.open_inner()?;
         match &inner {
             WasmDbInner::Memory(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    db.enqueue_transaction_update(
+                        open_transaction_id,
+                        table,
+                        row_id,
+                        patch,
+                        options,
+                    )
+                    .map_err(to_js_error)?;
+                    db.drive_queued_mutation_once();
+                    return Ok(JsValue::UNDEFINED);
+                }
                 let write = db
                     .enqueue_update(table, row_id, patch, options)
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
+                wasm_write_memory(Rc::clone(db), write).map(Into::into)
             }
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_update(table, row_id, patch, options)
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    db.enqueue_transaction_update(
+                        open_transaction_id,
+                        table,
+                        row_id,
+                        patch,
+                        options,
+                    )
+                    .map_err(to_js_error)?;
+                    return Ok(JsValue::UNDEFINED);
+                }
+                wasm_write_browser(
+                    Rc::clone(db),
+                    db.enqueue_update(table, row_id, patch, options)
+                        .map_err(to_js_error)?,
+                )
+                .map(Into::into)
+            }
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
@@ -1263,25 +1281,52 @@ impl WasmDb {
         row_id: Vec<u8>,
         cells: Vec<u8>,
         options: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
+    ) -> Result<JsValue, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
+        let open_transaction_id = transaction_id_from_write_options(&options)?;
         let options = upsert_options_from_js(options)?;
         let inner = self.open_inner()?;
         match &inner {
             WasmDbInner::Memory(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    db.enqueue_transaction_upsert(
+                        open_transaction_id,
+                        table,
+                        row_id,
+                        cells,
+                        options,
+                    )
+                    .map_err(to_js_error)?;
+                    db.drive_queued_mutation_once();
+                    return Ok(JsValue::UNDEFINED);
+                }
                 let write = db
                     .enqueue_upsert(table, row_id, cells, options)
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
+                wasm_write_memory(Rc::clone(db), write).map(Into::into)
             }
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_upsert(table, row_id, cells, options)
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    db.enqueue_transaction_upsert(
+                        open_transaction_id,
+                        table,
+                        row_id,
+                        cells,
+                        options,
+                    )
+                    .map_err(to_js_error)?;
+                    return Ok(JsValue::UNDEFINED);
+                }
+                wasm_write_browser(
+                    Rc::clone(db),
+                    db.enqueue_upsert(table, row_id, cells, options)
+                        .map_err(to_js_error)?,
+                )
+                .map(Into::into)
+            }
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
@@ -1292,24 +1337,39 @@ impl WasmDb {
         table: String,
         row_id: Vec<u8>,
         options: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
+    ) -> Result<JsValue, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
+        let open_transaction_id = transaction_id_from_write_options(&options)?;
         let options = delete_options_from_js(options)?;
         let inner = self.open_inner()?;
         match &inner {
             WasmDbInner::Memory(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    db.enqueue_transaction_delete(open_transaction_id, table, row_id, options)
+                        .map_err(to_js_error)?;
+                    db.drive_queued_mutation_once();
+                    return Ok(JsValue::UNDEFINED);
+                }
                 let write = db
                     .enqueue_delete(table, row_id, options)
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
+                wasm_write_memory(Rc::clone(db), write).map(Into::into)
             }
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_delete(table, row_id, options)
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    db.enqueue_transaction_delete(open_transaction_id, table, row_id, options)
+                        .map_err(to_js_error)?;
+                    return Ok(JsValue::UNDEFINED);
+                }
+                wasm_write_browser(
+                    Rc::clone(db),
+                    db.enqueue_delete(table, row_id, options)
+                        .map_err(to_js_error)?,
+                )
+                .map(Into::into)
+            }
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
@@ -1321,25 +1381,52 @@ impl WasmDb {
         row_id: Vec<u8>,
         cells: Vec<u8>,
         options: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
+    ) -> Result<JsValue, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
+        let open_transaction_id = transaction_id_from_write_options(&options)?;
         let options = restore_options_from_js(options)?;
         let inner = self.open_inner()?;
         match &inner {
             WasmDbInner::Memory(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    db.enqueue_transaction_restore(
+                        open_transaction_id,
+                        table,
+                        row_id,
+                        Some(cells),
+                        options,
+                    )
+                    .map_err(to_js_error)?;
+                    db.drive_queued_mutation_once();
+                    return Ok(JsValue::UNDEFINED);
+                }
                 let write = db
                     .enqueue_restore(table, row_id, Some(cells), options)
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
+                wasm_write_memory(Rc::clone(db), write).map(Into::into)
             }
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_restore(table, row_id, Some(cells), options)
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(db) => {
+                if let Some(open_transaction_id) = open_transaction_id {
+                    db.enqueue_transaction_restore(
+                        open_transaction_id,
+                        table,
+                        row_id,
+                        Some(cells),
+                        options,
+                    )
+                    .map_err(to_js_error)?;
+                    return Ok(JsValue::UNDEFINED);
+                }
+                wasm_write_browser(
+                    Rc::clone(db),
+                    db.enqueue_restore(table, row_id, Some(cells), options)
+                        .map_err(to_js_error)?,
+                )
+                .map(Into::into)
+            }
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
@@ -1498,35 +1585,7 @@ impl WasmDb {
         })
     }
 
-    /// Attach this typed view to an existing owner-wide mergeable transaction.
-    #[wasm_bindgen(js_name = attachMergeableTx)]
-    pub fn attach_mergeable_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        Ok(WasmTx {
-            db: self.open_inner()?,
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: false,
-        })
-    }
-
-    /// Attach this typed view to an existing owner-wide exclusive transaction.
-    #[wasm_bindgen(js_name = attachExclusiveTx)]
-    pub fn attach_exclusive_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        Ok(WasmTx {
-            db: self.open_inner()?,
-            kind: WasmTxKind::Exclusive,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: false,
-        })
-    }
-
-    /// Begin one owner-wide transaction without creating an owning per-schema Tx.
+    /// Begin one owner-wide transaction.
     #[wasm_bindgen(js_name = beginTransaction)]
     pub fn begin_transaction(
         &self,
@@ -1562,7 +1621,6 @@ impl WasmDb {
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
     }
-
     /// Commit an owner-wide mergeable transaction by id.
     #[wasm_bindgen(js_name = commitTransaction)]
     pub fn commit_transaction(
@@ -2390,64 +2448,11 @@ impl WasmDb {
         })
     }
 
-    #[wasm_bindgen(js_name = mergeableTx)]
-    pub fn mergeable_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let db = self.open_inner()?;
-        db.begin_mergeable(open_transaction_id, None, None)
-            .map_err(to_js_error)?;
-        Ok(WasmTx {
-            db,
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: true,
-        })
-    }
-
-    #[wasm_bindgen(js_name = mergeableTxForIdentity)]
-    pub fn mergeable_tx_for_identity(
-        &self,
-        open_transaction_id: String,
-        author: Vec<u8>,
-    ) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let author = author_id_from_bytes(&author)?;
-        let db = self.open_inner()?;
-        db.begin_mergeable(open_transaction_id, Some(author), None)
-            .map_err(to_js_error)?;
-        Ok(WasmTx {
-            db,
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: true,
-        })
-    }
-
-    #[wasm_bindgen(js_name = exclusiveTx)]
-    pub fn exclusive_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let db = self.open_inner()?;
-        db.begin_exclusive(open_transaction_id, None, None)
-            .map_err(to_js_error)?;
-        Ok(WasmTx {
-            db,
-            kind: WasmTxKind::Exclusive,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: true,
-        })
-    }
-
     #[wasm_bindgen(js_name = close)]
     pub fn close(&self) -> js_sys::Promise {
         // A close failure still consumes the binding. Retrying a partially
         // failed storage close would re-enter an indeterminate runtime; this
-        // matches the previous eager `Closed` transition and keeps physical
+        // matches the previous eager Closed transition and keeps physical
         // close exactly once.
         let Some(inner) = self.inner.borrow_mut().take() else {
             return js_sys::Promise::resolve(&JsValue::from_bool(false));
@@ -2639,179 +2644,6 @@ impl WasmTransport {
     }
 }
 
-#[wasm_bindgen]
-impl WasmTx {
-    #[wasm_bindgen(js_name = insert)]
-    pub fn insert_with_options(
-        &mut self,
-        table: String,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
-        let cells = decode_cells(&cells)?;
-        let options = insert_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        let row = with_wasm_db!(&self.db, |db| db.enqueue_transaction_insert(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            cells,
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(row.to_bytes())
-    }
-
-    #[wasm_bindgen(js_name = update)]
-    pub fn update_with_options(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        options: JsValue,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let patch = decode_cells(&patch)?;
-        let options = update_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| db.enqueue_transaction_update(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            row_id,
-            patch,
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = upsert)]
-    pub fn upsert_with_options(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let options = upsert_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| db.enqueue_transaction_upsert(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            row_id,
-            cells,
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = delete)]
-    pub fn delete_with_options(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        options: JsValue,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let options = delete_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| db.enqueue_transaction_delete(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            row_id,
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = restore)]
-    pub fn restore_with_options(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let options = restore_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| db.enqueue_transaction_restore(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            row_id,
-            Some(cells),
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = commit)]
-    pub fn commit(&mut self) -> Result<WasmWrite, JsValue> {
-        let open_tx = self.open_tx_for_read()?;
-        let write = match (&self.db, self.kind) {
-            (WasmDbInner::Memory(db), WasmTxKind::Mergeable) => {
-                let _ = db;
-                self.db.commit_mergeable(open_tx)
-            }
-            (WasmDbInner::Memory(db), WasmTxKind::Exclusive) => {
-                let _ = db;
-                self.db.commit_exclusive(open_tx)
-            }
-            #[cfg(target_arch = "wasm32")]
-            (WasmDbInner::Browser(db), WasmTxKind::Mergeable) => {
-                let _ = db;
-                self.db.commit_mergeable(open_tx)
-            }
-            #[cfg(target_arch = "wasm32")]
-            (WasmDbInner::Browser(db), WasmTxKind::Exclusive) => {
-                let _ = db;
-                self.db.commit_exclusive(open_tx)
-            }
-            (WasmDbInner::Closed, _) => Err(JsValue::from_str("WasmDb is closed")),
-        }?;
-        self.open_tx.take();
-        Ok(write)
-    }
-
-    #[wasm_bindgen(js_name = rollback)]
-    pub fn rollback(&mut self) -> Result<(), JsValue> {
-        let open_tx = self.open_tx_for_read()?;
-        self.db.abandon_transaction(open_tx).map_err(to_js_error)?;
-        self.open_tx.take();
-        Ok(())
-    }
-
-    fn open_tx_for_read(&self) -> Result<OpenTransactionId, JsValue> {
-        self.open_tx
-            .ok_or_else(|| JsValue::from_str("transaction is already closed"))
-    }
-}
-
 fn rows_promise(
     db: WasmDbInner,
     query: PreparedQuery,
@@ -2910,6 +2742,20 @@ fn write_option(options: &JsValue, name: &str) -> Result<Option<JsValue>, JsValu
     }
     let value = js_sys::Reflect::get(options, &JsValue::from_str(name))?;
     Ok((!value.is_null() && !value.is_undefined()).then_some(value))
+}
+
+fn transaction_id_from_write_options(
+    options: &JsValue,
+) -> Result<Option<OpenTransactionId>, JsValue> {
+    write_option(options, "transactionId")?
+        .map(|value| {
+            value
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("transactionId must be a string"))?
+                .parse::<OpenTransactionId>()
+                .map_err(|error| JsValue::from_str(&error))
+        })
+        .transpose()
 }
 
 /// Whether a JavaScript write-options object *contains* a property.
@@ -4592,7 +4438,9 @@ mod dynamic_schema_view_tests {
             Value::F64(7.5)
         );
         assert_eq!(
-            claim_value_from_json(serde_json::json!(9_007_199_254_740_992_u64)).unwrap().unwrap(),
+            claim_value_from_json(serde_json::json!(9_007_199_254_740_992_u64))
+                .unwrap()
+                .unwrap(),
             Value::F64(9_007_199_254_740_992.0),
             "integers beyond Number.MAX_SAFE_INTEGER must not participate in integer policy matching"
         );
@@ -4727,11 +4575,10 @@ mod dynamic_schema_view_tests {
             decoded.removed_occurrence_keys[1]
         );
     }
-    /// A short-lived WASM schema attachment must not abandon its owner's open
-    /// transaction when the JavaScript wrapper is collected.
+    /// A WASM schema view can address its owner's open transaction by id.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn attached_tx_drop_preserves_owner_batch() {
+    fn schema_view_uses_owner_transaction_id() {
         let source = SchemaBuilder::new()
             .table(
                 TableSchema::builder("items")
@@ -4763,12 +4610,6 @@ mod dynamic_schema_view_tests {
         let view = Rc::new(block_on(owner.register_schema_view(schema.clone())).unwrap());
         let batch = OpenTransactionId::new();
         block_on(owner.begin_mergeable(batch)).unwrap();
-        drop(WasmTx {
-            db: WasmDbInner::Memory(Rc::clone(&view)),
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(batch),
-            owns_lifetime: false,
-        });
         block_on(view.mergeable_tx_ref(batch).insert(
             "items",
             BTreeMap::from([("label".to_owned(), Value::String("kept".to_owned()))]),
@@ -4791,12 +4632,6 @@ mod dynamic_schema_view_tests {
 
         let exclusive = OpenTransactionId::new();
         block_on(owner.begin_exclusive(exclusive)).unwrap();
-        drop(WasmTx {
-            db: WasmDbInner::Memory(Rc::clone(&view)),
-            kind: WasmTxKind::Exclusive,
-            open_tx: Some(exclusive),
-            owns_lifetime: false,
-        });
         block_on(view.exclusive_tx_ref(exclusive).insert(
             "items",
             BTreeMap::from([(
@@ -4813,13 +4648,13 @@ mod dynamic_schema_view_tests {
     }
 
     /// Transaction reads cross the WASM boundary as promises: a valid
-    /// transaction must resolve them, while a transaction attached to another
+    /// transaction must resolve them, while a transaction id from another
     /// database runtime must still fail synchronously before a promise is
     /// created. Keeping both checks here makes the binding contract explicit
     /// rather than accidentally only type-checking the promise construction.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    async fn attached_transaction_reads_are_async_and_runtime_bound() {
+    async fn transaction_reads_are_async_and_runtime_bound() {
         let source = SchemaBuilder::new()
             .table(
                 TableSchema::builder("items")
@@ -4861,12 +4696,6 @@ mod dynamic_schema_view_tests {
             .begin_mergeable(attached_batch)
             .await
             .expect("begin attached schema transaction");
-        drop(WasmTx {
-            db: WasmDbInner::Memory(Rc::clone(&view)),
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(attached_batch),
-            owns_lifetime: false,
-        });
         view.mergeable_tx_ref(attached_batch)
             .insert(
                 "items",
@@ -4898,12 +4727,6 @@ mod dynamic_schema_view_tests {
             .begin_exclusive(attached_exclusive)
             .await
             .expect("begin attached exclusive transaction");
-        drop(WasmTx {
-            db: WasmDbInner::Memory(Rc::clone(&view)),
-            kind: WasmTxKind::Exclusive,
-            open_tx: Some(attached_exclusive),
-            owns_lifetime: false,
-        });
         view.exclusive_tx_ref(attached_exclusive)
             .insert(
                 "items",

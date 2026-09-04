@@ -134,6 +134,7 @@ type NativeDbConstructor = {
 };
 
 type NativeWriteOptions = {
+  transactionId?: OpenTransactionId;
   author?: Uint8Array;
   attribution?: Uint8Array;
   updatedAtMs?: number;
@@ -154,6 +155,13 @@ function isPendingNativeRead(value: unknown): value is PendingNativeRead {
 
 function isPendingNativeWrite(value: unknown): value is PendingNativeWrite {
   return typeof (value as PendingNativeWrite | null)?.poll === "function";
+}
+
+function requireNativeWrite(value: Write | Uint8Array | null | undefined): Write {
+  if (!value || value instanceof Uint8Array) {
+    throw new Error("Native runtime direct mutation did not return a write receipt");
+  }
+  return value;
 }
 
 function isPendingNativePermissionAdvice(value: unknown): value is PendingNativePermissionAdvice {
@@ -194,8 +202,6 @@ type NativeDb = {
   ): void;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
-  attachMergeableTx(openTransactionId: string): Tx;
-  attachExclusiveTx?(openTransactionId: string): Tx;
   all(
     query: PreparedQuery,
     opts: unknown,
@@ -219,16 +225,26 @@ type NativeDb = {
     opts: unknown,
     author?: Uint8Array,
   ): ReadableStream<unknown> | Subscription;
-  insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
-  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: NativeUpdateOptions): Write;
-  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: NativeUpsertOptions): Write;
-  delete(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
+  insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write | Uint8Array;
+  update(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    options?: NativeUpdateOptions,
+  ): Write | null | undefined;
+  upsert(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: NativeUpsertOptions,
+  ): Write | null | undefined;
+  delete(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write | null | undefined;
   restore(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: NativeRestoreOptions,
-  ): Write;
+  ): Write | null | undefined;
   beginStreamingMutation?(
     table: string,
     rowId: Uint8Array,
@@ -249,9 +265,6 @@ type NativeDb = {
     patch: Uint8Array,
   ): NativePermissionAdviceResult;
   requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
-  mergeableTx(openTransactionId: OpenTransactionId): Tx;
-  mergeableTxForIdentity?(openTransactionId: OpenTransactionId, author: Uint8Array): Tx;
-  exclusiveTx?(openTransactionId: OpenTransactionId): Tx;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -362,23 +375,6 @@ type Write = {
   close?(): boolean;
 };
 
-type Tx = {
-  commit(): Write;
-  rollback(): void;
-  /** Release the native transaction view after its owner batch has completed. */
-  close?(): boolean;
-  insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
-  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: NativeUpdateOptions): void;
-  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: NativeUpsertOptions): void;
-  delete(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): void;
-  restore(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: NativeRestoreOptions,
-  ): void;
-};
-
 export type Transport = {
   close(): boolean;
   recvWireFrames(): unknown[];
@@ -400,7 +396,6 @@ export type Transport = {
 type PendingTx = {
   id: OpenTransactionId;
   kind: TransactionKind;
-  txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
   /** External provenance fixed at begin, never supplied per staged operation. */
   attribution?: Uint8Array;
@@ -1186,15 +1181,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerCoveredQueries.clear();
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
-      // A schema view can own an attached transaction handle while its parent
-      // owns the batch. Closing this view must release only that handle; the
-      // parent still needs its batch and sibling views to complete it.
-      for (const pending of this.pendingTxs.values()) {
-        const tx = pending.txByView.get(this);
-        if (!tx) continue;
-        tx.close?.();
-        pending.txByView.delete(this);
-      }
       // Query and subscription futures may still be unwinding through this
       // schema-view wrapper. Eagerly freeing a wasm-bindgen receiver here is a
       // use-after-free; let GC release the Rc-backed view after those promises
@@ -1205,9 +1191,6 @@ export class NativeRuntimeAdapter implements Runtime {
       write.close?.();
     }
     this.subscriptions.clear();
-    for (const pending of this.pendingTxs.values()) {
-      this.releaseTransactionViews(pending);
-    }
     this.pendingTxs.clear();
     this.completedTxs.clear();
     this.writes.clear();
@@ -1254,12 +1237,16 @@ export class NativeRuntimeAdapter implements Runtime {
     if (tx) this.assertTransactionAttribution(tx, attribution);
     const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      const rowId = nativeTx.insert(table, cells, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      const rowId = this.db.insert(table, cells, {
+        transactionId: tx.id,
         rowId: suppliedRowId,
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
       });
+      if (!(rowId instanceof Uint8Array)) {
+        throw new Error("Native runtime transaction insert did not return a row id");
+      }
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -1270,13 +1257,15 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     const write = writeOrNormalizeRejection("Insert", () =>
-      this.db.insert(table, cells, {
-        rowId: suppliedRowId,
-        author: attribution ? undefined : writeIdentity,
-        attribution,
-        branch: branchView?.head,
-        updatedAtMs: updatedAtMs ?? undefined,
-      }),
+      requireNativeWrite(
+        this.db.insert(table, cells, {
+          rowId: suppliedRowId,
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          branch: branchView?.head,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
     );
     return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
   }
@@ -1411,8 +1400,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (tx) this.assertTransactionAttribution(tx, attribution);
     const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.restore(table, rowId, cells, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      this.db.restore(table, rowId, cells, {
+        transactionId: tx.id,
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
       });
@@ -1426,12 +1416,14 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
-      this.db.restore(table, rowId, cells, {
-        author: attribution ? undefined : writeIdentity,
-        attribution,
-        branch: branchView?.head,
-        updatedAtMs: updatedAtMs ?? undefined,
-      }),
+      requireNativeWrite(
+        this.db.restore(table, rowId, cells, {
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          branch: branchView?.head,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
     );
     return this.finishInsert(table, rowId, values, write);
   }
@@ -1455,8 +1447,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (tx) this.assertTransactionAttribution(tx, attribution);
     const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.update(table, rowId, patch, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      this.db.update(table, rowId, patch, {
+        transactionId: tx.id,
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1469,13 +1462,15 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
-      this.db.update(table, rowId, patch, {
-        author: attribution ? undefined : writeIdentity,
-        attribution,
-        head: branchView?.head,
-        base: branchView?.base,
-        updatedAtMs: updatedAtMs ?? undefined,
-      }),
+      requireNativeWrite(
+        this.db.update(table, rowId, patch, {
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          head: branchView?.head,
+          base: branchView?.base,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
     );
     return this.finishMutation(write);
   }
@@ -1548,7 +1543,9 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, attribution ? undefined : writeIdentity).upsert(table, rowId, cells, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      this.db.upsert(table, rowId, cells, {
+        transactionId: tx.id,
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1563,13 +1560,15 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
-      this.db.upsert(table, rowId, cells, {
-        author: attribution ? undefined : writeIdentity,
-        attribution,
-        head: branchView?.head,
-        base: branchView?.base,
-        updatedAtMs: updatedAtMs ?? undefined,
-      }),
+      requireNativeWrite(
+        this.db.upsert(table, rowId, cells, {
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          head: branchView?.head,
+          base: branchView?.base,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
     );
     return this.finishMutation(write);
   }
@@ -1588,8 +1587,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) this.assertTransactionAttribution(tx, attribution);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.delete(table, rowId, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      this.db.delete(table, rowId, {
+        transactionId: tx.id,
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1598,13 +1598,15 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
-      this.db.delete(table, rowId, {
-        author: attribution ? undefined : writeIdentity,
-        attribution,
-        head: branchView?.head,
-        base: branchView?.base,
-        updatedAtMs: updatedAtMs ?? undefined,
-      }),
+      requireNativeWrite(
+        this.db.delete(table, rowId, {
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          head: branchView?.head,
+          base: branchView?.base,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
     );
     return this.finishMutation(write);
   }
@@ -1721,7 +1723,6 @@ export class NativeRuntimeAdapter implements Runtime {
       identity: admission,
       attribution,
       writes: [],
-      txByView: new Map(),
     });
     return id;
   }
@@ -1741,7 +1742,6 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     const write = this.db.commitTransaction(openTransactionId, pending.kind);
-    this.releaseTransactionViews(pending);
     this.pendingTxs.delete(openTransactionId);
     this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
@@ -1801,7 +1801,6 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       this.db.rollbackTransaction(openTransactionId);
     } finally {
-      this.releaseTransactionViews(pending);
       this.pendingTxs.delete(openTransactionId);
     }
     this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "rolled_back" });
@@ -2822,12 +2821,15 @@ export class NativeRuntimeAdapter implements Runtime {
     throw new Error(`${operation} failed: WriteError("${txStateMessage(id, this.completedTxs)}")`);
   }
 
-  private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): Tx {
+  private assertTransactionWriteIdentity(
+    pending: PendingTx,
+    identity: Uint8Array | undefined,
+  ): void {
     if (pending.kind === "exclusive") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
         throw new Error("Native runtime exclusive transaction cannot mix write identities");
       }
-      return this.txForRead(pending);
+      return;
     }
     if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
@@ -2835,7 +2837,6 @@ export class NativeRuntimeAdapter implements Runtime {
     if (identity && !pending.identity) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
-    return this.txForRead(pending);
   }
 
   private assertTransactionAttribution(
@@ -2851,45 +2852,6 @@ export class NativeRuntimeAdapter implements Runtime {
         "Native runtime backend-attributed transaction requires its original provenance subject",
       );
     }
-  }
-
-  private txForRead(pending: PendingTx): Tx {
-    const existing = pending.txByView.get(this);
-    if (existing) return existing;
-    const tx =
-      pending.kind === "mergeable"
-        ? this.db.attachMergeableTx(pending.id)
-        : this.db.attachExclusiveTx?.(pending.id);
-    if (!tx) throw new Error("Native runtime does not support attached exclusive transactions");
-    pending.txByView.set(this, tx);
-    return tx;
-  }
-
-  private releaseTransactionViews(pending: PendingTx): void {
-    for (const tx of pending.txByView.values()) {
-      tx.close?.();
-    }
-    pending.txByView.clear();
-  }
-
-  private exclusiveTx(id: OpenTransactionId): Tx {
-    if (!this.db.exclusiveTx) {
-      throw new Error(
-        "Native runtime cannot perform exclusive transaction writes: " +
-          "the native runtime exclusive transaction API is unavailable.",
-      );
-    }
-    return this.db.exclusiveTx(id);
-  }
-
-  private mergeableTxForIdentity(id: OpenTransactionId, identity: Uint8Array): Tx {
-    if (!this.db.mergeableTxForIdentity) {
-      throw new Error(
-        "Native runtime cannot perform session-scoped transaction writes: " +
-          "the native runtime mergeable transaction API has no identity-aware staging methods.",
-      );
-    }
-    return this.db.mergeableTxForIdentity(id, identity);
   }
 
   private pumpSubscriptions(): void {

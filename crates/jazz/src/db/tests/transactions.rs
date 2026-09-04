@@ -1068,7 +1068,6 @@ fn cancelled_close_handoff_is_coherent_with_concurrent_and_repeated_close() {
             .unwrap();
         db.enqueue_transaction_insert(
             queued_transaction_id,
-            false,
             "todos".to_owned(),
             doctest_support::todo_cells("accepted before close", false),
             InsertOptions {
@@ -1138,7 +1137,6 @@ fn cancelled_close_tick_does_not_tombstone_a_later_admitted_mergeable_commit() {
         let tx_id = transaction.tx_id;
         db.enqueue_transaction_insert(
             tx_id,
-            false,
             "todos".to_owned(),
             doctest_support::todo_cells("accepted before cancelled close", false),
             InsertOptions {

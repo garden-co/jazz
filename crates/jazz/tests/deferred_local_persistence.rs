@@ -730,7 +730,6 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
     assert_eq!(
         db.enqueue_transaction_insert(
             late_open_tx,
-            false,
             "todos".to_owned(),
             row! { title: "must not stage after close starts" },
             Default::default(),
@@ -976,7 +975,6 @@ fn queued_transaction_read_waits_for_staging_and_cold_storage_without_sync_polli
     let row_id = db
         .enqueue_transaction_insert(
             open_tx,
-            false,
             "todos".to_owned(),
             row! { title: "staged before read" },
             Default::default(),
@@ -1079,7 +1077,6 @@ fn queued_transaction_read_reports_prior_staging_failure_without_running_outside
     block_on(db.begin_mergeable(open_tx)).expect("open transaction");
     db.enqueue_transaction_update(
         open_tx,
-        false,
         "missing".to_owned(),
         jazz::ids::RowUuid::from_bytes([0x9b; 16]),
         row! { title: "missing" },
@@ -1227,7 +1224,6 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     db.enqueue_begin_exclusive(open_tx, None, None).unwrap();
     db.enqueue_transaction_update(
         open_tx,
-        true,
         "todos".to_owned(),
         seed.row_uuid(),
         row! { title: "after" },
@@ -1309,7 +1305,6 @@ fn queued_transaction_stage_failure_poison_prevents_partial_commit() {
         .expect("queue begin");
     db.enqueue_transaction_insert(
         open_tx,
-        false,
         "missing_table".to_owned(),
         row! { title: "invalid" },
         Default::default(),
@@ -1317,7 +1312,6 @@ fn queued_transaction_stage_failure_poison_prevents_partial_commit() {
     .unwrap();
     db.enqueue_transaction_insert(
         open_tx,
-        false,
         "todos".to_owned(),
         row! { title: "must not commit" },
         Default::default(),
@@ -1371,7 +1365,6 @@ fn queued_commit_uses_host_clock_before_staging_runs() {
         }
         db.enqueue_transaction_insert(
             open_tx,
-            exclusive,
             "todos".to_owned(),
             row! { title: "queued" },
             jazz::db::InsertOptions {

@@ -83,6 +83,17 @@ export type NativeForegroundFactory = {
 export const REACT_NATIVE_UNSUPPORTED_ERROR =
   "React Native native foreground does not support this operation yet";
 
+type ForegroundWriteOptions = {
+  transactionId?: string;
+  rowId?: Uint8Array;
+  author?: Uint8Array;
+  attribution?: Uint8Array;
+  branch?: unknown;
+  head?: unknown;
+  base?: unknown;
+  updatedAtMs?: number;
+};
+
 /**
  * Narrow NativeDb consumer for the first JSI foreground slice.
  *
@@ -321,21 +332,19 @@ export class NativeForegroundDb {
     transaction.closed = true;
   }
 
-  attachMergeableTx(openTransactionId: string): NativeForegroundTx {
-    const transaction = this.transaction(openTransactionId, "mergeable");
-    return new NativeForegroundTx(this, transaction);
-  }
-
-  attachExclusiveTx(openTransactionId: string): NativeForegroundTx {
-    const transaction = this.transaction(openTransactionId, "exclusive");
-    return new NativeForegroundTx(this, transaction);
-  }
-
-  insertEncoded(
+  insert(
     table: string,
     cells: Uint8Array,
-    options?: { rowId?: Uint8Array },
-  ): NativeForegroundWrite {
+    options?: ForegroundWriteOptions,
+  ): NativeForegroundWrite | Uint8Array {
+    if (options?.transactionId) {
+      return this.stageInsert(
+        this.openTransaction(options.transactionId, "insert into"),
+        table,
+        cells,
+        options.rowId,
+      );
+    }
     return this.withOneMutation("insert", (transaction) => {
       const response = this.execute({
         type: "insert",
@@ -349,7 +358,21 @@ export class NativeForegroundDb {
     });
   }
 
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): NativeForegroundWrite {
+  update(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    options?: ForegroundWriteOptions,
+  ): NativeForegroundWrite | undefined {
+    if (options?.transactionId) {
+      this.stageUpdate(
+        this.openTransaction(options.transactionId, "update in"),
+        table,
+        rowId,
+        patch,
+      );
+      return undefined;
+    }
     return this.withOneMutation("update", (transaction) => {
       const response = this.execute({
         type: "update",
@@ -363,7 +386,21 @@ export class NativeForegroundDb {
     });
   }
 
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): NativeForegroundWrite {
+  upsert(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundWriteOptions,
+  ): NativeForegroundWrite | undefined {
+    if (options?.transactionId) {
+      this.stageUpsert(
+        this.openTransaction(options.transactionId, "upsert into"),
+        table,
+        rowId,
+        cells,
+      );
+      return undefined;
+    }
     return this.withOneMutation("upsert", (transaction) => {
       const response = this.execute({
         type: "upsert",
@@ -377,7 +414,15 @@ export class NativeForegroundDb {
     });
   }
 
-  deleteEncoded(table: string, rowId: Uint8Array): NativeForegroundWrite {
+  delete(
+    table: string,
+    rowId: Uint8Array,
+    options?: ForegroundWriteOptions,
+  ): NativeForegroundWrite | undefined {
+    if (options?.transactionId) {
+      this.stageDelete(this.openTransaction(options.transactionId, "delete from"), table, rowId);
+      return undefined;
+    }
     return this.withOneMutation("delete", (transaction) => {
       const response = this.execute({
         type: "delete",
@@ -390,7 +435,12 @@ export class NativeForegroundDb {
     });
   }
 
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): NativeForegroundWrite {
+  restore(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    _options?: ForegroundWriteOptions,
+  ): NativeForegroundWrite {
     // The current shared command ABI has no restore discriminant. Upsert is
     // not equivalent for a tombstoned row, so make the limitation explicit
     // rather than silently changing restore semantics.
@@ -400,9 +450,6 @@ export class NativeForegroundDb {
     return unsupported("restore");
   }
 
-  mergeableTx(): never {
-    return unsupported("detached mergeable transaction handles");
-  }
   connectUpstream(): never {
     return unsupported("JavaScript upstream transport");
   }
@@ -508,14 +555,6 @@ export class NativeForegroundDb {
     if (response.type !== "mutationStaged") return unexpected("delete", response.type);
   }
 
-  private transaction(id: string, kind: "mergeable" | "exclusive"): NativeForegroundTransaction {
-    const transaction = this.transactions.get(id);
-    if (!transaction || transaction.closed || transaction.kind !== kind) {
-      throw new Error(`React Native native foreground has no open ${kind} transaction ${id}`);
-    }
-    return transaction;
-  }
-
   private openTransaction(id: string, operation: string): NativeForegroundTransaction {
     const transaction = this.transactions.get(id);
     if (!transaction || transaction.closed) {
@@ -542,47 +581,6 @@ type NativeForegroundWrite = {
   writeState(): unknown;
   close(): boolean;
 };
-
-class NativeForegroundTx {
-  constructor(
-    private readonly db: NativeForegroundDb,
-    private readonly transaction: NativeForegroundTransaction,
-  ) {}
-
-  commit(): NativeForegroundWrite {
-    throw new Error("React Native native foreground transactions are committed by their owning Db");
-  }
-
-  rollback(): void {
-    throw new Error(
-      "React Native native foreground transactions are rolled back by their owning Db",
-    );
-  }
-
-  close(): boolean {
-    return false;
-  }
-
-  insertEncoded(table: string, cells: Uint8Array, options?: { rowId?: Uint8Array }): Uint8Array {
-    return this.db.stageInsert(this.transaction, table, cells, options?.rowId);
-  }
-
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void {
-    this.db.stageUpdate(this.transaction, table, rowId, patch);
-  }
-
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void {
-    this.db.stageUpsert(this.transaction, table, rowId, cells);
-  }
-
-  deleteEncoded(table: string, rowId: Uint8Array): void {
-    this.db.stageDelete(this.transaction, table, rowId);
-  }
-
-  restoreEncoded(): never {
-    return unsupported("restore");
-  }
-}
 
 function nativeWrite(
   txId: Uint8Array<ArrayBufferLike>,

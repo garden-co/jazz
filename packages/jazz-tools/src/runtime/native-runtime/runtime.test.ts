@@ -6505,13 +6505,13 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
 
   it("does not mix per-write provenance into a transaction opened without it", () => {
     const beginTransaction = vi.fn();
-    const attachMergeableTx = vi.fn(() => fakeTx());
+    const insert = vi.fn();
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () => {
           throw new Error("not used");
         },
-        openMemoryAsBackend: () => fakeDb({ beginTransaction, attachMergeableTx }),
+        openMemoryAsBackend: () => fakeDb({ beginTransaction, insert }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6537,7 +6537,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "00000000-0000-0000-0000-000000000123",
       ),
     ).toThrow("opened without backend attribution");
-    expect(attachMergeableTx).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
   });
 
   it("rejects reserved public write-context sessions and attributions", async () => {
@@ -7871,27 +7871,15 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   type FakeOpenBatch = {
     kind: "mergeable" | "exclusive";
     author?: Uint8Array;
-    tx?: TxForTest;
   };
   const implementation = db as T & {
     connectUpstream?(): Transport;
     tick?(): void | Promise<void>;
-    mergeableTx?(openTransactionId: string): TxForTest;
-    mergeableTxForIdentity?(openTransactionId: string, author: Uint8Array): TxForTest;
-    exclusiveTx?(openTransactionId: string): TxForTest;
   };
   const openBatches = new Map<string, FakeOpenBatch>();
-  const attach = (openTransactionId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+  const requireOpenBatch = (openTransactionId: string): void => {
     const batch = openBatches.get(openTransactionId);
-    if (!batch || batch.kind !== kind)
-      throw new Error(`unknown ${kind} batch ${openTransactionId}`);
-    batch.tx ??=
-      kind === "exclusive"
-        ? (implementation.exclusiveTx?.(openTransactionId) ?? fakeTx())
-        : batch.author && implementation.mergeableTxForIdentity
-          ? implementation.mergeableTxForIdentity(openTransactionId, batch.author)
-          : (implementation.mergeableTx?.(openTransactionId) ?? fakeTx());
-    return batch.tx;
+    if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
@@ -7909,18 +7897,50 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
     ) => {
       openBatches.set(openTransactionId, { kind, author });
     },
-    attachMergeableTx: (openTransactionId: string) => attach(openTransactionId, "mergeable"),
-    attachExclusiveTx: (openTransactionId: string) => attach(openTransactionId, "exclusive"),
+    insert: (
+      _table: string,
+      _cells: Uint8Array,
+      options?: { transactionId?: string; rowId?: Uint8Array },
+    ) => {
+      const txId = options?.transactionId;
+      if (txId) {
+        requireOpenBatch(txId);
+        return options?.rowId ?? new Uint8Array(16);
+      }
+      return { ...fakeWrite(), rowId: options?.rowId ?? new Uint8Array(16) };
+    },
+    restore: (
+      _table: string,
+      _rowId: Uint8Array,
+      _cells: Uint8Array,
+      options?: { transactionId?: string },
+    ) =>
+      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
+    update: (
+      _table: string,
+      _rowId: Uint8Array,
+      _patch: Uint8Array,
+      options?: { transactionId?: string },
+    ) =>
+      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
+    upsert: (
+      _table: string,
+      _rowId: Uint8Array,
+      _cells: Uint8Array,
+      options?: { transactionId?: string },
+    ) =>
+      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
+    delete: (_table: string, _rowId: Uint8Array, options?: { transactionId?: string }) =>
+      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
     commitTransaction: (openTransactionId: string) => {
       const batch = openBatches.get(openTransactionId);
       if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
       openBatches.delete(openTransactionId);
-      return batch.tx?.commit() ?? fakeWrite();
+      return fakeWrite();
     },
     rollbackTransaction: (openTransactionId: string) => {
       const batch = openBatches.get(openTransactionId);
       if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
-      batch.tx?.rollback();
       openBatches.delete(openTransactionId);
     },
     ...db,
@@ -7940,19 +7960,6 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   return result as T & NativeDbForTest;
 }
 
-function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
-  return {
-    commit: () => fakeWrite(),
-    rollback: () => undefined,
-    insert: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
-    restore: () => undefined,
-    update: () => undefined,
-    upsert: () => undefined,
-    delete: () => undefined,
-    ...overrides,
-  };
-}
-
 function fakeWrite() {
   return {
     txId: "00000000000070008000000000000001",
@@ -7961,39 +7968,6 @@ function fakeWrite() {
     writeState: () => ({}),
   };
 }
-
-type TxForTest = {
-  commit(): ReturnType<typeof fakeWrite>;
-  rollback(): void;
-  insert(
-    table: string,
-    cells: Uint8Array,
-    options?: { rowId?: Uint8Array; branch?: unknown; updatedAtMs?: number },
-  ): Uint8Array;
-  restore(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: { branch?: unknown; updatedAtMs?: number },
-  ): void;
-  update(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
-  ): void;
-  upsert(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: { branch?: unknown; updatedAtMs?: number },
-  ): void;
-  delete(
-    table: string,
-    rowId: Uint8Array,
-    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
-  ): void;
-};
 
 function uuidBytes(value: string): Uint8Array {
   const hex = value.replaceAll("-", "");

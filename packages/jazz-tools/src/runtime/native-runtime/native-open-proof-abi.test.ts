@@ -32,7 +32,6 @@ function fakeDb() {
     beginTransaction: unused,
     commitTransaction: unused,
     rollbackTransaction: unused,
-    attachMergeableTx: unused,
     all: unused,
     prepareQuery: unused,
     insert: unused,

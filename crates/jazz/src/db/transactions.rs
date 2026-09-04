@@ -34,6 +34,13 @@ where
             .await
     }
 
+    async fn transaction_is_exclusive(&self, id: OpenTransactionId) -> Result<bool, Error> {
+        self.lock_for_transaction_operation(id)
+            .await?
+            .transaction_is_exclusive(id)
+            .map_err(Into::into)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
@@ -839,7 +846,6 @@ where
     pub fn enqueue_transaction_insert(
         &self,
         id: OpenTransactionId,
-        exclusive: bool,
         table: String,
         cells: RowCells,
         mut options: InsertOptions,
@@ -852,6 +858,7 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
+                let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
                     db.exclusive_tx_ref(id)
                         .insert(&table, cells, options)
@@ -871,7 +878,6 @@ where
     pub fn enqueue_transaction_update(
         &self,
         id: OpenTransactionId,
-        exclusive: bool,
         table: String,
         row: RowUuid,
         patch: RowCells,
@@ -881,6 +887,7 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
+                let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
                     db.exclusive_tx_ref(id)
                         .update(&table, row, patch, options)
@@ -898,7 +905,6 @@ where
     pub fn enqueue_transaction_upsert(
         &self,
         id: OpenTransactionId,
-        exclusive: bool,
         table: String,
         row: RowUuid,
         cells: RowCells,
@@ -908,6 +914,7 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
+                let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
                     db.exclusive_tx_ref(id)
                         .upsert(&table, row, cells, options)
@@ -925,7 +932,6 @@ where
     pub fn enqueue_transaction_delete(
         &self,
         id: OpenTransactionId,
-        exclusive: bool,
         table: String,
         row: RowUuid,
         options: DeleteOptions,
@@ -934,6 +940,7 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
+                let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
                     db.exclusive_tx_ref(id).delete(&table, row, options).await
                 } else {
@@ -947,7 +954,6 @@ where
     pub fn enqueue_transaction_restore(
         &self,
         id: OpenTransactionId,
-        exclusive: bool,
         table: String,
         row: RowUuid,
         cells: Option<RowCells>,
@@ -957,6 +963,7 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
+                let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
                     db.exclusive_tx_ref(id)
                         .restore(&table, row, cells, options)
