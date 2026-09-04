@@ -115,7 +115,10 @@ function assertAndroidHarnessStartupContract(driver) {
     "harness stdout and stderr must both be retained for a bounded failure diagnostic",
   );
   assert.match(driver, /child\.once\("exit", \(code, signal\) =>/);
-  assert.match(driver, /adb\(\["get-state"\]\)/);
+  assert.match(driver, /import \{ adb \} from "\.\/android-adb\.mjs"/);
+  assert.match(driver, /const androidAdb = \(args\) => adb\(args, \{ serial \}\)/);
+  assert.doesNotMatch(driver, /execFileSync\("adb"/);
+  assert.match(driver, /androidAdb\(\["get-state"\]\)/);
   assert.match(driver, /retainHarnessOutput\(stdout, chunk\)/);
   assert.match(driver, /retainHarnessOutput\(stderr, chunk\)/);
   assert.match(driver, /JAZZ_RN_EDGE_SESSION \[redacted\]/);
@@ -612,10 +615,10 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
     driver,
     /"logcat",[\s\S]*"-d",[\s\S]*"-v",[\s\S]*"threadtime",[\s\S]*"ReactNativeJS:I",[\s\S]*"JazzDeviceAcceptance:E",[\s\S]*"\*:S"/,
   );
-  assert.doesNotMatch(driver, /adb\(\["logcat", "-d"\]\)/);
-  assert.match(driver, /adb\(\["logcat", "-c"\]\)/);
+  assert.doesNotMatch(driver, /androidAdb\(\["logcat", "-d"\]\)/);
+  assert.match(driver, /androidAdb\(\["logcat", "-c"\]\)/);
   assert.ok(
-    driver.indexOf('adb(["logcat", "-c"])') <
+    driver.indexOf('androidAdb(["logcat", "-c"])') <
       driver.indexOf('"dev.jazz.rndeviceacceptance\/.MainActivity"'),
     "each launched phase must clear stale log diagnostics before starting its app process",
   );
