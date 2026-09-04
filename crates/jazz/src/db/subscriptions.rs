@@ -104,9 +104,9 @@ where
 
     /// Attach a one-shot usage-site query coverage request.
     ///
-    /// Bindings call this before an edge/global one-shot read, drive
-    /// [`Db::tick`] until [`Db::query_attachment_is_covered`] is true, read, then
-    /// call [`Db::detach_query`].
+    /// Binding read operations own this attachment internally, drive
+    /// [`Db::tick`] until [`Db::query_attachment_is_covered`] is true, execute
+    /// the read, and then call [`Db::detach_query`].
     pub fn attach_query_with_opts(
         &self,
         prepared: &PreparedQuery,

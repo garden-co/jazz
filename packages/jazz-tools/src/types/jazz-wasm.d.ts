@@ -19,7 +19,9 @@ declare module "jazz-wasm" {
   ): string;
 
   export class WasmPreparedQuery {}
-  export class QueryAttachment {}
+  export class PendingNativeRead {
+    poll(): Uint8Array | null;
+  }
   export class WasmPermissionAdviceRequest {
     readonly promise: Promise<"allowed" | "denied" | "unknown">;
     cancel(): void;
@@ -138,16 +140,7 @@ declare module "jazz-wasm" {
       opts: unknown,
       openTransactionId?: string,
       author?: Uint8Array,
-    ): Uint8Array | Promise<Uint8Array>;
-    /** Attach coverage, optionally at an open transaction snapshot and/or explicit identity. */
-    attachQuery(
-      query: WasmPreparedQuery,
-      opts: unknown,
-      openTransactionId?: string,
-      author?: Uint8Array,
-    ): QueryAttachment;
-    queryAttachmentIsCovered(attachment: QueryAttachment): boolean;
-    detachQuery(attachment: QueryAttachment): void;
+    ): Uint8Array | PendingNativeRead;
     subscribe(
       query: WasmPreparedQuery,
       opts: unknown,

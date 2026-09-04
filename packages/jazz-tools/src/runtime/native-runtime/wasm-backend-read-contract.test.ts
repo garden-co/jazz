@@ -37,9 +37,7 @@ describe("WASM backend read capability parity", () => {
         () => db.all(relationQuery, opts),
       ];
       try {
-        const attachment = db.attachQuery(query, opts);
-        db.detachQuery(attachment);
-        for (const read of reads) expect(await read()).toBeInstanceOf(Uint8Array);
+        for (const read of reads) expect(await resolveRead(read())).toBeInstanceOf(Uint8Array);
         await db.subscribe(query, opts).cancel();
         await db.subscribe(relationQuery, opts).cancel();
       } finally {
@@ -49,3 +47,12 @@ describe("WASM backend read capability parity", () => {
     });
   }
 });
+
+async function resolveRead(read: Uint8Array | { poll(): Uint8Array | null }): Promise<Uint8Array> {
+  if (read instanceof Uint8Array) return read;
+  for (;;) {
+    const result = read.poll();
+    if (result !== null) return result;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}

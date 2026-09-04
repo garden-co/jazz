@@ -75,15 +75,6 @@ export declare class NapiDb {
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
-  /**
-   * Attach query coverage using one native entry point. An optional open
-   * transaction selects its frozen snapshot; an explicit author selects
-   * trusted-serving authorization. With no author, an explicit backend
-   * open uses backend authority and an ordinary open remains client-local.
-   */
-  attachQuery(query: PreparedQuery, opts?: any | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): QueryAttachment
-  queryAttachmentIsCovered(attachment: QueryAttachment): boolean
-  detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Subscription
   tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
@@ -108,10 +99,11 @@ export declare class PendingNativePermissionAdvice {
 }
 
 /**
- * A JavaScript-thread-owned binding read which suspended on asynchronous
- * large-value storage. NAPI promises execute on a Send worker pool, whereas
- * a Jazz runtime is deliberately `Rc`/thread-affine. The adapter drives this
- * object after its peer transport makes progress instead of blocking Node.
+ * A JavaScript-thread-owned binding read waiting for query coverage or
+ * asynchronous large-value storage. NAPI promises execute on a Send worker
+ * pool, whereas a Jazz runtime is deliberately `Rc`/thread-affine. The
+ * adapter drives this object after its peer transport makes progress instead
+ * of blocking Node.
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
@@ -130,10 +122,6 @@ export declare class PendingNativeSubscriptionBatch {
 }
 
 export declare class PreparedQuery {
-
-}
-
-export declare class QueryAttachment {
 
 }
 

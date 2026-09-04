@@ -11,7 +11,6 @@ export const {
   JazzServer,
   NapiDb,
   PreparedQuery,
-  QueryAttachment,
   StreamingMutation,
   Subscription,
   TestJwtIssuer,

@@ -206,14 +206,6 @@ type NativeDb = {
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
-  attachQuery?(
-    query: PreparedQuery,
-    opts: unknown,
-    openTransactionId?: OpenTransactionId,
-    author?: Uint8Array,
-  ): unknown;
-  queryAttachmentIsCovered?(attachment: unknown): boolean;
-  detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array, kind: "query" | "relation"): PreparedQuery;
   subscribe?(
     query: PreparedQuery,
@@ -617,14 +609,6 @@ export class NativeRuntimeAdapter implements Runtime {
   >();
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
-  // A non-durable follower needs a worker response before trusting native
-  // coverage. Full-propagation one-shot reads detach their query, so a later
-  // attachment must not reuse the prior attachment's confirmation: the
-  // upstream can have changed while no transport was attached. The recorded
-  // epoch distinguishes that reattachment from its initial attachment.
-  // Local-only reattachments may reuse their own confirmation when no newer
-  // worker frame has arrived, scoped to the serving authorization context.
-  private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -1039,7 +1023,6 @@ export class NativeRuntimeAdapter implements Runtime {
     // Db wrappers cannot retain stale native graph/storage state through a
     // cache after their context has shut down.
     this.preparedQueries.clear();
-    this.peerCoveredQueries.clear();
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
       // Query and subscription futures may still be unwinding through this
@@ -1695,52 +1678,35 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = this.prepareQuery(coreQueryJson);
-    if (queryUsesNativeRelationApi(coreQueryJson)) {
-      await this.waitForStrictRemoteQueryTransport(tier);
-      if (this.closed) return [];
-      const payload = await this.readRowsForContextAsync(query, opts, readContext);
-      return rowsFromBatches(readRowBatches(payload), this.schema);
-    }
-    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session, pendingTx);
+    await this.waitForStrictRemoteQueryTransport(tier);
+    await this.processPendingPeerActivityBeforeRead();
     if (this.closed) return [];
     if (!pendingTx) {
       this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     }
-    try {
-      if (queryHasArraySubqueries(coreQueryJson)) {
-        if (pendingTx) {
-          const payload = await this.readRowsForContextAsync(
-            query,
-            opts,
-            readContext,
-            pendingTx.id,
-          );
-          return rowsFromRelationSnapshot(
-            readRelationSnapshot(payload),
-            this.schema,
-            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
-          );
-        }
-        const payload = await this.readRowsForContextAsync(query, opts, readContext);
+    this.emitQueryCoverageTrace("attach");
+    if (queryHasArraySubqueries(coreQueryJson)) {
+      if (pendingTx) {
+        const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
+        this.emitQueryCoverageTrace("covered");
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
-      const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
-      let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
-      if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
-        await this.refreshRowsFromEdge(session, query, opts);
-        if (this.closed) return [];
-        rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-        rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
-      }
-      return rowStates;
-    } finally {
-      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
+      const payload = await this.readRowsForContextAsync(query, opts, readContext);
+      this.emitQueryCoverageTrace("covered");
+      return rowsFromRelationSnapshot(
+        readRelationSnapshot(payload),
+        this.schema,
+        subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+      );
     }
+    const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
+    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+    this.emitQueryCoverageTrace("covered");
+    return rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
   }
 
   createSubscription(
@@ -2250,7 +2216,7 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("native read is asynchronous; use the asynchronous read boundary");
     }
     if (isPendingNativeRead(result)) {
-      throw new Error("large-value hydration is pending; use the asynchronous read boundary");
+      throw new Error("native read is pending; use the asynchronous read boundary");
     }
     return result as Uint8Array;
   }
@@ -2261,7 +2227,10 @@ export class NativeRuntimeAdapter implements Runtime {
     context: NativeReadContext,
     openTransactionId?: OpenTransactionId,
   ): Promise<Uint8Array> {
-    return this.awaitNativeRead(this.startRowsForContext(query, opts, context, openTransactionId));
+    return this.awaitNativeRead(
+      this.startRowsForContext(query, opts, context, openTransactionId),
+      (opts as { tier?: string }).tier,
+    );
   }
 
   private startRowsForContext(
@@ -2311,34 +2280,21 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.subscribe(query, opts, author);
   }
 
-  private attachQueryForContext(
-    query: PreparedQuery,
-    opts: unknown,
-    context: NativeReadContext,
-    pendingTx?: PendingTx,
-  ): unknown {
-    if (!this.db.attachQuery) {
-      throw new Error("Native runtime does not support query coverage");
-    }
-    const author = context.kind === "session-authority" ? context.identity : undefined;
-    return this.db.attachQuery(query, opts, pendingTx?.id, author);
-  }
-
-  /**
-   * Native NAPI reads may suspend on a routed large-value chunk.  Keep the
-   * thread-affine Rust future in the binding and let the existing peer pump
-   * deliver the missing chunk between polls; never block the JS event loop.
-   */
+  /** Drive the binding-owned coverage and hydration operation while the
+   * existing peer pump delivers whatever remote state it is waiting for. */
   private async awaitNativeRead(
     started: NativeReadResult | Promise<NativeReadResult>,
+    tier?: string,
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
     for (;;) {
-      if (this.closed) throw new Error("large-value hydration was cancelled by runtime shutdown");
+      if (this.closed) throw new Error("native read was cancelled by runtime shutdown");
+      if (tier) this.throwServerTransportErrorForTier(tier);
       const bytes = result.poll();
       if (bytes !== null) return bytes;
       await this.pumpServerTransport();
+      if (tier) this.throwServerTransportErrorForTier(tier);
       await sleep(0);
     }
   }
@@ -2396,19 +2352,6 @@ export class NativeRuntimeAdapter implements Runtime {
     console.warn(`[jazz native-runtime] ${message}`);
   }
 
-  private async refreshRowsFromEdge(
-    session: RuntimeSession | null,
-    query: PreparedQuery,
-    opts: unknown,
-  ): Promise<void> {
-    if (!this.hasUpstream()) return;
-    // The outer Edge attachment owns both membership and concrete
-    // occurrences. Reusing that prepared query materializes only its
-    // delivered versions; a nested exact-id request creates a second scope
-    // and can circularly await its own authority receipt.
-    await this.readRowsForContextAsync(query, opts, this.nativeReadContext(session));
-  }
-
   private prepareQuery(queryJson: string): PreparedQuery {
     const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
     const queryBytes =
@@ -2426,86 +2369,6 @@ export class NativeRuntimeAdapter implements Runtime {
       this.preparedQueries.set(key, query);
     }
     return query;
-  }
-
-  private async attachQueryIfNeeded(
-    tier: string | null | undefined,
-    optionsJson: string | null | undefined,
-    query: PreparedQuery,
-    session: RuntimeSession | null,
-    pendingTx?: PendingTx,
-  ): Promise<unknown | undefined> {
-    if (this.closed) return;
-    if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
-    if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
-    await this.waitForStrictRemoteQueryTransport(tier);
-    if (!this.db.attachQuery) return;
-    // Coverage registration and probes are synchronous node operations. A
-    // storage-backed evaluator may hold that node across suspension, so enter
-    // the same owner-wide idle boundary used for peer admission first.
-    const opts = readOptions(tier, false, optionsJson);
-    const readContext = this.nativeReadContext(session, pendingTx);
-    const attachment = await this.runWhenCoreIdle(() =>
-      this.closed ? undefined : this.attachQueryForContext(query, opts, readContext, pendingTx),
-    );
-    if (attachment === undefined) return;
-    this.emitQueryCoverageTrace("attach");
-    // Durable Local reads returned above. A memory-only foreground must first
-    // receive its persistent owner's local answer, including an empty answer.
-    // The core attachment distinguishes that delivery from authority coverage:
-    // Local still completes while the owner is disconnected from edge/core.
-    if (!this.db.queryAttachmentIsCovered) return attachment;
-    const coverageKey = this.coverageKey(readContext, session);
-    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
-    const mayReusePeerConfirmation = this.nonDurableClient && !readPropagationIsFull(optionsJson);
-    const requiresFreshPeerConfirmation =
-      this.nonDurableClient &&
-      readPropagationIsFull(optionsJson) &&
-      confirmedPeerActivityEpoch != null;
-    // A prior confirmation can recover a reattachment only if no newer worker
-    // frame has arrived. Otherwise the old coverage state could be exposed to
-    // a query whose authorization (for example, an authorship-scoped policy)
-    // is about to change.
-    if (
-      mayReusePeerConfirmation &&
-      confirmedPeerActivityEpoch != null &&
-      (await this.runWhenCoreIdle(
-        () =>
-          !this.closed &&
-          this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
-          this.db.queryAttachmentIsCovered!(attachment),
-      ))
-    ) {
-      return attachment;
-    }
-    const minimumPeerActivityEpoch = this.nonDurableClient
-      ? this.peerTransportActivityEpoch
-      : undefined;
-    const pendingPeerActivityEpoch =
-      this.nonDurableClient &&
-      !requiresFreshPeerConfirmation &&
-      this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
-        ? this.peerTransportActivityEpoch
-        : undefined;
-    await this.waitForQueryCoverage(
-      attachment,
-      query,
-      readOptions(tier, false, optionsJson),
-      readContext,
-      minimumPeerActivityEpoch,
-      pendingPeerActivityEpoch,
-      mayReusePeerConfirmation && confirmedPeerActivityEpoch != null,
-    );
-    if (this.nonDurableClient) {
-      await this.runWhenCoreIdle(() => {
-        if (this.closed || !this.db.queryAttachmentIsCovered!(attachment)) return;
-        const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
-        confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
-        this.peerCoveredQueries.set(query, confirmations);
-      });
-    }
-    this.emitQueryCoverageTrace("covered");
-    return attachment;
   }
 
   /**
@@ -2545,6 +2408,19 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  /** Apply every worker frame already admitted before `all` creates its fresh
+   * coverage attachment. A queued receipt from an older usage site therefore
+   * cannot satisfy the new binding-owned read operation. */
+  private async processPendingPeerActivityBeforeRead(): Promise<void> {
+    if (!this.nonDurableClient) return;
+    while (
+      !this.closed &&
+      this.peerTransportProcessedActivityEpoch < this.peerTransportActivityEpoch
+    ) {
+      await this.progressPeerTransport();
+    }
+  }
+
   private attachLocalReadCoverageInBackground(
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
@@ -2553,35 +2429,28 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (tier != null && tier !== "local") return;
     if (!readPropagationIsFull(optionsJson)) return;
-    if (this.nonDurableClient || !this.serverTransport || !this.db.attachQuery) return;
+    if (this.nonDurableClient || !this.serverTransport) return;
 
     const refresh = async () => {
       await this.serverCarrierPromise;
       if (this.closed) return;
       const edgeOptionsJson = JSON.stringify({ propagation: "full" });
-      const attachment = await this.attachQueryIfNeeded("edge", edgeOptionsJson, query, session);
-      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
+      await this.waitForStrictRemoteQueryTransport("edge");
+      if (this.closed) return;
+      await this.readRowsForContextAsync(
+        query,
+        readOptions("edge", false, edgeOptionsJson),
+        this.nativeReadContext(session),
+      );
     };
 
     void refresh().catch((error: unknown) => {
       if (this.closed) return;
-      if (error instanceof Error && error.message === "Timed out waiting for edge query coverage") {
+      if (error instanceof Error && error.message === "Timed out waiting for query coverage") {
         return;
       }
       this.handleServerTransportError(error);
     });
-  }
-
-  /** Coverage is partitioned by the same native read context that owns it. */
-  private coverageKey(context: NativeReadContext, session: RuntimeSession | null): string {
-    switch (context.kind) {
-      case "client-local":
-        return "client-local";
-      case "backend-authority":
-        return "backend-authority";
-      case "session-authority":
-        return JSON.stringify([bytesKey(context.identity), canonicalJson(session?.claims ?? {})]);
-    }
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
@@ -2602,57 +2471,6 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     this.db.setIdentityClaims(session.identity, session.claims);
-  }
-
-  private async waitForQueryCoverage(
-    attachment: unknown,
-    query: PreparedQuery,
-    opts: unknown,
-    context: NativeReadContext,
-    minimumPeerActivityEpoch?: number,
-    pendingPeerActivityEpoch?: number,
-    exactContextWasConfirmed = false,
-  ): Promise<void> {
-    const deadline = Date.now() + 15_000;
-    const tier = (opts as { tier?: string }).tier ?? "";
-    while (Date.now() < deadline) {
-      // A query can still be waiting for an upstream coverage response while
-      // its owning browser runtime is being torn down. `close()` frees the
-      // WASM Db, so this background wait must not touch its attachment after
-      // that boundary.
-      if (this.closed) return;
-      this.throwServerTransportErrorForTier(tier);
-      await this.pumpServerTransport();
-      this.throwServerTransportErrorForTier(tier);
-      const covered = await this.runWhenCoreIdle(() => {
-        if (this.closed) return true;
-        if (!this.db.queryAttachmentIsCovered) return false;
-        const peerActivityWasProcessed =
-          minimumPeerActivityEpoch == null ||
-          this.peerTransportProcessedActivityEpoch > minimumPeerActivityEpoch ||
-          (exactContextWasConfirmed &&
-            minimumPeerActivityEpoch > 0 &&
-            this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
-          (pendingPeerActivityEpoch != null &&
-            this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
-        return peerActivityWasProcessed && this.db.queryAttachmentIsCovered(attachment);
-      });
-      if (covered) return;
-      try {
-        await this.readRowsForContextAsync(query, opts, context);
-        if (!this.db.queryAttachmentIsCovered) return;
-      } catch (error) {
-        if (!isPendingCoverageError(error)) throw error;
-      }
-      const transportError = this.waitForServerTransportError(tier);
-      try {
-        await (transportError ? Promise.race([sleep(10), transportError.promise]) : sleep(10));
-      } finally {
-        transportError?.cancel();
-      }
-    }
-    this.scheduleServerPump();
-    throw new Error("Timed out waiting for edge query coverage");
   }
 
   private table(table: string): { columns: ColumnDescriptor[]; policies?: TablePolicies } {
@@ -4288,15 +4106,6 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isPendingCoverageError(error: unknown): boolean {
-  const message = errorMessage(error);
-  return (
-    message.includes("NotCovered") ||
-    message.includes("not covered") ||
-    message.includes("has not reached requested tier")
-  );
 }
 
 function rejectedWaitError(
