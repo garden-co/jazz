@@ -191,10 +191,12 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
         userId: session.user,
       }),
     ),
-    // `senderId` is a profile UUID; policy evaluation retains the native
-    // subject claim for this typed internal binding. Public ownership fields
-    // above use the canonical public `session.user` identity.
-    policy.messages.allowDelete.where({ senderId: session.claims["sub"] }),
+    policy.messages.allowDelete.where((message) =>
+      policy.profiles.exists.where({
+        id: message.senderId,
+        userId: session.user,
+      }),
+    ),
 
     policy.reactions.allowRead.where(allowedTo.read("messageId")),
     policy.reactions.allowInsert.where({ userId: session.user }),
@@ -738,6 +740,29 @@ describe("raw websocket private read gate", () => {
           .orderBy("createdAt", "desc"),
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Alice should receive Bob's private invite message",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+
+    const deniedDelete = bob.delete(camelChatApp.messages, seedMessage.id);
+    await expect(deniedDelete.wait({ tier: "edge" })).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      transactionId: deniedDelete.txId,
+      code: "permission_denied",
+    });
+
+    await withTimeout(
+      bob.delete(camelChatApp.messages, bobMessage.id).wait({ tier: "edge" }),
+      15_000,
+      "Bob own-message delete edge wait",
+    );
+    await expect(
+      waitForQuery(
+        alice,
+        camelChatApp.messages.where({ chatId: chat.id }),
+        (rows) => !rows.some((row) => row.id === bobMessage.id),
+        "Alice should observe Bob's own message deletion",
         15_000,
         "edge",
       ),
