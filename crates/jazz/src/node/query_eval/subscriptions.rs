@@ -391,6 +391,10 @@ where
     }
 
     pub(in crate::node) fn apply_subscribe(&mut self, subscribe: Subscribe) -> Result<(), Error> {
+        let policy_binding = subscribe
+            .delegated_session
+            .as_ref()
+            .map(crate::protocol::PolicyBindingKey::from_delegated_session);
         let Some(shape) = self
             .query
             .registered_shapes
@@ -401,10 +405,13 @@ where
                 .parked_binding_deltas
                 .entry(subscribe.shape_id)
                 .or_default()
-                .push(subscribe);
+                .push(super::ParkedSubscription {
+                    subscribe,
+                    policy_binding,
+                });
             return Ok(());
         };
-        self.apply_known_shape_subscribe(&shape, subscribe)
+        self.apply_known_shape_subscribe(&shape, subscribe, policy_binding)
     }
 
     /// Register a server-admitted subscriber usage under the exact immutable
@@ -520,8 +527,8 @@ where
             self.parking.parked_binding_deltas.insert(shape_id, deltas);
             return Ok(());
         };
-        for subscribe in deltas {
-            self.apply_known_shape_subscribe(&shape, subscribe)?;
+        for parked in deltas {
+            self.apply_known_shape_subscribe(&shape, parked.subscribe, parked.policy_binding)?;
         }
         Ok(())
     }
@@ -530,6 +537,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         subscribe: Subscribe,
+        policy_binding: Option<crate::protocol::PolicyBindingKey>,
     ) -> Result<(), Error> {
         if subscribe.values.len() != shape.params().len() {
             return Err(Error::InvalidStoredValue("binding arity mismatch"));
@@ -546,10 +554,7 @@ where
             binding_id: binding.binding_id(),
             read_view: subscribe.subscription.read_view,
         };
-        let authority_result_key = subscribe
-            .delegated_session
-            .as_ref()
-            .map(crate::protocol::PolicyBindingKey::from_delegated_session)
+        let authority_result_key = policy_binding
             .map(|policy| AuthorityResultKey::policy_scoped(binding_view_key, policy))
             .unwrap_or_else(|| AuthorityResultKey::unscoped(binding_view_key));
         self.apply_known_shape_subscribe_with_authority_result_key(
@@ -666,6 +671,32 @@ where
     }
 
     pub(crate) fn apply_unsubscribe(&mut self, subscription: SubscriptionKey) {
+        let mut parked_policy_binding = None;
+        if let Some(parked) = self
+            .parking
+            .parked_binding_deltas
+            .get(&subscription.shape_id)
+        {
+            for parked in parked
+                .iter()
+                .filter(|parked| parked.subscribe.subscription == subscription)
+            {
+                let policy_binding = &parked.policy_binding;
+                if let Some(existing) = &parked_policy_binding {
+                    if existing != policy_binding {
+                        // A bare wire handle must not choose between policy
+                        // scopes that share the same usage-site key.
+                        return;
+                    }
+                } else {
+                    parked_policy_binding = Some(policy_binding.clone());
+                }
+            }
+        }
+        if let Some(policy_binding) = parked_policy_binding {
+            self.remove_parked_binding_usage(subscription, policy_binding.as_ref());
+        }
+
         let Some(registered_key) = self.unique_registered_binding_usage_key(subscription) else {
             // A bare wire handle is deliberately insufficient to retire an
             // ambiguous multiplexed policy scope. Authenticated serving paths
@@ -683,10 +714,35 @@ where
         subscription: SubscriptionKey,
         policy_binding: crate::protocol::PolicyBindingKey,
     ) {
+        self.remove_parked_binding_usage(subscription, Some(&policy_binding));
         self.apply_unsubscribe_registered_binding(
             subscription,
             registered_binding_usage_key(subscription, Some(policy_binding)),
         );
+    }
+
+    fn remove_parked_binding_usage(
+        &mut self,
+        subscription: SubscriptionKey,
+        policy_binding: Option<&crate::protocol::PolicyBindingKey>,
+    ) {
+        let remove_bucket = self
+            .parking
+            .parked_binding_deltas
+            .get_mut(&subscription.shape_id)
+            .map(|parked| {
+                parked.retain(|parked| {
+                    parked.subscribe.subscription != subscription
+                        || parked.policy_binding.as_ref() != policy_binding
+                });
+                parked.is_empty()
+            })
+            .unwrap_or(false);
+        if remove_bucket {
+            self.parking
+                .parked_binding_deltas
+                .remove(&subscription.shape_id);
+        }
     }
 
     fn apply_unsubscribe_registered_binding(

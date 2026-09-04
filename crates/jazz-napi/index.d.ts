@@ -97,6 +97,7 @@ export declare class NapiDb {
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
+  prepareQueryAsync(query: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PendingNativePreparation
   /**
    * Execute an ordinary prepared read. The optional transaction id selects
    * that transaction's snapshot and staged overlay; an explicit author
@@ -126,6 +127,7 @@ export declare class NapiDb {
   queryAttachmentIsCovered(attachment: QueryAttachment): boolean
   detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  subscribeAsync(query: PreparedQuery, opts?: JsonValue | undefined | null, author?: Uint8Array | undefined | null): PendingNativeSubscription
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   /**
    * Subscribe through the authority of an explicit backend open. This
@@ -169,6 +171,13 @@ export declare class PendingNativePermissionAdvice {
   cancel(): void
 }
 
+/** Thread-affine query preparation waiting for the core owner. */
+export declare class PendingNativePreparation {
+  setWake(callback: ((err: Error | null, arg: string) => void)): void
+  poll(): PreparedQuery | null
+  cancel(): void
+}
+
 /**
  * A JavaScript-thread-owned binding read which suspended on asynchronous
  * large-value storage. NAPI promises execute on a Send worker pool, whereas
@@ -177,6 +186,13 @@ export declare class PendingNativePermissionAdvice {
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
+}
+
+/** Thread-affine subscription opening waiting for the core owner. */
+export declare class PendingNativeSubscription {
+  setWake(callback: ((err: Error | null, arg: string) => void)): void
+  poll(): Subscription | null
+  cancel(): void
 }
 
 /**
@@ -204,7 +220,9 @@ export declare class PreparedQuery {
 }
 
 export declare class QueryAttachment {
-
+  setWake(callback: ((err: Error | null, arg: string) => void)): void
+  poll(): boolean | null
+  cancel(): void
 }
 
 /**
