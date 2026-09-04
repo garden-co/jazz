@@ -2618,6 +2618,19 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 },
             }
         }
+        ForegroundDbCommandRequest::LocalCurrentRow { table, row_id } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.local_current_foreground_row(table, row_id) {
+                Ok(rows) => ForegroundDbCommandResponse::Rows { rows },
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
         ForegroundDbCommandRequest::Subscribe { query } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
@@ -2876,7 +2889,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         | ForegroundDbCommandRequest::FinishStreamingMutation { .. }
         | ForegroundDbCommandRequest::AbortStreamingMutation { .. }
         | ForegroundDbCommandRequest::AllRelationQuery { .. }
-        | ForegroundDbCommandRequest::LocalCurrentRow { .. }
         | ForegroundDbCommandRequest::UpdateLargeValues { .. } => {
             ForegroundDbCommandResponse::OperationError {
                 reason: "foreground command handler is unavailable".to_owned(),
@@ -3140,6 +3152,26 @@ impl NativeRelayClient {
                 options_json,
                 transaction,
                 structured,
+            )
+        })
+    }
+
+    fn local_current_foreground_row(
+        &self,
+        table: String,
+        row_id: [u8; 16],
+    ) -> Result<Vec<u8>, RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            let client = worker.foreground_client(id)?;
+            let row = block_on(
+                client
+                    .db
+                    .local_current_row(&table, RowUuid::from_bytes(row_id)),
+            )
+            .map_err(RelayError::Db)?;
+            jazz::binding_codec::encode_rows(&row.into_iter().collect::<Vec<_>>()).map_err(
+                |error| RelayError::ForegroundCommand(format!("encode local current row: {error}")),
             )
         })
     }

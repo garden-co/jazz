@@ -17,6 +17,7 @@ type ForegroundCommand =
   | { type: "nativeSessionMetadata" }
   | { type: "prepareQuery"; query: Uint8Array }
   | { type: "all"; query: number }
+  | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
   | {
       type: "allWithOptions" | "allRelationSnapshotWithOptions";
       query: number;
@@ -226,6 +227,14 @@ export class NativeForegroundDb {
     if (response.type === "rows") return response.rows;
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("allRelationSnapshot", response.type);
+  }
+
+  // The shared mutation adapter needs one exact local row, without coverage
+  // registration or hydration, to merge staged patches synchronously.
+  localCurrentRow(table: string, rowId: Uint8Array): Uint8Array {
+    const response = this.execute({ type: "localCurrentRow", table, rowId });
+    if (response.type !== "rows") return unexpected("localCurrentRow", response.type);
+    return response.rows;
   }
 
   allForIdentity(): never {
