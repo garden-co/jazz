@@ -1571,7 +1571,7 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
         let v1_index = physical_current_index_name(mapping.columns[indexed_column]);
         assert_eq!(
             v1_index,
-            format!("by_physical_user_v1_{}", mapping.columns[indexed_column].0),
+            format!("by_physical_app_v1_{}", mapping.columns[indexed_column].0),
             "the branch-prefixed current-index identity is frozen at V1"
         );
         for storage_table in [
