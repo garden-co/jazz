@@ -4,7 +4,6 @@ const canonicalAuthorDecoder = new TextDecoder("utf-8", { fatal: true });
 const STORED_SCALAR_INLINE_TAG = 2;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
 const publicSessions = new WeakMap<Session, PublicSession>();
-const REGISTERED_JWT_CLAIMS = new Set(["iss", "sub", "aud", "exp", "nbf", "iat", "jti"]);
 
 function cloneAndFreezeClaim(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -71,18 +70,14 @@ export function canonicalAuthorSubject(issuer: string, subject: string): string 
  * control `iss`/`sub`, and the identity is derived from those exact values.
  *
  * @internal Public bindings expose the resulting `PublicSession`; applications
- * should read `session.user` instead of reproducing this encoding. Registered
- * JWT transport claims are not public application metadata.
+ * should read `session.user` instead of reproducing this encoding. JWT claims
+ * remain inspectable metadata and never form a second identity path.
  */
 export function withCanonicalUser(session: Session): PublicSession {
   const existing = publicSessions.get(session);
   if (existing) return existing;
   const user = canonicalAuthorSubject(session.issuer, session.user_id);
-  const claims = cloneAndFreezeClaim(
-    Object.fromEntries(
-      Object.entries(session.claims).filter(([key]) => !REGISTERED_JWT_CLAIMS.has(key)),
-    ),
-  ) as Readonly<Record<string, unknown>>;
+  const claims = cloneAndFreezeClaim(session.claims) as Readonly<Record<string, unknown>>;
   const published: PublicSession = Object.freeze({
     user,
     claims,

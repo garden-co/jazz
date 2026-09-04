@@ -193,7 +193,7 @@ pub struct JwtClaims {
     /// Optional issuer.
     #[serde(default)]
     pub iss: Option<String>,
-    /// Flat application metadata (all non-registered JWT claims).
+    /// Additional JWT payload fields retained alongside registered claims.
     #[serde(flatten)]
     #[serde(default)]
     pub claims: std::collections::BTreeMap<String, serde_json::Value>,
@@ -234,6 +234,10 @@ struct DecodedJwtClaims {
     exp: Option<u64>,
     #[serde(default)]
     nbf: Option<u64>,
+    #[serde(default)]
+    iat: Option<u64>,
+    #[serde(default)]
+    jti: Option<String>,
 }
 
 /// JWT identity data extracted after signature validation.
@@ -767,23 +771,49 @@ fn signature_only_validation(alg: Algorithm) -> Validation {
 }
 
 fn verified_jwt(claims: DecodedJwtClaims) -> VerifiedJwt {
-    let extra = claims
-        .extra
-        .into_iter()
-        .filter(|(name, _)| !is_registered_jwt_claim(name))
-        .collect();
+    let mut full = claims.extra;
+    full.insert(
+        "sub".to_owned(),
+        serde_json::Value::String(claims.sub.clone()),
+    );
+    if let Some(issuer) = &claims.iss {
+        full.insert("iss".to_owned(), serde_json::Value::String(issuer.clone()));
+    }
+    if let Some(audience) = &claims.aud {
+        full.insert(
+            "aud".to_owned(),
+            match audience {
+                JwtAudience::One(value) => serde_json::Value::String(value.clone()),
+                JwtAudience::Many(values) => serde_json::Value::Array(
+                    values
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            },
+        );
+    }
+    for (name, value) in [
+        ("exp", claims.exp),
+        ("nbf", claims.nbf),
+        ("iat", claims.iat),
+    ] {
+        if let Some(value) = value {
+            full.insert(name.to_owned(), serde_json::Value::Number(value.into()));
+        }
+    }
+    if let Some(jti) = claims.jti {
+        full.insert("jti".to_owned(), serde_json::Value::String(jti));
+    }
     VerifiedJwt {
         subject: claims.sub,
         issuer: claims.iss,
-        claims: serde_json::Value::Object(extra),
+        claims: serde_json::Value::Object(full.into_iter().collect()),
         exp: claims.exp,
         audiences: claims.aud.map(JwtAudience::into_values).unwrap_or_default(),
         not_before: claims.nbf,
     }
-}
-
-fn is_registered_jwt_claim(name: &str) -> bool {
-    matches!(name, "iss" | "sub" | "aud" | "exp" | "nbf" | "iat" | "jti")
 }
 
 fn select_jwk_candidates<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm) -> Vec<&'a Jwk> {
@@ -1447,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_external_jwt_claims_preserve_metadata_and_exclude_registered_fields() {
+    fn flat_external_jwt_claims_preserve_the_complete_verified_payload() {
         let token = make_raw_jwt(serde_json::json!({
             "iss": "https://issuer.jazz.test",
             "sub": "better-auth-user-123",
@@ -1494,12 +1524,13 @@ mod tests {
             session.claims["claims"],
             serde_json::json!({"legacy": "not flattened"})
         );
-        for reserved in ["iss", "sub", "aud", "exp", "nbf", "iat", "jti"] {
-            assert!(
-                session.claims.get(reserved).is_none(),
-                "{reserved} is transport metadata"
-            );
-        }
+        assert_eq!(session.claims["iss"], "https://issuer.jazz.test");
+        assert_eq!(session.claims["sub"], "better-auth-user-123");
+        assert_eq!(session.claims["aud"], "jazz-audience");
+        assert_eq!(session.claims["exp"], serde_json::json!(4_102_444_800_u64));
+        assert_eq!(session.claims["nbf"], serde_json::json!(0));
+        assert_eq!(session.claims["iat"], serde_json::json!(0));
+        assert_eq!(session.claims["jti"], "transport-token-id");
     }
 
     #[test]

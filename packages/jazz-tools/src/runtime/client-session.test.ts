@@ -61,6 +61,13 @@ describe("client session resolution", () => {
           auth_mode: "external",
           subject: "subject-123",
           issuer: "https://issuer.example",
+          iss: "untrusted-cookie-issuer",
+          sub: "untrusted-cookie-subject",
+          aud: "untrusted-cookie-audience",
+          exp: 123,
+          nbf: 45,
+          iat: 67,
+          jti: "untrusted-cookie-id",
         },
         authMode: "external",
       },
@@ -100,6 +107,8 @@ describe("client session resolution", () => {
     expect(session).toEqual({
       user: '["https://issuer.example","user-subject"]',
       claims: {
+        iss: "https://issuer.example",
+        sub: "user-subject",
         better_auth_user_id: "user-subject",
         profile_id: "profile-456",
       },
@@ -142,6 +151,8 @@ describe("client session resolution", () => {
     expect(session).toEqual({
       user: '["https://issuer.example","verified-subject"]',
       claims: {
+        iss: "https://issuer.example",
+        sub: "verified-subject",
         roles: ["writer"],
       },
       authMode: "external",
@@ -154,7 +165,7 @@ describe("client session resolution", () => {
     }
   });
 
-  it("exposes every non-reserved top-level JSON claim without a nested-claims path", () => {
+  it("exposes the complete verified JWT payload without a nested-claims path", () => {
     const session = resolveClientSessionSync({
       appId: "app-jwt-policy-claim-corpus",
       jwtToken: makeJwt({
@@ -180,10 +191,8 @@ describe("client session resolution", () => {
         claims: { role: "nested" },
       },
     });
-    expect(session?.claims.exp).toBeUndefined();
-    expect(session?.claims.aud).toBeUndefined();
-    expect(session?.claims.iss).toBeUndefined();
-    expect(session?.claims.sub).toBeUndefined();
+    expect(session?.claims.iss).toBe("https://issuer.example");
+    expect(session?.claims.sub).toBe("alice");
   });
 
   it("preserves prototype-named flat claims as own data properties through public cloning", () => {
@@ -202,7 +211,14 @@ describe("client session resolution", () => {
     )!;
 
     expect(Object.getPrototypeOf(internal.claims)).toBeNull();
-    expect(Object.keys(internal.claims)).toEqual(["__proto__", "constructor", "prototype", "role"]);
+    expect(Object.keys(internal.claims)).toEqual([
+      "__proto__",
+      "constructor",
+      "iss",
+      "prototype",
+      "role",
+      "sub",
+    ]);
     expect(Object.hasOwn(internal.claims, "__proto__")).toBe(true);
     expect(Object.hasOwn(internal.claims, "constructor")).toBe(true);
     expect(Object.hasOwn(internal.claims, "prototype")).toBe(true);
@@ -213,13 +229,20 @@ describe("client session resolution", () => {
 
     // Public publication clones and freezes the claim dictionary, while the
     // native bridge can enumerate these own JSON properties as a BTreeMap.
-    expect(Object.keys(session.claims)).toEqual(["__proto__", "constructor", "prototype", "role"]);
+    expect(Object.keys(session.claims)).toEqual([
+      "__proto__",
+      "constructor",
+      "iss",
+      "prototype",
+      "role",
+      "sub",
+    ]);
     expect(session.claims.__proto__).toEqual({ polluted: true });
     expect(session.claims.constructor).toBe("app-constructor");
     expect(session.claims.prototype).toEqual({ version: 1 });
     expect(JSON.parse(JSON.stringify(session.claims))).toEqual(
       JSON.parse(
-        '{"__proto__":{"polluted":true},"constructor":"app-constructor","prototype":{"version":1},"role":"editor"}',
+        '{"__proto__":{"polluted":true},"constructor":"app-constructor","iss":"urn:jazz:local-first","prototype":{"version":1},"role":"editor","sub":"alice"}',
       ),
     );
   });
@@ -235,8 +258,8 @@ describe("client session resolution", () => {
     });
 
     expect(spaced?.user).toBe('[" issuer "," alice "]');
-    expect(spaced?.claims.iss).toBeUndefined();
-    expect(spaced?.claims.sub).toBeUndefined();
+    expect(spaced?.claims.iss).toBe(" issuer ");
+    expect(spaced?.claims.sub).toBe(" alice ");
     expect(spaced?.claims.subject).toBeUndefined();
     expect(spaced?.user).not.toBe(plain?.user);
     for (const subject of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
@@ -265,8 +288,8 @@ describe("client session resolution", () => {
       });
 
       expect(session?.user).toBe(JSON.stringify([`${subject}issuer`, subject]));
-      expect(session?.claims.iss).toBeUndefined();
-      expect(session?.claims.sub).toBeUndefined();
+      expect(session?.claims.iss).toBe(`${subject}issuer`);
+      expect(session?.claims.sub).toBe(subject);
       expect(session?.claims.subject).toBeUndefined();
     }
   });
@@ -395,7 +418,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
     );
     expect(localFirst).toEqual({
       user: '["urn:jazz:local-first","u1"]',
-      claims: { role: "writer" },
+      claims: { iss: LOCAL_FIRST_JWT_ISSUER, sub: "u1", role: "writer" },
       authMode: "local-first",
     });
     expect(
@@ -423,7 +446,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
     ).toBeNull();
   });
 
-  it("does not expose reserved self-signed proof keys as policy claims", () => {
+  it("does not expose reserved self-signed proof keys while retaining identity metadata", () => {
     for (const [authMode, issuer] of [
       ["anonymous", ANONYMOUS_JWT_ISSUER],
       ["local-first", LOCAL_FIRST_JWT_ISSUER],
@@ -432,12 +455,13 @@ describe("resolveJwtSession — reserved issuer admission", () => {
         const payload = { sub: "user", iss: issuer, jazz_pub_key: proofKey };
         expect(sessionFromVerifiedReservedJwtPayload(payload, authMode)).toEqual({
           user: JSON.stringify([issuer, "user"]),
-          claims: {},
+          claims: { iss: issuer, sub: "user" },
           authMode,
         });
-        expect(internalSessionFromVerifiedReservedJwtPayload(payload, authMode)?.claims).toEqual(
-          {},
-        );
+        expect(internalSessionFromVerifiedReservedJwtPayload(payload, authMode)?.claims).toEqual({
+          iss: issuer,
+          sub: "user",
+        });
       }
     }
     // An external provider may legitimately use this spelling as a custom

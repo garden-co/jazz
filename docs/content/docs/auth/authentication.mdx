@@ -84,10 +84,10 @@ If your provider doesn't provide a stable ID in `sub` by default, either configu
 or remint the token through your own JWT layer that rewrites `sub`.
 
 <Callout type="info">
-  Policies use `session.user` when comparing `$createdBy` or `$updatedBy`. Non-registered provider
-  metadata remains available under `session.claims`; registered transport fields such as `iss` and
-  `sub` do not. Authorship identity is the exact `[iss, sub]` pair, so changing either component
-  creates a different author.
+  Policies use `session.user` when comparing `$createdBy` or `$updatedBy`. The complete verified JWT
+  payload, including registered fields such as `iss` and `sub`, remains inspectable under
+  `session.claims`; none of those fields is a second authorship path. Authorship identity is the
+  exact `[iss, sub]` pair, so changing either component creates a different author.
 </Callout>
 
 ### Managing JWT changes on a live client
