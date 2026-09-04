@@ -217,6 +217,53 @@ describe("client session resolution", () => {
     expect(arrayAudience?.claims.aud).toEqual(["jazz-web", "jazz-mobile"]);
   });
 
+  it("keeps complete public JWT metadata out of the delegated policy corpus", () => {
+    const state = resolveClientSessionStateSync({
+      appId: "app-jwt-public-policy-split",
+      jwtToken: makeJwt({
+        iss: "https://issuer.example",
+        sub: "alice",
+        aud: "jazz-web",
+        exp: 4_102_444_800,
+        role: "editor",
+        team_ids: ["team-a", "team-b"],
+        profile: { handler_only: true },
+      }),
+    });
+
+    // Application code gets the complete verified payload, including standard
+    // JWT metadata and object-valued handler metadata.
+    expect(state.session?.claims).toMatchObject({
+      iss: "https://issuer.example",
+      sub: "alice",
+      aud: "jazz-web",
+      exp: 4_102_444_800,
+      role: "editor",
+      team_ids: ["team-a", "team-b"],
+      profile: { handler_only: true },
+    });
+
+    // The browser relay instead delegates exactly the non-recursive provider
+    // corpus that native admission reconstructs from the verified JWT.
+    expect(state.internalSession?.claims).toEqual({
+      role: "editor",
+      team_ids: ["team-a", "team-b"],
+    });
+    expect(state.internalSession?.claims).not.toHaveProperty("iss");
+    expect(state.internalSession?.claims).not.toHaveProperty("sub");
+    expect(state.internalSession?.claims).not.toHaveProperty("aud");
+    expect(state.internalSession?.claims).not.toHaveProperty("exp");
+    expect(state.internalSession?.claims).not.toHaveProperty("profile");
+
+    // Worker handoff copies only the Session's policy corpus. The complete
+    // handler presentation payload is identity-local and cannot accidentally
+    // become a delegated binding through object or JSON serialization.
+    const internal = state.internalSession!;
+    expect(structuredClone(internal).claims).toEqual(internal.claims);
+    expect(JSON.parse(JSON.stringify(internal)).claims).toEqual(internal.claims);
+    expect({ ...internal }.claims).toEqual(internal.claims);
+  });
+
   it("preserves prototype-named flat claims as own data properties through public cloning", () => {
     // JSON payloads cannot contain symbols or accessors, but they can contain
     // every string key, including names with legacy Object.prototype behavior.
@@ -233,20 +280,11 @@ describe("client session resolution", () => {
     )!;
 
     expect(Object.getPrototypeOf(internal.claims)).toBeNull();
-    expect(Object.keys(internal.claims)).toEqual([
-      "__proto__",
-      "constructor",
-      "iss",
-      "prototype",
-      "role",
-      "sub",
-    ]);
-    expect(Object.hasOwn(internal.claims, "__proto__")).toBe(true);
+    expect(Object.keys(internal.claims)).toEqual(["constructor", "role"]);
+    expect(Object.hasOwn(internal.claims, "__proto__")).toBe(false);
     expect(Object.hasOwn(internal.claims, "constructor")).toBe(true);
-    expect(Object.hasOwn(internal.claims, "prototype")).toBe(true);
-    expect(internal.claims.__proto__).toEqual({ polluted: true });
     expect(internal.claims.constructor).toBe("app-constructor");
-    expect(internal.claims.prototype).toEqual({ version: 1 });
+    expect(Object.hasOwn(internal.claims, "prototype")).toBe(false);
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
 
     // Public publication clones and freezes the claim dictionary, while the
@@ -483,10 +521,9 @@ describe("resolveJwtSession — reserved issuer admission", () => {
           claims: { iss: issuer, sub: "user" },
           authMode,
         });
-        expect(internalSessionFromVerifiedReservedJwtPayload(payload, authMode)?.claims).toEqual({
-          iss: issuer,
-          sub: "user",
-        });
+        expect(internalSessionFromVerifiedReservedJwtPayload(payload, authMode)?.claims).toEqual(
+          {},
+        );
       }
     }
     // An external provider may legitimately use this spelling as a custom
