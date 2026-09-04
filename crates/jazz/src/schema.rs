@@ -2093,7 +2093,7 @@ mod tests {
             table
                 .columns
                 .iter()
-                .any(|column| column.name == "user_title")
+                .any(|column| column.name == "_app_title")
         );
         assert!(
             table
@@ -2526,8 +2526,8 @@ mod tests {
             registry(right.register_storage_table(), "_deletion")
         );
         assert_ne!(
-            registry(left.history_storage_table(), "user_state"),
-            registry(right.history_storage_table(), "user_state"),
+            registry(left.history_storage_table(), "_app_state"),
+            registry(right.history_storage_table(), "_app_state"),
             "structurally identical user enums must retain independent registries"
         );
     }

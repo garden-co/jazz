@@ -20,7 +20,7 @@ pub(super) fn source_requirements(
     // key, even when that intermediate source contributes no application
     // payload.  Source projections are allowed to elide unrequested fields;
     // without this requirement a nested include such as `project.org` can
-    // resolve `projects` with `user_org` replaced by its sparse projection
+    // resolve `projects` with `_app_org` replaced by its sparse projection
     // default, making the second hop look universally missing.
     for path in &request.input.shape.closure_paths {
         for segment in closure_path_segments(path) {

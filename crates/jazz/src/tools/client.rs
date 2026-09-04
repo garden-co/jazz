@@ -5687,7 +5687,7 @@ mod tests {
 
         let descriptor = crate::groove::records::RecordDescriptor::new([
             ("row_uuid", ValueType::Uuid),
-            ("user_occurred_at", ValueType::U64),
+            ("_app_occurred_at", ValueType::U64),
             ("$createdAt", ValueType::U64),
             ("$updatedAt", ValueType::U64),
             ("tx_time", ValueType::U64),

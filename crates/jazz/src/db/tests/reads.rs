@@ -2141,7 +2141,7 @@ fn version_bearing_current_source_preserves_provenance_timestamps() {
     let row = rows.iter().find(|row| row.row_uuid() == id).unwrap();
     assert_eq!(row.raw_field("$createdAt"), Some(Value::U64(1_234)));
     assert_eq!(row.raw_field("$updatedAt"), Some(Value::U64(1_234)));
-    assert_eq!(row.raw_field("user_done"), None);
+    assert_eq!(row.raw_field("_app_done"), None);
 }
 
 #[test]

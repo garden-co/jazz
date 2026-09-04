@@ -255,7 +255,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
             && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
                 field: groove::ivm::FieldRef::Name(field),
                 direction: groove::ivm::TopByDirection::Asc,
-            }] if field == "user_title")
+            }] if field == "_app_title")
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
                 if field == "row_uuid")
             && matches!(
@@ -267,7 +267,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
                 } if matches!(
                     input.as_ref(),
                     GraphBuilder::Table { table, .. } if table == "resolved_todos"
-                ) && field == "user_title"
+                ) && field == "_app_title"
                     && value == &groove::ivm::LiteralValue::String("ship".to_owned())
             )
         )
@@ -430,7 +430,7 @@ fn current_nullable_field_comparison_preserves_declared_literal_depth() {
                 GraphBuilder::Filter {
                     predicate: groove::ivm::PredicateExpr::Eq { field, value },
                     ..
-                } if field == "user_todo"
+                } if field == "_app_todo"
                     && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
                         groove::ivm::LiteralValue::Uuid(row(0xa2).0),
                     )))
@@ -579,7 +579,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                         && matches!(
                             right.as_ref(),
                             GraphBuilder::UnwrapNullable { input, field }
-                                if matches!(field, groove::ivm::FieldRef::Name(name) if name == "user_todo")
+                                if matches!(field, groove::ivm::FieldRef::Name(name) if name == "_app_todo")
                                     && matches!(
                                         input.as_ref(),
                                         GraphBuilder::Filter { input, predicate, .. }
@@ -589,7 +589,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                             ) && matches!(
                                                 predicate,
                                                 groove::ivm::PredicateExpr::Eq { field, value }
-                                                    if field == "user_tag"
+                                                    if field == "_app_tag"
                                                         && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
                                                             groove::ivm::LiteralValue::String("ship".to_owned()),
                                                         )))
@@ -597,7 +597,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                     )
                         )
                         && matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "_app_todo")
                 )
     )));
 }
@@ -1043,14 +1043,14 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                             [
                                 groove::ivm::FieldRef::Name(todo),
                                 groove::ivm::FieldRef::Name(tag)
-                            ] if todo == "user_todo" && tag == "user_tag"
+                            ] if todo == "_app_todo" && tag == "_app_tag"
                         )
                         && matches!(
                             right_on.as_slice(),
                             [
                                 groove::ivm::FieldRef::Name(row_uuid),
                                 groove::ivm::FieldRef::Name(tag)
-                            ] if row_uuid == "row_uuid" && tag == "user_tag"
+                            ] if row_uuid == "row_uuid" && tag == "_app_tag"
                         )
             )
     )));
@@ -1313,7 +1313,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                         right_on,
                         ..
                     } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "_app_todo")
                 )
     ));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;

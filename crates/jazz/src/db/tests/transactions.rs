@@ -574,14 +574,14 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         overlay_row
             .encoded_record()
             .0
-            .field_index("user_title")
+            .field_index("_app_title")
             .is_some()
     );
     assert!(
         overlay_row
             .encoded_record()
             .0
-            .field_index("user_done")
+            .field_index("_app_done")
             .is_some()
     );
     assert_eq!(
@@ -601,7 +601,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         rows[0]
             .encoded_record()
             .0
-            .field_index("user_title")
+            .field_index("_app_title")
             .is_some()
     );
     assert_eq!(
