@@ -1988,65 +1988,6 @@ mod tests {
             ))
         ));
     }
-    #[test]
-    fn resolves_positional_cte_and_reference_table_column_aliases() {
-        let cte = Cte::new(
-            "album_ids",
-            Query::Select(Box::new(
-                Select::new([
-                    SelectItem::expr(Expr::column("id")),
-                    SelectItem::expr(Expr::column("title")),
-                ])
-                .from([TableRef::named("albums")]),
-            )),
-        )
-        .with_columns(["declared_id", "declared_title"]);
-        let reference = TableRef::Named {
-            name: ObjectName::single("album_ids"),
-            alias: Some(TableAlias::new("ref").with_columns(["reference_id"])),
-        };
-        let query = Query::With(Box::new(WithQuery::new(
-            [cte],
-            Query::Select(Box::new(
-                Select::new([
-                    SelectItem::expr(Expr::Column(ColumnRef::qualified(["ref"], "reference_id"))),
-                    SelectItem::expr(Expr::Column(ColumnRef::qualified(
-                        ["ref"],
-                        "declared_title",
-                    ))),
-                ])
-                .from([reference]),
-            )),
-        )));
-
-        let planned = plan_query(&query, &schema()).unwrap();
-
-        let output = planned
-            .output
-            .iter()
-            .map(|field| (field.qualifier.as_deref(), field.name.as_str()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            output,
-            vec![
-                (Some("ref"), "reference_id"),
-                (Some("ref"), "declared_title"),
-            ]
-        );
-        assert_eq!(
-            planned.graph,
-            GraphBuilder::table("albums")
-                .project(["id", "title"])
-                .project_fields([
-                    ProjectField::renamed("id", "declared_id"),
-                    ProjectField::renamed("title", "declared_title"),
-                ])
-                .project_fields([
-                    ProjectField::renamed("declared_id", "reference_id"),
-                    ProjectField::renamed("declared_title", "declared_title"),
-                ])
-        );
-    }
 
     #[test]
     fn preserves_hidden_binding_fields_through_cte_aliases() {
@@ -2160,6 +2101,66 @@ mod tests {
                 "relation name is reserved for prepared-query bindings"
             ))
         ));
+    }
+
+    #[test]
+    fn resolves_positional_cte_and_reference_table_column_aliases() {
+        let cte = Cte::new(
+            "album_ids",
+            Query::Select(Box::new(
+                Select::new([
+                    SelectItem::expr(Expr::column("id")),
+                    SelectItem::expr(Expr::column("title")),
+                ])
+                .from([TableRef::named("albums")]),
+            )),
+        )
+        .with_columns(["declared_id", "declared_title"]);
+        let reference = TableRef::Named {
+            name: ObjectName::single("album_ids"),
+            alias: Some(TableAlias::new("ref").with_columns(["reference_id"])),
+        };
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(
+                Select::new([
+                    SelectItem::expr(Expr::Column(ColumnRef::qualified(["ref"], "reference_id"))),
+                    SelectItem::expr(Expr::Column(ColumnRef::qualified(
+                        ["ref"],
+                        "declared_title",
+                    ))),
+                ])
+                .from([reference]),
+            )),
+        )));
+
+        let planned = plan_query(&query, &schema()).unwrap();
+
+        let output = planned
+            .output
+            .iter()
+            .map(|field| (field.qualifier.as_deref(), field.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            output,
+            vec![
+                (Some("ref"), "reference_id"),
+                (Some("ref"), "declared_title"),
+            ]
+        );
+        assert_eq!(
+            planned.graph,
+            GraphBuilder::table("albums")
+                .project(["id", "title"])
+                .project_fields([
+                    ProjectField::renamed("id", "declared_id"),
+                    ProjectField::renamed("title", "declared_title"),
+                ])
+                .project_fields([
+                    ProjectField::renamed("declared_id", "reference_id"),
+                    ProjectField::renamed("declared_title", "declared_title"),
+                ])
+        );
     }
 
     #[test]
