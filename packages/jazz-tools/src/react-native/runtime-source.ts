@@ -129,6 +129,12 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     throw new Error(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
   }
 
+  override assertAuthUpdateAllowed(): never {
+    throw new Error(
+      "React Native authentication is native-admission bound; revoke the old native scope, admit the new scope, and create a new Db",
+    );
+  }
+
   override admitConfig(config: ReactNativeDbConfig): void {
     if (!this.admittedSession) throw new Error("React Native native session is not admitted");
     // Public identity is derived from the native admission. Caller metadata

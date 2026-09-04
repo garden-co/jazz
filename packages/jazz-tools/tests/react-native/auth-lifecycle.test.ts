@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
 import { expect, it } from "vitest";
 import { schema } from "../../src/schema-namespace.js";
 import { withNativeRelayFixture } from "./fixture.js";
@@ -42,29 +45,34 @@ it("revokes the old foreground before opening an isolated newly admitted identit
     first.nativeHost.revoke(first.capability);
     await expect(old.all(app.notes, { tier: "local" })).rejects.toThrow();
     await expect(first.createDb()).rejects.toThrow();
-    await withNativeRelayFixture(
-      app,
-      async (second) => {
-        const current = await second.createDb();
-        expect(current.getAuthState().session?.user).toBe(
-          JSON.stringify(["https://auth.example", "second"]),
-        );
-        expect(await current.all(app.notes, { tier: "local" })).toEqual([]);
-        await current.insert(app.notes, { title: "second identity row" }).wait({ tier: "local" });
-        expect((await current.all(app.notes, { tier: "local" })).map((row) => row.title)).toEqual([
-          "second identity row",
-        ]);
-      },
-      {
-        appId: first.config.appId,
-        session: {
-          issuer: "https://auth.example",
-          user_id: "second",
-          claims: {},
-          authMode: "external",
+    const newCapability = first.nativeHost.admit(
+      JSON.stringify({
+        scope: {
+          app_namespace: first.config.appId,
+          storage_namespace: "default",
+          auth_scope: "second-identity",
         },
-      },
+        sqlite_path: join(first.directory, "second.sqlite"),
+        schema_json: serializeSchemaSource(app.wasmSchema),
+        identity: {
+          node: randomUUID(),
+          author: JSON.stringify(["https://auth.example", "second"]),
+        },
+        claims: {},
+      }),
     );
+    const current = await first.createDb({
+      ...first.config,
+      nativeRelay: { capability: newCapability },
+    });
+    expect(current.getAuthState().session?.user).toBe(
+      JSON.stringify(["https://auth.example", "second"]),
+    );
+    expect(await current.all(app.notes, { tier: "local" })).toEqual([]);
+    await current.insert(app.notes, { title: "second identity row" }).wait({ tier: "local" });
+    expect((await current.all(app.notes, { tier: "local" })).map((row) => row.title)).toEqual([
+      "second identity row",
+    ]);
   });
 });
 
@@ -79,5 +87,25 @@ it("logout and repeated shutdown retire the public foreground", async () => {
     await expect
       .poll(async () => (await reopened.all(app.notes, { tier: "local" })).map((row) => row.title))
       .toEqual(["retained on logout"]);
+  });
+});
+
+it("rejects auth replacement before and after first query without changing public identity", async () => {
+  await withNativeRelayFixture(app, async (fixture) => {
+    const db = await fixture.createDb();
+    const admitted = db.getAuthState();
+    for (const materialized of [false, true]) {
+      if (materialized) await db.all(app.notes, { tier: "local" });
+      expect(() => db.updateAuthToken(null)).toThrow("native-admission bound");
+      expect(() =>
+        db.updateCookieSession({
+          issuer: "https://other.example",
+          user_id: "other",
+          claims: {},
+          authMode: "external",
+        }),
+      ).toThrow("native-admission bound");
+      expect(db.getAuthState()).toEqual(admitted);
+    }
   });
 });

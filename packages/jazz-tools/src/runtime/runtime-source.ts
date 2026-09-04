@@ -111,6 +111,9 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     reconnect(): void | Promise<void>;
   };
 
+  /** Admission-bound native sources reject updates before any public state changes. */
+  assertAuthUpdateAllowed(): void {}
+
   /** Apply source-specific admission after the shared auth config is resolved. */
   admitConfig(_config: RuntimeConfig): void {}
 

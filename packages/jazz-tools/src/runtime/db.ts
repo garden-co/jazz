@@ -1700,6 +1700,7 @@ export class Db {
   }
 
   protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
+    this.runtimeSource.assertAuthUpdateAllowed();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
@@ -1735,6 +1736,7 @@ export class Db {
   }
 
   protected applyCookieSessionUpdate(session: Session | null): boolean {
+    this.runtimeSource.assertAuthUpdateAllowed();
     const cookieSession = session ?? undefined;
     const previousSession = this.config.cookieSession;
     const previousState = this.authStateStore.getState();
