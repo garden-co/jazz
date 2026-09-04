@@ -207,7 +207,7 @@ function staticLibraryArchitectures(file) {
     if (!bytes.subarray(start, start + 8).equals(Buffer.from("!<arch>\n")))
       throw new Error(`malformed static-library archive ${file}`);
     let offset = start + 8;
-    const before = architectures.size;
+    let hasExpectedMachO = false;
     while (offset + 60 <= end) {
       const size = Number(bytes.subarray(offset + 48, offset + 58).toString("ascii").trim());
       if (!Number.isSafeInteger(size) || size < 0 || offset + 60 + size > end)
@@ -221,12 +221,13 @@ function staticLibraryArchitectures(file) {
       const object = bsdNameLength === undefined ? payload : payload + Number(bsdNameLength);
       if (object > payload + size) throw new Error(`malformed BSD static-library member ${file}`);
       addElfArchitecture(object);
-      addMachOArchitecture(object, payload + size, expectedCpu);
+      if (addMachOArchitecture(object, payload + size, expectedCpu) && expectedCpu !== undefined)
+        hasExpectedMachO = true;
       addFatMachOArchitectures(object, payload + size);
       offset = payload + size + (size % 2);
     }
     if (offset !== end) throw new Error(`malformed static-library archive padding ${file}`);
-    if (expectedCpu !== undefined && architectures.size === before)
+    if (expectedCpu !== undefined && !hasExpectedMachO)
       throw new Error(`fat Mach-O slice has no supported object payload in ${file}`);
   };
 

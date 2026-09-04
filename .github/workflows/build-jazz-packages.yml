@@ -513,10 +513,15 @@ jobs:
         with:
           name: pkg-jazz-rn
           path: |
-            dist/jazz-rn-*.tgz
             crates/jazz-rn
             !crates/jazz-rn/node_modules
           include-hidden-files: true
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkg-jazz-rn-tarball
+          path: dist/jazz-rn-*.tgz
           if-no-files-found: error
 
   verify-jazz-rn-android-consumer:
@@ -535,7 +540,7 @@ jobs:
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: pkg-jazz-rn
+          name: pkg-jazz-rn-tarball
           path: dist
 
       - name: Install the packed relay into an isolated Expo fixture
@@ -585,7 +590,7 @@ jobs:
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: pkg-jazz-rn
+          name: pkg-jazz-rn-tarball
           path: dist
 
       - name: Install the packed relay into an isolated Expo fixture

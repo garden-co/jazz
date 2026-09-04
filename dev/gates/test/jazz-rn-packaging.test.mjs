@@ -507,6 +507,25 @@ ${
       "a fat Mach-O table cannot claim an architecture its payload lacks",
     );
 
+    await writeFile(
+      simulatorLibrary,
+      fatMachO([
+        { cpu: 0x0100000c, bytes: archive([["object.o", elfObject(183)]]) },
+        { cpu: 0x01000007, bytes: machObject(0x01000007) },
+      ]),
+    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /fat Mach-O slice has no supported object payload/,
+      "a fat Mach-O slice cannot satisfy its table with an ar-wrapped ELF object",
+    );
+
     await writeFile(join(iosRoot, "ios-arm64/libjazz_native_relay.a"), "!<thin>\n");
     await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
     assert.throws(
