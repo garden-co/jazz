@@ -2858,24 +2858,16 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     "the React Native validation label must not cause a package preview release",
   );
 
-  const regularPreviewPublish = previewBuild.slice(
-    previewBuild.indexOf("- name: Publish to pkg.pr.new"),
-    previewBuild.indexOf("- name: Publish jazz-rn to pkg.pr.new"),
+  assert.match(
+    previewBuild,
+    /PACKAGES\+=\('\.\/crates\/jazz-rn'\)/,
+    "the single preview publication must add jazz-rn only in RN preview mode",
   );
-  assert.doesNotMatch(
-    regularPreviewPublish,
-    /'\.\/crates\/jazz-rn'/,
-    "ordinary preview-build runs must neither download nor publish jazz-rn",
+  assert.equal(
+    (previewBuild.match(/pnpm exec pkg-pr-new publish/g) ?? []).length,
+    1,
+    "all selected preview packages must be published in one pkg-pr-new invocation",
   );
-  assert.throws(
-    () =>
-      assert.match(
-        regularPreviewPublish.replace("'./packages/create-jazz'", "'./crates/jazz-rn'"),
-        /ordinary preview-build runs must neither download nor publish jazz-rn/,
-      ),
-    /ordinary preview-build runs must neither download nor publish jazz-rn/,
-  );
-
   const previewMode = (labels, sameRepository) => ({
     runs:
       sameRepository && (labels.includes("preview-build") || labels.includes("rn-preview-release")),
@@ -2944,4 +2936,55 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(packageBuild, /cargo-ndk@\$\{\{ env\.JAZZ_RN_CARGO_NDK_VERSION \}\}/);
   assert.match(packageBuild, /--package-root/);
   assert.match(verifier, /relay artifact inventory differs from its manifest/);
+});
+
+test("RN preview publishes selected packages once and device acceptance grants KVM at launch", async () => {
+  const preview = parse(
+    await readFile(
+      new URL("../../../.github/workflows/preview-build.yml", import.meta.url),
+      "utf8",
+    ),
+  );
+  const publishing = Object.values(preview.jobs)
+    .flatMap((job) => job.steps ?? [])
+    .filter((step) => step.run?.includes("pkg-pr-new publish"));
+  assert.equal(publishing.length, 1);
+  for (const includeRn of ["false", "true"]) {
+    const output = execFileSync(
+      "bash",
+      ["-c", `pnpm() { printf '%s\\n' CALL "$@"; }\n${publishing[0].run}`],
+      {
+        encoding: "utf8",
+        env: { ...process.env, INCLUDE_RN: includeRn },
+      },
+    )
+      .trim()
+      .split("\n");
+    assert.equal(output.filter((arg) => arg === "CALL").length, 1);
+    assert.equal(output.includes("./crates/jazz-rn"), includeRn === "true");
+    for (const packagePath of [
+      "./packages/jazz-tools",
+      "./crates/jazz-wasm",
+      "./crates/jazz-napi",
+      "./packages/create-jazz",
+    ])
+      assert.ok(output.includes(packagePath));
+  }
+  const device = parse(
+    await readFile(
+      new URL("../../../.github/workflows/rn-device-acceptance.yml", import.meta.url),
+      "utf8",
+    ),
+  );
+  const android = Object.values(device.jobs).find((job) =>
+    job.steps?.some((step) => step.name === "Grant the runner user access to KVM"),
+  );
+  const grant = android.steps.findIndex(
+    (step) => step.name === "Grant the runner user access to KVM",
+  );
+  assert.equal(
+    android.steps[grant + 1].name,
+    "Assemble, launch, and require the run-bound receipt",
+  );
+  assert.match(android.steps[grant].run, /sudo setfacl/);
 });
