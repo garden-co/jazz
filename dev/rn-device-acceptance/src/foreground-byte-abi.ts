@@ -522,35 +522,73 @@ async function readTodos(
   const prepared = execute({ type: "prepareQuery", query: TODOS_QUERY });
   if (prepared.type !== "preparedQuery")
     throw new Error("scope isolation fixture could not prepare the todos query");
+  const subscribed = execute({ type: "subscribe", query: prepared.query });
+  if (subscribed.type !== "subscribed")
+    throw new Error("scope isolation fixture could not subscribe to the todos query");
   let pendingOperation: number | undefined;
+  let published = false;
+  let failed = true;
+  const finishRead = () => {
+    let cleanupError: unknown;
+    try {
+      if (pendingOperation !== undefined) execute({ type: "cancel", operation: pendingOperation });
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      const closed = execute({ type: "unsubscribe", subscription: subscribed.subscription });
+      if (closed.type !== "unsubscribed" || !closed.closed)
+        throw new Error("scope isolation fixture subscription did not close");
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (!failed && cleanupError) throw cleanupError;
+  };
   const deadline = timing.now() + timing.timeoutMs;
-  do {
-    progressWriter();
-    foreground.tick();
-    // Async storage completion wakes the installed foreground through React
-    // Native's CallInvoker. A synchronous tick loop starves that callback, so
-    // each bounded attempt must hand control back to the app event loop.
-    await timing.yieldTurn();
-    if (timing.now() >= deadline) break;
-    if (pendingOperation !== undefined && !consumeWake()) continue;
-    if (timing.now() >= deadline) break;
-    const response =
-      pendingOperation === undefined
-        ? execute({ type: "all", query: prepared.query })
-        : execute({ type: "poll", operation: pendingOperation });
-    if (timing.now() >= deadline) break;
-    if (response.type === "rows") {
-      pendingOperation = undefined;
-      if (ready(response.rows)) return response.rows;
-      continue;
-    }
-    if (response.type === "pending") {
-      pendingOperation = response.operation;
-      continue;
-    }
-    throw new Error("scope isolation fixture read returned an unexpected response");
-  } while (timing.now() < deadline);
-  throw new Error("scope isolation fixture read did not settle before its bounded deadline");
+  try {
+    do {
+      progressWriter();
+      foreground.tick();
+      // The subscription retains relay coverage for this fresh foreground.
+      // LocalFirst all() alone may legitimately remain empty. Wait for actual
+      // publication and keep the coverage alive until the local read finishes.
+      await timing.yieldTurn();
+      if (timing.now() >= deadline) break;
+      if (pendingOperation !== undefined && !consumeWake()) continue;
+      if (timing.now() >= deadline) break;
+      let response =
+        pendingOperation !== undefined
+          ? execute({ type: "poll", operation: pendingOperation })
+          : published
+            ? execute({ type: "all", query: prepared.query })
+            : execute({ type: "drainSubscription", subscription: subscribed.subscription });
+      // Retain a newly admitted operation even if execution crossed the deadline,
+      // so timeout cleanup can cancel it rather than abandoning its future.
+      pendingOperation = response.type === "pending" ? response.operation : undefined;
+      if (timing.now() >= deadline) break;
+      if (response.type === "subscriptionEvents") {
+        if (response.events.some((event) => event.type === "rejected" || event.type === "closed"))
+          throw new Error("scope isolation fixture subscription ended before its read");
+        if (!response.events.some((event) => event.type === "delta")) continue;
+        published = true;
+        response = execute({ type: "all", query: prepared.query });
+        pendingOperation = response.type === "pending" ? response.operation : undefined;
+        if (timing.now() >= deadline) break;
+      }
+      if (response.type === "rows") {
+        if (ready(response.rows)) {
+          failed = false;
+          return response.rows;
+        }
+        continue;
+      }
+      if (response.type === "pending") continue;
+      throw new Error("scope isolation fixture read returned an unexpected response");
+    } while (timing.now() < deadline);
+    throw new Error("scope isolation fixture read did not settle before its bounded deadline");
+  } finally {
+    finishRead();
+  }
 }
 
 async function drainSubscription(
