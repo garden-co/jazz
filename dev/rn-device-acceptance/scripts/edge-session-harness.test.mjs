@@ -168,3 +168,39 @@ test("missing Core observation cannot release the native foreground", async () =
     await control.close();
   }
 });
+
+function assertCoreObserverContract(source) {
+  const context = /let observer = connect\(AppContext \{([\s\S]*?)\}\)/.exec(source)?.[1];
+  assert.ok(context, "observer must use an explicit isolated client context");
+  assert.match(context, /server_url: core\.base_url\(\)/, "observer must connect directly to Core");
+  assert.match(context, /storage: ClientStorage::Memory/);
+  assert.doesNotMatch(
+    source,
+    /\.insert\(|\.insert_with_id\(|\.update\(|\.upsert\(/,
+    "observer harness cannot manufacture the device write",
+  );
+  assert.match(source, /wait_for_query\(\s*&observer,/);
+  assert.match(source, /values\.contains\(&Value::Text\(title\.clone\(\)\)\)/);
+}
+
+test("observer source stays read-only and Core-connected; planted Edge reader and writer fail", () => {
+  const source = readFileSync(
+    new URL(
+      "../../../crates/jazz-native-relay/examples/rn_edge_session_harness.rs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assertCoreObserverContract(source);
+  assert.throws(
+    () =>
+      assertCoreObserverContract(
+        source.replace("server_url: core.base_url()", "server_url: edge.base_url()"),
+      ),
+    /directly to Core/,
+  );
+  assert.throws(
+    () => assertCoreObserverContract(`${source}\n observer.insert("todos", fake);`),
+    /cannot manufacture/,
+  );
+});

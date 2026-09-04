@@ -145,7 +145,17 @@ try {
   }
 
   await launchAndAssert("seed");
-  await localSession.waitForCoreObservation();
+  const coreObservation = await localSession.waitForCoreObservation();
+  console.log(
+    "JAZZ_DEVICE_CORE_RESULT " +
+      JSON.stringify({
+        platform: "ios",
+        deviceIdentifier: udid,
+        buildFingerprint,
+        ...coreObservation,
+        observedAt: new Date().toISOString(),
+      }),
+  );
   // A full process termination is required: backgrounding could retain the old
   // JSI bridge and relay owner and would not establish restart durability.
   simctl(["terminate", udid, "dev.jazz.rndeviceacceptance"]);

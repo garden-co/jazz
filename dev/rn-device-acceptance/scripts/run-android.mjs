@@ -119,7 +119,17 @@ try {
   }
 
   await launchAndAssert("seed");
-  await localSession.waitForCoreObservation();
+  const coreObservation = await localSession.waitForCoreObservation();
+  console.log(
+    "JAZZ_DEVICE_CORE_RESULT " +
+      JSON.stringify({
+        platform: "android",
+        deviceIdentifier: deviceIdentifier,
+        buildFingerprint,
+        ...coreObservation,
+        observedAt: new Date().toISOString(),
+      }),
+  );
   // This must be a process boundary: no JSI alias or relay process can survive.
   androidAdb(["shell", "am", "force-stop", "dev.jazz.rndeviceacceptance"]);
   await launchAndAssert("verify");
