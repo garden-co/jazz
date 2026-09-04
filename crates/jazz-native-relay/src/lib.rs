@@ -2464,6 +2464,43 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
             }
         }
+        ForegroundDbCommandRequest::SubscribeWithOptions {
+            query,
+            options_json,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match foreground_read_opts_from_json(&options_json)
+                .and_then(|opts| client.subscribe_foreground_query_with_options(query, opts))
+            {
+                Ok(subscription) => ForegroundDbCommandResponse::Subscribed { subscription },
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::WaitForTransaction { tx_id, tier } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            let tier = match tier.as_str() {
+                "local" => CoreDurabilityTier::Local,
+                "edge" => CoreDurabilityTier::Edge,
+                "global" => CoreDurabilityTier::Global,
+                _ => return JazzNativeRelayStatus::InvalidArgument,
+            };
+            match client.wait_for_foreground_transaction(tx_id, tier) {
+                Ok(poll) => foreground_operation_response(poll),
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
         ForegroundDbCommandRequest::DrainSubscription { subscription } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
@@ -2639,9 +2676,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         }
         // Each extension fails closed until its handler is installed. Keep this
         // list explicit so future vocabulary additions require dispatch review.
-        ForegroundDbCommandRequest::SubscribeWithOptions { .. }
-        | ForegroundDbCommandRequest::WaitForTransaction { .. }
-        | ForegroundDbCommandRequest::StageMutation { .. }
+        ForegroundDbCommandRequest::StageMutation { .. }
         | ForegroundDbCommandRequest::DisconnectNativeUpstream
         | ForegroundDbCommandRequest::ReconnectNativeUpstream
         | ForegroundDbCommandRequest::NativeConnectionStatus => {
@@ -2915,6 +2950,26 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay
             .run(move |worker| worker.subscribe_foreground_query(id, query))
+    }
+
+    fn subscribe_foreground_query_with_options(
+        &self,
+        query: u64,
+        opts: ReadOpts,
+    ) -> Result<u64, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.subscribe_foreground_query_with_options(id, query, opts))
+    }
+
+    fn wait_for_foreground_transaction(
+        &self,
+        tx_id: [u8; 16],
+        tier: CoreDurabilityTier,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.wait_for_foreground_transaction(id, tx_id, tier))
     }
 
     fn drain_foreground_subscription(
@@ -4006,6 +4061,15 @@ impl RelayWorker {
     }
 
     fn subscribe_foreground_query(&mut self, client: u64, query: u64) -> Result<u64, RelayError> {
+        self.subscribe_foreground_query_with_options(client, query, ReadOpts::default())
+    }
+
+    fn subscribe_foreground_query_with_options(
+        &mut self,
+        client: u64,
+        query: u64,
+        opts: ReadOpts,
+    ) -> Result<u64, RelayError> {
         let client = self.foreground_client_mut(client)?;
         let prepared = client
             .prepared_queries
@@ -4014,8 +4078,8 @@ impl RelayWorker {
                 RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
             })?
             .clone();
-        let subscription = block_on(client.db.subscribe(&prepared, ReadOpts::default()))
-            .map_err(RelayError::Db)?;
+        let subscription =
+            block_on(client.db.subscribe(&prepared, opts)).map_err(RelayError::Db)?;
         let handle = Self::next_foreground_handle(client)?;
         client.subscriptions.insert(handle, subscription);
         Ok(handle)
@@ -4121,7 +4185,10 @@ impl RelayWorker {
         match pending_operation.future.as_mut().poll(&mut context) {
             Poll::Ready(Ok(result)) => Ok(ForegroundOperationPoll::Ready(result)),
             Poll::Ready(Err(error)) => Ok(ForegroundOperationPoll::Error {
-                reason: error.to_string(),
+                reason: match error {
+                    RelayError::Db(error) => error.to_string(),
+                    error => error.to_string(),
+                },
             }),
             Poll::Pending => {
                 self.foreground_client_mut(client)?
@@ -4369,6 +4436,15 @@ impl RelayWorker {
         client: u64,
         public_tx_id: [u8; 16],
     ) -> Result<ForegroundOperationPoll, RelayError> {
+        self.wait_for_foreground_transaction(client, public_tx_id, CoreDurabilityTier::Global)
+    }
+
+    fn wait_for_foreground_transaction(
+        &mut self,
+        client: u64,
+        public_tx_id: [u8; 16],
+        tier: CoreDurabilityTier,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
         let (db, public_tx_id, tx_id) = {
             let client = self.foreground_client(client)?;
             let (&public_tx_id, &tx_id) = client
@@ -4383,7 +4459,7 @@ impl RelayWorker {
             (Rc::clone(&client.db), public_tx_id, tx_id)
         };
         let future: ForegroundOperationFuture = Box::pin(async move {
-            db.wait_for_transaction(tx_id, CoreDurabilityTier::Global)
+            db.wait_for_transaction(tx_id, tier)
                 .await
                 .map_err(RelayError::Db)?;
             Ok(ForegroundOperationResult::TransactionSettled(public_tx_id))

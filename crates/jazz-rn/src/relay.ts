@@ -102,7 +102,9 @@ export type NativeForegroundCommand =
     }
   | { type: 'delete'; transaction: number; table: string; rowId: Uint8Array }
   | { type: 'commitTransaction'; transaction: number }
-  | { type: 'rollbackTransaction'; transaction: number };
+  | { type: 'rollbackTransaction'; transaction: number }
+  | { type: 'subscribeWithOptions'; query: number; optionsJson: string }
+  | { type: 'waitForTransaction'; txId: Uint8Array; tier: string };
 
 /** The existing core transaction semantics selected by the foreground codec. */
 export type NativeForegroundTransactionKind = 'mergeable' | 'exclusive';
@@ -123,7 +125,8 @@ export type NativeForegroundResponse =
   | { type: 'inserted'; rowId: Uint8Array }
   | { type: 'mutationStaged' }
   | { type: 'transactionCommitted'; txId: Uint8Array }
-  | { type: 'transactionRolledBack'; rolledBack: boolean };
+  | { type: 'transactionRolledBack'; rolledBack: boolean }
+  | { type: 'transactionSettled'; txId: Uint8Array };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -255,6 +258,10 @@ export function encodeNativeForegroundCommand(
       encodeForegroundBytes(command.query)
     );
   }
+  if (command.type === 'subscribeWithOptions')
+    return concatForegroundBytes(Uint8Array.of(20), encodeForegroundU64(command.query), encodeForegroundString(command.optionsJson));
+  if (command.type === 'waitForTransaction')
+    return concatForegroundBytes(Uint8Array.of(21), encodeForegroundId(command.txId, 'transaction id'), encodeForegroundString(command.tier));
   if (command.type === 'all')
     return concatForegroundBytes(
       Uint8Array.of(3),
@@ -426,6 +433,7 @@ export function decodeNativeForegroundResponse(
       type: 'transactionCommitted',
       txId: decodeForegroundId(bytes.subarray(1), 'committed txId'),
     };
+  if (tag === 16) return { type: 'transactionSettled', txId: decodeForegroundId(bytes.subarray(1), 'settled txId') };
   if (tag === 15 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
     return { type: 'transactionRolledBack', rolledBack: bytes[1] === 1 };
   }

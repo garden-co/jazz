@@ -4416,6 +4416,7 @@ function readOptions(
   const options = optionsJson == null ? ({} as Record<string, unknown>) : JSON.parse(optionsJson);
   const readOptions: Record<string, unknown> = { tier: tier ?? "local" };
   if (includeDeleted) readOptions.include_deleted = true;
+  if (options.local_updates != null) readOptions.local_updates = options.local_updates;
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
   const readView = options.read_view ?? options.readView;

@@ -38,7 +38,9 @@ type ForegroundCommand =
     }
   | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
   | { type: "commitTransaction"; transaction: number }
-  | { type: "rollbackTransaction"; transaction: number };
+  | { type: "rollbackTransaction"; transaction: number }
+  | { type: "subscribeWithOptions"; query: number; optionsJson: string }
+  | { type: "waitForTransaction"; txId: Uint8Array; tier: string };
 
 type ForegroundEvent =
   | {
@@ -67,7 +69,8 @@ type ForegroundResponse =
   | { type: "inserted"; rowId: Uint8Array }
   | { type: "mutationStaged" }
   | { type: "transactionCommitted"; txId: Uint8Array }
-  | { type: "transactionRolledBack"; rolledBack: boolean };
+  | { type: "transactionRolledBack"; rolledBack: boolean }
+  | { type: "transactionSettled"; txId: Uint8Array };
 
 export type NativeForegroundRuntime = {
   execute(command: Uint8Array): Uint8Array;
@@ -206,11 +209,11 @@ export class NativeForegroundDb {
   }
 
   subscribe(query: object, opts: unknown): NativeForegroundSubscription {
-    assertLocalReadOptions(opts);
     this.tick();
     const response = this.execute({
-      type: "subscribe",
+      type: "subscribeWithOptions",
       query: queryHandle(query),
+      optionsJson: JSON.stringify(opts),
     });
     if (response.type !== "subscribed") return unexpected("subscribe", response.type);
     return new NativeForegroundSubscription(response.subscription, this);
@@ -277,6 +280,22 @@ export class NativeForegroundDb {
     return response.closed;
   }
 
+  async waitForTransaction(txId: Uint8Array, tier: string): Promise<void> {
+    if (!["local", "edge", "global"].includes(tier)) {
+      throw new Error(`Unsupported write durability tier: ${tier}`);
+    }
+    let response = this.execute({ type: "waitForTransaction", txId, tier });
+    while (response.type === "pending") {
+      const operation = response.operation;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      this.tick();
+      response = this.execute({ type: "poll", operation });
+    }
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "transactionSettled")
+      return unexpected("waitForTransaction", response.type);
+  }
+
   private execute(command: ForegroundCommand): ForegroundResponse {
     this.assertOpen();
     return this.executeAllowClosed(command);
@@ -339,7 +358,7 @@ export class NativeForegroundDb {
       return unexpected("commitTransaction", response.type);
     this.transactions.delete(openTransactionId);
     transaction.closed = true;
-    return nativeWrite(response.txId);
+    return nativeWrite(this, response.txId);
   }
 
   rollbackTransaction(openTransactionId: string): void {
@@ -465,7 +484,7 @@ export class NativeForegroundDb {
         return unexpected(`${operation}.commit`, committed.type);
       }
       transaction.closed = true;
-      return nativeWrite(committed.txId, rowId);
+      return nativeWrite(this, committed.txId, rowId);
     } catch (error) {
       if (!transaction.closed) {
         try {
@@ -618,6 +637,7 @@ class NativeForegroundTx {
 }
 
 function nativeWrite(
+  db: NativeForegroundDb,
   txId: Uint8Array<ArrayBufferLike>,
   rowId: Uint8Array<ArrayBufferLike> = new Uint8Array(16),
 ): NativeForegroundWrite {
@@ -628,11 +648,7 @@ function nativeWrite(
     payload: new Uint8Array(),
     rowId: rowId.slice(),
     async wait(tier: string): Promise<void> {
-      if (tier !== "local") {
-        throw new Error(
-          `React Native native foreground only confirms local writes; ${tier} settlement is not implemented`,
-        );
-      }
+      await db.waitForTransaction(txId, tier);
     },
     writeState: () => ({ state: "committed" }),
     close: () => {
