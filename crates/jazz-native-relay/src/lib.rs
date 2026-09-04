@@ -358,9 +358,8 @@ pub enum RelayCommandResponse {
 ///
 /// Query bytes are the canonical postcard [`Query`] bytes already produced by
 /// the shared JS query codec.  This is intentionally *not* a second RN query
-/// AST.  Read options are fixed to the ordinary local-first default for this
-/// first capability-gated slice; non-default tiers/views remain unavailable
-/// until their shared codec is added.
+/// AST. The original All/Subscribe commands retain local-first defaults;
+/// additive WithOptions commands use the shared native binding option spelling.
 ///
 /// This is the settled V1 command vocabulary. Future incompatible changes
 /// require a new relay ABI, while a command's established payload is immutable.
@@ -4140,16 +4139,15 @@ impl RelayWorker {
             })?;
             (Rc::clone(&client.db), prepared.clone())
         };
-        let attachment = match open_tx {
-            Some(tx) => db.attach_query_in_transaction_with_opts(&prepared, tx, opts.clone()),
-            None => db.attach_query_with_opts(&prepared, opts.clone()),
-        }
-        .map_err(RelayError::Db)?;
-        let coverage = ForegroundReadCoverage {
-            db: Rc::clone(&db),
-            attachment: Some(attachment),
-        };
         let future: ForegroundOperationFuture = Box::pin(async move {
+            let attachment = db
+                .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, None)
+                .await
+                .map_err(RelayError::Db)?;
+            let coverage = ForegroundReadCoverage {
+                db: Rc::clone(&db),
+                attachment: Some(attachment),
+            };
             std::future::poll_fn(|_| {
                 if db.query_attachment_is_covered(
                     coverage.attachment.as_ref().expect("live coverage"),
@@ -9030,6 +9028,30 @@ mod tests {
             })
             .unwrap(),
             [vec![16], vec![6; 16]].concat()
+        );
+    }
+
+    // Public row results cannot detect a changed native event discriminant.
+    #[test]
+    fn foreground_structured_delta_v1_byte_contract() {
+        let event = ForegroundSubscriptionEvent::StructuredDelta {
+            reset: true,
+            settled: false,
+            tier: "local".into(),
+            delta: vec![9],
+            terminal_operations_json: "[]".into(),
+        };
+        let bytes = [
+            vec![3, 1, 0, 5],
+            b"local".to_vec(),
+            vec![1, 9, 2],
+            b"[]".to_vec(),
+        ]
+        .concat();
+        assert_eq!(postcard::to_allocvec(&event).unwrap(), bytes);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundSubscriptionEvent>(&bytes).unwrap(),
+            event
         );
     }
 

@@ -382,6 +382,18 @@ The byte-level Rust contract is pinned by
 `foreground_extension_v1_byte_contract`; additive handler availability must be
 verified by the corresponding real C ABI acceptance tests.
 
+`AllWithOptions` and `AllRelationSnapshotWithOptions` attach ordinary core
+coverage with the supplied read options before evaluating. An optional
+foreground-owned transaction handle selects the opening snapshot and staged
+write overlay through the existing transaction read APIs; it cannot select a
+sibling foreground's transaction or replace its opening identity/claims.
+The pending future awaits owner admission and coverage without blocking the
+owner thread; completion or cancellation detaches its coverage. Relation
+snapshots use `binding_codec::encode_relation_snapshot`. Subscription event 3,
+`StructuredDelta`, appends the existing terminal-operation JSON codec to the
+ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
+event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
+
 **V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
 local-first query lifecycle `PrepareQuery`, `All`, `Subscribe`,
