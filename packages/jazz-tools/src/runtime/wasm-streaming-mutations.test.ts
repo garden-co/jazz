@@ -161,24 +161,64 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     );
 
     const push = upload.push(new TextEncoder().encode("gated push"));
-    await commitGate.started;
+    try {
+      await withWatchdog(commitGate.started, "push entered storage");
+      let abortSettled = false;
+      const abort = upload.abort().then((result: boolean) => {
+        abortSettled = true;
+        return result;
+      });
+      const finishRejected = expect(upload.finish()).rejects.toThrow(/closed/i);
+      const secondPushRejected = expect(upload.push(Uint8Array.of(65))).rejects.toThrow(/closed/i);
+      const duplicate = upload.abort();
+      await Promise.all([finishRejected, secondPushRejected]);
+      await expect(duplicate).resolves.toBe(false);
+      expect(abortSettled).toBe(false);
 
-    let abortSettled = false;
-    const abort = upload.abort().then((result: boolean) => {
-      abortSettled = true;
-      return result;
-    });
-    await Promise.resolve();
-    expect(abortSettled).toBe(false);
-
-    commitGate.release();
-    await expect(push).resolves.toBeUndefined();
-    await expect(abort).resolves.toBe(true);
-    expect(abortSettled).toBe(true);
+      commitGate.release();
+      await expect(push).resolves.toBeUndefined();
+      await expect(abort).resolves.toBe(true);
+      expect(abortSettled).toBe(true);
+      await expect(upload.finish()).rejects.toThrow(/closed/i);
+      await expect(upload.push(Uint8Array.of(65))).rejects.toThrow(/closed/i);
+    } finally {
+      commitGate.release();
+    }
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
 
     db.setLargeValueStagingPolicy(Number.MAX_SAFE_INTEGER, 60_000, 0);
     // Expiry uses the platform clock; advance one event-loop turn past maxAgeMs=0.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await expect(db.evictExpiredStagedLargeValues()).resolves.toBe(0);
+  });
+
+  it("hands failed in-flight push ownership to abort without retaining staged chunks", async () => {
+    const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
+    const commitGate = pageStore.armCommitGate();
+    const upload = db.beginStreamingMutationEncoded(
+      "todos",
+      uuidBytes("00000000-0000-4000-8000-000000000130"),
+      encodeCellsForRow(streamingApp.wasmSchema.todos!, {
+        done: { type: "Boolean", value: false },
+      }),
+      "title",
+      "insert",
+      author,
+    );
+    const pushRejected = expect(upload.push(Uint8Array.of(0xff))).rejects.toThrow();
+    try {
+      await withWatchdog(commitGate.started, "invalid-text push entered storage");
+      const abort = upload.abort();
+      commitGate.release();
+      await pushRejected;
+      await expect(abort).resolves.toBe(true);
+      await expect(upload.abort()).resolves.toBe(false);
+      await expect(upload.finish()).rejects.toThrow(/closed/i);
+    } finally {
+      commitGate.release();
+    }
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+    db.setLargeValueStagingPolicy(Number.MAX_SAFE_INTEGER, 60_000, 0);
     await new Promise((resolve) => setTimeout(resolve, 2));
     await expect(db.evictExpiredStagedLargeValues()).resolves.toBe(0);
   });
