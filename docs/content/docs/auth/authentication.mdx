@@ -70,9 +70,10 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
 </Callout>
 
 Jazz requires both JWT `iss` and `sub`. It derives the logical `session.user` from their canonical
-pair for every write, but does not expose either registered field through public `session.claims`.
-Two providers may issue the same
-`sub` without becoming the same Jazz author; `$createdBy` distinguishes them by `iss`.
+pair for every write. The complete verified JWT payload, including those registered fields, is
+inspectable through public `session.claims`, but it never creates a second authorship identity.
+Two providers may issue the same `sub` without becoming the same Jazz author; `$createdBy`
+distinguishes them by `iss`.
 Treat `session.user` as opaque: it is not a user-row reference, display name, or raw `sub`.
 
 - In most cases, use your provider's internal user ID, as this is generally fixed for the lifetime
