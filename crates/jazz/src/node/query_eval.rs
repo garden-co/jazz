@@ -1570,7 +1570,7 @@ where
                 .iter()
                 .filter(|(_, weight)| *weight > 0)
                 .map(|(record, _)| {
-                    CurrentRow::new_logical(
+                    CurrentRow::new(
                         shape.query().table.clone(),
                         OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
                     )

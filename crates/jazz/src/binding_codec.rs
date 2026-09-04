@@ -171,17 +171,22 @@ pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
             .fields()
             .iter()
             .zip(row.binding_fields())
-            .map(|(field, binding)| {
+            .zip(row.binding_field_names())
+            .map(|((field, binding), public_name)| {
                 let name = field
                     .name
                     .as_deref()
                     .expect("native row descriptor fields must be named");
                 let name = match binding {
                     CurrentRowBindingField::PhysicalColumn => {
+                        assert!(
+                            public_name.is_none(),
+                            "physical native binding fields cannot override their private name"
+                        );
                         RowDescriptorFieldName::PhysicalColumn(name)
                     }
                     CurrentRowBindingField::LogicalField => {
-                        RowDescriptorFieldName::LogicalField(name)
+                        RowDescriptorFieldName::LogicalField(public_name.as_deref().unwrap_or(name))
                     }
                 };
                 RowDescriptorField {
@@ -275,6 +280,39 @@ mod tests {
         assert!(matches!(
             batches[0].descriptor[2].name,
             RowDescriptorFieldName::LogicalField("user_check")
+        ));
+    }
+
+    #[test]
+    fn tagged_descriptor_uses_terminal_public_name_for_logical_source_carrier() {
+        // A lowered projection may retain `user_title` as its source slot but
+        // expose `title`. The producer supplies that mapping so hosts do not
+        // accidentally apply a prefix heuristic to all logical fields.
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid".to_owned(), ValueType::Uuid),
+            ("user_title".to_owned(), ValueType::String),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(uuid::Uuid::from_bytes([0x5d; 16])),
+                Value::String("projected".to_owned()),
+            ])
+            .expect("encode projected record");
+        let row = CurrentRow::new_with_explicit_binding_fields_and_names(
+            "todos",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                CurrentRowBindingField::LogicalField,
+                CurrentRowBindingField::LogicalField,
+            ],
+            vec![None, Some("title".to_owned())],
+        );
+
+        let rows = [row];
+        let batches = row_batches(&rows);
+        assert!(matches!(
+            batches[0].descriptor[1].name,
+            RowDescriptorFieldName::LogicalField("title")
         ));
     }
 }

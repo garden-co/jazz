@@ -33,6 +33,74 @@ fn project_preserves_logical_binding_fields() {
 }
 
 #[test]
+fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff() {
+    // A terminal can reuse `user_title` as its private carrier for the public
+    // application field `title`, while also exposing a genuine logical output
+    // named `user_title`. The explicit override, rather than prefix stripping,
+    // distinguishes them.
+    let table = TableSchema::new("items", [ColumnSchema::new("title", ColumnType::String)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_title".to_owned(), records::ValueType::String),
+        ("user_title".to_owned(), records::ValueType::String),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6a).0),
+            Value::String("application title".to_owned()),
+            Value::String("genuine logical user_title".to_owned()),
+        ])
+        .unwrap();
+    let terminal = CurrentRow::new_with_explicit_binding_fields_and_names(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        vec![
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::LogicalField,
+        ],
+        vec![None, Some("title".to_owned()), None],
+    );
+
+    assert_eq!(
+        terminal.cell(&table, "title"),
+        Some(Value::String("application title".to_owned()))
+    );
+    let projected = terminal.project(&table, &["title".to_owned()]).unwrap();
+    assert_eq!(
+        projected.cell(&table, "title"),
+        Some(Value::String("application title".to_owned()))
+    );
+    assert_eq!(projected.binding_field_names()[1].as_deref(), Some("title"));
+
+    let physical_descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_title".to_owned(), records::ValueType::String),
+        ("user_title".to_owned(), records::ValueType::String),
+    ]);
+    let physical_raw = physical_descriptor
+        .create(&[
+            Value::Uuid(row(0x6a).0),
+            Value::String("application title".to_owned()),
+            Value::String("genuine logical user_title".to_owned()),
+        ])
+        .unwrap();
+    let physical_then_logical = CurrentRow::new_with_explicit_binding_fields(
+        "items",
+        OwnedRecord::new(physical_raw, physical_descriptor),
+        vec![
+            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingField::PhysicalColumn,
+            CurrentRowBindingField::LogicalField,
+        ],
+    );
+    assert!(
+        terminal.subscription_equivalent(&physical_then_logical),
+        "a cache handoff must not emit a reset solely because the terminal carrier changed"
+    );
+}
+
+#[test]
 fn projection_prefers_tagged_physical_column_over_reverse_order_logical_collision() {
     // A hybrid collector may expose a logical `user_check` beside the physical
     // storage field `user_check`. Descriptor position is not provenance: the
