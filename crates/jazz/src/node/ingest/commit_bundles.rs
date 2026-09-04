@@ -1199,6 +1199,10 @@ where
         for (tx_bundles, local_tx, view_scoped) in eligible {
             let first = tx_bundles[0];
             let tx = &local_tx;
+            // A reset is a clock observation just like incremental ingestion.
+            // Otherwise the next local write can sort before the snapshot it
+            // just read, including a synchronously reserved binding commit.
+            self.merge_tx_time(tx.tx_id.time);
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
             let global_time = first.global_time.expect("checked above");
             applied_global_times.push(global_time);

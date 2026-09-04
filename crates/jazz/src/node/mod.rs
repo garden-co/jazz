@@ -1521,32 +1521,52 @@ impl CurrentRow {
         self.record.borrowed().get_idx(idx).ok()
     }
 
-    pub(crate) fn provenance(&self) -> Result<Option<RowProvenance>, Error> {
+    /// Locate one provenance field without requiring unrelated projected fields.
+    /// Storage records use physical names; query records use magic-column names.
+    fn provenance_field_index(&self, column: &str) -> Option<usize> {
+        let stored_column = match column {
+            "$createdBy" => "created_by",
+            "$createdAt" => "created_at",
+            "$updatedBy" => "updated_by",
+            "$updatedAt" => "updated_at",
+            _ => return None,
+        };
         let descriptor = self.record.descriptor();
+        descriptor.field_index(column).or_else(|| {
+            (descriptor.field_index("schema_version").is_some()
+                && descriptor.field_index("branch_key").is_some())
+            .then(|| descriptor.field_index(stored_column))
+            .flatten()
+        })
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn provenance_value(&self, column: &str) -> Result<Option<Value>, Error> {
+        let Some(index) = self.provenance_field_index(column) else {
+            return Ok(None);
+        };
+        let record = self.record.borrowed();
+        Ok(Some(match column {
+            "$createdBy" | "$updatedBy" => {
+                let author = AuthorSubject::from_canonical(record.get_str(index)?)
+                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
+                Value::String(author.canonical().to_owned())
+            }
+            "$createdAt" | "$updatedAt" => Value::U64(record.get_u64(index)?),
+            _ => unreachable!("provenance_field_index accepts only provenance columns"),
+        }))
+    }
+
+    pub(crate) fn provenance(&self) -> Result<Option<RowProvenance>, Error> {
         let borrowed = self.record.borrowed();
         let indices = match (
-            descriptor.field_index("$createdBy"),
-            descriptor.field_index("$createdAt"),
-            descriptor.field_index("$updatedBy"),
-            descriptor.field_index("$updatedAt"),
+            self.provenance_field_index("$createdBy"),
+            self.provenance_field_index("$createdAt"),
+            self.provenance_field_index("$updatedBy"),
+            self.provenance_field_index("$updatedAt"),
         ) {
             (Some(created_by), Some(created_at), Some(updated_by), Some(updated_at)) => {
                 Some((created_by, created_at, updated_by, updated_at))
-            }
-            _ if descriptor.field_index("schema_version").is_some()
-                && descriptor.field_index("branch_key").is_some() =>
-            {
-                match (
-                    descriptor.field_index("created_by"),
-                    descriptor.field_index("created_at"),
-                    descriptor.field_index("updated_by"),
-                    descriptor.field_index("updated_at"),
-                ) {
-                    (Some(created_by), Some(created_at), Some(updated_by), Some(updated_at)) => {
-                        Some((created_by, created_at, updated_by, updated_at))
-                    }
-                    _ => None,
-                }
             }
             _ => None,
         };

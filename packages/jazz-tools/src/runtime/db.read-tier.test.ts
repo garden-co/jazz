@@ -495,6 +495,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     );
     const localCallback = client.subscriptionCallbacks.get(1)!;
     const edgeReady = deferred<void>();
+    localCallback({ added: [], removed: [], updated: [], reset: true });
     const connection = (
       db as unknown as { connection: { ensureReady: (tier?: string) => Promise<void> } }
     ).connection;
@@ -689,15 +690,14 @@ describe("Db ReadTier.RemoteIfPossible", () => {
 
     expect(onError).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledWith(failure);
-    expect(onDelta).toHaveBeenCalledOnce();
-    expect(publicationTitles(onDelta.mock.calls[0]![0].all)).toEqual([]);
+    expect(onDelta).not.toHaveBeenCalled();
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);
 
     openingCallbacks.onUpdate(added("late", "must stay terminal"));
     openingCallbacks.onError?.(new Error("late error"));
     unsubscribe();
 
-    expect(onDelta).toHaveBeenCalledOnce();
+    expect(onDelta).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledOnce();
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);
   });
@@ -743,12 +743,8 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     unsubscribe();
   });
 
-  it("fences an already-running local seed after a native terminal error", async () => {
+  it("uses only the native stream for its opening and later results", async () => {
     const client = makeClient();
-    const localSeed = deferred<
-      Array<{ id: string; values: Array<{ type: "Text"; value: string }> }>
-    >();
-    client.query.mockImplementationOnce(() => localSeed.promise);
     const db = await createDbWithRuntimeSource(
       {
         appId: "read-tier-running-seed-error",
@@ -764,21 +760,21 @@ describe("Db ReadTier.RemoteIfPossible", () => {
       onUpdate: (rows) => updates.push(publicationTitles(rows)),
       onError: (error) => errors.push(error),
     });
-    await vi.waitFor(() => expect(client.query).toHaveBeenCalledOnce());
+    await settle();
+    expect(client.query).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    const onDelta = client.subscriptionCallbacks.get(1)!;
+    onDelta(added("opening", "native opening"));
+    expect(updates).toEqual([["native opening"]]);
     const onNativeError = client.subscriptionErrorCallbacks.get(1)!;
-    const failure = new Error("native stream failed while seed was reading");
+    const failure = new Error("native stream failed");
     onNativeError(failure);
-
-    localSeed.resolve([
-      {
-        id: "00000000-0000-0000-0000-000000000001",
-        values: [{ type: "Text", value: "late local seed" }],
-      },
-    ]);
+    onDelta(added("late", "must stay terminal"));
     await settle();
 
     expect(errors).toEqual([failure]);
-    expect(updates).toEqual([[]]);
+    expect(updates).toEqual([["native opening"]]);
+    expect(client.query).not.toHaveBeenCalled();
     unsubscribe();
   });
 
@@ -812,7 +808,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(() => onDelta(added("callback", "throws"))).not.toThrow();
     onDelta(added("late", "must stay terminal"));
 
-    expect(updates).toHaveBeenCalledTimes(2);
+    expect(updates).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledWith(updateFailure);
     expect(consoleError).toHaveBeenCalledWith(
@@ -848,7 +844,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await db.reconnect();
     await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
 
-    expect(publications).toEqual([[], ["synchronous remote"]]);
+    expect(publications).toEqual([["synchronous remote"]]);
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
     unsubscribe();
   });
@@ -887,10 +883,10 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
 
     expect(errors).toEqual([failure]);
-    expect(publications).toEqual([[]]);
+    expect(publications).toEqual([]);
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);
     localCallback(added("local", "retired after replacement failure"));
-    expect(publications).toEqual([[]]);
+    expect(publications).toEqual([]);
 
     unsubscribe();
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);

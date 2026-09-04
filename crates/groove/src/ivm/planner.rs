@@ -271,6 +271,7 @@ impl<'a> Planner<'a> {
                 let old_ctes = self.ctes.clone();
                 for cte in &with.ctes {
                     let plan = self.lower_query(&cte.query)?;
+                    let plan = apply_relation_alias(plan, &cte.name, &cte.columns)?;
                     self.ctes.insert(cte.name.clone(), plan);
                 }
                 let result = self.lower_query(&with.query);
@@ -352,17 +353,33 @@ impl<'a> Planner<'a> {
         match table_ref {
             TableRef::Named { name, alias } => {
                 let table_name = single_name(&name.0)?;
+                if table_name == BINDING_QUALIFIER
+                    || alias
+                        .as_ref()
+                        .is_some_and(|alias| alias.name == BINDING_QUALIFIER)
+                {
+                    return Err(PlannerError::UnsupportedQuery(
+                        "relation name is reserved for prepared-query bindings",
+                    ));
+                }
                 if let Some(cte) = self.ctes.get(table_name) {
-                    return Ok(cte.clone());
+                    let (qualifier, columns) = match alias {
+                        Some(alias) => (alias.name.as_str(), alias.columns.as_slice()),
+                        None => (table_name, &[][..]),
+                    };
+                    return apply_relation_alias(cte.clone(), qualifier, columns);
                 }
                 let table = self
                     .schema
                     .table(table_name)
                     .ok_or_else(|| PlannerError::TableNotFound(table_name.to_owned()))?;
-                Ok(scan_plan(
-                    table,
-                    alias.as_ref().map(|alias| alias.name.clone()),
-                ))
+                let plan = scan_plan(table, alias.as_ref().map(|alias| alias.name.clone()));
+                match alias {
+                    Some(alias) if !alias.columns.is_empty() => {
+                        apply_relation_alias(plan, &alias.name, &alias.columns)
+                    }
+                    _ => Ok(plan),
+                }
             }
             TableRef::Join {
                 left,
@@ -692,7 +709,17 @@ fn graph_from_logical_required(
         LogicalPlan::Project { input, fields } if fields == input.fields() => {
             graph_from_logical_required(input, required)
         }
-        LogicalPlan::Project { input, fields } => graph_from_logical_required(input, Some(fields)),
+        LogicalPlan::Project { input, fields } => match required {
+            None => graph_from_logical_required(input, Some(fields)),
+            Some(required) => {
+                let selected = required
+                    .iter()
+                    .map(|field| field_for_source(fields, &field.source_name).cloned())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let graph = graph_from_logical_required(input, Some(&selected))?;
+                project_required_graph(graph, &selected, Some(required))
+            }
+        },
         LogicalPlan::Join {
             left,
             right,
@@ -718,11 +745,17 @@ fn graph_from_logical_required(
             let join = GraphBuilder::join(left_graph, right_graph, left_keys, right_keys);
             project_join_required_graph(join, &left_required, &right_required, required)
         }
-        LogicalPlan::UnionAll { inputs, .. } => inputs
-            .iter()
-            .map(graph_from_logical)
-            .collect::<Result<Vec<_>, _>>()
-            .map(GraphBuilder::union),
+        LogicalPlan::UnionAll { inputs, fields } => {
+            let graph = inputs
+                .iter()
+                .map(|input| {
+                    let graph = graph_from_logical(input)?;
+                    project_positional_graph(graph, input.fields(), fields)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(GraphBuilder::union)?;
+            project_required_graph(graph, fields, required)
+        }
     }
 }
 
@@ -755,14 +788,55 @@ fn project_required_graph(
     let Some(required) = required else {
         return Ok(graph);
     };
-    if required == available {
+    if required == available
+        || required.len() == available.len()
+            && required.iter().zip(available).all(|(required, available)| {
+                required.source_name == available.source_name
+                    && required.name == available.name
+                    && required.value_type == available.value_type
+            })
+    {
         return Ok(graph);
     }
-    Ok(graph.project_fields(
-        required
+    let fields = required
+        .iter()
+        .map(|field| {
+            let source_name = field_for_source(available, &field.source_name)?
+                .name
+                .clone();
+            Ok(ProjectField::renamed(source_name, field.name.clone()))
+        })
+        .collect::<Result<Vec<_>, PlannerError>>()?;
+    Ok(graph.project_fields(fields))
+}
+
+fn project_positional_graph(
+    graph: GraphBuilder,
+    available: &[LogicalField],
+    target: &[LogicalField],
+) -> Result<GraphBuilder, PlannerError> {
+    if available.len() != target.len()
+        || available
             .iter()
-            .map(|field| ProjectField::renamed(field.source_name.clone(), field.name.clone())),
-    ))
+            .zip(target)
+            .any(|(available, target)| available.value_type != target.value_type)
+    {
+        return Err(PlannerError::UnsupportedQuery(
+            "set query inputs must have compatible columns",
+        ));
+    }
+    if available
+        .iter()
+        .zip(target)
+        .all(|(available, target)| available.name == target.name)
+    {
+        return Ok(graph);
+    }
+    Ok(
+        graph.project_fields(available.iter().zip(target).map(|(available, target)| {
+            ProjectField::renamed(available.name.clone(), target.name.clone())
+        })),
+    )
 }
 
 fn join_child_required_fields(
@@ -1025,7 +1099,15 @@ fn append_missing_binding_fields(
         }
     };
     for field in binding_fields {
-        if let Some(existing) = fields.iter().find(|candidate| candidate.name == field.name) {
+        let mut existing_name = false;
+        for existing in fields
+            .iter()
+            .filter(|candidate| candidate.name == field.name)
+        {
+            existing_name = true;
+            if existing.qualifier == field.qualifier {
+                continue;
+            }
             let Some((_, source)) = binding_source_fields
                 .iter()
                 .find(|(parameter, _)| parameter == &field.name)
@@ -1039,7 +1121,8 @@ fn append_missing_binding_fields(
                     "projected output names must not collide with parameter names",
                 ));
             }
-        } else {
+        }
+        if !existing_name {
             fields.push(field);
         }
     }
@@ -1170,6 +1253,44 @@ fn scan_plan(table: &TableSchema, alias: Option<String>) -> LogicalPlan {
         alias,
         fields,
     }
+}
+
+fn apply_relation_alias(
+    plan: LogicalPlan,
+    qualifier: &str,
+    column_aliases: &[String],
+) -> Result<LogicalPlan, PlannerError> {
+    let source_fields = plan.fields();
+    let public_field_count = source_fields
+        .iter()
+        .filter(|field| field.qualifier.as_deref() != Some(BINDING_QUALIFIER))
+        .count();
+    if column_aliases.len() > public_field_count {
+        return Err(PlannerError::UnsupportedQuery(
+            "column alias list has more entries than source columns",
+        ));
+    }
+
+    let mut public_index = 0;
+    let fields = source_fields
+        .iter()
+        .map(|source| {
+            if source.qualifier.as_deref() == Some(BINDING_QUALIFIER) {
+                return source.clone();
+            }
+            let mut field = source.clone();
+            field.qualifier = Some(qualifier.to_owned());
+            if let Some(alias) = column_aliases.get(public_index) {
+                field.name = alias.clone();
+            }
+            public_index += 1;
+            field
+        })
+        .collect();
+    Ok(LogicalPlan::Project {
+        input: Box::new(plan),
+        fields,
+    })
 }
 
 fn resolve_column<'a>(
@@ -1866,5 +1987,328 @@ mod tests {
                 "projected output names must not collide with parameter names"
             ))
         ));
+    }
+    #[test]
+    fn resolves_positional_cte_and_reference_table_column_aliases() {
+        let cte = Cte::new(
+            "album_ids",
+            Query::Select(Box::new(
+                Select::new([
+                    SelectItem::expr(Expr::column("id")),
+                    SelectItem::expr(Expr::column("title")),
+                ])
+                .from([TableRef::named("albums")]),
+            )),
+        )
+        .with_columns(["declared_id", "declared_title"]);
+        let reference = TableRef::Named {
+            name: ObjectName::single("album_ids"),
+            alias: Some(TableAlias::new("ref").with_columns(["reference_id"])),
+        };
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(
+                Select::new([
+                    SelectItem::expr(Expr::Column(ColumnRef::qualified(["ref"], "reference_id"))),
+                    SelectItem::expr(Expr::Column(ColumnRef::qualified(
+                        ["ref"],
+                        "declared_title",
+                    ))),
+                ])
+                .from([reference]),
+            )),
+        )));
+
+        let planned = plan_query(&query, &schema()).unwrap();
+
+        let output = planned
+            .output
+            .iter()
+            .map(|field| (field.qualifier.as_deref(), field.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            output,
+            vec![
+                (Some("ref"), "reference_id"),
+                (Some("ref"), "declared_title"),
+            ]
+        );
+        assert_eq!(
+            planned.graph,
+            GraphBuilder::table("albums")
+                .project(["id", "title"])
+                .project_fields([
+                    ProjectField::renamed("id", "declared_id"),
+                    ProjectField::renamed("title", "declared_title"),
+                ])
+                .project_fields([
+                    ProjectField::renamed("declared_id", "reference_id"),
+                    ProjectField::renamed("declared_title", "declared_title"),
+                ])
+        );
+    }
+
+    #[test]
+    fn preserves_hidden_binding_fields_through_cte_aliases() {
+        let cte = Cte::new(
+            "album_ids",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("id"))])
+                    .from([TableRef::named("albums")])
+                    .where_(Expr::binary(
+                        Expr::column("artist_id"),
+                        BinaryOp::Eq,
+                        Expr::parameter("artist"),
+                    )),
+            )),
+        )
+        .with_columns(["declared_id"]);
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(
+                Select::new([SelectItem::Wildcard]).from([TableRef::named("album_ids")]),
+            )),
+        )));
+
+        let planned = plan_prepared_shape(&query, &schema()).unwrap();
+
+        assert_eq!(planned.output_key_fields, vec!["artist"]);
+        assert_eq!(
+            planned
+                .public_output
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["declared_id"]
+        );
+        assert!(
+            planned
+                .planned
+                .logical
+                .fields()
+                .iter()
+                .any(|field| field.qualifier.as_deref() == Some(BINDING_QUALIFIER))
+        );
+    }
+
+    #[test]
+    fn rejects_public_parameter_name_collisions_after_a_preserved_cte_binding_field() {
+        let cte = Cte::new(
+            "filtered",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("artist_id"))])
+                    .from([TableRef::named("albums")])
+                    .where_(Expr::binary(
+                        Expr::column("title"),
+                        BinaryOp::Eq,
+                        Expr::parameter("name"),
+                    )),
+            )),
+        );
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([
+                TableRef::Join {
+                    left: Box::new(TableRef::named("filtered")),
+                    right: Box::new(TableRef::named("artists")),
+                    kind: JoinKind::Inner,
+                    constraint: JoinConstraint::On(Expr::binary(
+                        Expr::Column(ColumnRef::qualified(["filtered"], "artist_id")),
+                        BinaryOp::Eq,
+                        Expr::Column(ColumnRef::qualified(["artists"], "id")),
+                    )),
+                },
+            ]))),
+        )));
+
+        assert!(matches!(
+            plan_prepared_shape(&query, &schema()),
+            Err(PlannerError::UnsupportedQuery(
+                "projected output names must not collide with parameter names"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_the_reserved_prepared_binding_relation_name() {
+        let cte_query = Query::With(Box::new(WithQuery::new(
+            [Cte::new(
+                BINDING_QUALIFIER,
+                Query::Select(Box::new(
+                    Select::new([SelectItem::expr(Expr::column("id"))])
+                        .from([TableRef::named("albums")]),
+                )),
+            )],
+            Query::Select(Box::new(
+                Select::new([SelectItem::Wildcard]).from([TableRef::named(BINDING_QUALIFIER)]),
+            )),
+        )));
+        assert!(matches!(
+            plan_query(&cte_query, &schema()),
+            Err(PlannerError::UnsupportedQuery(
+                "relation name is reserved for prepared-query bindings"
+            ))
+        ));
+
+        let alias_query = Query::Select(Box::new(
+            Select::new([SelectItem::Wildcard])
+                .from([TableRef::named("albums").aliased(BINDING_QUALIFIER)]),
+        ));
+        assert!(matches!(
+            plan_query(&alias_query, &schema()),
+            Err(PlannerError::UnsupportedQuery(
+                "relation name is reserved for prepared-query bindings"
+            ))
+        ));
+    }
+
+    #[test]
+    fn lowers_partial_table_column_aliases_as_a_logical_projection() {
+        let query = Query::Select(Box::new(
+            Select::new([
+                SelectItem::expr(Expr::Column(ColumnRef::qualified(["ref"], "renamed_id"))),
+                SelectItem::expr(Expr::Column(ColumnRef::qualified(["ref"], "title"))),
+            ])
+            .from([TableRef::Named {
+                name: ObjectName::single("albums"),
+                alias: Some(TableAlias::new("ref").with_columns(["renamed_id"])),
+            }]),
+        ));
+
+        let planned = plan_query(&query, &schema()).unwrap();
+
+        assert_eq!(
+            planned.output,
+            vec![
+                LogicalField {
+                    qualifier: Some("ref".to_owned()),
+                    name: "renamed_id".to_owned(),
+                    source_name: "id".to_owned(),
+                    value_type: ValueType::U64,
+                },
+                LogicalField {
+                    qualifier: Some("ref".to_owned()),
+                    name: "title".to_owned(),
+                    source_name: "title".to_owned(),
+                    value_type: ValueType::String,
+                },
+            ]
+        );
+        assert_eq!(
+            planned.graph,
+            GraphBuilder::table("albums").project_fields([
+                ProjectField::renamed("id", "renamed_id"),
+                ProjectField::renamed("title", "title"),
+            ])
+        );
+    }
+    #[test]
+    fn applies_cte_column_aliases_to_union_all_graphs() {
+        let union = Query::Set(Box::new(SetQuery {
+            left: Query::Select(Box::new(
+                Select::new([SelectItem::aliased(Expr::column("id"), "left_id")])
+                    .from([TableRef::named("albums")]),
+            )),
+            op: SetOperator::Union,
+            right: Query::Select(Box::new(
+                Select::new([SelectItem::aliased(Expr::column("artist_id"), "right_id")])
+                    .from([TableRef::named("albums")]),
+            )),
+            quantifier: SetQuantifier::All,
+        }));
+        let query = Query::With(Box::new(WithQuery::new(
+            [Cte::new("album_ids", union).with_columns(["album_id"])],
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("album_id"))])
+                    .from([TableRef::named("album_ids")]),
+            )),
+        )));
+
+        let planned = plan_query(&query, &schema()).unwrap();
+        assert_eq!(planned.output[0].name, "album_id");
+        assert_eq!(
+            planned.graph,
+            GraphBuilder::union([
+                GraphBuilder::table("albums")
+                    .project_fields([ProjectField::renamed("id", "left_id")]),
+                GraphBuilder::table("albums")
+                    .project_fields([ProjectField::renamed("artist_id", "right_id")])
+                    .project_fields([ProjectField::renamed("right_id", "left_id")]),
+            ])
+            .project_fields([ProjectField::renamed("left_id", "album_id")])
+        );
+    }
+
+    #[test]
+    fn rejects_excess_table_and_cte_column_aliases() {
+        let table_query = Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([
+            TableRef::Named {
+                name: ObjectName::single("albums"),
+                alias: Some(TableAlias::new("ref").with_columns(["a", "b", "c", "d"])),
+            },
+        ])));
+        assert!(matches!(
+            plan_query(&table_query, &schema()),
+            Err(PlannerError::UnsupportedQuery(
+                "column alias list has more entries than source columns"
+            ))
+        ));
+
+        let cte = Cte::new(
+            "album_ids",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("id"))])
+                    .from([TableRef::named("albums")]),
+            )),
+        )
+        .with_columns(["a", "b"]);
+        let cte_query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(
+                Select::new([SelectItem::Wildcard]).from([TableRef::named("album_ids")]),
+            )),
+        )));
+        assert!(matches!(
+            plan_query(&cte_query, &schema()),
+            Err(PlannerError::UnsupportedQuery(
+                "column alias list has more entries than source columns"
+            ))
+        ));
+    }
+
+    #[test]
+    fn clones_cte_qualifiers_for_each_reference() {
+        let cte = Cte::new(
+            "album_ids",
+            Query::Select(Box::new(
+                Select::new([SelectItem::expr(Expr::column("id"))])
+                    .from([TableRef::named("albums")]),
+            )),
+        );
+        let query = Query::With(Box::new(WithQuery::new(
+            [cte],
+            Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([
+                TableRef::Join {
+                    left: Box::new(TableRef::named("album_ids").aliased("left_ref")),
+                    right: Box::new(TableRef::named("album_ids").aliased("right_ref")),
+                    kind: JoinKind::Inner,
+                    constraint: JoinConstraint::On(Expr::binary(
+                        Expr::Column(ColumnRef::qualified(["left_ref"], "id")),
+                        BinaryOp::Eq,
+                        Expr::Column(ColumnRef::qualified(["right_ref"], "id")),
+                    )),
+                },
+            ]))),
+        )));
+
+        let planned = plan_query(&query, &schema()).unwrap();
+        assert_eq!(
+            planned
+                .output
+                .iter()
+                .map(|field| field.qualifier.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("left_ref"), Some("right_ref")]
+        );
     }
 }

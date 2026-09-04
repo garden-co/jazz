@@ -1216,7 +1216,7 @@ where
         if local.terminal_schemas.has_root_collector() {
             let terminal_rows = local
                 .maintained
-                .structured_app_rows_by_terminal_key()
+                .structured_app_rows_by_terminal_key()?
                 .into_iter()
                 .map(|(terminal_key, record)| {
                     Ok((

@@ -35,6 +35,7 @@ type UnitHarness = {
     entry: CacheEntryHandle<Todo>;
   };
   calls: SubscribeCall[];
+  all: ReturnType<typeof vi.fn>;
   emit: (index: number, delta: SubscriptionDelta<Todo>) => void;
   emitError: (index: number, error: Error) => void;
   setThrowOnSubscribe: (error: Error | null) => void;
@@ -76,11 +77,13 @@ function createUnitHarness(
   initialSession?: Session | null,
 ): UnitHarness {
   const calls: SubscribeCall[] = [];
+  const all = vi.fn(async () => []);
   let throwOnSubscribe: Error | null = null;
   let nextReadiness: Promise<void> | null = null;
   let errorOnSubscribe: Error | null = null;
 
   const db: {
+    all: typeof all;
     subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
       callbacks: DbDeltaSubscriptionCallbacks<T>,
@@ -88,6 +91,7 @@ function createUnitHarness(
       session?: Session,
     ): SubscriptionHandle;
   } = {
+    all,
     subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
       callbacks: DbDeltaSubscriptionCallbacks<T>,
@@ -127,6 +131,7 @@ function createUnitHarness(
       return { key, entry };
     },
     calls,
+    all,
     emit(index, delta) {
       const call = calls[index];
       if (!call) {
@@ -315,6 +320,27 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(entry.state).toEqual({
         status: "fulfilled",
         data: [makeTodo("1")],
+        error: null,
+      });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("accepts an empty opening without a supplemental snapshot read", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      expect(entry.status).toBe("pending");
+      harness.emit(0, makeDelta([]));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(harness.all).not.toHaveBeenCalled();
+      expect(entry.state).toEqual({ status: "fulfilled", data: [], error: null });
+      harness.emit(0, makeDelta([makeTodo("new")]));
+      expect(entry.state).toEqual({
+        status: "fulfilled",
+        data: [makeTodo("new")],
         error: null,
       });
     } finally {

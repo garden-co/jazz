@@ -515,8 +515,6 @@ pub struct WasmTransport {
     inner: WasmTransportInner,
     queues: WasmWireQueues,
     auxiliary_pump: jazz::db::PeerIoPump,
-    protocol_version: u16,
-    features: u64,
     subscriber_identity: Option<AuthorSubject>,
 }
 
@@ -937,7 +935,7 @@ impl WasmDbInner {
         match self {
             Self::Memory(db) => {
                 let write = db
-                    .enqueue_commit_exclusive_handle(open_tx_id)
+                    .enqueue_commit_exclusive_handle_at_ms(open_tx_id, current_timestamp())
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
                 wasm_write_memory(Rc::clone(db), write)
@@ -945,7 +943,7 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.enqueue_commit_exclusive_handle(open_tx_id)
+                db.enqueue_commit_exclusive_handle_at_ms(open_tx_id, current_timestamp())
                     .map_err(to_js_error)?,
             ),
             Self::Closed => Err(JsValue::from_str("WasmDb is closed")),
@@ -956,7 +954,7 @@ impl WasmDbInner {
         match self {
             Self::Memory(db) => {
                 let write = db
-                    .enqueue_commit_mergeable_handle(open_tx_id)
+                    .enqueue_commit_mergeable_handle_at_ms(open_tx_id, current_timestamp())
                     .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
                 wasm_write_memory(Rc::clone(db), write)
@@ -964,7 +962,7 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                db.enqueue_commit_mergeable_handle(open_tx_id)
+                db.enqueue_commit_mergeable_handle_at_ms(open_tx_id, current_timestamp())
                     .map_err(to_js_error)?,
             ),
             Self::Closed => Err(JsValue::from_str("WasmDb is closed")),
@@ -2901,7 +2899,7 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = connectUpstream)]
-    pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
+    pub fn connect_upstream(&self) -> Result<js_sys::Promise, JsValue> {
         let queues = WasmWireQueues::default();
         // Browser WebSocket carriers negotiate ordinary sync only. They do not
         // receive the authenticated endpoint context required for scoped
@@ -2918,29 +2916,28 @@ impl WasmDb {
             None,
         ));
         let db_inner = self.open_inner()?;
-        let inner = match &db_inner {
-            WasmDbInner::Memory(db) => WasmTransportInner::Memory {
-                db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
-            },
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => WasmTransportInner::Browser {
-                db: Rc::clone(db),
-                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
-            },
-            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-        };
-        let auxiliary_pump = inner.auxiliary_pump();
-        Ok(WasmTransport {
-            inner,
-            queues,
-            auxiliary_pump,
-            protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
-            features: jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
-            subscriber_identity: None,
-        })
+        Ok(future_to_promise(async move {
+            let inner = match &db_inner {
+                WasmDbInner::Memory(db) => WasmTransportInner::Memory {
+                    db: Rc::clone(db),
+                    connection: Some(db.connect_upstream(transport).await),
+                },
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => WasmTransportInner::Browser {
+                    db: Rc::clone(db),
+                    connection: Some(db.connect_upstream(transport).await),
+                },
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            };
+            let auxiliary_pump = inner.auxiliary_pump();
+            Ok(WasmTransport {
+                inner,
+                queues,
+                auxiliary_pump,
+                subscriber_identity: None,
+            }
+            .into())
+        }))
     }
 
     /// Connect after the browser carrier has accepted the server Hello. The
@@ -3003,8 +3000,6 @@ impl WasmDb {
                 inner,
                 queues,
                 auxiliary_pump,
-                protocol_version,
-                features: features as u64,
                 subscriber_identity: None,
             }
             .into())
@@ -3081,10 +3076,6 @@ impl WasmDb {
             inner,
             queues,
             auxiliary_pump,
-            protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
-            features: jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
             subscriber_identity: Some(identity),
         })
     }
@@ -3193,10 +3184,9 @@ impl WasmTransport {
     #[wasm_bindgen(js_name = routeAuxiliaryWireFrame)]
     pub fn route_auxiliary_wire_frame(&self, frame: Vec<u8>) -> js_sys::Promise {
         let pump = self.auxiliary_pump.clone();
-        let features = self.features;
         future_to_promise(async move {
             match pump
-                .route_incoming_wire_frame(frame, features)
+                .route_incoming_wire_frame(frame)
                 .await
                 .map_err(|error| JsValue::from_str(&error))?
             {
@@ -3223,13 +3213,7 @@ impl WasmTransport {
         let frames = js_sys::Array::new();
         for frame in self
             .auxiliary_pump
-            .take_outbound_wire_frames(
-                self.protocol_version,
-                self.features,
-                None,
-                max_frames,
-                max_bytes,
-            )
+            .take_outbound_wire_frames(max_frames, max_bytes)
             .map_err(|error| JsValue::from_str(&error))?
         {
             frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());
@@ -3674,7 +3658,7 @@ fn update_options_from_js(options: JsValue) -> Result<jazz::db::UpdateOptions, J
         None => {
             return Err(JsValue::from_str(
                 "branch view base requires a head selector",
-            ))
+            ));
         }
     };
     Ok(jazz::db::UpdateOptions {
@@ -5021,16 +5005,18 @@ mod dynamic_schema_view_tests {
             &serde_json::to_string(&("https://wasm.test", "subscriber")).unwrap(),
         )
         .unwrap();
-        let mut transport = binding
+        let transport = binding
             .accept_subscriber(subscriber.canonical().as_bytes().to_vec(), JsValue::NULL)
             .expect("accept a real wasm subscriber transport");
 
-        // Encode against the exact binding-local negotiation surface. The
-        // subscriber transport intentionally omits authorization-scope
-        // extensions, whose feature-gated enum layout must not leak into this
-        // auxiliary frame.
-        transport.features &= !(jazz::wire::FEATURE_PAYLOAD_LZ4 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
-        let features = transport.features;
+        // Decode against the exact feature set carried by an auxiliary frame.
+        // The pump strips compression bits because each auxiliary payload is an
+        // independently encoded complete envelope.
+        let features = jazz::wire::current_wire_features()
+            & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+                | jazz::wire::FEATURE_PAYLOAD_LZ4
+                | jazz::wire::FEATURE_PAYLOAD_ZSTD);
         let request = |request_id| jazz::protocol::ChunkRequestEntry {
             request_id,
             locator: jazz::groove::large_values::Locator::random(),

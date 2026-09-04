@@ -7,6 +7,7 @@
 //! after evaluating the input node. Base table commits and schema-aware row
 //! encoding live above in [`crate::db`] and [`crate::records`].
 
+use bytes::Bytes;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ivm::DurableStorage;
@@ -21,6 +22,7 @@ use super::{
 struct PendingPersistKey {
     weight: i64,
     positive_record: Option<Vec<u8>>,
+    unique_record_deltas: HashMap<Bytes, i64>,
 }
 
 pub(super) async fn apply_persist_delta(
@@ -39,7 +41,7 @@ pub(super) async fn apply_persist_delta(
     // by persisted key before writing: an update whose indexed key is
     // unchanged appears as `-old, +new` for the same key, and the final durable
     // entry must remain present regardless of delta order.
-    let mut pending = HashMap::<Vec<u8>, PendingPersistKey>::new();
+    let mut pending = BTreeMap::<Vec<u8>, PendingPersistKey>::new();
     for record_delta in &delta.deltas {
         let keys = persist_record_keys(
             &delta.descriptor,
@@ -49,67 +51,48 @@ pub(super) async fn apply_persist_delta(
         )?;
 
         for key in keys {
-            if record_delta.weight > 0 {
-                if unique {
-                    // A unique index key may be rewritten by the same record, but
-                    // not by a different record.
-                    let current = if let Some(record) = pending
-                        .get(&key)
-                        .and_then(|entry| entry.positive_record.clone())
-                    {
-                        Some(record)
-                    } else {
-                        store.get_raw(&key).await?
-                    };
-                    if current
-                        .as_deref()
-                        .is_some_and(|record| record != record_delta.raw())
-                    {
-                        return Err(IvmRuntimeError::UniqueIndexViolation {
-                            index: durable_storage_name(durable_storage),
-                        });
-                    }
-                }
-                let entry = pending.entry(key).or_default();
-                entry.weight += record_delta.weight;
-                entry.positive_record = Some(record_delta.raw().to_vec());
-            } else if record_delta.weight < 0 {
-                if unique {
-                    let current = store.get_raw(&key).await?;
-                    if current
-                        .as_deref()
-                        .is_some_and(|record| record != record_delta.raw())
-                    {
-                        continue;
-                    }
-                }
-                pending.entry(key).or_default().weight += record_delta.weight;
+            if record_delta.weight == 0 {
+                continue;
             }
+            add_pending_delta(
+                pending.entry(key).or_default(),
+                &record_delta.record,
+                record_delta.weight,
+                unique,
+            );
         }
     }
 
-    let mut final_writes = BTreeMap::<Vec<u8>, Option<Vec<u8>>>::new();
+    if unique {
+        return apply_unique_pending(&store, durable_storage, pending).await;
+    }
+
+    let mut operations = Vec::with_capacity(pending.len());
     for (key, entry) in pending {
         if entry.weight > 0 {
             let record = entry
                 .positive_record
                 .ok_or(IvmRuntimeError::PersistRecordMismatch)?;
-            final_writes.insert(key, Some(record));
+            operations.push(OwnedWriteOperation::Set {
+                cf: durable_storage.column_family.clone(),
+                key,
+                value: record,
+            });
         } else if entry.weight < 0 {
-            final_writes.insert(key, None);
+            operations.push(OwnedWriteOperation::Delete {
+                cf: durable_storage.column_family.clone(),
+                key,
+            });
         } else if let Some(record) = entry.positive_record
             && store.get_raw(&key).await?.is_some()
         {
-            final_writes.insert(key, Some(record));
+            operations.push(OwnedWriteOperation::Set {
+                cf: durable_storage.column_family.clone(),
+                key,
+                value: record,
+            });
         }
     }
-    let operations = final_writes
-        .iter()
-        .map(|(key, record)| match record {
-            Some(record) => store.set(key, record),
-            None => store.delete(key),
-        })
-        .collect::<Vec<_>>();
     Ok(store.write_many(operations).await?)
 }
 
@@ -128,41 +111,19 @@ async fn apply_index_persist_delta(
             .get_bytes(0)
             .map_err(IvmRuntimeError::RecordEncoding)?;
         let key = persisted_index_record_key(durable_storage, logical_key);
-
-        if record_delta.weight > 0 {
-            if unique {
-                let current = if let Some(record) = pending
-                    .get(&key)
-                    .and_then(|entry| entry.positive_record.clone())
-                {
-                    Some(record)
-                } else {
-                    store.get_raw(&key).await?
-                };
-                if current
-                    .as_deref()
-                    .is_some_and(|record| record != record_delta.raw())
-                {
-                    return Err(IvmRuntimeError::UniqueIndexViolation {
-                        index: durable_storage_name(durable_storage),
-                    });
-                }
-            }
-            let entry = pending.entry(key).or_default();
-            entry.weight += record_delta.weight;
-            entry.positive_record = Some(record_delta.raw().to_vec());
-        } else if record_delta.weight < 0 {
-            if unique {
-                let current = store.get_raw(&key).await?;
-                if current
-                    .as_deref()
-                    .is_some_and(|record| record != record_delta.raw())
-                {
-                    continue;
-                }
-            }
-            pending.entry(key).or_default().weight += record_delta.weight;
+        if record_delta.weight == 0 {
+            continue;
         }
+        add_pending_delta(
+            pending.entry(key).or_default(),
+            &record_delta.record,
+            record_delta.weight,
+            unique,
+        );
+    }
+
+    if unique {
+        return apply_unique_pending(&store, durable_storage, pending).await;
     }
 
     // `pending` is already ordered. Consume it directly into owned storage
@@ -195,6 +156,78 @@ async fn apply_index_persist_delta(
         }
     }
     Ok(store.write_many(operations).await?)
+}
+
+fn add_pending_delta(entry: &mut PendingPersistKey, record: &Bytes, weight: i64, unique: bool) {
+    if weight == 0 {
+        return;
+    }
+    entry.weight += weight;
+    if unique {
+        if let Some(current_weight) = entry.unique_record_deltas.get_mut(record) {
+            *current_weight += weight;
+        } else {
+            entry.unique_record_deltas.insert(record.clone(), weight);
+        }
+    } else if weight > 0 {
+        entry.positive_record = Some(record.to_vec());
+    }
+}
+
+async fn apply_unique_pending<S>(
+    store: &RecordStore<'_, S>,
+    durable_storage: &DurableStorage,
+    pending: BTreeMap<Vec<u8>, PendingPersistKey>,
+) -> Result<(), IvmRuntimeError>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let mut operations = Vec::with_capacity(pending.len());
+    for (key, entry) in pending {
+        let record = resolve_unique_owner(store, durable_storage, &key, entry).await?;
+        match record {
+            Some(record) => operations.push(OwnedWriteOperation::Set {
+                cf: durable_storage.column_family.clone(),
+                key,
+                value: record,
+            }),
+            None => operations.push(OwnedWriteOperation::Delete {
+                cf: durable_storage.column_family.clone(),
+                key,
+            }),
+        }
+    }
+    Ok(store.write_many(operations).await?)
+}
+
+async fn resolve_unique_owner<S>(
+    store: &RecordStore<'_, S>,
+    durable_storage: &DurableStorage,
+    key: &[u8],
+    entry: PendingPersistKey,
+) -> Result<Option<Vec<u8>>, IvmRuntimeError>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let durable_owner = store.get_raw(key).await?;
+    let mut record_deltas = entry.unique_record_deltas;
+    let durable_owner_survives = durable_owner
+        .as_ref()
+        .is_some_and(|record| record_deltas.remove(record.as_slice()).unwrap_or_default() >= 0);
+    let mut owner = durable_owner.filter(|_| durable_owner_survives);
+
+    for (record, delta) in record_deltas {
+        if delta <= 0 {
+            continue;
+        }
+        if owner.is_some() {
+            return Err(IvmRuntimeError::UniqueIndexViolation {
+                index: durable_storage_name(durable_storage),
+            });
+        }
+        owner = Some(record.to_vec());
+    }
+    Ok(owner)
 }
 
 fn persisted_index_record_key(durable_storage: &DurableStorage, logical_key: &[u8]) -> Vec<u8> {
@@ -263,5 +296,77 @@ fn arrangement_key_parts(value: crate::records::Value) -> Vec<crate::records::Va
             value => vec![crate::records::Value::Nullable(Some(Box::new(value)))],
         },
         value => vec![value],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ivm::RecordDelta;
+    use crate::storage::{TestStorage, TestStorageOperation};
+
+    /// `alice` and `bob` submit conflicting positive index entries in both
+    /// orders; pre-submit resolution rejects them without writing storage.
+    #[futures_test::test]
+    async fn unique_index_positive_conflict_is_pre_submit_in_both_orders() {
+        for records in [
+            vec![
+                (b"same-key".to_vec(), b"record-a".to_vec()),
+                (b"same-key".to_vec(), b"record-b".to_vec()),
+            ],
+            vec![
+                (b"same-key".to_vec(), b"record-b".to_vec()),
+                (b"same-key".to_vec(), b"record-a".to_vec()),
+            ],
+        ] {
+            let (storage, control) = TestStorage::controlled(&["indices"]);
+            let durable_storage = DurableStorage {
+                column_family: "indices".to_owned(),
+                key_prefix: b"albums\0unique_albums_by_title\0".to_vec(),
+            };
+            let descriptor = index_record_descriptor();
+            let delta = RecordDeltas {
+                descriptor,
+                deltas: records
+                    .into_iter()
+                    .map(|(key, value)| RecordDelta {
+                        record: descriptor
+                            .create(&[
+                                crate::records::Value::Bytes(key),
+                                crate::records::Value::Bytes(value),
+                            ])
+                            .unwrap()
+                            .into(),
+                        weight: 1,
+                    })
+                    .collect(),
+            };
+            let before = storage
+                .prefix("indices".to_owned(), Vec::new())
+                .await
+                .unwrap();
+            control.take_observed();
+
+            let error = apply_index_persist_delta(&storage, &durable_storage, true, &delta)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                IvmRuntimeError::UniqueIndexViolation { index }
+                    if index == "albums.unique_albums_by_title"
+            ));
+            assert!(
+                !control
+                    .take_observed()
+                    .contains(&TestStorageOperation::WriteMany)
+            );
+            assert_eq!(
+                storage
+                    .prefix("indices".to_owned(), Vec::new())
+                    .await
+                    .unwrap(),
+                before
+            );
+        }
     }
 }

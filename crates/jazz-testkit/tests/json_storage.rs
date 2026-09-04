@@ -1,6 +1,6 @@
 //! Regression coverage retained from the pre-engine-swap JSON integration
-//! suite. JSON is physically stored as text, but its public schema contract
-//! must still be enforced at every write boundary.
+//! suite. JSON preserves its public source-text representation, while its
+//! schema contract is enforced at every write boundary.
 
 use jazz::row_input;
 use jazz::tools::{AppContext, ColumnType, JazzClient, Schema, SchemaBuilder, TableSchema, Value};
@@ -18,6 +18,60 @@ fn documents_schema(json_schema: Option<serde_json::Value>) -> Schema {
 
 fn name_schema() -> Schema {
     documents_schema(Some(name_json_schema()))
+}
+
+/// A whole-row remote read must preserve the JSON cell's storage descriptor
+/// until normal public-value materialization. Selecting the JSON column alone
+/// must not be required to make the same row readable.
+#[tokio::test(flavor = "current_thread")]
+async fn remote_whole_json_row_matches_explicit_projection() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = documents_schema(None);
+            let server = jazz_server::JazzServer::start().await;
+            jazz_testkit::push_catalogue_in_memory(
+                server.server_state(),
+                server.app_id(),
+                "dev",
+                &[schema.clone()],
+                &[],
+            )
+            .await
+            .expect("publish JSON schema");
+            jazz_testkit::publish_allow_all_permissions(
+                &server.base_url(),
+                server.app_id(),
+                server.admin_secret(),
+                &schema,
+            )
+            .await;
+            let client = jazz_testkit::connect(
+                server.make_client_context_for_user(schema, uuid::Uuid::new_v4().to_string()),
+            )
+            .await
+            .expect("connect JSON client");
+            let raw = "{\n  \"name\": \"Ada\",\n  \"active\": true\n}";
+            let (id, _, tx) = client
+                .insert("documents", row_input!("payload" => raw))
+                .expect("insert JSON document");
+            jazz_testkit::wait_for_edge_txs(&client, &[tx.expect("insert transaction")]).await;
+            for query in [
+                jazz::query::Query::from("documents"),
+                jazz::query::Query::from("documents").select(["payload"]),
+            ] {
+                let rows = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    client.query_with_read_tier(query, jazz::tools::ReadTier::Remote),
+                )
+                .await
+                .expect("JSON remote query settles")
+                .expect("JSON remote query succeeds");
+                assert_eq!(rows, vec![(id, vec![Value::Text(raw.to_owned())])]);
+            }
+            client.shutdown().await.expect("shutdown JSON client");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 fn name_json_schema() -> serde_json::Value {

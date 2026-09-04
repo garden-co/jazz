@@ -3770,6 +3770,55 @@ fn deferred_local_publications_persist_and_enqueue_in_publication_order_once() {
     assert_eq!(db.node.outbox.borrow().len(), 2);
 }
 
+/// Internal because the regression needs the exact overlap between a retained
+/// owner operation holding node state and an earlier publication's settlement.
+/// The browser counterpart performs insert/subscribe/insert without delays.
+#[test]
+fn deferred_publication_does_not_starve_the_queued_operation_holding_node_state() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let db = open_db(0xa8, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let write = block_on(db.insert(
+        "todos",
+        cells("settle while next operation is cold", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    let node = db.node.node();
+    let (release, blocked) = futures::channel::oneshot::channel();
+    db.node
+        .enqueue_transaction_operation(
+            OpenTransactionId::new(),
+            Box::pin(async move {
+                let _guard = node.lock().await;
+                blocked.await.expect("owner operation must remain retained");
+                Ok(())
+            }),
+        )
+        .unwrap();
+    db.drive_queued_mutation_once();
+
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut tick = Box::pin(db.tick());
+    assert!(matches!(
+        tick.as_mut().poll(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+    drop(tick);
+    assert_eq!(db.node.pending_local_publications.borrow().len(), 1);
+
+    release.send(()).unwrap();
+    block_on(db.tick()).unwrap();
+    assert!(db.node.pending_local_publications.borrow().is_empty());
+    assert_eq!(
+        db.write_state(write.mergeable_tx_id()).unwrap().durability,
+        DurabilityTier::Local
+    );
+    assert_eq!(prepared_read(&db, &db.table("todos")).len(), 1);
+}
+
 /// Causal flow: a mergeable transaction enters the node-owned deferred queue,
 /// its subscriber refresh stalls, and the caller future is cancelled. The next
 /// node tick must still persist the exact queued transaction.

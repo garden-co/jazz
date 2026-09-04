@@ -89,6 +89,7 @@ export function isTrustedReservedSession(
 }
 
 export interface JwtPayload {
+  jazz_pub_key?: unknown;
   sub?: unknown;
   iss?: unknown;
   claims?: unknown;
@@ -126,6 +127,16 @@ function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown
     if (admitted !== undefined) claims[name] = admitted;
   }
   return claims;
+}
+
+function reservedPolicyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> | null {
+  // `jazz_pub_key` is proof material for Jazz's reserved self-signed issuers,
+  // not an application-visible policy claim. Native admission verifies it and
+  // derives the subject from it before constructing the session. Keeping it
+  // in `Session.claims` would make every fresh anonymous proof look like a
+  // different authorization scope even though anonymous policy is shared.
+  const { jazz_pub_key: _proofKey, ...policyPayload } = payload;
+  return policyClaimsFromJwtPayload(policyPayload);
 }
 
 function supportedPolicyClaim(value: unknown): unknown | undefined {
@@ -254,7 +265,7 @@ export function sessionFromVerifiedReservedJwtPayload(
   const expectedIssuer = authMode === "local-first" ? LOCAL_FIRST_JWT_ISSUER : ANONYMOUS_JWT_ISSUER;
   if (!subject || issuer !== expectedIssuer) return null;
 
-  const claims = policyClaimsFromJwtPayload(payload);
+  const claims = reservedPolicyClaimsFromJwtPayload(payload);
   if (!claims) return null;
   const internal = markTrustedReservedSession({
     issuer,
@@ -274,7 +285,7 @@ export function internalSessionFromVerifiedReservedJwtPayload(
   const issuer = asUsableSubjectString(payload.iss);
   const expectedIssuer = authMode === "local-first" ? LOCAL_FIRST_JWT_ISSUER : ANONYMOUS_JWT_ISSUER;
   if (!subject || issuer !== expectedIssuer) return null;
-  const claims = policyClaimsFromJwtPayload(payload);
+  const claims = reservedPolicyClaimsFromJwtPayload(payload);
   if (!claims) return null;
   return markTrustedReservedSession({ issuer, user_id: subject, claims, authMode });
 }

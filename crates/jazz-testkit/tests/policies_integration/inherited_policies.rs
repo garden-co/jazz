@@ -2080,7 +2080,20 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
         .await
         .expect("subscribe array files");
     let mut log = Vec::new();
-    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    // A no-change assertion needs an installed initial view, not a timed
+    // guess: otherwise a slow initial snapshot looks like a reorder delta.
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "array subscription initially contains both referenced files",
+        |entries| {
+            has_added_id(entries, file_a)
+                && has_added_id(entries, file_b)
+                && entries.last().is_some_and(|delta| !delta.pending)
+        },
+    )
+    .await;
     log.clear();
 
     update_row(
@@ -2322,7 +2335,18 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
 
     let mut stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
     let mut log = Vec::new();
-    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    // The stream itself must have observed the row before revocation can
+    // legitimately be required to produce a removal for that stream.
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "bob's active subscription initially contains the shared document",
+        |entries| {
+            has_added_id(entries, doc_id) && entries.last().is_some_and(|delta| !delta.pending)
+        },
+    )
+    .await;
     log.clear();
 
     update_row(
@@ -2435,7 +2459,16 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
 
     let mut stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
     let mut log = Vec::new();
-    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "bob's active subscription initially contains the document before retargeting",
+        |entries| {
+            has_added_id(entries, doc_id) && entries.last().is_some_and(|delta| !delta.pending)
+        },
+    )
+    .await;
     log.clear();
 
     update_row(

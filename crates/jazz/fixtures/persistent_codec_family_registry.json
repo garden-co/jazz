@@ -363,7 +363,7 @@
       "evidence": [
         {
           "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-          "anchor": "fast_known_state_fact_survives_storage_reopen"
+          "anchor": "storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement"
         }
       ]
     },

@@ -149,6 +149,57 @@ fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     assert_currency_tables_match_storage(&mut incremental_reader, "todos");
 }
 
+/// Receiver-level coverage pins the optimized reset path as well as ordinary
+/// ingestion. A high-level transport test cannot require that batching choice.
+#[test]
+fn snapshot_ingestion_advances_clock_before_a_local_edit() {
+    for reset in [false, true] {
+        let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+        let (_core_dir, mut core) = open_node_with_uuid(node(2));
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("todos", row(1), 1_800_000_000_000)
+                .cells(title_cells("before")),
+        );
+        let mut peer = PeerState::new();
+        let mut update = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
+        register_whole_table_receiver(&mut reader, "todos");
+        if !reset {
+            let subscription = reader.whole_table_subscription_key("todos").unwrap();
+            reader
+                .apply_view_update(todos_receiver_reset(subscription))
+                .unwrap();
+            let SyncMessage::ViewUpdate(payload) = &mut update else {
+                panic!("expected view update");
+            };
+            payload.reset_result_set = false;
+            payload.program_fact_adds.retain(|fact| {
+                !matches!(
+                    fact,
+                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
+                )
+            });
+        }
+        reader.apply_sync_message_settled(update).unwrap();
+        // A client's wall clock may lag what it has just read. Its next
+        // transaction still has to follow every admitted snapshot transaction.
+        commit_mergeable_global(
+            &mut reader,
+            &mut core,
+            MergeableCommit::new("todos", row(1), 1).cells(title_cells("after")),
+        );
+        let rows = core.current_rows("todos", DurabilityTier::Global).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].cell(&schema().tables[0], "title"),
+            Some(Value::String("after".to_owned())),
+            "an acknowledged edit after reset={reset} must win over the snapshot it observed",
+        );
+    }
+}
+
 #[test]
 fn receiver_batch_ingests_non_reset_complete_bundles_once() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));

@@ -3677,6 +3677,65 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("waits for the persistent owner's local answer without requiring a server", async () => {
+    vi.useFakeTimers();
+    try {
+      let ownerAnswered = false;
+      const attachedOptions: unknown[] = [];
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              all: () => new Uint8Array([0]),
+              connectUpstream: () => new FakeTransport([]),
+              prepareQuery: () => ({}),
+              attachQuery: (_query: unknown, opts: unknown) => {
+                attachedOptions.push(opts);
+                return {};
+              },
+              queryAttachmentIsCovered: () => ownerAnswered,
+              detachQuery: () => undefined,
+              setNonDurableClient: () => undefined,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.setNonDurableClient();
+      runtime.connectUpstreamPeer();
+      let settled = false;
+      const pending = runtime
+        .query(JSON.stringify({ table: "todos" }), null, "local")
+        .then((rows) => {
+          settled = true;
+          return rows;
+        });
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(false);
+      // An unrelated owner frame cannot acknowledge this exact query.
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(false);
+      ownerAnswered = true;
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(pending).resolves.toEqual([]);
+      expect(attachedOptions).toEqual([{ tier: "local" }]);
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not treat processed activity as coverage for a new full attachment", async () => {
     vi.useFakeTimers();
     try {

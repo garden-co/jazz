@@ -85,6 +85,7 @@ type RuntimeContext = {
   transportTransition: Promise<void>;
   transportStateEpoch: number;
   transportStateWaiters: Set<() => void>;
+  authFailureEpoch: number;
 };
 
 function canonicalClaimsJson(value: unknown): string {
@@ -881,6 +882,7 @@ function createContext(
     transportTransition: Promise.resolve(),
     transportStateEpoch: 0,
     transportStateWaiters: new Set(),
+    authFailureEpoch: 0,
     initialize: Promise.resolve(),
     closing: null,
     idleReleaseTimer: null,
@@ -951,7 +953,10 @@ async function initialize(context: RuntimeContext): Promise<void> {
     );
     context.runtime = runtime;
     unownedDb = null;
-    context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
+    context.runtime.onAuthFailure((reason) => {
+      context.authFailureEpoch += 1;
+      broadcast(context, { type: "auth-failure", reason });
+    });
     context.runtime.onMutationError((event) => {
       // A mutation error is a notification for foreground runtimes that are
       // attached now. Durable reconciliation belongs to the worker's database;
@@ -1315,15 +1320,29 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     }
     if (message.type === "update-auth") {
       if (!peer.subscriber) throw new Error("Browser tab is not initialized");
+      let authenticationRejected = false;
       await enqueueTransportTransition(peer.context, async () => {
-        if (!peer.context.explicitlyDisconnected) {
-          await activeRuntime.updateAuth(message.authJson);
-          await activeRuntime.waitForUpstreamServerConnection();
+        const authFailureEpoch = peer.context.authFailureEpoch;
+        try {
+          if (!peer.context.explicitlyDisconnected) {
+            await activeRuntime.updateAuth(message.authJson);
+            await activeRuntime.waitForUpstreamServerConnection();
+          }
+        } catch (error) {
+          // Classify inside this serialized attempt: a preceding queued
+          // rejection must not mask this attempt's unrelated runtime failure.
+          // Auth rejection was already broadcast to every tab; retain their
+          // client links so any sibling can provide a replacement credential.
+          if (peer.context.authFailureEpoch !== authFailureEpoch) {
+            authenticationRejected = true;
+            return;
+          }
+          throw error;
         }
         peer.context.serverAuthJson = message.authJson;
         await publishWorkerSessionClaims(peer.context, message.sessionClaims);
       });
-      broadcast(peer.context, { type: "auth-restored" });
+      if (!authenticationRejected) broadcast(peer.context, { type: "auth-restored" });
       return;
     }
     if (message.type === "disconnect") {

@@ -685,7 +685,18 @@ where
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<WriteHandle<S>, Error> {
-        let now_ms = self.next_now_ms();
+        self.enqueue_commit_mergeable_handle_at_ms(open_tx_id, self.next_now_ms())
+    }
+
+    /// Reserve a queued commit using the host's Unix-millisecond clock sample.
+    /// Bindings must supply this separately from per-row provenance timestamps:
+    /// staging may still be queued when the final identity is returned.
+    #[doc(hidden)]
+    pub fn enqueue_commit_mergeable_handle_at_ms(
+        &self,
+        open_tx_id: OpenTransactionId,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
         let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
         let db = self.clone_for_reserved_transaction(tx_id);
         let status = self.node.enqueue_transaction_commit(
@@ -1332,7 +1343,16 @@ where
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<WriteHandle<S>, Error> {
-        let now_ms = self.next_now_ms();
+        self.enqueue_commit_exclusive_handle_at_ms(open_tx_id, self.next_now_ms())
+    }
+
+    /// Exclusive counterpart of [`Db::enqueue_commit_mergeable_handle_at_ms`].
+    #[doc(hidden)]
+    pub fn enqueue_commit_exclusive_handle_at_ms(
+        &self,
+        open_tx_id: OpenTransactionId,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
         let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
         let db = self.clone_for_reserved_transaction(tx_id);
         let status = self.node.enqueue_transaction_commit(

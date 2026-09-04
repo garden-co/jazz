@@ -822,6 +822,121 @@ async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     );
 }
 
+/// Alice, Bob, and Carol share a collector after its disposable output memo
+/// is evicted. Rehydrating Bob/Carol must not multiply Alice's resident rows.
+/// Alice opens -> evict memo -> Bob opens -> evict -> Carol opens -> update/delete.
+/// Internal coverage is intentional: forcing this pure-cache eviction is not
+/// a public database operation; the canvas scenario covers the public Db path.
+#[futures_test::test]
+async fn shared_root_collector_rehydration_does_not_multiply_rows() {
+    let schema = albums_schema();
+    let albums = schema.table("albums").unwrap().record_schema();
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    write_two_album_rows(&storage, &albums).await;
+    let graph = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [
+            crate::ivm::CollectByField::named("id"),
+            crate::ivm::CollectByField::named("title"),
+        ],
+        Vec::<crate::ivm::TopByOrder>::new(),
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let mut subscriptions = Vec::new();
+    for _ in 0..3 {
+        runtime.evict_eval_memo_for_tests(0, 0);
+        let subscription = runtime
+            .subscribe([("rows", graph.clone())], &storage)
+            .unwrap();
+        runtime.drive_pending_incremental().await.unwrap();
+        let initial = subscription.try_recv().unwrap();
+        let operations = &initial.terminal_sinks["rows"].operations;
+        assert_eq!(operations.len(), 2);
+        assert!(
+            operations
+                .iter()
+                .all(|op| matches!(op.edit, TerminalEdit::Insert { .. }))
+        );
+        subscriptions.push(subscription);
+    }
+    let old = albums
+        .create(&[Value::U64(1), Value::String("one".into())])
+        .unwrap();
+    let new = albums
+        .create(&[Value::U64(1), Value::String("updated".into())])
+        .unwrap();
+    runtime
+        .tick(
+            vec![TableDelta {
+                variant_tag: 0,
+                table: "albums".into(),
+                descriptor: albums,
+                deltas: vec![
+                    RecordDelta {
+                        record: old.into(),
+                        weight: -1,
+                    },
+                    RecordDelta {
+                        record: new.clone().into(),
+                        weight: 1,
+                    },
+                ],
+            }],
+            &storage,
+        )
+        .await
+        .unwrap();
+    for subscription in &subscriptions {
+        let update = subscription.try_recv().unwrap();
+        let operations = &update.terminal_sinks["rows"].operations;
+        assert_eq!(operations.len(), 1);
+        let TerminalEdit::Update { value, .. } = &operations[0].edit else {
+            panic!("expected one update: {operations:?}");
+        };
+        assert_eq!(
+            OwnedRecord::new(value.clone(), operations[0].root_descriptor)
+                .to_values()
+                .unwrap(),
+            vec![Value::U64(1), Value::String("updated".into())]
+        );
+    }
+    runtime
+        .tick(
+            vec![TableDelta {
+                variant_tag: 0,
+                table: "albums".into(),
+                descriptor: albums,
+                deltas: vec![RecordDelta {
+                    record: new.into(),
+                    weight: -1,
+                }],
+            }],
+            &storage,
+        )
+        .await
+        .unwrap();
+    for subscription in &subscriptions {
+        let update = subscription.try_recv().unwrap();
+        assert!(matches!(
+            update.terminal_sinks["rows"].operations.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Remove { .. },
+                ..
+            }]
+        ));
+    }
+    runtime.tick(Vec::new(), &storage).await.unwrap();
+    assert!(
+        subscriptions
+            .iter()
+            .all(|subscription| subscription.try_recv().is_err())
+    );
+}
+
 #[futures_test::test]
 async fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed() {
     let schema = albums_schema();
