@@ -242,6 +242,19 @@ then verifies that digest before decompression or semantic decode. The resource
 limits and expiry/deduplication rules are normative in
 `SPEC/13_transport_message_fragmentation.md`.
 
+JSON version cells use the schema-derived `StoredScalar(Json)` descriptor,
+including inline cells. This is the same existing scalar codec used by local
+physical JSON columns. The pre-freeze correction tracked with #2461 changes
+the serialized `VersionRecord` descriptor for inline JSON, but leaves its raw
+inline scalar bytes unchanged; the old `String` descriptor could not encode
+indirect JSON at all. Receivers reject old inline JSON records whose descriptor
+no longer matches the authored schema. This correction must be shared by the
+contained and typed identity candidates before freezing v1; it introduces no
+new durable storage encoding or compatibility fallback.
+`fixtures/large_json_wire_v1.json` pins the old inline descriptor and the corrected
+inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
+and rejection of the old descriptor before storage.
+
 The wire-protocol v1 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
 `crates/jazz/fixtures/wire_hello_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic

@@ -823,3 +823,24 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     assert!(!reader.initial_sync_flush_active);
     assert!(reader.query.initial_hydration_binding_views.is_empty());
 }
+
+// Internal wire-compatibility receipt: public JSON values cannot distinguish
+// the obsolete String descriptor from the schema-derived JSON scalar codec.
+#[test]
+fn legacy_inline_json_wire_descriptor_is_rejected_before_storage() {
+    let schema = JazzSchema::new(&crate::tools::SchemaBuilder::new().table(
+        crate::tools::TableSchemaBuilder::new("documents").column("payload", crate::tools::ColumnType::Json { schema: None })
+    ).build()).unwrap();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x61), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x62), schema.clone());
+    let (_, unit) = writer.commit_mergeable_unit_settled(MergeableCommit::new("documents", row(0x63), 1003).cells(BTreeMap::from([("payload".to_owned(), Value::String("{\"answer\":42}".into()))]))).unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else { panic!("commit unit expected"); };
+    let legacy = versions.into_iter().map(|version| {
+        let descriptor = groove::records::RecordDescriptor::new(version.record().descriptor().fields().iter().map(|field| (field.name.clone().unwrap(), if field.name.as_deref() == Some("_app_payload") { groove::records::ValueType::Nullable(Box::new(groove::records::ValueType::String)) } else { field.value_type.clone() })));
+        let raw = descriptor.create(&version.record().to_values().unwrap()).unwrap();
+        crate::protocol::VersionRecord::new("documents", schema.version_id(), groove::records::OwnedRecord::new(raw, descriptor))
+    }).collect();
+    let updates = core.apply_sync_message_settled(SyncMessage::CommitUnit { tx: tx.clone(), versions: legacy }).unwrap();
+    assert!(updates.iter().any(|message| matches!(message, SyncMessage::FateUpdate { tx_id, fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)), .. } if *tx_id == tx.tx_id && reason.contains("complete descriptor of its authored schema"))));
+    assert!(core.row_history("documents", row(0x63)).unwrap().is_empty());
+}

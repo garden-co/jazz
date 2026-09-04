@@ -886,7 +886,7 @@ fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemant
 /// Storage descriptors are schema-derived. JSON remains string-shaped to
 /// callers and operators, but its internal cell codec is distinct so a large
 /// JSON descriptor cannot be mistaken for text.
-fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
+pub(crate) fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
     match column.large_value_kind {
         LargeValueSemanticKind::Json => groove::large_values::physical_storage_value_type(
             groove::large_values::LargeValueKind::Json,
@@ -1337,8 +1337,9 @@ impl TableSchema {
     /// Wire records contain row payload data and immutable row provenance:
     /// `row_uuid`, `parents`, provenance, `_deletion`, and nullable user cells.
     /// Receiver-local currentness and authority-state columns are deliberately
-    /// excluded. Schema changes change this descriptor; v0 requires identical
-    /// descriptors at sender and receiver.
+    /// excluded. Schema changes change this descriptor; v1 requires identical
+    /// descriptors at sender and receiver. JSON cells retain their schema-derived
+    /// stored-scalar kind so indirect JSON is never encoded as ordinary text.
     pub fn wire_record_descriptor(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             [
@@ -1360,7 +1361,7 @@ impl TableSchema {
             .chain(self.columns.iter().map(|column| {
                 (
                     app_storage_column_name(&column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone())),
+                    ValueType::Nullable(Box::new(storage_column_type(column))),
                 )
             })),
         )
