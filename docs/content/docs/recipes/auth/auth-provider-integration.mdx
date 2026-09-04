@@ -30,7 +30,7 @@ Jazz supports external JWT-based authentication for production use. This recipe 
 1. The user signs in with your auth provider and gets a JWT.
 2. Your client passes that JWT to Jazz.
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. On success, Jazz keeps JWT `iss` and `sub` under `session.claims` and exposes their canonical pair as the opaque `session.user` author identity.
+4. On success, Jazz derives the opaque `session.user` author identity from the verified JWT's canonical `iss` and `sub` pair. Registered JWT fields are not exposed through public `session.claims`.
 
 If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
 
