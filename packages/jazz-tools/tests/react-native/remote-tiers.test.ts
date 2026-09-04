@@ -89,6 +89,11 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
       async (fixture) => {
         const db = await fixture.createDb();
         expect(await db.all(app.todos, { tier: ReadTier.Remote })).toEqual([]);
+        const strictSnapshots: unknown[][] = [];
+        const stopStrict = db.subscribe(app.todos, (rows) => strictSnapshots.push(rows), {
+          tier: ReadTier.Remote,
+        });
+        await expect.poll(() => strictSnapshots.at(-1)).toEqual([]);
         await db.disconnect();
         const write = db.insert(app.todos, { title: "offline queued", done: false });
         const row = await write.wait({ tier: "local" });
@@ -114,14 +119,22 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
         });
         // A parked remote read must not hold the native owner or prevent the
         // caller from persisting a subsequent local mutation.
-        await db.update(app.todos, row.id, { done: true }).wait({ tier: "local" });
+        const laterWrite = db.update(app.todos, row.id, { done: true });
+        await laterWrite.wait({ tier: "local" });
         await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(strictSnapshots.flat()).toEqual([]);
         expect([remoteReady, edgeReady, globalReady]).toEqual([false, false, false]);
         await db.reconnect();
         await Promise.all([edge, global]);
-        expect(await remote).toEqual([{ ...row, done: true }]);
+        expect(await remote).toEqual([expect.objectContaining({ id: row.id, title: row.title })]);
+        await laterWrite.wait({ tier: "global" });
+        await expect.poll(() => strictSnapshots.at(-1)).toEqual([{ ...row, done: true }]);
+        stopStrict();
+        const stoppedCount = strictSnapshots.length;
+        await db.update(app.todos, row.id, { title: "after detach" }).wait({ tier: "global" });
+        expect(strictSnapshots).toHaveLength(stoppedCount);
         expect(await db.all(app.todos, { tier: ReadTier.RemoteIfPossible })).toEqual([
-          { ...row, done: true },
+          { ...row, title: "after detach", done: true },
         ]);
       },
       {

@@ -745,16 +745,6 @@ function queryHandle(query: object): number {
   return handle as number;
 }
 
-function assertLocalReadOptions(opts: unknown): void {
-  if (!opts || typeof opts !== "object") throw new Error(REACT_NATIVE_UNSUPPORTED_ERROR);
-  const entries = Object.entries(opts as Record<string, unknown>);
-  if (entries.some(([key, value]) => key !== "tier" || value !== "local")) {
-    throw new Error(
-      `${REACT_NATIVE_UNSUPPORTED_ERROR}; remote tiers, historical views, and include-deleted reads are not implemented`,
-    );
-  }
-}
-
 function unsupported(operation: string): never {
   throw new Error(`${REACT_NATIVE_UNSUPPORTED_ERROR}; ${operation} is unavailable`);
 }
