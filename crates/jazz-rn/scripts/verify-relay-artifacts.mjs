@@ -296,6 +296,10 @@ function requireArchitectures(file, expected, label) {
         `${label} is missing ${architecture}; found ${[...actual].sort().join(", ")}`,
       );
   }
+  if (actual.size !== expected.length)
+    throw new Error(
+      `${label} has unexpected architectures; expected ${[...expected].sort().join(", ")}, found ${[...actual].sort().join(", ")}`,
+    );
 }
 
 function verifyIosSlices(expected) {
@@ -406,10 +410,16 @@ for (const requested of requestedTargets) {
     for (const [architecture, path] of [
       ["arm64", "arm64-v8a/libjazz_native_relay.a"],
       ["armv7", "armeabi-v7a/libjazz_native_relay.a"],
-      ["x86", "x86/libjazz_native_relay.a"],
       ["x86_64", "x86_64/libjazz_native_relay.a"],
     ])
       requireArchitectures(join(target.root, path), [architecture], `Android ${path}`);
+    if (expected.has("x86/libjazz_native_relay.a")) {
+      requireArchitectures(
+        join(target.root, "x86/libjazz_native_relay.a"),
+        ["x86"],
+        "Android x86/libjazz_native_relay.a",
+      );
+    }
   }
   if (requested === "ios") verifyIosSlices(expected);
 }

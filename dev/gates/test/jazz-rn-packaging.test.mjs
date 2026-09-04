@@ -2415,6 +2415,34 @@ ${
     );
 
     await writeFile(
+      join(androidRoot, "arm64-v8a/libjazz_native_relay.a"),
+      archive([
+        ["arm64.o", elfObject(183)],
+        ["x86_64.o", elfObject(62)],
+      ]),
+    );
+    await writeManifest(androidRoot, join(packageRoot, "android/jazz-native-relay.manifest.json"), {
+      toolchain: { cargoNdk: "4.1.2" },
+    });
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /Android arm64-v8a\/libjazz_native_relay\.a has unexpected architectures; expected arm64, found arm64, x86_64/,
+      "a manifest-valid Android archive must be rejected when it mixes a foreign architecture into one ABI path",
+    );
+    await writeFile(
+      join(androidRoot, "arm64-v8a/libjazz_native_relay.a"),
+      artifactBytes("arm64-v8a/libjazz_native_relay.a"),
+    );
+    await writeManifest(androidRoot, join(packageRoot, "android/jazz-native-relay.manifest.json"), {
+      toolchain: { cargoNdk: "4.1.2" },
+    });
+
+    await writeFile(
       simulatorLibrary,
       fatMachO(
         [
