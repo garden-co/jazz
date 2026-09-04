@@ -241,6 +241,11 @@ declare module "jazz-wasm" {
     ): Promise<Uint8Array>;
     allRelationQueryForBackend(queryJson: string, opts: unknown): Promise<Uint8Array>;
     attachQueryForBackend(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
+    attachQueryInTransactionForBackend(
+      query: WasmPreparedQuery,
+      tx: WasmTx,
+      opts: unknown,
+    ): QueryAttachment;
     subscribeForBackend(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
     subscribeRelationQueryForBackend(queryJson: string, opts: unknown): ReadableStream<unknown>;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
@@ -254,6 +259,13 @@ declare module "jazz-wasm" {
     attachQuery(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
     attachQueryForIdentity(
       query: WasmPreparedQuery,
+      author: Uint8Array,
+      opts: unknown,
+    ): QueryAttachment;
+    attachQueryInTransaction(query: WasmPreparedQuery, tx: WasmTx, opts: unknown): QueryAttachment;
+    attachQueryInTransactionForIdentity(
+      query: WasmPreparedQuery,
+      tx: WasmTx,
       author: Uint8Array,
       opts: unknown,
     ): QueryAttachment;

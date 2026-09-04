@@ -229,6 +229,14 @@ type NativeDb = {
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
   attachQueryForBackend?(query: PreparedQuery, opts: unknown): unknown;
+  attachQueryInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): unknown;
+  attachQueryInTransactionForIdentity?(
+    query: PreparedQuery,
+    tx: Tx,
+    author: Uint8Array,
+    opts: unknown,
+  ): unknown;
+  attachQueryInTransactionForBackend?(query: PreparedQuery, tx: Tx, opts: unknown): unknown;
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
@@ -2042,7 +2050,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
-    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
+    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session, pendingTx);
     if (this.closed) return [];
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
@@ -2800,19 +2808,43 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     opts: unknown,
     context: NativeReadContext,
+    pendingTx?: PendingTx,
   ): unknown {
+    const tx = pendingTx ? this.txForRead(pendingTx) : undefined;
     switch (context.kind) {
       case "backend-authority":
+        if (tx) {
+          if (!this.db.attachQueryInTransactionForBackend) {
+            throw new Error(
+              "Native runtime does not support backend transaction snapshot query coverage",
+            );
+          }
+          return this.db.attachQueryInTransactionForBackend(query, tx, opts);
+        }
         if (!this.db.attachQueryForBackend) {
           throw new Error("Native runtime does not support backend authority query coverage");
         }
         return this.db.attachQueryForBackend(query, opts);
       case "session-authority":
+        if (tx) {
+          if (!this.db.attachQueryInTransactionForIdentity) {
+            throw new Error(
+              "Native runtime does not support session transaction snapshot query coverage",
+            );
+          }
+          return this.db.attachQueryInTransactionForIdentity(query, tx, context.identity, opts);
+        }
         if (!this.db.attachQueryForIdentity) {
           throw new Error("Native runtime does not support session-authority query coverage");
         }
         return this.db.attachQueryForIdentity(query, context.identity, opts);
       case "client-local":
+        if (tx) {
+          if (!this.db.attachQueryInTransaction) {
+            throw new Error("Native runtime does not support transaction snapshot query coverage");
+          }
+          return this.db.attachQueryInTransaction(query, tx, opts);
+        }
         if (!this.db.attachQuery) {
           throw new Error("Native runtime does not support query coverage");
         }
@@ -2935,6 +2967,7 @@ export class NativeRuntimeAdapter implements Runtime {
     optionsJson: string | null | undefined,
     query: PreparedQuery,
     session: RuntimeSession | null,
+    pendingTx?: PendingTx,
   ): Promise<unknown | undefined> {
     if (this.closed) return;
     if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
@@ -2945,9 +2978,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // storage-backed evaluator may hold that node across suspension, so enter
     // the same owner-wide idle boundary used for peer admission first.
     const opts = readOptions(tier, false, optionsJson);
-    const readContext = this.nativeReadContext(session);
+    const readContext = this.nativeReadContext(session, pendingTx);
     const attachment = await this.runWhenCoreIdle(() =>
-      this.closed ? undefined : this.attachQueryForContext(query, opts, readContext),
+      this.closed ? undefined : this.attachQueryForContext(query, opts, readContext, pendingTx),
     );
     if (attachment === undefined) return;
     this.emitQueryCoverageTrace("attach");

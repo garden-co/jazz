@@ -149,6 +149,9 @@ export declare class NapiDb {
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
+  attachQueryInTransaction(query: PreparedQuery, tx: Tx, opts?: any | undefined | null): QueryAttachment
+  attachQueryInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
+  attachQueryInTransactionForBackend(query: PreparedQuery, tx: Tx, opts?: any | undefined | null): QueryAttachment
   /**
    * Attach remote coverage using the authority identity of an explicit
    * backend open. This has no public author argument by design.

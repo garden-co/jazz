@@ -127,6 +127,28 @@ where
         )
     }
 
+    /// Attach one-shot coverage for the immutable base of an open transaction.
+    /// Pending writes remain local overlays and are never sent upstream.
+    #[doc(hidden)]
+    pub fn attach_query_in_transaction_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        open_tx_id: OpenTransactionId,
+        mut opts: ReadOpts,
+    ) -> Result<QueryAttachment, Error> {
+        let snapshot = self
+            .node
+            .node
+            .borrow()
+            .open_transaction_snapshot(open_tx_id)?;
+        opts.read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: snapshot.into(),
+            },
+        };
+        self.attach_query_with_opts(prepared, opts)
+    }
+
     /// Attach a one-shot usage-site query coverage request evaluated as `author`.
     pub fn attach_query_with_opts_for_identity(
         &self,
@@ -154,6 +176,28 @@ where
             author,
             effective_read_tier(&opts) >= DurabilityTier::Edge,
         )
+    }
+
+    /// Identity-aware counterpart of [`Db::attach_query_in_transaction_with_opts`].
+    #[doc(hidden)]
+    pub fn attach_query_in_transaction_with_opts_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        open_tx_id: OpenTransactionId,
+        mut opts: ReadOpts,
+        author: AuthorSubject,
+    ) -> Result<QueryAttachment, Error> {
+        let snapshot = self
+            .node
+            .node
+            .borrow()
+            .open_transaction_snapshot(open_tx_id)?;
+        opts.read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: snapshot.into(),
+            },
+        };
+        self.attach_query_with_opts_for_identity(prepared, opts, author)
     }
 
     fn attach_or_refresh_query_coverage(

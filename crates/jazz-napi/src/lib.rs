@@ -3788,6 +3788,105 @@ impl NapiDb {
         Ok(QueryAttachment { inner })
     }
 
+    #[napi(js_name = "attachQueryInTransaction")]
+    pub fn attach_query_in_transaction(
+        &self,
+        query: &PreparedQuery,
+        tx: &Tx,
+        opts: Option<serde_json::Value>,
+    ) -> napi::Result<QueryAttachment> {
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let tx_db = tx
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        if !db.shares_runtime_with(tx_db) {
+            return Err(napi::Error::from_reason(
+                "transaction belongs to a different database runtime",
+            ));
+        }
+        let open_tx = tx.open_tx()?;
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                db.attach_query_in_transaction_with_opts(&query.inner, open_tx, opts)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                db.attach_query_in_transaction_with_opts(&query.inner, open_tx, opts)
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(QueryAttachment { inner })
+    }
+
+    #[napi(js_name = "attachQueryInTransactionForIdentity")]
+    pub fn attach_query_in_transaction_for_identity(
+        &self,
+        query: &PreparedQuery,
+        tx: &Tx,
+        author: Uint8Array,
+        opts: Option<serde_json::Value>,
+    ) -> napi::Result<QueryAttachment> {
+        let author = core_author_id_from_bytes(&author)?;
+        self.attach_query_in_transaction_for_author(query, tx, opts, author)
+    }
+
+    fn attach_query_in_transaction_for_author(
+        &self,
+        query: &PreparedQuery,
+        tx: &Tx,
+        opts: Option<serde_json::Value>,
+        author: CoreAuthorSubject,
+    ) -> napi::Result<QueryAttachment> {
+        let opts = core_read_opts_from_json(opts)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let tx_db = tx
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        if !db.shares_runtime_with(tx_db) {
+            return Err(napi::Error::from_reason(
+                "transaction belongs to a different database runtime",
+            ));
+        }
+        let open_tx = tx.open_tx()?;
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => db
+                .attach_query_in_transaction_with_opts_for_identity(
+                    &query.inner,
+                    open_tx,
+                    opts,
+                    author,
+                ),
+            NapiDbInnerStorage::Persistent(db) => db
+                .attach_query_in_transaction_with_opts_for_identity(
+                    &query.inner,
+                    open_tx,
+                    opts,
+                    author,
+                ),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(QueryAttachment { inner })
+    }
+
+    #[napi(js_name = "attachQueryInTransactionForBackend")]
+    pub fn attach_query_in_transaction_for_backend(
+        &self,
+        query: &PreparedQuery,
+        tx: &Tx,
+        opts: Option<serde_json::Value>,
+    ) -> napi::Result<QueryAttachment> {
+        self.require_trusted_backend()?;
+        self.attach_query_in_transaction_for_author(query, tx, opts, CoreAuthorSubject::SYSTEM)
+    }
+
     /// Attach remote coverage using the authority identity of an explicit
     /// backend open. This has no public author argument by design.
     #[napi(js_name = "attachQueryForBackend")]

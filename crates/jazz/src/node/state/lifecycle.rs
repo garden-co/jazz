@@ -673,6 +673,16 @@ where
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
         node.recover_known_state_facts().await?;
+        if !node.history_complete {
+            let recovered_authority_cut = node
+                .query
+                .authority_results
+                .values()
+                .filter_map(|state| state.settled_through)
+                .max()
+                .unwrap_or_default();
+            node.record_authoritative_settled_through(recovered_authority_cut);
+        }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.recover_known_state = started.elapsed();
