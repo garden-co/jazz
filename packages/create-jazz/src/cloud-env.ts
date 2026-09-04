@@ -59,11 +59,7 @@ function restrictEnvPermissions(envPath: string): void {
   }
 }
 
-export function writeHostedEnv({
-  dir,
-  values,
-  keys = DEFAULT_HOSTED_KEYS as unknown as string[],
-}: {
+type HostedEnvOptions = {
   dir: string;
   values:
     | {
@@ -74,7 +70,39 @@ export function writeHostedEnv({
       }
     | Record<string, string | undefined>;
   keys?: string[];
-}): void {
+};
+
+/**
+ * Add missing managed keys and fill managed placeholders without overwriting a
+ * non-empty value already in .env. This is used for manual-provisioning
+ * placeholders, where an existing value may be user-owned.
+ */
+export function writeHostedEnv({
+  dir,
+  values,
+  keys = DEFAULT_HOSTED_KEYS as unknown as string[],
+}: HostedEnvOptions): void {
+  writeHostedEnvInternal({ dir, values, keys, replaceManagedValues: false });
+}
+
+/**
+ * Atomically replace the complete managed hosted tuple from one successful
+ * provision response. Non-managed .env entries are left untouched.
+ */
+export function replaceHostedEnv({
+  dir,
+  values,
+  keys = DEFAULT_HOSTED_KEYS as unknown as string[],
+}: HostedEnvOptions): void {
+  writeHostedEnvInternal({ dir, values, keys, replaceManagedValues: true });
+}
+
+function writeHostedEnvInternal({
+  dir,
+  values,
+  keys,
+  replaceManagedValues,
+}: Omit<HostedEnvOptions, "keys"> & { keys: string[]; replaceManagedValues: boolean }): void {
   for (const [key, value] of Object.entries(values)) {
     if (value && /[\n\r]/.test(value)) {
       throw new Error(
@@ -90,17 +118,21 @@ export function writeHostedEnv({
   const parsed = parseEnv(existing);
   const vals = values as Record<string, string | undefined>;
 
-  // Empty hosted values are placeholders, so a successful retry may replace them.
+  // Empty hosted values are placeholders. Provisioning uses replacement mode so
+  // every managed value comes from its one successful response; placeholder
+  // writes retain non-empty entries that may be user-owned.
   const replacements: Record<string, string> = {};
   for (const key of keys) {
     const supplied = vals[key];
-    if (parsed.get(key) === "" && supplied) replacements[key] = supplied;
+    if (supplied && (replaceManagedValues || parsed.get(key) === "")) replacements[key] = supplied;
   }
-  const skippedWithDifferentValue = keys.filter((key) => {
-    const supplied = vals[key];
-    const existingValue = parsed.get(key);
-    return parsed.has(key) && existingValue !== "" && supplied && supplied !== existingValue;
-  });
+  const skippedWithDifferentValue = replaceManagedValues
+    ? []
+    : keys.filter((key) => {
+        const supplied = vals[key];
+        const existingValue = parsed.get(key);
+        return parsed.has(key) && existingValue !== "" && supplied && supplied !== existingValue;
+      });
 
   if (skippedWithDifferentValue.length > 0) {
     console.warn(
@@ -114,7 +146,9 @@ export function writeHostedEnv({
     if (eq === -1) return line;
     const key = line.slice(0, eq);
     const replacement = replacements[key];
-    return replacement !== undefined && line.slice(eq + 1) === "" ? `${key}=${replacement}` : line;
+    return replacement !== undefined && (replaceManagedValues || line.slice(eq + 1) === "")
+      ? `${key}=${replacement}`
+      : line;
   });
   let base = lines.join("\n");
 

@@ -6,7 +6,7 @@ import {
   ProvisionParseError,
   provisionHostedApp,
 } from "./cloud-provision.js";
-import { writeHostedEnv } from "./cloud-env.js";
+import { replaceHostedEnv, writeHostedEnv } from "./cloud-env.js";
 
 export interface RunHostedInitOptions {
   /** Absolute path to the directory containing .env (typically the starter root). */
@@ -92,9 +92,9 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
     emit("warn", message, credentials);
 
   const existing = readEnvValues(join(dir, ".env"));
-  // A partial .env can be left by an interrupted legacy write. It is not a
-  // completed configuration: provision again so writeHostedEnv can fill only
-  // the missing/empty placeholders while retaining deliberate user values.
+  // A partial .env can be left by an interrupted write. It is not a completed
+  // configuration: provision again and replace the entire managed tuple from
+  // that one response. Non-managed values remain user-owned and untouched.
   if (keys.every((key) => existing[key] && existing[key].length > 0)) {
     try {
       // This is normally a content no-op, but it tightens an older managed
@@ -123,7 +123,7 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
 
     const { appId, adminSecret, backendSecret } = provisioned;
 
-    writeHostedEnv({
+    replaceHostedEnv({
       dir,
       values: {
         [envKeys.appId]: appId,

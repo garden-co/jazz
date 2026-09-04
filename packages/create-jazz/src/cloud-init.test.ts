@@ -215,7 +215,7 @@ describe("runHostedInit", () => {
   });
 
   describe("idempotency", () => {
-    it("does not short-circuit when only appId is present", async () => {
+    it("replaces a partial managed tuple with one successful provision response", async () => {
       const provisionSpy = vi
         .spyOn(cloudProvision, "provisionHostedApp")
         .mockResolvedValue({ appId: "should-not-be-used", adminSecret: "x", backendSecret: "y" });
@@ -231,7 +231,7 @@ describe("runHostedInit", () => {
 
       expect(provisionSpy).toHaveBeenCalledOnce();
       expect(parseEnv(readEnv(dir))).toMatchObject({
-        NEXT_PUBLIC_JAZZ_APP_ID: "existing-app-id",
+        NEXT_PUBLIC_JAZZ_APP_ID: "should-not-be-used",
         NEXT_PUBLIC_JAZZ_SERVER_URL: CLOUD_SYNC_URL,
         JAZZ_ADMIN_SECRET: "x",
         BACKEND_SECRET: "y",
@@ -317,37 +317,42 @@ describe("runHostedInit", () => {
       expect(values["BACKEND_SECRET"]).toBe("retry-backend");
     });
 
-    it("retries a partial write, preserves its explicit values, and fills missing credentials", async () => {
-      const abandonedAdminSecret = "admin-secret-in-interrupted-write";
-      const abandonedBackendSecret = "backend-secret-in-interrupted-write";
+    it("retries an interrupted provision by replacing the full managed tuple from response B", async () => {
+      const abandonedAppId = "app-from-response-a";
+      const abandonedServerUrl = "https://sync-from-response-a.example.com";
+      const abandonedAdminSecret = "admin-secret-from-response-a";
+      const abandonedBackendSecret = "backend-secret-from-response-a";
+      const retryAppId = "app-from-response-b";
+      const retryServerUrl = "https://sync-from-response-b.example.com";
       const retryAdminSecret = "admin-secret-after-retry";
       const retryBackendSecret = "backend-secret-after-retry";
       const provisionSpy = vi
         .spyOn(cloudProvision, "provisionHostedApp")
         .mockResolvedValueOnce({
-          appId: "app-written-before-interruption",
+          appId: abandonedAppId,
           adminSecret: abandonedAdminSecret,
           backendSecret: abandonedBackendSecret,
         })
         .mockResolvedValueOnce({
-          appId: "app-from-retry",
+          appId: retryAppId,
           adminSecret: retryAdminSecret,
           backendSecret: retryBackendSecret,
         });
-      vi.spyOn(cloudEnv, "writeHostedEnv").mockImplementationOnce(() => {
-        // Plant the pre-atomic failure mode: content reaches .env, then the
-        // write fails before the credential lines are present.
+      vi.spyOn(cloudEnv, "replaceHostedEnv").mockImplementationOnce(() => {
+        // Plant response A's partial tuple, as if an earlier non-atomic write
+        // reached .env before failing. A retry must not combine it with B.
         writeFileSync(
           join(dir, ".env"),
-          "NEXT_PUBLIC_JAZZ_APP_ID=user-kept-app\n" +
-            "NEXT_PUBLIC_JAZZ_SERVER_URL=https://user-kept.example.com\n",
+          "UNRELATED_USER_VALUE=keep-me\n" +
+            `NEXT_PUBLIC_JAZZ_APP_ID=${abandonedAppId}\n` +
+            `NEXT_PUBLIC_JAZZ_SERVER_URL=${abandonedServerUrl}\n`,
         );
         throw new Error(`interrupted while writing BACKEND_SECRET=${abandonedBackendSecret}`);
       });
       const logs: string[] = [];
       const options = {
         dir,
-        cloudSyncUrl: CLOUD_SYNC_URL,
+        cloudSyncUrl: abandonedServerUrl,
         envKeys: NEXT_KEYS,
         apiUrl: API_URL,
         onLog: (_kind: "info" | "warn", message: string) => logs.push(message),
@@ -355,18 +360,19 @@ describe("runHostedInit", () => {
 
       await runHostedInit(options);
       expect(parseEnv(readEnv(dir))).toMatchObject({
-        NEXT_PUBLIC_JAZZ_APP_ID: "user-kept-app",
-        NEXT_PUBLIC_JAZZ_SERVER_URL: "https://user-kept.example.com",
+        NEXT_PUBLIC_JAZZ_APP_ID: abandonedAppId,
+        NEXT_PUBLIC_JAZZ_SERVER_URL: abandonedServerUrl,
         JAZZ_ADMIN_SECRET: "",
         BACKEND_SECRET: "",
       });
 
-      await runHostedInit(options);
+      await runHostedInit({ ...options, cloudSyncUrl: retryServerUrl });
 
       expect(provisionSpy).toHaveBeenCalledTimes(2);
       expect(parseEnv(readEnv(dir))).toMatchObject({
-        NEXT_PUBLIC_JAZZ_APP_ID: "user-kept-app",
-        NEXT_PUBLIC_JAZZ_SERVER_URL: "https://user-kept.example.com",
+        UNRELATED_USER_VALUE: "keep-me",
+        NEXT_PUBLIC_JAZZ_APP_ID: retryAppId,
+        NEXT_PUBLIC_JAZZ_SERVER_URL: retryServerUrl,
         JAZZ_ADMIN_SECRET: retryAdminSecret,
         BACKEND_SECRET: retryBackendSecret,
       });
@@ -455,7 +461,7 @@ describe("runHostedInit", () => {
     });
   });
 
-  describe("writeHostedEnv throws (outer catch)", () => {
+  describe("hosted env writer throws (outer catch)", () => {
     it("does not serialize a write error containing a credential", async () => {
       const backendSecret = "backend-secret-from-write-error";
       vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
@@ -463,7 +469,7 @@ describe("runHostedInit", () => {
         adminSecret: "admin-safe-error",
         backendSecret,
       });
-      vi.spyOn(cloudEnv, "writeHostedEnv")
+      vi.spyOn(cloudEnv, "replaceHostedEnv")
         .mockImplementationOnce(() => {
           throw new Error(`could not save BACKEND_SECRET=${backendSecret}`);
         })
