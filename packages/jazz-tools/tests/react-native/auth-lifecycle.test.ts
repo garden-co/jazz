@@ -82,7 +82,12 @@ it("logout and repeated shutdown retire the public foreground", async () => {
     await db.insert(app.notes, { title: "retained on logout" }).wait({ tier: "local" });
     await db.logout();
     await Promise.all([db.shutdown(), db.shutdown()]);
-    expect(await db.all(app.notes, { tier: "local" })).toEqual([]);
+    await expect(db.all(app.notes, { tier: "local" })).rejects.toThrow("shutting down or closed");
+    expect(() => db.insert(app.notes, { title: "must not reopen" })).toThrow(
+      "shutting down or closed",
+    );
+    expect(() => db.subscribe(app.notes, () => {})).toThrow("shutting down or closed");
+    expect(() => db.beginTransaction()).toThrow("shutting down or closed");
     const reopened = await fixture.createDb();
     await expect
       .poll(async () => (await reopened.all(app.notes, { tier: "local" })).map((row) => row.title))
@@ -107,5 +112,18 @@ it("rejects auth replacement before and after first query without changing publi
       ).toThrow("native-admission bound");
       expect(db.getAuthState()).toEqual(admitted);
     }
+  });
+});
+
+it("rejects operations once shutdown starts even before a runtime was materialized", async () => {
+  await withNativeRelayFixture(app, async (fixture) => {
+    const db = await fixture.createDb();
+    const closing = db.shutdown();
+    await expect(db.all(app.notes, { tier: "local" })).rejects.toThrow("shutting down or closed");
+    expect(() => db.insert(app.notes, { title: "must not initialize" })).toThrow(
+      "shutting down or closed",
+    );
+    await closing;
+    await db.shutdown();
   });
 });

@@ -1800,6 +1800,7 @@ export class Db {
    *
    */
   protected getClient(schema: WasmSchema): JazzClient {
+    this.assertOpen();
     return this.connection.getClient(schema);
   }
 
@@ -2329,6 +2330,7 @@ export class Db {
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+    this.assertOpen();
     const context = this.getRuntimeOperationContext();
     const ownerClient = this.getCurrentClient();
     if (kind === "exclusive" && !ownerClient) {
@@ -2898,6 +2900,12 @@ export class Db {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.shutdownPromise = this.runShutdown();
     return this.shutdownPromise;
+  }
+
+  private assertOpen(): void {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot operate on a Db that is shutting down or closed.");
+    }
   }
 
   private async runShutdown(): Promise<void> {
