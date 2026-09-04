@@ -406,7 +406,13 @@ tx_id 16 raw bytes followed by row_id 16 raw bytes. Direct writes use the core's
 queued admission and return its reserved write identity before suspended owner
 work completes. Synchronous LocalCurrentRow and WriteState report an explicit
 transient busy error when the semantic owner is unavailable; they never invent
-an empty row or an unobserved write state. Subscription event ordinal 3 is reserved for
+an empty row or an unobserved write state. Invalid target option keys are rejected
+at the byte boundary, including null-valued keys. Canceling a finish or abort
+operation retires its result handle; the already admitted operation continues
+through bounded foreground cleanup. Finish and abort use first-closing-wins;
+canceling a result does not roll back a finish. Canceling a push leaves its
+partial upload available for an explicit abort. Foreground close retires all
+pending operations and uploads. Subscription event ordinal 3 is reserved for
 StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
 terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
 terminal operations use `binding_codec::terminal_operations_to_json`.

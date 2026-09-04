@@ -707,6 +707,7 @@ export class NativeForegroundDb {
       cells,
       optionsJson: JSON.stringify(wireOptions),
     });
+    if (response.type === "operationError") throw new Error(response.reason);
     if (response.type !== "mutationCommitted") return unexpected(mutation, response.type);
     return nativeWrite(this, response.txId, response.rowId);
   }

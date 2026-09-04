@@ -511,6 +511,18 @@ where
         std::future::pending::<()>().await;
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Count unfinished core upload journals for lifecycle cancellation receipts.
+    pub async fn pending_upload_count_for_test(&self) -> Result<usize, Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .pending_upload_count_for_test()
+            .await
+            .map_err(Into::into)
+    }
+
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
         self.detach_query_using(attachment, |subscription| {

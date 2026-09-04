@@ -4130,6 +4130,7 @@ struct ConnectedClient {
     pending_subscriptions: BTreeMap<u64, ForegroundSubscriptionOpen>,
     subscriptions: BTreeMap<u64, SubscriptionStream>,
     pending_operations: BTreeMap<u64, ForegroundPendingOperation>,
+    mutation_cleanups: Vec<ForegroundOperationFuture>,
     read_cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
     read_cleanup: Option<Pin<Box<dyn Future<Output = ()>>>>,
     transactions: BTreeMap<u64, ForegroundTransaction>,
@@ -4151,6 +4152,12 @@ struct ForegroundTransaction {
 }
 
 impl ConnectedClient {
+    fn poll_mutation_cleanup(&mut self, waker: &Waker) {
+        let mut context = Context::from_waker(waker);
+        self.mutation_cleanups
+            .retain_mut(|future| future.as_mut().poll(&mut context).is_pending());
+    }
+
     fn poll_read_cleanup(&mut self, waker: &Waker) {
         if self.read_cleanup.is_none()
             && let Some(attachment) = self.read_cleanups.borrow_mut().pop_front()
@@ -4172,6 +4179,7 @@ impl ConnectedClient {
         self.tick = None;
         self.pending_operations.clear();
         self.pending_subscriptions.clear();
+        self.mutation_cleanups.clear();
         self.read_cleanup = None;
         self.read_cleanups.borrow_mut().clear();
         self.upstream_io.incoming = None;
@@ -4300,6 +4308,7 @@ where
 struct ForegroundPendingOperation {
     subscription: Option<u64>,
     future: ForegroundOperationFuture,
+    finish_on_cancel: bool,
 }
 
 enum ForegroundOperationResult {
@@ -4513,6 +4522,7 @@ impl RelayWorker {
                 pending_subscriptions: BTreeMap::new(),
                 subscriptions: BTreeMap::new(),
                 pending_operations: BTreeMap::new(),
+                mutation_cleanups: Vec::new(),
                 read_cleanups: Rc::new(RefCell::new(VecDeque::new())),
                 read_cleanup: None,
                 transactions: BTreeMap::new(),
@@ -4542,6 +4552,7 @@ impl RelayWorker {
             poll_relay_tick(&client.db, &mut client.tick, &waker)?;
             client.served_io.poll(&waker)?;
             client.poll_read_cleanup(&waker);
+            client.poll_mutation_cleanup(&waker);
         }
         self.upstream_io.poll(&waker)?;
         poll_relay_tick(&self.persistent, &mut self.persistent_tick, &waker)?;
@@ -4551,6 +4562,7 @@ impl RelayWorker {
             client.upstream_io.poll(&waker)?;
             poll_relay_tick(&client.db, &mut client.tick, &waker)?;
             client.poll_read_cleanup(&waker);
+            client.poll_mutation_cleanup(&waker);
         }
         Ok(())
     }
@@ -4842,7 +4854,9 @@ impl RelayWorker {
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let operation = {
             let client = self.foreground_client_mut(client)?;
-            if client.pending_operations.len() >= NATIVE_RELAY_FOREGROUND_PENDING_MAX {
+            if client.pending_operations.len() + client.mutation_cleanups.len()
+                >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
+            {
                 return Err(RelayError::ForegroundCommand(format!(
                     "foreground pending operation capacity {} exceeded",
                     NATIVE_RELAY_FOREGROUND_PENDING_MAX
@@ -4854,6 +4868,7 @@ impl RelayWorker {
                 ForegroundPendingOperation {
                     subscription,
                     future,
+                    finish_on_cancel: false,
                 },
             );
             operation
@@ -4899,11 +4914,16 @@ impl RelayWorker {
         client: u64,
         operation: u64,
     ) -> Result<bool, RelayError> {
-        Ok(self
-            .foreground_client_mut(client)?
-            .pending_operations
-            .remove(&operation)
-            .is_some())
+        let client = self.foreground_client_mut(client)?;
+        let Some(pending) = client.pending_operations.remove(&operation) else {
+            return Ok(false);
+        };
+        if pending.finish_on_cancel {
+            // Cancellation retires the caller's result, not admitted finish/abort.
+            client.mutation_cleanups.push(pending.future);
+            self.wake.wake_by_ref();
+        }
+        Ok(true)
     }
 
     fn close_foreground_subscription(
@@ -4987,10 +5007,7 @@ impl RelayWorker {
         cells: Vec<u8>,
         options_json: String,
     ) -> Result<Option<RowUuid>, RelayError> {
-        let options: ForegroundMutationOptions =
-            serde_json::from_str(&options_json).map_err(|error| {
-                RelayError::ForegroundCommand(format!("invalid mutation options: {error}"))
-            })?;
+        let options = foreground_mutations::parse_mutation_options(mutation, &options_json)?;
         let (db, transaction) = self.foreground_transaction(client, transaction)?;
         let cells = if matches!(mutation, ForegroundMutationKind::Delete) {
             Default::default()
@@ -7594,6 +7611,15 @@ mod tests {
     // semantic owner between native commands. All data and uploads still use core.
     #[test]
     fn streaming_abort_during_pending_push_cannot_resurrect_upload() {
+        pending_push_abort_receipt(false);
+    }
+
+    #[test]
+    fn cancelled_streaming_push_remains_abortable() {
+        pending_push_abort_receipt(true);
+    }
+
+    fn pending_push_abort_receipt(cancel_push: bool) {
         let directory = tempfile::tempdir().unwrap();
         let relay = NativeRelay::spawn(config(
             directory.path().join("upload-owner.sqlite"),
@@ -7658,7 +7684,10 @@ mod tests {
         let ForegroundOperationPoll::Pending { operation: push } = push else {
             unreachable!()
         };
-        for _ in 0..10 {
+        if cancel_push {
+            assert!(client.cancel_foreground_operation(push).unwrap());
+        }
+        for _ in 0..if cancel_push { 0 } else { 10 } {
             relay.pump().unwrap();
             if matches!(
                 client.poll_foreground_operation(push).unwrap(),
@@ -7678,6 +7707,183 @@ mod tests {
                 .run(move |worker| worker.push_foreground_streaming_mutation(id, upload, vec![1]))
                 .is_err()
         );
+        client.close().unwrap();
+    }
+
+    // Internal cancellation receipt: public JavaScript cannot hold the node owner
+    // across an exact native operation boundary or inspect core upload journals.
+    #[test]
+    fn cancelled_upload_results_finish_cleanup_without_pinning_capacity() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("cancel-upload.sqlite"),
+            Some("uploads"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x51; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        for finish in [false, true] {
+            for round in 0..4 {
+                let upload = relay
+                    .run(move |worker| {
+                        let descriptor =
+                            RecordDescriptor::new(std::iter::empty::<(&str, ValueType)>());
+                        let raw = descriptor.create(&[]).unwrap();
+                        worker.begin_foreground_streaming_mutation(
+                            id,
+                            ForegroundMutationKind::Insert,
+                            "todos".into(),
+                            [if finish { 60 + round } else { 70 + round }; 16],
+                            postcard::to_allocvec(&(descriptor, raw)).unwrap(),
+                            "title".into(),
+                            "{}".into(),
+                        )
+                    })
+                    .unwrap();
+                let mut push = relay
+                    .run(move |worker| {
+                        worker.push_foreground_streaming_mutation(id, upload, vec![b'x'; 65536])
+                    })
+                    .unwrap();
+                for _ in 0..100 {
+                    let ForegroundOperationPoll::Pending { operation } = push else {
+                        break;
+                    };
+                    relay.pump().unwrap();
+                    push = client.poll_foreground_operation(operation).unwrap();
+                }
+                assert!(matches!(
+                    push,
+                    ForegroundOperationPoll::Ready(
+                        ForegroundOperationResult::StreamingMutationPushed
+                    )
+                ));
+                let held = relay
+                    .run(move |worker| {
+                        let db = Rc::clone(&worker.foreground_client(id)?.db);
+                        worker.start_foreground_operation(
+                            id,
+                            None,
+                            Box::pin(async move {
+                                db.hold_node_owner_for_test().await;
+                                unreachable!()
+                            }),
+                        )
+                    })
+                    .unwrap();
+                let ForegroundOperationPoll::Pending { operation: holder } = held else {
+                    unreachable!()
+                };
+                let result = relay
+                    .run(move |worker| {
+                        if finish {
+                            worker.finish_foreground_streaming_mutation(id, upload)
+                        } else {
+                            worker.abort_foreground_streaming_mutation(id, upload)
+                        }
+                    })
+                    .unwrap();
+                let ForegroundOperationPoll::Pending { operation } = result else {
+                    panic!("held owner must defer terminal upload operation");
+                };
+                assert!(client.cancel_foreground_operation(operation).unwrap());
+                assert!(client.poll_foreground_operation(operation).is_err());
+                assert!(client.cancel_foreground_operation(holder).unwrap());
+                for _ in 0..100 {
+                    relay.pump().unwrap();
+                    if relay
+                        .run(move |worker| {
+                            Ok(worker.foreground_client(id)?.mutation_cleanups.is_empty())
+                        })
+                        .unwrap()
+                    {
+                        break;
+                    }
+                }
+                relay
+                    .run(move |worker| {
+                        let client = worker.foreground_client(id)?;
+                        assert!(client.mutation_cleanups.is_empty());
+                        assert_eq!(client.mutations.upload_count_for_test(), 0);
+                        assert_eq!(
+                            block_on(client.db.pending_upload_count_for_test()).unwrap(),
+                            0
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        }
+        client.close().unwrap();
+    }
+
+    #[test]
+    fn mutation_command_rejects_unsupported_target_options_before_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("mutation-options.sqlite"),
+            Some("options"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x52; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let tx = client
+            .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
+            .unwrap();
+        for (mutation, key) in [
+            (ForegroundMutationKind::Insert, "head"),
+            (ForegroundMutationKind::Restore, "base"),
+            (ForegroundMutationKind::Update, "branch"),
+            (ForegroundMutationKind::Delete, "branch"),
+            (ForegroundMutationKind::Upsert, "branch"),
+        ] {
+            for value in ["null", "\"draft\""] {
+                let options = format!("{{\"{key}\":{value}}}");
+                let direct_options = options.clone();
+                let error = relay
+                    .run(move |worker| {
+                        worker.direct_foreground_mutation(
+                            id,
+                            mutation,
+                            "todos".into(),
+                            Some([0x53; 16]),
+                            encoded_title_cells("must not write"),
+                            direct_options,
+                        )
+                    })
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("option `{key}` is not supported"))
+                );
+                let error = client
+                    .stage_foreground_mutation(
+                        tx,
+                        mutation,
+                        "todos".into(),
+                        Some([0x53; 16]),
+                        encoded_title_cells("must not write"),
+                        options,
+                    )
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("option `{key}` is not supported"))
+                );
+            }
+        }
         client.close().unwrap();
     }
 
@@ -8198,6 +8404,7 @@ mod tests {
                         ForegroundPendingOperation {
                             subscription: None,
                             future,
+                            finish_on_cancel: false,
                         },
                     );
                 Ok(())

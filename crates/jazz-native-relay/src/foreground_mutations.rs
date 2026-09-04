@@ -13,6 +13,11 @@ pub(super) struct MutationHandles {
 }
 
 impl MutationHandles {
+    #[cfg(test)]
+    pub(super) fn upload_count_for_test(&self) -> usize {
+        self.uploads.borrow().len()
+    }
+
     pub(super) fn new(db: &Db<MemoryStorage>) -> Self {
         let errors = Rc::new(RefCell::new(Vec::new()));
         let captured = Rc::clone(&errors);
@@ -74,6 +79,29 @@ fn register_write(writes: &Writes, write: WriteHandle<MemoryStorage>) -> Transac
     id
 }
 
+pub(super) fn parse_mutation_options(
+    mutation: ForegroundMutationKind,
+    json: &str,
+) -> Result<ForegroundMutationOptions, RelayError> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
+        RelayError::ForegroundCommand(format!("invalid mutation options: {error}"))
+    })?;
+    let invalid = match mutation {
+        ForegroundMutationKind::Insert | ForegroundMutationKind::Restore => ["head", "base"]
+            .into_iter()
+            .find(|key| value.get(key).is_some()),
+        _ => value.get("branch").map(|_| "branch"),
+    };
+    if let Some(key) = invalid {
+        return Err(RelayError::ForegroundCommand(format!(
+            "mutation option `{key}` is not supported for {mutation:?}"
+        )));
+    }
+    serde_json::from_value(value).map_err(|error| {
+        RelayError::ForegroundCommand(format!("invalid mutation options: {error}"))
+    })
+}
+
 impl RelayWorker {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn direct_foreground_mutation(
@@ -85,10 +113,7 @@ impl RelayWorker {
         cells: Vec<u8>,
         options_json: String,
     ) -> Result<(TransactionId, RowUuid), RelayError> {
-        let options: ForegroundMutationOptions =
-            serde_json::from_str(&options_json).map_err(|error| {
-                RelayError::ForegroundCommand(format!("invalid mutation options: {error}"))
-            })?;
+        let options = parse_mutation_options(mutation, &options_json)?;
         let cells = if matches!(mutation, ForegroundMutationKind::Delete) {
             Default::default()
         } else {
@@ -194,6 +219,7 @@ impl RelayWorker {
 
     fn ensure_mutation_operation_capacity(&self, client: u64) -> Result<(), RelayError> {
         if self.foreground_client(client)?.pending_operations.len()
+            + self.foreground_client(client)?.mutation_cleanups.len()
             >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
         {
             return Err(RelayError::ForegroundCommand(
@@ -391,7 +417,15 @@ impl RelayWorker {
                 register_write(&writes, write),
             ))
         });
-        self.start_foreground_operation(client, None, future)
+        let result = self.start_foreground_operation(client, None, future)?;
+        if let ForegroundOperationPoll::Pending { operation } = result {
+            self.foreground_client_mut(client)?
+                .pending_operations
+                .get_mut(&operation)
+                .expect("new pending mutation")
+                .finish_on_cancel = true;
+        }
+        Ok(result)
     }
 
     pub(super) fn abort_foreground_streaming_mutation(
@@ -428,7 +462,15 @@ impl RelayWorker {
             result.map_err(RelayError::Db)?;
             Ok(ForegroundOperationResult::StreamingMutationAborted(true))
         });
-        self.start_foreground_operation(client, None, future)
+        let result = self.start_foreground_operation(client, None, future)?;
+        if let ForegroundOperationPoll::Pending { operation } = result {
+            self.foreground_client_mut(client)?
+                .pending_operations
+                .get_mut(&operation)
+                .expect("new pending mutation")
+                .finish_on_cancel = true;
+        }
+        Ok(result)
     }
 
     pub(super) fn update_foreground_large_values(
