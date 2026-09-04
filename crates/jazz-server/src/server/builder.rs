@@ -809,6 +809,21 @@ fn validate_server_config(
         _ => {}
     }
 
+    if auth_config
+        .admin_secret
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("admin secret cannot be empty".to_owned());
+    }
+    if auth_config
+        .backend_secret
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("backend secret cannot be empty".to_owned());
+    }
+
     if topology.is_edge() && auth_config.admin_secret.is_none() {
         return Err("edge mode requires --admin-secret / JAZZ_ADMIN_SECRET when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
     }
@@ -1087,6 +1102,39 @@ mod tests {
             &self,
             _request: NativeTransportRequest,
         ) -> NativeCatalogueBootstrapFuture {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Records every adapter boundary an edge build could reach. This internal
+    /// test is necessary because the observable security property is that a
+    /// rejected credential never reaches the target-owned transport adapter.
+    struct AdmissionProbeConnector {
+        validation_calls: AtomicUsize,
+        bootstrap_calls: AtomicUsize,
+        connect_calls: AtomicUsize,
+    }
+
+    impl NativeTransportConnector for AdmissionProbeConnector {
+        fn validate_catalogue_bootstrap_url(
+            &self,
+            _server_url: &str,
+            _app_id: AppId,
+        ) -> Result<(), NativeTransportError> {
+            self.validation_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.connect_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            self.bootstrap_calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(std::future::pending())
         }
     }
@@ -1663,6 +1711,111 @@ mod tests {
 
         assert!(built.state.topology.is_edge());
         assert!(built.state.upstream_http_url.is_some());
+    }
+    #[tokio::test]
+    async fn builder_omitted_secrets_preserve_unconfigured_auth() {
+        let built = ServerBuilder::new(AppId::from_name("builder-omitted-secrets"))
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("builder accepts omitted credentials");
+
+        assert!(built.state.auth_config.admin_secret.is_none());
+        assert!(built.state.auth_config.backend_secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_empty_and_whitespace_only_admin_and_backend_secrets() {
+        for (field, expected_error, value) in [
+            ("admin_secret", "admin secret cannot be empty", ""),
+            ("admin_secret", "admin secret cannot be empty", " \t\n"),
+            ("backend_secret", "backend secret cannot be empty", ""),
+            ("backend_secret", "backend secret cannot be empty", " \t\n"),
+        ] {
+            let mut auth_config = AuthConfig::default();
+            match field {
+                "admin_secret" => auth_config.admin_secret = Some(value.to_owned()),
+                "backend_secret" => auth_config.backend_secret = Some(value.to_owned()),
+                _ => unreachable!("test field is known"),
+            }
+
+            let result = ServerBuilder::new(AppId::from_name("builder-blank-secrets"))
+                .with_auth_config(auth_config)
+                .with_storage(StorageBackend::InMemory)
+                .build()
+                .await;
+            let error = result
+                .err()
+                .expect("blank credentials must be rejected during build");
+
+            assert_eq!(error, expected_error);
+            if !value.is_empty() {
+                assert!(
+                    !error.contains(value),
+                    "validation error must not expose the configured credential"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_blank_edge_admin_without_exposing_credential() {
+        for value in ["", " \t\n"] {
+            let connector = Arc::new(AdmissionProbeConnector {
+                validation_calls: AtomicUsize::new(0),
+                bootstrap_calls: AtomicUsize::new(0),
+                connect_calls: AtomicUsize::new(0),
+            });
+            let result = ServerBuilder::new(AppId::from_name("builder-blank-edge-admin"))
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some(value.to_owned()),
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::InMemory)
+                .with_upstream_url("ws://127.0.0.1:9")
+                .with_native_transport_connector(connector.clone())
+                .build()
+                .await;
+            let error = result
+                .err()
+                .expect("blank edge admin credential must be rejected during build");
+
+            assert_eq!(error, "admin secret cannot be empty");
+            if !value.is_empty() {
+                assert!(
+                    !error.contains(value),
+                    "validation error must not expose the configured credential"
+                );
+            }
+            assert_eq!(connector.validation_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(connector.bootstrap_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(connector.connect_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_accepts_nonblank_admin_and_backend_secrets() {
+        let admin_secret = " configured-admin ";
+        let backend_secret = " configured-backend ";
+        let built = ServerBuilder::new(AppId::from_name("builder-nonblank-secrets"))
+            .with_auth_config(AuthConfig {
+                admin_secret: Some(admin_secret.to_owned()),
+                backend_secret: Some(backend_secret.to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("builder accepts nonblank credentials");
+
+        assert_eq!(
+            built.state.auth_config.admin_secret.as_deref(),
+            Some(admin_secret)
+        );
+        assert_eq!(
+            built.state.auth_config.backend_secret.as_deref(),
+            Some(backend_secret)
+        );
     }
 
     #[tokio::test]

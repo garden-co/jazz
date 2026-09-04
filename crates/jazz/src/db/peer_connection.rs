@@ -484,9 +484,8 @@ where
                 })
             }
             SyncMessage::CommitUnit { tx, versions }
-                if tx.kind == TxKind::Mergeable
-                    && (matches!(peer.role(), PeerRole::ClientLink { .. })
-                        || peer.role() == PeerRole::Relay) =>
+                if matches!(peer.role(), PeerRole::ClientLink { .. })
+                    || peer.role() == PeerRole::Relay =>
             {
                 // Terminal authorization belongs to the immutable session
                 // selected at request admission, never to the relay's
@@ -494,6 +493,9 @@ where
                 // already been checked against its server-issued one-binding
                 // capability; a multiplexed relay has passed the corresponding
                 // transport admission check for this request.
+                // Both transaction kinds need this proof. Exclusive writes
+                // also validate their read sets at terminal ingest, but that
+                // cannot replace authorization under the delegated session.
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
                     CommitUnitTrust::Relay => session_claim_binding.0,
@@ -876,6 +878,8 @@ pub(super) struct SubscriberConnectionState {
     pub(super) coverage_groups: BTreeMap<CoverageKey, CoverageGroup>,
     pub(super) shape_registrations: BTreeMap<ShapeRegistrationKey, SubscriberShapeRegistration>,
     pub(super) deferred_subscribe_rejections: VecDeque<PendingSubscriberControlResponse>,
+    pub(super) pending_catalogue_subscriptions:
+        BTreeMap<SubscriptionKey, PendingCatalogueSubscription>,
     pub(super) scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
     pub(super) scope_aggregates:
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, AuthorityScopeAggregate>,
@@ -883,6 +887,15 @@ pub(super) struct SubscriberConnectionState {
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ServedAuthorizationScopeHydration>,
     pub(super) authority_scope_hydration_count: u64,
     pub(super) serve_dirty: bool,
+}
+
+/// A valid request awaiting activation of its schema, not a rejected query.
+/// Retain the admission snapshot rather than looking up mutable connection
+/// claims again when the catalogue becomes ready.
+pub(super) struct PendingCatalogueSubscription {
+    subscribe: crate::protocol::Subscribe,
+    policy_binding: (AuthorSubject, BTreeMap<String, Value>),
+    encoded_bytes: usize,
 }
 
 pub(super) struct PendingRowVersionRepair {
@@ -3415,6 +3428,7 @@ where
                 coverage_groups,
                 shape_registrations,
                 deferred_subscribe_rejections,
+                pending_catalogue_subscriptions,
                 scope_purposes,
                 scope_aggregates,
                 authority_scope_hydrations,
@@ -3552,7 +3566,20 @@ where
                 // turn awaits policy and storage work; matching it by value
                 // below moves only the selected payload out of the box instead
                 // of reserving every variant in the tick future's stack frame.
-                while let Some(message) = self.transport.try_recv().map(Box::new) {
+                loop {
+                    // Drain new controls first, so cancellation retires parked
+                    // requests before catalogue activation can replay them.
+                    let (message, parked_policy_binding) = if let Some(message) = self.transport.try_recv() {
+                        (Box::new(message), None)
+                    } else {
+                        let ready = pending_catalogue_subscriptions.iter().find_map(|(key, pending)| {
+                            self.node.borrow().registered_shape(pending.subscribe.shape_id)
+                                .is_some().then_some(*key)
+                        });
+                        let Some(key) = ready else { break; };
+                        let pending = pending_catalogue_subscriptions.remove(&key).expect("selected pending request");
+                        (Box::new(SyncMessage::Subscribe(pending.subscribe)), Some(pending.policy_binding))
+                    };
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
@@ -3913,12 +3940,12 @@ where
                             // inactive Subscribe arm on a normal two-megabyte executor stack.
                             let should_continue = Box::pin(async {
                             let subscription_has_delegated_session = subscribe.delegated_session.is_some();
-                            let session_claim_binding = admitted_request_policy_binding(
+                            let session_claim_binding = parked_policy_binding.or_else(|| admitted_request_policy_binding(
                                 *ingest_context,
                                 peer,
                                 session_claim_binding.clone(),
                                 subscribe.delegated_session.clone(),
-                            );
+                            ));
                             if session_claim_binding.is_none() {
                                 // A relay's transport is not a user. It may
                                 // only carry the topology-assigned immutable
@@ -3938,6 +3965,16 @@ where
                             if shape_id != subscription.shape_id {
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
+                            }
+                            // An incoming repeat can race catalogue activation.
+                            // Validate it against the parked immutable request
+                            // even if the shape is now ready, then consume that
+                            // one pending owner before normal admission.
+                            if let Some(existing) = pending_catalogue_subscriptions.get(&subscription) {
+                                if existing.subscribe != subscribe || Some(&existing.policy_binding) != session_claim_binding.as_ref() {
+                                    return Err(Error::new(ErrorCode::Protocol, "conflicting pending catalogue subscription"));
+                                }
+                                pending_catalogue_subscriptions.remove(&subscription);
                             }
                             let values = subscribe.values.clone();
                             let known_state = subscribe.known_state.clone();
@@ -3979,14 +4016,18 @@ where
                             };
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 if pending_catalogue_admission {
-                                    queue_direct_control(&mut self.pending_control_responses,
-                                        SyncMessage::SubscribeRejected {
-                                            subscription,
-                                            reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
-                                        },
-                                    );
-                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                    flush_subscriber_controls_or_stop!(self, peer);
+                                    let policy_binding = session_claim_binding.expect("admitted above");
+                                    let encoded_bytes = postcard::experimental::serialized_size(&(&subscribe, &policy_binding))
+                                        .map_err(|_| Error::new(ErrorCode::Protocol, "cannot size pending catalogue subscription"))?;
+                                    let retained_bytes = pending_catalogue_subscriptions.values()
+                                        .map(|pending| pending.encoded_bytes).sum::<usize>();
+                                    if pending_catalogue_subscriptions.len() >= crate::protocol_limits::MAX_SHAPE_REGISTRATIONS_PER_PEER
+                                        || retained_bytes.saturating_add(encoded_bytes) > crate::protocol_limits::MAX_SHAPE_REGISTRATION_BYTES * crate::protocol_limits::MAX_SHAPE_REGISTRATIONS_PER_PEER {
+                                        return Err(Error::new(ErrorCode::Protocol, "pending catalogue subscription limit exceeded"));
+                                    }
+                                    pending_catalogue_subscriptions.insert(subscription, PendingCatalogueSubscription {
+                                        subscribe, policy_binding, encoded_bytes,
+                                    });
                                     return Ok(true);
                                 } else {
                                     drop_peer_request(&self.node);
@@ -4521,6 +4562,7 @@ where
                             }
                         }
                         SyncMessage::Unsubscribe { subscription } => {
+                            pending_catalogue_subscriptions.remove(&subscription);
                             let admitted_policy_binding = peer
                                 .subscription_policy_binding(subscription)
                                 .map(|(identity, claims)| {
@@ -5712,7 +5754,8 @@ where
                     .await?;
             }
             Err(error @ crate::node::Error::InvalidAuthoritySourceClosure { .. }) => {
-                route_invalid_authority_source_closure(subscriptions, &error);
+                let public_rejections =
+                    route_invalid_authority_source_closure(subscriptions, &error);
                 let crate::node::Error::InvalidAuthoritySourceClosure {
                     subscription,
                     transition,
@@ -5720,7 +5763,10 @@ where
                 else {
                     unreachable!()
                 };
-                if queue_relay_subscription_rejection(
+                let one_shot_owner = query_coverage_registrations
+                    .borrow()
+                    .contains_key(subscription);
+                let relay_rejections_queued = queue_relay_subscription_rejection(
                     relay_owners,
                     relay_rejections,
                     upstream,
@@ -5728,10 +5774,17 @@ where
                     &SubscribeRejectReason::InvalidAuthoritySourceClosure {
                         transition: transition.clone(),
                     },
-                ) > 0
-                {
+                );
+                if relay_rejections_queued > 0 {
                     subscriber_dirty_epoch.set(subscriber_dirty_epoch.get().wrapping_add(1));
                     schedule_tick_in(scheduler, TickUrgency::Immediate);
+                }
+                // One-shot attachments have no public stream sender. If no
+                // downstream owner receives the scoped rejection either,
+                // surface the original protocol error through the owner tick;
+                // silently succeeding here leaves the read waiting forever.
+                if one_shot_owner || (public_rejections == 0 && relay_rejections_queued == 0) {
+                    return Err(error.into());
                 }
                 return Ok(());
             }

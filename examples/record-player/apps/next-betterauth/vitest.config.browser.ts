@@ -51,10 +51,10 @@ export default defineConfig({
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
-      // The workspace browser gate starts this topology beside three other
-      // Vitest projects. This registry-owned reservation prevents it from
-      // probing their shared default range.
-      api: { port: 63318, strictPort: true },
+      // Other parallel Vitest projects can reach any port in the default
+      // range. Let Vite retry EADDRINUSE instead of treating a source-code
+      // port convention as an operating-system reservation.
+      api: { port: 63318, strictPort: false },
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {

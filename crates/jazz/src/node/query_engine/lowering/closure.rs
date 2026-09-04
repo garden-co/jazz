@@ -35,6 +35,7 @@ impl ClosureLowering {
 pub(super) fn lower_closure_membership(
     root_graph: GraphBuilder,
     request: &QueryProgramRequest,
+    plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     route_fields: &BTreeSet<String>,
@@ -61,7 +62,11 @@ pub(super) fn lower_closure_membership(
     let mut result_members = BTreeMap::<SourceId, GraphBuilder>::new();
     for path in &request.input.shape.closure_paths {
         for (_, source, graph) in closure_membership_graph_for_path(
-            visible_root.clone(),
+            if flat_join_payload_fields(plan).is_empty() {
+                visible_root.clone()
+            } else {
+                source_rows_for_visible_graph(root_source, visible_root.clone(), route_fields)?
+            },
             path,
             root_source,
             resolved_sources,

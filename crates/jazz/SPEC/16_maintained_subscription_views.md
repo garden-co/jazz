@@ -69,6 +69,13 @@ one complete replacement context, and every continuation uses that retained
 context; reconciliation MUST NOT substitute the default read view or reconstruct
 selectors from the opaque `ReadViewKey`.
 
+Late-usage cloning and ordinary incremental publication MUST use the same
+canonical runtime recovery path. If catalogue activation invalidates a
+maintained handle, reopening restores the retained read and policy context
+before either path drains it. Existing usages receive the recovered complete
+source closure before the new usage receives its reset; a missing handle is
+not an indefinitely pending clone.
+
 `groove/SPEC/INVARIANTS.md::INV-INC-1` is the mechanism law for this chapter:
 maintained-view ingestion, application, publication, snapshot assembly, diffing,
 and subscriber delivery are bounded by the size of the change and affected keys,
@@ -137,11 +144,30 @@ relation fact whose referenced row version has not been admitted as part of the
 same exact authority closure is incomplete and cannot advance settlement or
 enter the graph.
 
+A client relay preserves each version witness's physical supplying branch,
+even when the read view projects that version into another logical branch.
+For a strict authority-backed closure, it forwards the selected upstream
+receipt's settlement cut, not its own local committed clock. A newly attached
+usage receives a complete source-manifest reset: a cached cursor or known
+payload inventory does not establish a predecessor input closure for that
+usage. Known payloads may still avoid retransmitting bytes; they cannot remove
+the manifest or turn its opening into an incremental update.
+
 Compiled source-occurrence identities MUST be identical on native and WASM
 hosts. They must not incorporate pointer widths or machine-sized sentinel
 values. Implicit root references use a `reference:<column>` alias, separate
 from explicit `include:<include-index>:<segment-index>` aliases; both are
 root-relative identities under the query's schema.
+
+A source occurrence retains its logical name in the query's read schema; its
+version witness names the immutable row under its authored schema. For example,
+after `users` is renamed to `people`, a `people` source may admit a version
+authored in `users`. The catalogue's permanent physical table ID connects the
+two names. The authority MUST emit the authored coordinate, and the receiver
+MUST resolve the source's physical table and verify the exact authored name,
+row ID, transaction, branch, and layer. Initial, incremental, and resident-body
+recovery paths use the same identity checks. Equal row IDs or similar table
+names alone are never sufficient evidence.
 
 A deletion-register witness is not authorization by itself. Its source
 occurrence MUST also be admitted by the same current policy-filtered
@@ -170,7 +196,10 @@ answer may be published; it does not select another evaluator:
 
 - `local-first` evaluates locally known current data plus pending local
   changes, online or offline. Installing a remote closure does not retire its
-  cached inputs. Remote scope withdrawal is not a stored client-side revocation;
+  cached inputs. This is determined by observation tier, not by whether the
+  local node is a trusted backend: a trusted backend may make the same Local
+  read while merely propagating upstream. Remote scope withdrawal is not a
+  stored client-side revocation;
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
@@ -186,6 +215,15 @@ answer may be published; it does not select another evaluator:
   fresh authority coverage;
 - a local-only internal execution suppresses upstream registration but still
   uses the same lowered graph over its local source.
+
+In a split foreground/persistent-owner client, the owner's same-scope stored
+data is local knowledge too. A one-shot local-first read from a newly opened
+memory-only foreground must receive the owner's query answer (including a
+confirmed empty answer) before returning. This is local storage delivery, not
+authority settlement: it completes while the owner is offline or while its
+edge/core connection is stalled. Ordinary upstream propagation remains enabled
+when requested. A standalone durable runtime can read its local storage directly
+and does not acquire this foreground delivery prerequisite.
 
 Source membership and stored row state are distinct. Scope withdrawal neither
 deletes nor redacts previously downloaded content. An actually admitted deletion
@@ -281,6 +319,14 @@ for ordered shapes, relation edge additions/removals where the query includes
 relations, settled/tier metadata, and a `reset` flag. There is no separate
 snapshot event type. The first delivery for a fresh subscription is a reset
 delta from the empty result set; reducing that delta yields the initial view.
+
+The maintained stream owns both this opening and all subsequent changes.
+Bindings must not manufacture an empty opening or supplement the stream with
+an independent one-shot cache read: such a read has no ordering relationship
+with delivered deltas and may overwrite newer results or fail independently.
+An empty opening is a valid result, not a reason to launch a second read.
+Explicit server-rendered hydration snapshots remain a separate initial-display
+facility; they do not replace the live stream's opening contract.
 
 Consumers own the materialized result set. The contract is that applying the
 delta reducer to events in stream order produces the same result as a one-shot
@@ -498,15 +544,39 @@ is deliberately about terminal values, not relations:
 Groove owns the selected ordered keys and scalar payload for every collection
 slot. It emits the smallest affected path operations without re-encoding an
 unmodified ancestor. One-shot reads and initial hydration still render complete
-terminal rows from that state. The transport carries this generic terminal
-operation vocabulary unchanged; a client applies it to its hydrated terminal
-tree and performs no joins, relation-edge interpretation, or query assembly.
+terminal rows from that state. The local subscription carrier delivers this
+generic terminal vocabulary to its binding's hydrated terminal tree. This is
+not authority-to-client result transport: the receiver evaluates the covered
+inputs locally, as specified above.
 
 This split is required by `INV-INC-1`: replacing a parent containing 20,000
 children after one child insert is observably correct but still performs work
 proportional to accumulated state. Root-addressing alone is insufficient unless
 the changed descendant path is preserved through Groove evaluation and the
 subscription carrier.
+
+The receiver-local decoder obeys the same rule. It retains decoded collection
+state keyed by the compiler's child identities and applies the addressed edit
+without decoding or encoding every sibling. Both the maintained receiver and
+the facade use this reducer. Opening, an explicit full snapshot, and a reset
+may encode complete roots; ordinary child-delta delivery may not. Opening also
+prepares the facade's decoder from the already-decoded terminal state, so the
+first subsequent edit cannot hide a full-collection initialization cost. This
+is process-local derived state, not a storage format or another query evaluator.
+
+A scalar update of an existing occurrence preserves its independently maintained
+child collections. Empty collection placeholders in that scalar payload do not
+mean child removal; explicit child edits own those changes. A remove/reinsert of
+the same occurrence within one atomic terminal batch is likewise a replacement,
+not a child-lifetime boundary. An occurrence absent at the end of the batch loses
+its retained child state. Only compiler-addressed
+collection slots receive this treatment; ordinary array-valued application
+columns remain scalar payload and are replaced normally.
+
+Collection membership edits address the collection path and carry the affected
+child key in the edit. Recursive scalar updates may instead end their path at
+that child key; the decoder verifies it matches the update's key and updates
+that occurrence without dropping its independently maintained descendants.
 
 - Subscription opening: direct `array_subqueries` are accepted at the `Db` facade
   and sync registration surfaces, covered by
@@ -580,33 +650,50 @@ aligned with the settled typed result-member model.
 
 #### Retained receiver input pages
 
-The interaction of this retained-page contract with literal local-first
-pagination is under clarification in [#2502](https://github.com/garden-co/jazz/issues/2502).
-In particular, an offset into an authority page is not necessarily the same
-offset into the receiver's currently cached inputs. That question is not
-permission to infer authority result positions from partial local data.
+Local-first pagination is literal over local knowledge. An offset into an
+authority page is not necessarily the same offset into the receiver's cached
+inputs. Pagination follows the same tier-selected input semantics as filtering,
+ordering, and projection; it has no retained-page exception. This contract was
+settled in [#2502](https://github.com/garden-co/jazz/issues/2502).
 
 The same compiler-owned window stage is used by authority closure publication
 and by the receiver's application collector. A closure for a bounded root or
 parent window is proportional to that requested window; it is never an
-authority terminal snapshot. Consequently a non-durable receiver that keeps a
-page after its authority usage site detaches retains a typed **window-source
-capability**, not a boolean saying that some result happened to be
-materialized.
+authority terminal snapshot. A live authority-relative receiver therefore
+needs a typed **window-source capability**, not a boolean saying that some
+result happened to be materialized. Cached rows surviving detachment remain
+ordinary local knowledge; they do not transfer that capability to later Local
+queries.
+
+For a live exact-query receiver, that source contract is known at compilation,
+before its `RegisterShape` message has been processed or its opening receipt
+has arrived. A cold and a warm receiver therefore compile the same relative
+window. For example, authority `OFFSET 2 LIMIT 1` over `A,B,C,D` supplies `C`;
+the receiver orders that input and uses relative `OFFSET 0 LIMIT 1`. It does
+not skip two more rows, and it retains the limit when pending inserts join
+those inputs. Ordinary local-first evaluation has no such authority-selected
+source and continues to apply `OFFSET 2` to its local current inputs. Equal
+numeric offsets and limits alone never establish compatible source identity.
 
 That capability contains the exact normalized source occurrence, full
 validated source shape, root/parent partition, user order keys and directions,
 the compiler's deterministic tie keys, window offset/limit, and the
-policy-scoped receipt that supplied it. A later Local lowering may reuse it
-only when its own compiler-owned descriptor is exactly the same apart from a
-window wholly contained by the retained page. It then treats the retained rows
-as the output of the source window and applies its requested offset relative to
-that page. It MUST NOT apply the original absolute offset a second time, sort
-the page in Jazz, search similar registered shapes, or use authority output
-membership as a fallback.
+policy-scoped receipt that supplied it. Only the corresponding authority-relative
+receiver interprets the covered rows as the output of that source window. It
+MUST NOT apply the original absolute offset a second time, sort the page in
+Jazz, search similar registered shapes, or use authority output membership as
+a fallback. A narrower remote query requires its own coverage receipt.
+
+A later Local query applies its complete order/offset/limit to local current
+inputs, even if its numeric window is contained in a previously received remote
+page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
+16–17. Use `remote` for authority-relative pagination, or `remote-if-possible`
+for authority-relative pagination online and literal local fallback offline.
+Pending local rows participate in that local ordering normally; retained remote
+page coordinates must not silently change their rank.
 
 Different source occurrences, partitions, ordering/tie contracts, schemas,
-bindings, policy scopes, or non-contained windows are incompatible. They must
+bindings, policy scopes, or window contracts are incompatible. They must
 open fresh coverage (or use ordinary local-first inputs), even where their
 table names or visible rows happen to match. Detach, revocation, reconnect, and
 new scope admission retire or replace the exact capability atomically with its

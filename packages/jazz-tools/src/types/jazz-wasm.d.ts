@@ -319,7 +319,7 @@ declare module "jazz-wasm" {
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
     close(): Promise<boolean>;
-    connectUpstream(): WasmTransport;
+    connectUpstream(): Promise<WasmTransport>;
     connectUpstreamWithSession(
       protocolVersion: number,
       features: number,

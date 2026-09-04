@@ -2013,7 +2013,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       ]),
     );
 
-    const transport = runtime.connectUpstreamPeer();
+    const transport = await runtime.connectUpstreamPeer();
     expect(transport.tick()).toBeGreaterThanOrEqual(0);
     expect(transport.recvWireFrames()).toEqual(expect.any(Array));
     expect(transport.close()).toBe(true);

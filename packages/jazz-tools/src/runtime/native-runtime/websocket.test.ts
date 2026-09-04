@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { BrowserWebSocket } from "./websocket.js";
@@ -87,7 +88,11 @@ describe("websocket frame carrier", () => {
     const largestSingleton = new Uint8Array(2 * 1024 * 1024 - 4);
     const exactCarrier = encodeWebSocketFrameBatch([largestSingleton]);
     expect(exactCarrier.byteLength).toBe(2 * 1024 * 1024);
-    expect(decodeWebSocketFrameBatch(exactCarrier)).toEqual([largestSingleton]);
+    const decoded = decodeWebSocketFrameBatch(exactCarrier);
+    expect(decoded).toHaveLength(1);
+    // Compare every byte without asking the general deep-equality matcher to
+    // walk two million indexed properties under a busy full-suite worker pool.
+    expect(Buffer.from(decoded[0]!).equals(Buffer.from(largestSingleton))).toBe(true);
 
     const rawLimit = new Uint8Array(2 * 1024 * 1024);
     expect(() => encodeWebSocketFrameBatch([rawLimit])).toThrow(

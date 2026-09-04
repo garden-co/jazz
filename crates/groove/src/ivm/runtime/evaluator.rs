@@ -1832,6 +1832,14 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        if self.context.eval_mode == EvalMode::Hydrate {
+            // Hydration supplies a complete snapshot, including when another
+            // subscription already owns this shared collector. Rebuild its
+            // state instead of applying that snapshot as incremental inserts;
+            // otherwise a later retraction leaves a phantom duplicate behind.
+            let operator_key = self.operator_key(node)?;
+            self.operator_states.remove(&operator_key);
+        }
         if input.deltas.is_empty() || collect_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }

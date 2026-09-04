@@ -103,7 +103,9 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
-    client.node.set_non_durable_client();
+    // This standalone client owns its local storage. A memory-only foreground
+    // first needs its persistent owner's answer, covered separately by
+    // foreground_local_attachment_waits_for_owner_delivery_not_authority.
     let (client_transport, _authority_transport) = duplex();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let query = Query::from("todos");

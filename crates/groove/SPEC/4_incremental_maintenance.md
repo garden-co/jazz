@@ -110,6 +110,15 @@ existing subscriptions' future deltas (`INV-TICK-19`). The tick provides that
 isolation with per-tick memoization keyed by `{scope, node, tick, sub_tick}`,
 cleared after the tick (`INV-TICK-5`).
 
+The replacement rule also applies to a collector's resident row weights and
+selected-root state, not only join arrangements. If Alice already subscribes
+to a collector, opening Bob's identical subscription after its disposable
+output memo is evicted must rebuild from the complete snapshot, not insert
+that snapshot into Alice's existing state again. Both subscribers must then
+observe one update or removal for one changed row; a cache miss must never
+leave a phantom second copy which survives a retraction (`INV-TICK-12`,
+`INV-TICK-19`).
+
 **Decision, Anselm 2026-08-05 — narrow output-terminal exception to `INV-INC-1`
 (`INV-INC-2`, target).** A terminal `CollectBy` may retain a complete flat
 group. For a touched group `g`, let `D_g` be its input delta and let

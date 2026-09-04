@@ -72,6 +72,22 @@ impl CoveredInputReceiver {
 }
 
 impl LocalMaintainedViewSubscription {
+    /// Seed a facade's retained decoder at its opening boundary. Copy the
+    /// compiler-addressed collections already decoded by the local terminal;
+    /// do not infer collection semantics from arbitrary array-valued columns.
+    pub(crate) fn decoded_terminal_records(
+        &self,
+    ) -> Result<
+        BTreeMap<OutputOccurrenceId, crate::db::terminal_record::TerminalRecordState>,
+        crate::db::Error,
+    > {
+        self.maintained
+            .decoded_terminal_records()
+            .iter()
+            .map(|(key, record)| Ok((crate::db::terminal_root_occurrence_id(key)?, record.clone())))
+            .collect()
+    }
+
     pub(crate) fn terminal_root_layout(&self) -> Option<&crate::db::TerminalRootLayout> {
         self.terminal_schemas.terminal_root_layout()
     }
@@ -697,7 +713,12 @@ where
                         "incremental covered input names no compiled source occurrence",
                     ))?;
             let Some(record) = self
-                .covered_input_runtime_record(input, runtime_source, result_schema_version)
+                .covered_input_runtime_record(
+                    input,
+                    runtime_source,
+                    result_schema_version,
+                    &receiver.read_view,
+                )
                 .await?
             else {
                 continue;
@@ -839,9 +860,6 @@ where
                 closure_generation,
             );
         }
-        let schema_alias = self
-            .ensure_schema_version_alias(result_schema_version)
-            .await?;
         let mut records = receiver
             .sources
             .keys()
@@ -858,93 +876,17 @@ where
                     "authority covered input names no compiled source occurrence",
                 ));
             };
-            // `version_table` is the authored physical table of the witness,
-            // while `source.table` names the compiled receiver occurrence in
-            // its read schema. A lens may legitimately rename either side,
-            // so validate their compatibility by projecting the immutable
-            // witness through that schema below; comparing names here would
-            // reject a sound exact closure before the descriptor boundary.
-            let source_table =
-                self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
-            let tx_alias = self
-                .node_aliases
-                .get(&input.version.tx.node)
-                .copied()
-                .ok_or(Error::MissingTransaction(input.version.tx))?;
-            let layer = match input.version.layer {
-                ResultRowLayer::Content => VersionLayer::Content,
-                // A covered input closure contains the current content
-                // carrier for each compiled source. A deletion witness proves
-                // why a former content carrier is absent; it is not itself a
-                // tuple accepted by the source's content descriptor. Validate
-                // that exact witness below, then leave this source's staged
-                // input without that row so the atomic replacement retracts
-                // the old contributor.
-                ResultRowLayer::Deletion => VersionLayer::Deletion,
-                ResultRowLayer::ContentOrDeletion => {
-                    return Err(Error::InvalidStoredValue(
-                        "covered input must name one concrete version layer",
-                    ));
-                }
-            };
-            let branch_key = input
-                .version
-                .branch_or_prefix
-                .as_deref()
-                .map(BranchKey::from_canonical_bytes)
-                .transpose()
-                .map_err(|_| {
-                    Error::InvalidStoredValue("covered input branch witness is malformed")
-                })?
-                .unwrap_or_default();
-            let version = self
-                .query_version_by_alias_in_branch(
+            let Some(record) = self
+                .covered_input_runtime_record(
+                    &input,
+                    runtime_source,
                     result_schema_version,
-                    input.version_table.as_str(),
-                    &branch_key,
-                    input.source_row,
-                    layer,
-                    input.version.tx.time,
-                    tx_alias,
+                    &receiver.read_view,
                 )
-                .await?;
-            let version = version.ok_or(Error::MissingTransaction(input.version.tx))?;
-            if version.branch_key().canonical_bytes()
-                != input.version.branch_or_prefix.clone().unwrap_or_default()
-            {
-                return Err(Error::InvalidStoredValue(
-                    "authority covered input branch witness disagrees with stored version",
-                ));
-            }
-            if layer == VersionLayer::Deletion {
+                .await?
+            else {
                 continue;
-            }
-            let row = self
-                .projected_current_row_from_materialized_version_in_read_schema(
-                    result_schema_version,
-                    &version,
-                )?
-                .ok_or(Error::InvalidStoredValue(
-                    "authority covered content version cannot materialize a current row",
-                ))?;
-            let row = self.project_covered_input_row_in_read_view(
-                &source_table,
-                result_schema_version,
-                &receiver.read_view,
-                &version,
-                row,
-            )?;
-            if row.table() != source_table.name {
-                return Err(Error::InvalidStoredValue(
-                    "authority covered input does not project into its compiled source schema",
-                ));
-            }
-            let record = super::read_sources::covered_input_record(
-                &source_table,
-                &runtime_source.descriptor,
-                &row,
-                schema_alias,
-            )?;
+            };
             records
                 .get_mut(&input.source)
                 .expect("source presence was checked above")
@@ -998,51 +940,15 @@ where
         input: &CoveredInputEntry,
         runtime_source: &CoveredInputSource,
         result_schema_version: SchemaVersionId,
+        read_view: &ReadViewSpec,
     ) -> Result<Option<Vec<u8>>, Error> {
         let source_table =
             self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
-        let tx_alias = self
-            .node_aliases
-            .get(&input.version.tx.node)
-            .copied()
-            .ok_or(Error::MissingTransaction(input.version.tx))?;
-        let layer = match input.version.layer {
-            ResultRowLayer::Content => VersionLayer::Content,
-            ResultRowLayer::Deletion => VersionLayer::Deletion,
-            ResultRowLayer::ContentOrDeletion => {
-                return Err(Error::InvalidStoredValue(
-                    "covered input must name one concrete version layer",
-                ));
-            }
-        };
-        let branch_key = input
-            .version
-            .branch_or_prefix
-            .as_deref()
-            .map(BranchKey::from_canonical_bytes)
-            .transpose()
-            .map_err(|_| Error::InvalidStoredValue("covered input branch witness is malformed"))?
-            .unwrap_or_default();
         let version = self
-            .query_version_by_alias_in_branch(
-                result_schema_version,
-                input.version_table.as_str(),
-                &branch_key,
-                input.source_row,
-                layer,
-                input.version.tx.time,
-                tx_alias,
-            )
+            .covered_input_version(input, result_schema_version)
             .await?
             .ok_or(Error::MissingTransaction(input.version.tx))?;
-        if version.branch_key().canonical_bytes()
-            != input.version.branch_or_prefix.clone().unwrap_or_default()
-        {
-            return Err(Error::InvalidStoredValue(
-                "authority covered input branch witness disagrees with stored version",
-            ));
-        }
-        if layer == VersionLayer::Deletion {
+        if version.layer() == VersionLayer::Deletion {
             return Ok(None);
         }
         let row = self
@@ -1053,6 +959,17 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "authority covered content version cannot materialize a current row",
             ))?;
+        // Initial resets and incremental edits share the same logical branch
+        // projection, while the encoded witness below retains the physical
+        // supplying branch. A base row shown through a head is still a base
+        // version; neither projection nor a relay hop can relabel its identity.
+        let row = self.project_covered_input_row_in_read_view(
+            &source_table,
+            result_schema_version,
+            read_view,
+            &version,
+            row,
+        )?;
         if row.table() != source_table.name {
             return Err(Error::InvalidStoredValue(
                 "authority covered input does not project into its compiled source schema",
@@ -1066,6 +983,7 @@ where
             &runtime_source.descriptor,
             &row,
             schema_alias,
+            &version.branch_key(),
         )?))
     }
 

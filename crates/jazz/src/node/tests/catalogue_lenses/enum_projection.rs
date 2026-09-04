@@ -51,6 +51,50 @@ fn enum_projection_schema(statuses: &[&str]) -> JazzSchema {
     ))
 }
 
+#[test]
+fn maintained_enum_parameter_preserves_type_for_empty_and_populated_coverage() {
+    // Inspect the public peer update here because an empty result must still
+    // encode its coverage terminal, not just return an empty application row set.
+    let schema = enum_projection_schema(&["open", "active", "closed"]);
+    let query = Query::from("items")
+        .filter(eq(col("status"), param("wanted")))
+        .validate(&schema)
+        .unwrap();
+    for wanted in 0..3 {
+        let (_dir, mut core) = open_node_with_schema(node(0x91), schema.clone());
+        let item = row(0x92);
+        let first = accept_global(
+            &mut core,
+            MergeableCommit::new("items", item, 1).cells(BTreeMap::from([
+                ("title".to_owned(), v("enum route")),
+                ("status".to_owned(), Value::EnumTag(0)),
+            ])),
+        );
+        let binding = query
+            .bind(BTreeMap::from([("wanted".to_owned(), Value::EnumTag(wanted))]))
+            .unwrap();
+        let mut peer = PeerState::new();
+        let initial = peer.rehydrate_query(&mut core, &query, &binding).unwrap();
+        let expected = if wanted == 0 { vec![(item, first)] } else { vec![] };
+        assert_eq!(covered_input_rows(&initial, true), expected);
+        let SyncMessage::ViewUpdate(payload) = &initial else {
+            panic!("expected maintained view update");
+        };
+        assert!(!payload.program_fact_adds.is_empty(), "empty results still carry coverage");
+
+        let next = accept_global(
+            &mut core,
+            MergeableCommit::new("items", item, 2).cells(BTreeMap::from([
+                ("title".to_owned(), v("updated enum route")),
+                ("status".to_owned(), Value::EnumTag(wanted)),
+            ])),
+        );
+        let update = peer.query_update(&mut core, &query, &binding).unwrap();
+        assert_eq!(covered_input_rows(&update, true), vec![(item, next)]);
+        assert_eq!(covered_input_rows(&update, false), expected);
+    }
+}
+
 fn public_scalar_enum(name: &str, variants: &[&str]) -> PublicColumnType {
     PublicColumnType::ScalarEnum {
         name: name.to_owned(),

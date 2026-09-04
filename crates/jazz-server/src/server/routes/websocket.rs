@@ -1615,7 +1615,17 @@ mod tests {
         );
         assert!(!admission.claims.contains_key("subject"));
         assert!(!admission.claims.contains_key("user_id"));
-        assert!(!admission.claims.contains_key("authMode"));
+        // Auth metadata is derived from the admitted identity, not flattened
+        // from caller claims. Arbitrary claims remain in their own namespace.
+        assert_eq!(
+            admission.claims.get("authMode"),
+            Some(&CoreValue::String("external".to_owned()))
+        );
+        assert_eq!(
+            admission.claims.get("user"),
+            Some(&CoreValue::String(identity.canonical().to_owned()))
+        );
+        assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
 
     // Internal route-boundary test: this proves the reusable core

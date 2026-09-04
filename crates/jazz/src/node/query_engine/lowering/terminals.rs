@@ -50,6 +50,7 @@ pub(super) fn lowered_terminals(
     let initial_closure = lower_closure_membership(
         graph.clone(),
         request,
+        plan,
         source,
         resolved_sources,
         &initial_root_route_fields,
@@ -79,6 +80,7 @@ pub(super) fn lowered_terminals(
         lower_closure_membership(
             graph.clone(),
             request,
+            plan,
             source,
             resolved_sources,
             &root_route_fields,
@@ -2475,18 +2477,20 @@ fn route_literal_project_field_for_domain(
 ) -> Result<ProjectField, UnsupportedReason> {
     if let Some(path) = claim_path_from_param_field(route_field) {
         let value = claim_value(&path, &request.policy)?;
-        let literal: LiteralValue = domain
-            .claim_params
-            .get(route_field)
+        return Ok(match domain.claim_params.get(route_field) {
             // Prepared subscriptions compare routes against the same
             // descriptor-coerced binding record used at bind time. In
             // particular, a UUID session claim can be represented as a
             // string parameter by the schema; use the shared coercion rather
             // than the raw claim encoding so literal-only terminals (such as
             // source completeness) have the identical route value.
-            .map(|claim| coerce_prepared_binding_value(value.clone(), &claim.ty).into())
-            .unwrap_or_else(|| value.into());
-        return Ok(ProjectField::literal(route_field.to_owned(), literal));
+            Some(claim) => ProjectField::literal_typed(
+                route_field.to_owned(),
+                coerce_prepared_binding_value(value, &claim.ty),
+                claim.ty.clone(),
+            ),
+            None => ProjectField::literal(route_field.to_owned(), value),
+        });
     }
     let Some(param) = route_param_from_field(route_field) else {
         return Err(UnsupportedReason::Runtime(format!(
@@ -2498,12 +2502,18 @@ fn route_literal_project_field_for_domain(
             "authorization route field '{route_field}' refers to unbound parameter '{param}'"
         )));
     };
-    let literal: LiteralValue = domain
-        .user_params
-        .get(param)
-        .map(|ty| coerce_prepared_binding_value(value.clone(), ty).into())
-        .unwrap_or_else(|| value.clone().into());
-    Ok(ProjectField::literal(route_field.to_owned(), literal))
+    // The binding descriptor owns the type, not the literal's payload. An
+    // enum tag alone cannot reconstruct its registry; likewise null cannot
+    // reconstruct its nullable element type. Keep the route's descriptor
+    // identical to the prepared binding source, including on empty results.
+    Ok(match domain.user_params.get(param) {
+        Some(ty) => ProjectField::literal_typed(
+            route_field.to_owned(),
+            coerce_prepared_binding_value(value.clone(), ty),
+            ty.clone(),
+        ),
+        None => ProjectField::literal(route_field.to_owned(), value.clone()),
+    })
 }
 
 fn relation_edge_graph(
@@ -2758,6 +2768,29 @@ fn content_version_witness_graph(
     )
 }
 
+/// Recover source-shaped rows from a visible relation which may be a flat
+/// joined output. Keep the exact version and prepared-binding route: looking
+/// up only the row UUID would allow a different version or route to contribute.
+pub(super) fn source_rows_for_visible_graph(
+    source: &ResolvedSource,
+    visible: GraphBuilder,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
+    let version = version_witness_fields(&source.row_shape)?;
+    let mut keys = vec![
+        source.row_shape.row_uuid_field.clone(),
+        version.tx_time_field,
+        version.tx_node_field,
+    ];
+    keys.extend(route_fields.iter().cloned());
+    Ok(GraphBuilder::semi_join(
+        source.graph.clone(),
+        visible,
+        keys.clone(),
+        keys,
+    ))
+}
+
 /// Attach immutable version evidence to rows that have already passed the
 /// authority program's visibility graph. This is deliberately separate from
 /// `content_version_witness_graph`: the latter is appropriate for a local
@@ -2769,20 +2802,29 @@ fn content_version_witness_graph_from_visible_graph(
     event_kind: &str,
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
-    let Some(content_version) = &source.content_version else {
-        let mut fields = inline_version_witness_fields_for_tagged_rows(source, event_kind)?;
-        fields.extend(
-            routing_param_fields
-                .iter()
-                .cloned()
-                .map(ProjectField::named),
-        );
-        return Ok(visible_graph.project_fields(fields));
+    // Visibility can be a wide join tuple, not a source-shaped record. Resolve
+    // its exact row/version keys back to complete witnesses in both storage
+    // and covered-input realizations. Never reopen an unrestricted source as
+    // the publication: the visibility join below is required in both cases.
+    let (witness_source, witness_fields) = match &source.content_version {
+        Some(content_version) => (
+            content_version.graph.clone(),
+            unprefixed_version_witness_fields_for_tagged_rows(source, event_kind)?,
+        ),
+        None => (
+            source.graph.clone(),
+            inline_version_witness_fields_for_tagged_rows(source, event_kind)?,
+        ),
     };
+    let witness_names = witness_fields
+        .iter()
+        .map(|field| field.output_name.clone())
+        .collect::<Vec<_>>();
+    let witnesses = witness_source.project_fields(witness_fields);
     let version = version_witness_fields(&source.row_shape)?;
     if routing_param_fields.is_empty() {
         return Ok(GraphBuilder::semi_join(
-            content_version.graph.clone(),
+            witnesses,
             visible_graph,
             ["row_uuid", "tx_time", "tx_node_id"],
             [
@@ -2790,12 +2832,12 @@ fn content_version_witness_graph_from_visible_graph(
                 version.tx_time_field.clone(),
                 version.tx_node_field.clone(),
             ],
-        )
-        .project_fields(unprefixed_version_witness_fields_for_tagged_rows(
-            source, event_kind,
-        )?));
+        ));
     }
-    let mut fields = prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "right.")?;
+    let mut fields = witness_names
+        .into_iter()
+        .map(|field| ProjectField::renamed(format!("right.{field}"), field))
+        .collect::<Vec<_>>();
     fields.extend(
         routing_param_fields
             .iter()
@@ -2803,7 +2845,7 @@ fn content_version_witness_graph_from_visible_graph(
     );
     Ok(GraphBuilder::join(
         visible_graph,
-        content_version.graph.clone(),
+        witnesses,
         [
             source.row_shape.row_uuid_field.clone(),
             version.tx_time_field.clone(),
