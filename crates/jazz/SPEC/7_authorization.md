@@ -139,6 +139,11 @@ available to handlers but are omitted from the Groove policy identity; they do
 not reject authentication. Recursive object-policy values are not supported
 (`INV-RLS-25`).
 
+Claim values use their host JSON representation: JavaScript sessions use normal
+`JSON.parse` number semantics, while Rust server sessions retain `serde_json`
+values. The public session surface does not provide a cross-runtime
+lossless-number wrapper.
+
 For the two self-signed issuers, the signed `jazz_pub_key` verifies the proof
 and derives `sub`; that proof material is not copied into `session.claims` as
 an application policy input. The client and authority therefore bind the same
