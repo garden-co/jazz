@@ -1120,6 +1120,7 @@ where
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        let mut node = prepared.scoped_node(&mut node, author)?;
         let mut snapshot = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_relation_snapshot_with_options(
@@ -1155,6 +1156,7 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        let mut node = prepared.scoped_node(&mut node, author)?;
         let mut rows = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_query_with_options(

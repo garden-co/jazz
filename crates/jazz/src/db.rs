@@ -2121,6 +2121,7 @@ struct PendingSubscriptionFinalization {
     /// The fallible opening guard can run before a public stream state exists.
     /// It is never subject to runtime replacement, so this narrowly scoped
     /// fallback may carry its just-created Groove handle directly.
+    opening_upstream: Vec<UpstreamCoverageHandle>,
     opening_local: Option<(u64, groove::ivm::SubscriptionId)>,
     acknowledgement: Option<oneshot::Sender<()>>,
 }
@@ -4183,6 +4184,7 @@ struct SubscriptionState {
     /// closure, so finalization always retires the currently live state.
     upstream_subscription_handles: Vec<UpstreamCoverageHandle>,
     propagates_upstream: bool,
+    request_identity_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
@@ -4587,6 +4589,7 @@ impl Drop for SubscriptionStream {
 /// Validated and bound query plan used by all `Db` reads and subscriptions.
 #[derive(Clone, Debug)]
 pub struct PreparedQuery {
+    request_identity_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     shape: ValidatedQuery,
     binding: Binding,
     local_plan: Option<PreparedQueryPlanHandle>,
@@ -4597,6 +4600,40 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// Capture the admitted claims for this trusted-serving request.
+    /// Clones retain the same immutable scope across asynchronous owner waits.
+    pub fn with_identity_claims(
+        mut self,
+        author: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Self {
+        self.request_identity_claims = Some((author, claims));
+        self
+    }
+
+    fn scoped_node<'a, S: OrderedKvStorage>(
+        &self,
+        node: &'a mut NodeState<S>,
+        author: AuthorSubject,
+    ) -> Result<crate::node::ActiveSessionClaimsScope<'a, S>, Error> {
+        if self
+            .request_identity_claims
+            .as_ref()
+            .is_some_and(|(admitted, _)| *admitted != author)
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "prepared request identity does not match read identity",
+            ));
+        }
+        Ok(node.scoped_optional_session_claims(
+            author,
+            self.request_identity_claims
+                .as_ref()
+                .map(|(_, claims)| claims.clone()),
+        ))
+    }
+
     /// Validated query shape.
     pub fn shape(&self) -> &ValidatedQuery {
         &self.shape

@@ -8117,3 +8117,286 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   }
   return out;
 }
+
+it("retains deferred admission failure until execute installs its callback", async () => {
+  const failure = new Error("planted preparation failure");
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          prepareQueryAsync: () => ({
+            poll: () => {
+              throw failure;
+            },
+            cancel: () => {},
+            setWake: () => {},
+          }),
+          tick: () => undefined,
+        } as never),
+      openBrowser: async () => {
+        throw new Error("unused");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const callback = vi.fn();
+  runtime.executeSubscription(handle, callback);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(callback).toHaveBeenCalledWith(failure);
+});
+
+it.each([null, undefined])(
+  "wakes pending admission while an async transport tick waits on its owner (pending %s)",
+  async (pendingResult) => {
+    let polls = 0;
+    let wake = () => {};
+    let releaseOwner!: () => void;
+    const ownerReleased = new Promise<void>((resolve) => {
+      releaseOwner = resolve;
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQueryAsync: () => ({
+              poll: () => {
+                polls++;
+                if (polls === 1) {
+                  queueMicrotask(() => wake());
+                  return pendingResult;
+                }
+                releaseOwner();
+                return {};
+              },
+              cancel: () => {},
+              setWake: (callback: () => void) => {
+                wake = callback;
+              },
+            }),
+            tick: () => ownerReleased,
+          } as never),
+        openBrowser: async () => {
+          throw new Error("unused");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const inner = runtime as unknown as Record<string, any>;
+    inner.serverTransport = { recvWireFrames: () => [], close: () => {} };
+    inner.serverCarrier = { send: () => {}, close: () => {} };
+    const preparation = inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), null);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(polls).toBeGreaterThan(1);
+    } finally {
+      releaseOwner();
+      await preparation;
+      inner.closed = true;
+    }
+  },
+);
+
+it("finishes wake-driven attachment admission before starting its dependent read", async () => {
+  let polls = 0;
+  let wake = () => {};
+  let releaseOwner!: () => void;
+  const ownerReleased = new Promise<void>((resolve) => {
+    releaseOwner = resolve;
+  });
+  const pending = {
+    setWake: (callback: () => void) => {
+      wake = callback;
+    },
+    poll: () => {
+      polls += 1;
+      if (polls === 1) {
+        queueMicrotask(() => wake());
+        return null;
+      }
+      releaseOwner();
+      return true;
+    },
+    cancel: () => {},
+  };
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          attachQuery: () => pending,
+          queryAttachmentIsCovered: () => polls > 1,
+          all: async () => {
+            await ownerReleased;
+            return new Uint8Array();
+          },
+          tick: () => undefined,
+        } as never),
+      openBrowser: async () => {
+        throw new Error("unused");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const inner = runtime as unknown as Record<string, any>;
+  inner.nonDurableClient = true;
+  const attachment = inner.attachQueryIfNeeded("local", undefined, {}, null);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(polls).toBe(2);
+  } finally {
+    releaseOwner();
+    inner.closed = true;
+    await attachment;
+  }
+});
+
+it("cancels wake-driven admission before shutdown waits for its blocked tick", async () => {
+  let cancellations = 0;
+  let releaseOwner!: () => void;
+  const ownerReleased = new Promise<void>((resolve) => {
+    releaseOwner = resolve;
+  });
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          prepareQueryAsync: () => ({
+            poll: () => null,
+            setWake: () => {},
+            cancel: () => {
+              cancellations += 1;
+              releaseOwner();
+            },
+          }),
+          tick: () => ownerReleased,
+        } as never),
+      openBrowser: async () => {
+        throw new Error("unused");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const inner = runtime as unknown as Record<string, any>;
+  inner.serverTransport = { recvWireFrames: () => [], close: () => {} };
+  inner.serverCarrier = { send: () => {}, close: () => {} };
+  const result = inner
+    .prepareQueryForRead(JSON.stringify({ table: "todos" }), null)
+    .catch((error: Error) => error);
+  await runtime.close();
+  expect(cancellations).toBeGreaterThan(0);
+  expect(await result).toEqual(new Error("native operation was cancelled"));
+});
+
+it("isolates throwing callbacks when replaying a deferred admission failure", async () => {
+  const failure = new Error("preparation rejected");
+  const callbackFailure = new Error("user callback rejected");
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          prepareQueryAsync: () => ({
+            poll: () => {
+              throw failure;
+            },
+            setWake: () => {},
+            cancel: () => {},
+          }),
+          tick: () => undefined,
+        } as never),
+      openBrowser: async () => {
+        throw new Error("unused");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  const scheduled: Array<() => void> = [];
+  const timer = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback) => {
+    scheduled.push(callback as () => void);
+    return 0 as never;
+  });
+  try {
+    expect(() =>
+      runtime.executeSubscription(handle, () => {
+        throw callbackFailure;
+      }),
+    ).not.toThrow();
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]).toThrow(callbackFailure);
+  } finally {
+    timer.mockRestore();
+    runtime.unsubscribe(handle);
+    await runtime.close();
+  }
+});
+
+it("keeps same-query admissions with different claims out of the shared prepared cache", async () => {
+  const admitted: unknown[] = [];
+  const setClaims = vi.fn();
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          prepareQueryAsync: (_query: Uint8Array, identity: Uint8Array, claims: unknown) => {
+            const prepared = {
+              identity: new Uint8Array(identity),
+              claims: structuredClone(claims),
+            };
+            admitted.push(prepared);
+            return { poll: () => prepared, setWake: () => {}, cancel: () => {} };
+          },
+          setIdentityClaims: setClaims,
+          tick: () => undefined,
+        } as never),
+      openBrowser: async () => {
+        throw new Error("unused");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { readAuthorizationHost: "trusted-serving" },
+  );
+  const inner = runtime as unknown as Record<string, any>;
+  const session = {
+    identity: TEST_RUNTIME_AUTHOR,
+    claims: { team: "team-a" },
+    backendAuthority: false,
+  };
+  const a = await inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), session);
+  const b = await inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), {
+    ...session,
+    claims: { team: "team-b" },
+  });
+  expect(a).not.toBe(b);
+  expect(admitted).toHaveLength(2);
+  expect(a.claims).toEqual({ team: "team-a" });
+  expect(b.claims).toEqual({ team: "team-b" });
+  expect(setClaims).not.toHaveBeenCalled();
+  await runtime.close();
+});
