@@ -11,6 +11,12 @@ import { decodeCommandInRust, rustResponseCorpus } from "./native-platform.js";
 const txId = Uint8Array.from({ length: 16 }, () => 7);
 const optionsJson = '{"readTier":"local","view":{"head":"main"}}';
 const cases: [string, unknown, unknown][] = [
+  [
+    "relation subscription",
+    { type: "subscribeRelationQuery", queryJson: "{}", optionsJson },
+    { SubscribeRelationQuery: { query_json: "{}", options_json: optionsJson } },
+  ],
+
   ["probe", "probe", "Probe"],
   [
     "prepare",

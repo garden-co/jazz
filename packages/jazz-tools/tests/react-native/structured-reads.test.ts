@@ -32,6 +32,27 @@ describe("React Native structured reads", () => {
     });
   });
 
+  it("maintains filtered relation hops through the canonical subscription", async () => {
+    await withNativeRelayFixture(app, async (fixture) => {
+      const db = await fixture.createDb();
+      const first = db.insert(app.groups, { name: "first" }).value;
+      const second = db.insert(app.groups, { name: "second" }).value;
+      const task = db.insert(app.tasks, { title: "included", group_id: first.id }).value;
+      const related = app.tasks.where({ title: "included" }).hopTo("group").orderBy("name");
+      const snapshots: unknown[] = [];
+      const stop = db.subscribe(related, (rows) => snapshots.push(rows));
+      try {
+        await expect.poll(() => snapshots.at(-1)).toEqual([first]);
+        db.update(app.tasks, task.id, { group_id: second.id });
+        await expect.poll(() => snapshots.at(-1)).toEqual([second]);
+        db.update(app.tasks, task.id, { title: "excluded" });
+        await expect.poll(() => snapshots.at(-1)).toEqual([]);
+      } finally {
+        stop();
+      }
+    });
+  });
+
   it("hydrates selected nested includes and isolates transaction overlays", async () => {
     await withNativeRelayFixture(app, async (fixture) => {
       const db = await fixture.createDb();

@@ -533,6 +533,10 @@ pub enum ForegroundDbCommandRequest {
         cells: Vec<u8>,
         options_json: String,
     },
+    SubscribeRelationQuery {
+        query_json: String,
+        options_json: String,
+    },
 }
 
 /// Frozen postcard mutation ordinals within the V1 StageMutation envelope.
@@ -2690,6 +2694,22 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 },
             }
         }
+        ForegroundDbCommandRequest::SubscribeRelationQuery {
+            query_json,
+            options_json,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.subscribe_foreground_relation_query(query_json, options_json) {
+                Ok(subscription) => ForegroundDbCommandResponse::Subscribed { subscription },
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
         ForegroundDbCommandRequest::WaitForTransaction { tx_id, tier } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
@@ -3295,6 +3315,17 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay
             .run(move |worker| worker.subscribe_foreground_query_with_options(id, query, opts))
+    }
+
+    fn subscribe_foreground_relation_query(
+        &self,
+        query_json: String,
+        options_json: String,
+    ) -> Result<u64, RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker.subscribe_foreground_relation_query(id, query_json, options_json)
+        })
     }
 
     fn wait_for_foreground_transaction(
@@ -4787,17 +4818,7 @@ impl RelayWorker {
                 "relation reads require the current/default read_view".to_owned(),
             ));
         }
-        let value: serde_json::Value = serde_json::from_str(&query_json).map_err(|error| {
-            RelayError::ForegroundCommand(format!("decode query json: {error}"))
-        })?;
-        let rel = value.get("relation_ir").ok_or_else(|| {
-            RelayError::ForegroundCommand("relation query json is missing relation_ir".to_owned())
-        })?;
-        let relation = jazz::query::RelationQuery {
-            rel: serde_json::from_value(rel.clone()).map_err(|error| {
-                RelayError::ForegroundCommand(format!("decode relation_ir: {error}"))
-            })?,
-        };
+        let relation = foreground_relation_query_from_json(&query_json)?;
         let state = self.foreground_client(client)?;
         if state.read_cleanups.borrow().len()
             + usize::from(state.read_cleanup.is_some())
@@ -4845,6 +4866,30 @@ impl RelayWorker {
             db.subscribe(&prepared, opts).await.map_err(RelayError::Db)
         });
         self.start_foreground_subscription(client_id, opener)
+    }
+
+    fn subscribe_foreground_relation_query(
+        &mut self,
+        client: u64,
+        query_json: String,
+        options_json: String,
+    ) -> Result<u64, RelayError> {
+        let opts = foreground_read_opts_from_json(&options_json)?;
+        if !opts.read_view.is_default() {
+            return Err(RelayError::ForegroundCommand(
+                "relation subscriptions require the current/default read_view".to_owned(),
+            ));
+        }
+        let relation = foreground_relation_query_from_json(&query_json)?;
+        let db = Rc::clone(&self.foreground_client(client)?.db);
+        let opener: ForegroundSubscriptionOpen = Box::pin(async move {
+            let prepared = db
+                .prepare_relation_query_async(&relation)
+                .await
+                .map_err(RelayError::Db)?;
+            db.subscribe(&prepared, opts).await.map_err(RelayError::Db)
+        });
+        self.start_foreground_subscription(client, opener)
     }
 
     fn start_foreground_subscription(
@@ -5523,6 +5568,22 @@ impl Drop for ForegroundReadCoverage {
             self.db.schedule_tick(TickUrgency::Immediate);
         }
     }
+}
+
+fn foreground_relation_query_from_json(
+    query_json: &str,
+) -> Result<jazz::query::RelationQuery, RelayError> {
+    let value: serde_json::Value = serde_json::from_str(query_json)
+        .map_err(|error| RelayError::ForegroundCommand(format!("decode query json: {error}")))?;
+    let rel = value.get("relation_ir").ok_or_else(|| {
+        RelayError::ForegroundCommand("relation query json is missing relation_ir".to_owned())
+    })?;
+    let relation = jazz::query::RelationQuery {
+        rel: serde_json::from_value(rel.clone()).map_err(|error| {
+            RelayError::ForegroundCommand(format!("decode relation_ir: {error}"))
+        })?,
+    };
+    Ok(relation)
 }
 
 fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
@@ -8777,6 +8838,20 @@ mod tests {
                 "{function} must return pending work rather than spin the owner thread"
             );
         }
+    }
+
+    #[test]
+    fn relation_subscription_command_preserves_append_only_byte_contract() {
+        let command = ForegroundDbCommandRequest::SubscribeRelationQuery {
+            query_json: "{}".to_owned(),
+            options_json: "{}".to_owned(),
+        };
+        let expected = [37, 2, b'{', b'}', 2, b'{', b'}'];
+        assert_eq!(postcard::to_allocvec(&command).unwrap(), expected);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandRequest>(&expected).unwrap(),
+            command
+        );
     }
 
     // Deterministic owner contention is a native scheduling boundary that the

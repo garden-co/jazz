@@ -410,6 +410,11 @@ is existing 3 Rows. Request 35 is UpdateLargeValues: table string, row_id
 16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option
 u64; its response is existing 14 TransactionCommitted. The continuation bytes
 are pinned by `foreground_continuation_v1_byte_contract`.
+Request 37 is SubscribeRelationQuery: query_json string, options_json string;
+its response is existing 4 Subscribed. It uses the same asynchronous canonical
+relation preparation as request 33, then the ordinary deferred subscription
+opener and event codec. It requires the default read view.
+
 Request 36 is DirectMutation: mutation enum, table string, optional row_id 16 raw
 bytes, cells byte vector, options_json string. Response 24 is MutationCommitted:
 tx_id 16 raw bytes followed by row_id 16 raw bytes. Direct writes use the core's

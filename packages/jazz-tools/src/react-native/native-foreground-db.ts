@@ -20,7 +20,7 @@ type ForegroundCommand =
   | { type: "prepareQuery"; query: Uint8Array }
   | { type: "all"; query: number }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
-  | { type: "allRelationQuery"; queryJson: string; optionsJson: string }
+  | { type: "allRelationQuery" | "subscribeRelationQuery"; queryJson: string; optionsJson: string }
   | {
       type: "allWithOptions" | "allRelationSnapshotWithOptions";
       query: number;
@@ -302,6 +302,18 @@ export class NativeForegroundDb {
 
   allRelationQueryForIdentity(): never {
     return unsupported("trusted-serving relation reads");
+  }
+
+  subscribeRelationQuery(queryJson: string, opts: unknown): NativeForegroundSubscription {
+    this.tick();
+    const response = this.execute({
+      type: "subscribeRelationQuery",
+      queryJson,
+      optionsJson: JSON.stringify(opts ?? {}),
+    });
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "subscribed") return unexpected("subscribeRelationQuery", response.type);
+    return new NativeForegroundSubscription(response.subscription, this);
   }
 
   subscribe(query: object, opts: unknown): NativeForegroundSubscription {
