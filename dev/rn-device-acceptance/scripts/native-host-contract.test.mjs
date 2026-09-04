@@ -99,6 +99,24 @@ function assertAndroidRelayAssemblyAbiContract(libraryBuild, workflow) {
   );
 }
 
+function assertPackedJvmAdmissionWorkflowContract(workflow, packagingReceipt) {
+  const assembly = jobSection(workflow, "android-device-acceptance");
+  assert.match(
+    assembly,
+    /NODE_ENV=production \.\/gradlew -PreactNativeArchitectures="\$\{relay_abis\}" :app:assembleRelease[\s\S]*?export PATH="\$JAVA_HOME\/bin:\$PATH"[\s\S]*?JAZZ_REQUIRE_RN_JVM_CONTRACT=1[\s\\]+node --test --test-name-pattern='a freshly installed Expo app prebuilds the packed jazz-rn relay host' dev\/gates\/test\/jazz-rn-packaging\.test\.mjs[\s\S]*?JAZZ_DEVICE_APK=/,
+    "the JDK-equipped device lane must require the packed JVM admission receipt after Gradle warms Kotlin",
+  );
+  assert.match(
+    packagingReceipt,
+    /const requireJvmAdmissionContract = process\.env\.JAZZ_REQUIRE_RN_JVM_CONTRACT === "1";/,
+  );
+  assert.match(
+    packagingReceipt,
+    /if \(requireJvmAdmissionContract && !hasJvmToolchain\)[\s\S]*?JAZZ_REQUIRE_RN_JVM_CONTRACT=1 requires both java and javac/,
+    "the required JVM receipt must fail closed when its Java tools are unavailable",
+  );
+}
+
 test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   const sources = new Map([
     [
@@ -1047,6 +1065,20 @@ test("dispatch device workflow uses Blacksmith KVM while source jobs remain chea
     );
   }
   assertRnDeviceWorkflowContract(workflow);
+  const packagingReceipt = fs.readFileSync(
+    path.resolve(root, "../../dev/gates/test/jazz-rn-packaging.test.mjs"),
+    "utf8",
+  );
+  assertPackedJvmAdmissionWorkflowContract(workflow, packagingReceipt);
+  assert.throws(
+    () =>
+      assertPackedJvmAdmissionWorkflowContract(
+        workflow.replace("JAZZ_REQUIRE_RN_JVM_CONTRACT=1", "JAZZ_REQUIRE_RN_JVM_CONTRACT=0"),
+        packagingReceipt,
+      ),
+    /must require the packed JVM admission receipt/,
+    "the device lane must not silently make the JVM receipt optional",
+  );
   assert.throws(
     () =>
       assertRnDeviceWorkflowContract(

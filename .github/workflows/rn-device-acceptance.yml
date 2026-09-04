@@ -227,6 +227,11 @@ jobs:
             ./gradlew -q -PreactNativeArchitectures="${relay_abis}" :app:properties | grep -Fx "reactNativeArchitectures: ${relay_abis}"
             NODE_ENV=production ./gradlew -PreactNativeArchitectures="${relay_abis}" :app:assembleRelease --console=plain
           )
+          # The Android build has already provisioned Gradle's Kotlin compiler;
+          # make the packed JVM admission receipt mandatory on this JDK lane.
+          export PATH="$JAVA_HOME/bin:$PATH"
+          JAZZ_REQUIRE_RN_JVM_CONTRACT=1 \
+            node --test --test-name-pattern='a freshly installed Expo app prebuilds the packed jazz-rn relay host' dev/gates/test/jazz-rn-packaging.test.mjs
           export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
           export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           pnpm --filter rn-device-acceptance device:android

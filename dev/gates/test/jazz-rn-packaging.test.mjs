@@ -1171,6 +1171,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     // as an external consumer: sensitive bridge entry points must not resolve
     // from Java, while external Kotlin and Java consumers can use the public
     // facade.
+    const requireJvmAdmissionContract = process.env.JAZZ_REQUIRE_RN_JVM_CONTRACT === "1";
     const hasJvmToolchain = ["java", "javac"].every((command) => {
       try {
         execFileSync(command, ["-version"], { stdio: "ignore" });
@@ -1179,6 +1180,8 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
         return false;
       }
     });
+    if (requireJvmAdmissionContract && !hasJvmToolchain)
+      throw new Error("JAZZ_REQUIRE_RN_JVM_CONTRACT=1 requires both java and javac");
     if (hasJvmToolchain) {
       const jvmReceiptDirectory = join(directory, "packed-jvm-admission-receipt");
       const relaySourceDirectory = join(jvmReceiptDirectory, "relay", "src", "main");
