@@ -353,20 +353,34 @@ describe("db exclusive transaction reads browser integration", () => {
       });
 
       const transaction = reader.beginExclusiveTransaction();
-      let transactionRows: Todo[];
       try {
-        transactionRows = await transaction.all(app.todos.where({ id: inserted.value.id }), {
+        const transactionRowsBeforeUpdate = await transaction.all(
+          app.todos.where({ id: inserted.value.id }),
+          {
+            tier: "edge",
+          },
+        );
+
+        await writer
+          .update(app.todos, inserted.value.id, { title: "updated remotely" })
+          .wait({ tier: "global" });
+
+        const directRows = await reader.all(app.todos.where({ id: inserted.value.id }), {
           tier: "edge",
         });
+        const transactionRowsAfterUpdate = await transaction.all(
+          app.todos.where({ id: inserted.value.id }),
+          {
+            tier: "edge",
+          },
+        );
+
+        expect(transactionRowsBeforeUpdate).toEqual([inserted.value]);
+        expect(directRows).toEqual([{ ...inserted.value, title: "updated remotely" }]);
+        expect(transactionRowsAfterUpdate).toEqual([inserted.value]);
       } finally {
         await transaction.rollback();
       }
-      const directRows = await reader.all(app.todos.where({ id: inserted.value.id }), {
-        tier: "edge",
-      });
-
-      expect(transactionRows).toEqual([inserted.value]);
-      expect(directRows).toEqual([inserted.value]);
     } finally {
       await Promise.all([writer.shutdown(), reader.shutdown()]);
     }
