@@ -8,6 +8,10 @@ import { cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
+import {
+  materializeJazzRnConsumerManifest,
+  prepareJazzRnConsumerFixture,
+} from "../../scripts/prepare-jazz-rn-consumer-fixture.mjs";
 
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
@@ -1515,6 +1519,58 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
   }
 });
 
+test("the packaged Expo consumer fixture materializes catalog specs before isolated install", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jazz-rn-consumer-fixture-"));
+  const fixtureSource = new URL("../../../examples/todo-client-localfirst-expo/", import.meta.url)
+    .pathname;
+  const packageDirectory = join(directory, "package");
+  const appDirectory = join(directory, "app");
+  try {
+    await mkdir(packageDirectory, { recursive: true });
+    const packed = JSON.parse(
+      execFileSync("npm", npmPackMachineArgs("--pack-destination", packageDirectory), {
+        cwd: new URL("../../../crates/jazz-rn/", import.meta.url),
+        encoding: "utf8",
+      }),
+    );
+    assert.deepEqual(packed.length, 1, "packing jazz-rn must produce one npm tarball");
+    const tarball = join(packageDirectory, packed[0].filename);
+
+    const sourceManifest = JSON.parse(await readFile(join(fixtureSource, "package.json"), "utf8"));
+    const materialized = materializeJazzRnConsumerManifest(sourceManifest, tarball);
+    const materializedJson = JSON.stringify(materialized);
+    assert.equal(materialized.dependencies["jazz-rn"], `file:${tarball}`);
+    assert.equal(materialized.dependencies["jazz-tools"], undefined);
+    assert.equal(materialized.devDependencies.typescript, "6.0.2");
+    assert.doesNotMatch(
+      materializedJson,
+      /"[^"]+":\s*"(?:catalog|workspace):/,
+      "the isolated fixture manifest must contain only ordinary dependency specs plus the packed tarball",
+    );
+
+    prepareJazzRnConsumerFixture({
+      fixtureSource,
+      fixtureDestination: appDirectory,
+      tarball,
+    });
+    execFileSync("pnpm", ["install", "--no-frozen-lockfile", "--ignore-scripts"], {
+      cwd: appDirectory,
+      stdio: "inherit",
+    });
+    const installedJazzRn = readFileSync(
+      require.resolve("jazz-rn/package.json", { paths: [appDirectory] }),
+      "utf8",
+    );
+    assert.match(
+      installedJazzRn,
+      /"name": "jazz-rn"/,
+      "the prepared isolated fixture must install the packed jazz-rn package",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts", async () => {
   const [
     podspec,
@@ -2644,7 +2700,15 @@ test("both alpha jazz-rn verifiers use the shared release source-revision contra
 });
 
 test("release, preview, and labeled platform gates seal and link the staged relay package", async () => {
-  const [packageBuild, alphaPublish, previewBuild, rnWorkflow, artifactScript, verifier] =
+  const [
+    packageBuild,
+    alphaPublish,
+    previewBuild,
+    rnWorkflow,
+    fixturePreparation,
+    artifactScript,
+    verifier,
+  ] =
     await Promise.all([
       readFile(
         new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url),
@@ -2657,6 +2721,10 @@ test("release, preview, and labeled platform gates seal and link the staged rela
       readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
       readFile(
         new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../../../dev/scripts/prepare-jazz-rn-consumer-fixture.mjs", import.meta.url),
         "utf8",
       ),
       readFile(
@@ -2690,6 +2758,16 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(packageBuild, /name: pkg-jazz-rn/);
   assert.match(packageBuild, /verify-relay-artifacts\.mjs android ios/);
   assert.match(packageBuild, /Build jazz-rn TypeScript package/);
+  assert.match(
+    packageBuild,
+    /prepare-jazz-rn-consumer-fixture\.mjs[\s\S]*pnpm --dir "\$\{FIXTURE\}\/app" install --no-frozen-lockfile/,
+    "the packaged RN consumer workflow must prepare the copied Expo fixture before isolated pnpm install",
+  );
+  assert.match(
+    fixturePreparation,
+    /value\.startsWith\("catalog:"\)|value\.startsWith\("workspace:"\)/,
+    "the shared fixture-preparation step must materialize workspace-only dependency specs",
+  );
   assert.match(alphaPublish, /pkg-jazz-rn/);
   assert.match(alphaPublish, /JAZZ_REUSE_PREVIEW_ARTIFACTS/);
   assert.match(alphaPublish, /release-artifact-source-revision\.mjs/);

@@ -546,18 +546,12 @@ jobs:
       - name: Install the packed relay into an isolated Expo fixture
         run: |
           FIXTURE=$(mktemp -d)
-          cp -R examples/todo-client-localfirst-expo "${FIXTURE}/app"
           TARBALL=$(find "$GITHUB_WORKSPACE/dist" -name 'jazz-rn-*.tgz' -type f -print -quit)
           test -n "${TARBALL}"
-          FIXTURE="${FIXTURE}" TARBALL="${TARBALL}" node -e '
-            const fs = require("fs");
-            const path = require("path");
-            const packagePath = path.join(process.env.FIXTURE, "app", "package.json");
-            const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-            pkg.dependencies["jazz-rn"] = `file:${process.env.TARBALL}`;
-            delete pkg.dependencies["jazz-tools"];
-            fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
-          '
+          node dev/scripts/prepare-jazz-rn-consumer-fixture.mjs \
+            examples/todo-client-localfirst-expo \
+            "${FIXTURE}/app" \
+            "${TARBALL}"
           pnpm --dir "${FIXTURE}/app" install --no-frozen-lockfile
           FIXTURE="${FIXTURE}" node -e '
             const fs = require("fs");
@@ -596,18 +590,12 @@ jobs:
       - name: Install the packed relay into an isolated Expo fixture
         run: |
           FIXTURE=$(mktemp -d)
-          cp -R examples/todo-client-localfirst-expo "${FIXTURE}/app"
           TARBALL=$(find "$GITHUB_WORKSPACE/dist" -name 'jazz-rn-*.tgz' -type f -print -quit)
           test -n "${TARBALL}"
-          FIXTURE="${FIXTURE}" TARBALL="${TARBALL}" node -e '
-            const fs = require("fs");
-            const path = require("path");
-            const packagePath = path.join(process.env.FIXTURE, "app", "package.json");
-            const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-            pkg.dependencies["jazz-rn"] = `file:${process.env.TARBALL}`;
-            delete pkg.dependencies["jazz-tools"];
-            fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
-          '
+          node dev/scripts/prepare-jazz-rn-consumer-fixture.mjs \
+            examples/todo-client-localfirst-expo \
+            "${FIXTURE}/app" \
+            "${TARBALL}"
           pnpm --dir "${FIXTURE}/app" install --no-frozen-lockfile
           FIXTURE="${FIXTURE}" node -e '
             const fs = require("fs");
