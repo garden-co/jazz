@@ -1667,7 +1667,7 @@ mod tests {
 
         assert_eq!(session.user_id, "user-42");
         assert_eq!(session.auth_mode, jazz::tools::AuthMode::External);
-        assert_eq!(session.claims, serde_json::json!({}));
+        assert_eq!(session.claims["role"], "admin");
     }
 
     #[test]
