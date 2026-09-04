@@ -89,10 +89,28 @@ impl std::error::Error for WebSocketClientError {}
 /// NotReady/Later admission response accepted by the browser is retryable.
 fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
     let retryable = match &error {
-        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(_))
-        | WebSocketClientError::Send(tokio_tungstenite::tungstenite::Error::Io(_))
-        | WebSocketClientError::Receive(tokio_tungstenite::tungstenite::Error::Io(_))
-        | WebSocketClientError::HandshakeTimeout => true,
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(error))
+        | WebSocketClientError::Send(tokio_tungstenite::tungstenite::Error::Io(error))
+        | WebSocketClientError::Receive(tokio_tungstenite::tungstenite::Error::Io(error)) => {
+            // The rustls connector also returns certificate/protocol failures
+            // as Io(InvalidData), retaining rustls::Error as the source. An Io
+            // wrapper alone is therefore not evidence of network unavailability.
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::NetworkDown
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+            )
+        }
+        WebSocketClientError::HandshakeTimeout => true,
         WebSocketClientError::ServerWireError(error) => {
             error.code == jazz::wire::WireErrorCode::NotReady
                 && error.retry == jazz::wire::WireRetry::Later
@@ -906,6 +924,55 @@ mod tests {
             !native_transport_error(WebSocketClientError::UnexpectedHandshakeMessage)
                 .is_retryable()
         );
+    }
+
+    // The exact nested error comes from tokio-rustls before a Jazz handshake,
+    // so this adapter classification must be tested below the Db API.
+    #[test]
+    fn rustls_certificate_io_failures_remain_terminal() {
+        let certificate =
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer);
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidData, certificate);
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<rustls::Error>()
+                .is_some()
+        );
+        assert!(
+            !native_transport_error(WebSocketClientError::Connect(
+                tokio_tungstenite::tungstenite::Error::Io(error)
+            ))
+            .is_retryable()
+        );
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                !native_transport_error(WebSocketClientError::Receive(
+                    tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                        kind,
+                        "connection refused"
+                    ))
+                ))
+                .is_retryable()
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::NetworkUnreachable,
+        ] {
+            assert!(
+                native_transport_error(WebSocketClientError::Send(
+                    tokio_tungstenite::tungstenite::Error::Io(kind.into())
+                ))
+                .is_retryable()
+            );
+        }
     }
 
     use super::*;
