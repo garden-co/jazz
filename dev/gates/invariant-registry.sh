@@ -7,8 +7,7 @@
 set +e
 set -u -o pipefail
 
-readonly JAZZ_REGISTRY="${JAZZ_INVARIANT_REGISTRY:-crates/jazz/SPEC/INVARIANTS.md}"
-readonly GROOVE_REGISTRY="${GROOVE_INVARIANT_REGISTRY:-crates/groove/SPEC/INVARIANTS.md}"
+readonly REGISTRY="${INVARIANT_REGISTRY:-crates/invariant-registry.jsonl}"
 
 failures=0
 rows=0
@@ -30,90 +29,58 @@ require_command() {
     return 0
 }
 
-# Emits six unit-separator-delimited fields for each structurally valid registry
-# row. A literal Markdown pipe must be written as \|; the parser retains it in
-# the field rather than treating it as a table boundary.
+# Emits seven unit-separator-delimited fields for every canonical JSONL
+# record. The single repository-wide registry is deliberately one physical
+# record per line: unrelated changes conflict only when they edit one ID.
 parse_registry() {
     local registry=$1 parsed_status
     PARSED_ROWS="$(perl - "$registry" <<'PERL'
 use strict;
 use warnings;
+use JSON::PP ();
+use open qw(:std :encoding(UTF-8));
 
 my ($path) = @ARGV;
 open my $fh, '<', $path or die "cannot read $path: $!\n";
-my ($line_no, $state, $bad) = (0, 'before-header', 0);
-
-sub trim {
-    my ($value) = @_;
-    $value =~ s/^\s+|\s+$//g;
-    return $value;
-}
-
-sub split_row {
-    my ($line) = @_;
-    return unless $line =~ /^\|.*\|$/;
-    my ($cell, @fields) = ('');
-    my $inside = substr($line, 1, -1);
-    for (my $i = 0; $i < length $inside; $i++) {
-        my $char = substr($inside, $i, 1);
-        if ($char eq '\\' && $i + 1 < length($inside) && substr($inside, $i + 1, 1) eq '|') {
-            $cell .= '\\|';
-            $i++;
-        } elsif ($char eq '|') {
-            push @fields, trim($cell);
-            $cell = '';
-        } else {
-            $cell .= $char;
-        }
-    }
-    push @fields, trim($cell);
-    return @fields;
-}
-
+my $json = JSON::PP->new->utf8(0);
+my @keys = qw(domain id invariant tests implementation status coverage);
+my $bad = 0;
+my $previous = '';
+my $line_number = 0;
 while (my $line = <$fh>) {
+    $line_number++;
     chomp $line;
-    $line_no++;
-    if ($state eq 'before-header') {
-        if ($line =~ /^\|\s*id\s*\|/) {
-            my @fields = split_row($line);
-            if (@fields != 6 || $fields[0] ne 'id' || $fields[1] ne 'invariant' || $fields[2] ne 'enforced by (test)' || $fields[3] ne 'impl' || $fields[4] ne 'status' || $fields[5] ne 'coverage') {
-                warn "$path:$line_no: malformed invariant-registry header\n";
-                $bad++;
-                last;
-            }
-            $state = 'separator';
-        } elsif ($line =~ /^\|/) {
-            warn "$path:$line_no: table row before invariant-registry header\n";
-            $bad++;
-        }
-    } elsif ($state eq 'separator') {
-        my @fields = split_row($line);
-        if (@fields != 6 || grep { !/^:?-{3,}:?$/ } @fields) {
-            warn "$path:$line_no: malformed table separator\n";
-            $bad++;
-        }
-        $state = 'rows';
-    } elsif ($state eq 'rows') {
-        if ($line !~ /^\|/) {
-            $state = 'after-table';
-            next;
-        }
-        my @fields = split_row($line);
-        if (@fields != 6) {
-            warn "$path:$line_no: malformed row (expected six columns; escape literal pipes as \\|)\n";
-            $bad++;
-            next;
-        }
-        print join("\x1f", @fields), "\n";
-    } elsif ($state eq 'after-table' && $line =~ /^\|/) {
-        warn "$path:$line_no: unexpected table row after invariant registry\n";
+    if ($line eq '') {
+        warn "$path:$line_number: blank lines are not records\n";
+        $bad++;
+        next;
+    }
+    my $record = eval { $json->decode($line) };
+    if (!$record || ref($record) ne 'HASH') {
+        warn "$path:$line_number: malformed JSON object\n";
+        $bad++;
+        next;
+    }
+    my @actual_keys = sort keys %$record;
+    if (join(',', @actual_keys) ne join(',', sort @keys)
+        || grep { !defined($record->{$_}) || ref($record->{$_}) } @keys) {
+        warn "$path:$line_number: record must contain exactly the seven scalar fields\n";
+        $bad++;
+        next;
+    }
+    my $canonical = '{' . join(',', map { $json->encode($_) . ':' . $json->encode($record->{$_}) } @keys) . '}';
+    if ($line ne $canonical) {
+        warn "$path:$line_number: non-canonical JSONL spelling or field order\n";
+        $bad++;
+        next;
+    }
+    my $sort_key = "$record->{id}\0$record->{domain}";
+    if ($previous ne '' && $sort_key le $previous) {
+        warn "$path:$line_number: records must be strictly sorted by id then domain\n";
         $bad++;
     }
-}
-
-if ($state eq 'before-header' || $state eq 'separator') {
-    warn "$path: invariant registry table is missing or incomplete\n";
-    $bad++;
+    $previous = $sort_key;
+    print join("\x1f", @{$record}{@keys}), "\n";
 }
 exit($bad ? 1 : 0);
 PERL
@@ -231,46 +198,56 @@ check_test_citations() {
 }
 
 check_registry() {
-    local registry=$1 record id invariant tests impl status coverage registry_rows=0
+    local registry=$1 record domain id invariant tests impl status coverage registry_rows=0
     local -A seen_ids=()
     parse_registry "$registry"
-    while IFS=$'\x1f' read -r id invariant tests impl status coverage; do
+    while IFS=$'\x1f' read -r domain id invariant tests impl status coverage; do
         [[ -n $id ]] || continue
-        if [[ ! $id =~ ^(G-)?INV-[A-Za-z0-9-]+$ ]]; then
-            fail "$registry: invalid invariant id '$id'"
+        if [[ ! $domain =~ ^(jazz|groove)$ ]]; then
+            fail "$registry: invalid invariant domain '$domain'"
             continue
         fi
-        if [[ -n ${seen_ids[$id]+present} ]]; then
-            fail "$registry: duplicate invariant id '$id'"
+        if [[ ! $id =~ ^(G-)?INV-[A-Za-z0-9-]+$ ]]; then
+            fail "$registry:$domain: invalid invariant id '$id'"
+            continue
+        fi
+        if [[ -n ${seen_ids["$domain:$id"]+present} ]]; then
+            fail "$registry: duplicate invariant id '$domain:$id'"
         else
-            seen_ids[$id]=1
+            seen_ids["$domain:$id"]=1
         fi
         if [[ -z $status || -z $coverage ]]; then
-            fail "$registry:$id: status and coverage must not be empty"
+            fail "$registry:$domain:$id: status and coverage must not be empty"
         fi
+        case $status in
+            now|target|next|planned|prov|open) ;;
+            *) fail "$registry:$domain:$id: unknown status '$status'" ;;
+        esac
         if [[ $coverage == '✓' \
             && ! $tests =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ \
             && ! $tests =~ packages/[A-Za-z0-9_./-]+\.test\.(ts|tsx) ]]; then
-            printf 'invariant-registry: covered without test: %s:%s\n' "$registry" "$id" >&2
+            printf 'invariant-registry: covered without test: %s:%s:%s\n' "$registry" "$domain" "$id" >&2
             uncited_covered=$((uncited_covered + 1))
             failures=$((failures + 1))
         fi
         if [[ $status == 'now' && $coverage == 'untested' ]]; then
             now_untested=$((now_untested + 1))
-            printf 'invariant-registry: documented debt (not failing): %s:%s is now + untested\n' "$registry" "$id" >&2
+            printf 'invariant-registry: documented debt (not failing): %s:%s:%s is now + untested\n' "$registry" "$domain" "$id" >&2
         fi
         check_test_citations "$registry" "$id" "$tests"
         registry_rows=$((registry_rows + 1))
         rows=$((rows + 1))
     done <<< "$PARSED_ROWS"
+    if (( registry_rows == 0 )); then
+        fail "$registry: registry must contain at least one invariant record"
+    fi
     printf 'invariant-registry: checked %s (%d rows)\n' "$registry" "$registry_rows"
 }
 
 require_command git || exit 1
 require_command perl || exit 1
 index_test_functions
-check_registry "$JAZZ_REGISTRY"
-check_registry "$GROOVE_REGISTRY"
+check_registry "$REGISTRY"
 printf 'invariant-registry: summary: %d rows, %d missing test citations, %d covered rows without a test, %d now + untested (not failing)\n' \
     "$rows" "$missing_tests" "$uncited_covered" "$now_untested"
 
