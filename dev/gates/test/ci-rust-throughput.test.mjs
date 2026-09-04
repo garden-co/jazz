@@ -1722,7 +1722,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
-  assert.match(localCi, /native correctness-artifact producer[\s\S]*build:correctness-artifacts/);
+  assert.match(localCi, /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/);
   assert.match(localCi, /TypeScript consumers[\s\S]*test:typescript-consumers/);
   assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
   assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);

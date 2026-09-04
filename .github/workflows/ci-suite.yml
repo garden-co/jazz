@@ -167,10 +167,11 @@ jobs:
 
   # This is deliberately an exact, named historical-storage partition rather
   # than an incidental member of the broad nextest shard. A green Rust suite
-  # must mean current code opened the pinned native SQLite/RocksDB corpus.
+  # must mean current code opened the pinned native and real-browser corpora.
   test-storage-compat:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
+    # Native corpus plus cold sealed NAPI/WASM production and real Chromium.
+    timeout-minutes: 30
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
       credentials:
@@ -181,7 +182,7 @@ jobs:
       - uses: ./.github/actions/setup-blacksmith
         with:
           sccache-s3: false
-      - name: Run CI-equivalent native storage compatibility partition
+      - name: Run CI-equivalent native and browser storage compatibility partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition storage-compat
       - name: Report sccache statistics
         if: always()
