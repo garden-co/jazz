@@ -12,7 +12,11 @@ concurrency:
 
 permissions:
   actions: read
-  contents: read
+  # The reusable publisher declares `contents: write` for the real-release
+  # source-tag step. GitHub validates reusable-workflow permissions before it
+  # evaluates the dry-run guards, so the preview caller must grant the same
+  # ceiling even though dry-run never executes a repository write.
+  contents: write
   id-token: write
   pull-requests: read
   statuses: write

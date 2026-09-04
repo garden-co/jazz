@@ -350,3 +350,19 @@ test("release publishing rebuilds when workflow changes invalidate preview artif
   );
   assert.doesNotMatch(workflow, /workflow-only drift|nonWorkflowFiles/);
 });
+
+test("alpha release preview can call the publisher without elevating nested permissions", () => {
+  const previewWorkflow = readFileSync(
+    new URL("../../.github/workflows/preview-jazz-tools-alpha-release.yml", import.meta.url),
+    "utf8",
+  );
+  const publisherWorkflow = readFileSync(
+    new URL("../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(previewWorkflow, /permissions:[\s\S]*?contents: write/);
+  assert.match(previewWorkflow, /mode: dry-run/);
+  assert.match(publisherWorkflow, /permissions:[\s\S]*?contents: write/);
+  assert.match(publisherWorkflow, /if: env\.RELEASE_MODE == 'publish'/);
+});
