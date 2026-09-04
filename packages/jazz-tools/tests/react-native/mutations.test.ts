@@ -26,14 +26,13 @@ describe("React Native public mutations through the real foreground C ABI", () =
       });
       await db.delete(app.documents, row.id).wait({ tier: "local" });
       expect(await db.all(app.documents)).toEqual([]);
-      await expect(
+      // Native bindings can reject local admission synchronously; the row
+      // remains tombstoned at either the setup or settlement boundary.
+      await expect(async () =>
         db
           .upsert(app.documents, row.id, { title: "must stay hidden", done: false })
           .wait({ tier: "local" }),
-      ).rejects.toMatchObject({
-        name: "PersistedWriteRejectedError",
-        code: "write_rejected",
-      });
+      ).rejects.toThrow(`row already deleted: ${row.id}`);
       expect(await db.all(app.documents)).toEqual([]);
       await db
         .restore(app.documents, row.id, { title: "restored", done: false })
@@ -216,5 +215,54 @@ it("settles an empty standalone update without changing the row", async () => {
     const write = db.update(app.documents, row.id, {});
     await expect(write.wait({ tier: "local" })).resolves.toBeUndefined();
     expect(await db.one(app.documents.where({ id: row.id }))).toEqual(row);
+  });
+});
+
+it("preserves branch head/base targets and restores only the selected head", async () => {
+  const branches = schema.defineApp({
+    documents: schema
+      .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() })
+      .branchBy("branch"),
+  });
+  await withNativeRelayFixture(branches, async (fixture) => {
+    const db = await fixture.createDb();
+    const row = await db
+      .insert(
+        branches.documents,
+        { branch: "main", title: "inherited", done: false },
+        { branch: "main" },
+      )
+      .wait({ tier: "local" });
+    const main = () => db.one(branches.documents.where({ id: row.id }), { branch: "main" });
+    const draft = () =>
+      db.one(branches.documents.where({ id: row.id }), { branch: "draft", base: "main" });
+    await db
+      .upsert(
+        branches.documents,
+        row.id,
+        { title: "draft upsert" },
+        { branch: "draft", base: "main" },
+      )
+      .wait({ tier: "local" });
+    expect(await main()).toEqual(row);
+    expect(await draft()).toEqual({ ...row, branch: "draft", title: "draft upsert" });
+    await db
+      .update(branches.documents, row.id, { done: true }, { branch: "draft", base: "main" })
+      .wait({ tier: "local" });
+    expect(await draft()).toMatchObject({ title: "draft upsert", done: true });
+    await db
+      .delete(branches.documents, row.id, { branch: "draft", base: "main" })
+      .wait({ tier: "local" });
+    expect(await draft()).toBeNull();
+    await db
+      .restore(
+        branches.documents,
+        row.id,
+        { branch: "draft", title: "restored draft", done: false },
+        { branch: "draft" },
+      )
+      .wait({ tier: "local" });
+    expect(await draft()).toEqual({ ...row, branch: "draft", title: "restored draft" });
+    expect(await main()).toEqual(row);
   });
 });

@@ -4273,6 +4273,8 @@ enum ForegroundOperationResult {
     SubscriptionEvents(Vec<ForegroundSubscriptionEvent>),
     TransactionSettled(TransactionId),
     TransactionCommitted(TransactionId),
+    StreamingMutationPushed,
+    StreamingMutationAborted(bool),
 }
 
 enum ForegroundOperationPoll {
@@ -4292,6 +4294,12 @@ fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbC
         ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(events)) => {
             ForegroundDbCommandResponse::SubscriptionEvents { events }
         }
+        ForegroundOperationPoll::Ready(ForegroundOperationResult::StreamingMutationPushed) => {
+            ForegroundDbCommandResponse::StreamingMutationPushed
+        }
+        ForegroundOperationPoll::Ready(ForegroundOperationResult::StreamingMutationAborted(
+            aborted,
+        )) => ForegroundDbCommandResponse::StreamingMutationAborted { aborted },
         ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionCommitted(tx_id)) => {
             ForegroundDbCommandResponse::TransactionCommitted {
                 tx_id: *tx_id.as_bytes(),
@@ -5179,8 +5187,20 @@ impl RelayWorker {
                 .map(|(id, write)| (*id, Rc::clone(write)))
         };
         if let Some((id, write)) = retained {
+            // WriteHandle::wait is a snapshot check. The core callback API
+            // owns the asynchronous waiter and preserves queued no-op aliases.
+            let (send, receive) = futures::channel::oneshot::channel();
+            self.foreground_client(client)?
+                .db
+                .wait_for_write_with(&write, tier, move |result| {
+                    let _ = send.send(result);
+                });
             let future: ForegroundOperationFuture = Box::pin(async move {
-                write.wait(tier).await.map_err(RelayError::Db)?;
+                let _retained_write = write;
+                receive
+                    .await
+                    .map_err(|_| RelayError::Closed)?
+                    .map_err(RelayError::Db)?;
                 Ok(ForegroundOperationResult::TransactionSettled(id))
             });
             return self.start_foreground_operation(client, None, future);

@@ -8,7 +8,7 @@ type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle<MemoryStorage>>>
 
 pub(super) struct MutationHandles {
     pub(super) writes: Writes,
-    uploads: BTreeMap<u64, StreamingMutation>,
+    uploads: Rc<RefCell<BTreeMap<u64, StreamingMutation>>>,
     errors: Rc<RefCell<Vec<jazz::db::MutationErrorEvent>>>,
 }
 
@@ -21,22 +21,20 @@ impl MutationHandles {
         }));
         Self {
             writes: Rc::new(RefCell::new(BTreeMap::new())),
-            uploads: BTreeMap::new(),
+            uploads: Rc::new(RefCell::new(BTreeMap::new())),
             errors,
         }
     }
 
     pub(super) fn close(&mut self, db: &Db<MemoryStorage>) -> Result<(), RelayError> {
         db.clear_mutation_error_callback();
-        let mut first_error = None;
-        for (_, pending) in std::mem::take(&mut self.uploads) {
-            if let Err(error) = block_on(db.abort_streaming_value_upload(pending.upload)) {
-                first_error.get_or_insert(error);
-            }
-        }
+        // Unfinished uploads exist solely in this foreground's MemoryStorage.
+        // Closing drops its pending operations and Db; no unfinished scalar is
+        // published to the persistent relay. Never await a node lock here.
+        self.uploads.borrow_mut().clear();
         self.writes.borrow_mut().clear();
         self.errors.borrow_mut().clear();
-        first_error.map_or(Ok(()), |error| Err(RelayError::Db(error)))
+        Ok(())
     }
 }
 
@@ -50,6 +48,21 @@ struct StreamingMutation {
     upload: StreamingValueUpload,
 }
 
+fn poll_write_state_once(
+    future: impl Future<Output = Result<jazz::db::WriteState, jazz::db::Error>>,
+) -> Result<jazz::db::WriteState, RelayError> {
+    let mut future = std::pin::pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(result) => result.map_err(RelayError::Db),
+        Poll::Pending => Err(RelayError::ForegroundCommand(
+            "write state is temporarily busy; retry after the next native turn".into(),
+        )),
+    }
+}
+
 fn register_write(writes: &Writes, write: WriteHandle<MemoryStorage>) -> TransactionId {
     let id = TransactionId::from_committed_tx(write.mergeable_tx_id());
     writes.borrow_mut().insert(id, Rc::new(write));
@@ -57,6 +70,17 @@ fn register_write(writes: &Writes, write: WriteHandle<MemoryStorage>) -> Transac
 }
 
 impl RelayWorker {
+    fn ensure_mutation_operation_capacity(&self, client: u64) -> Result<(), RelayError> {
+        if self.foreground_client(client)?.pending_operations.len()
+            >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
+        {
+            return Err(RelayError::ForegroundCommand(
+                "foreground operation capacity exceeded".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn foreground_write_state(
         &self,
         client: u64,
@@ -69,7 +93,7 @@ impl RelayWorker {
             .find(|(id, _)| id.as_bytes() == &public_id)
             .map(|(_, write)| write);
         let state = match write {
-            Some(write) => block_on(write.write_state()),
+            Some(write) => poll_write_state_once(write.write_state()),
             None => {
                 let tx_id = client
                     .committed_transactions
@@ -79,10 +103,9 @@ impl RelayWorker {
                     .ok_or_else(|| {
                         RelayError::ForegroundCommand("unknown foreground write".into())
                     })?;
-                client.db.write_state(tx_id)
+                poll_write_state_once(client.db.write_state_async(tx_id))
             }
-        }
-        .map_err(RelayError::Db)?;
+        }?;
         serde_json::to_string(&state)
             .map_err(|error| RelayError::ForegroundCommand(error.to_string()))
     }
@@ -129,7 +152,7 @@ impl RelayWorker {
         }
         let cells = decode_foreground_cells(&cells)?;
         let client = self.foreground_client_mut(client)?;
-        if client.mutations.uploads.len() >= NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX {
+        if client.mutations.uploads.borrow().len() >= NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX {
             return Err(RelayError::ForegroundCommand(
                 "foreground streaming upload capacity exceeded".into(),
             ));
@@ -139,7 +162,7 @@ impl RelayWorker {
             .begin_streaming_value_upload(&table, &cells, &column)
             .map_err(RelayError::Db)?;
         let handle = Self::next_foreground_handle(client)?;
-        client.mutations.uploads.insert(
+        client.mutations.uploads.borrow_mut().insert(
             handle,
             StreamingMutation {
                 table,
@@ -159,23 +182,38 @@ impl RelayWorker {
         client: u64,
         handle: u64,
         chunk: Vec<u8>,
-    ) -> Result<(), RelayError> {
+    ) -> Result<ForegroundOperationPoll, RelayError> {
         if chunk.len() > 64 * 1024 {
             return Err(RelayError::ForegroundCommand(
                 "streaming chunks must fit the 64 KiB host window".into(),
             ));
         }
-        let client = self.foreground_client_mut(client)?;
-        let pending =
-            client.mutations.uploads.get_mut(&handle).ok_or_else(|| {
-                RelayError::ForegroundCommand("streaming mutation is closed".into())
-            })?;
-        block_on(
-            client
-                .db
-                .push_streaming_value_upload(&mut pending.upload, &chunk),
-        )
-        .map_err(RelayError::Db)
+        self.ensure_mutation_operation_capacity(client)?;
+        let (db, uploads, mut pending) = {
+            let client = self.foreground_client_mut(client)?;
+            let pending = client
+                .mutations
+                .uploads
+                .borrow_mut()
+                .remove(&handle)
+                .ok_or_else(|| {
+                    RelayError::ForegroundCommand("streaming mutation is closed or busy".into())
+                })?;
+            (
+                Rc::clone(&client.db),
+                Rc::clone(&client.mutations.uploads),
+                pending,
+            )
+        };
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let result = db
+                .push_streaming_value_upload(&mut pending.upload, &chunk)
+                .await;
+            uploads.borrow_mut().insert(handle, pending);
+            result.map_err(RelayError::Db)?;
+            Ok(ForegroundOperationResult::StreamingMutationPushed)
+        });
+        self.start_foreground_operation(client, None, future)
     }
 
     pub(super) fn finish_foreground_streaming_mutation(
@@ -183,11 +221,17 @@ impl RelayWorker {
         client: u64,
         handle: u64,
     ) -> Result<ForegroundOperationPoll, RelayError> {
+        self.ensure_mutation_operation_capacity(client)?;
         let (db, writes, pending) = {
             let client = self.foreground_client_mut(client)?;
-            let pending = client.mutations.uploads.remove(&handle).ok_or_else(|| {
-                RelayError::ForegroundCommand("streaming mutation is closed".into())
-            })?;
+            let pending = client
+                .mutations
+                .uploads
+                .borrow_mut()
+                .remove(&handle)
+                .ok_or_else(|| {
+                    RelayError::ForegroundCommand("streaming mutation is closed".into())
+                })?;
             (
                 Rc::clone(&client.db),
                 Rc::clone(&client.mutations.writes),
@@ -222,13 +266,23 @@ impl RelayWorker {
         &mut self,
         client: u64,
         handle: u64,
-    ) -> Result<bool, RelayError> {
-        let client = self.foreground_client_mut(client)?;
-        let Some(pending) = client.mutations.uploads.remove(&handle) else {
-            return Ok(false);
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        self.ensure_mutation_operation_capacity(client)?;
+        let (db, pending) = {
+            let client = self.foreground_client_mut(client)?;
+            let pending = client.mutations.uploads.borrow_mut().remove(&handle);
+            (Rc::clone(&client.db), pending)
         };
-        block_on(client.db.abort_streaming_value_upload(pending.upload)).map_err(RelayError::Db)?;
-        Ok(true)
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let Some(pending) = pending else {
+                return Ok(ForegroundOperationResult::StreamingMutationAborted(false));
+            };
+            db.abort_streaming_value_upload(pending.upload)
+                .await
+                .map_err(RelayError::Db)?;
+            Ok(ForegroundOperationResult::StreamingMutationAborted(true))
+        });
+        self.start_foreground_operation(client, None, future)
     }
 
     pub(super) fn update_foreground_large_values(
@@ -302,16 +356,15 @@ impl NativeRelayClient {
                         options_json,
                     )?,
                 },
-                Request::PushStreamingMutation { upload, chunk } => {
-                    worker.push_foreground_streaming_mutation(id, upload, chunk)?;
-                    Response::StreamingMutationPushed
-                }
+                Request::PushStreamingMutation { upload, chunk } => foreground_operation_response(
+                    worker.push_foreground_streaming_mutation(id, upload, chunk)?,
+                ),
                 Request::FinishStreamingMutation { upload } => foreground_operation_response(
                     worker.finish_foreground_streaming_mutation(id, upload)?,
                 ),
-                Request::AbortStreamingMutation { upload } => Response::StreamingMutationAborted {
-                    aborted: worker.abort_foreground_streaming_mutation(id, upload)?,
-                },
+                Request::AbortStreamingMutation { upload } => foreground_operation_response(
+                    worker.abort_foreground_streaming_mutation(id, upload)?,
+                ),
                 Request::UpdateLargeValues {
                     table,
                     row_id,

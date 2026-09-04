@@ -806,6 +806,29 @@ where
         })
     }
 
+    /// Read write state without synchronously reentering a suspended owner.
+    /// Bindings may retain this future, or poll once and report a transient busy
+    /// result when their public state accessor is synchronous.
+    #[doc(hidden)]
+    pub async fn write_state_async(&self, tx_id: TxId) -> Result<WriteState, Error> {
+        if let Some(state) = self.node.queued_mutation_write_state(tx_id) {
+            return state;
+        }
+        let Some((fate, global_time, durability)) =
+            self.node.node.lock().await.transaction_state(tx_id).await
+        else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("transaction {tx_id:?} is not known locally"),
+            ));
+        };
+        Ok(WriteState {
+            fate,
+            global_time,
+            durability,
+        })
+    }
+
     /// Consume a failure discovered by a binding-owned bounded admission turn.
     ///
     /// Normal writes retain their failure until `wait()` observes it. A

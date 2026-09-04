@@ -613,6 +613,9 @@ export class NativeForegroundDb {
     head?: unknown,
     base?: unknown,
   ) {
+    if (updatedAtMs !== undefined && (!Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0)) {
+      throw new Error("updatedAtMs must be a non-negative safe integer");
+    }
     const response = this.execute({
       type: "beginStreamingMutation",
       mutation,
@@ -632,9 +635,11 @@ export class NativeForegroundDb {
       this.assertOpen();
     };
     return {
-      push: (chunk: Uint8Array): void => {
+      push: async (chunk: Uint8Array): Promise<void> => {
         assertOpen();
-        const pushed = this.execute({ type: "pushStreamingMutation", upload, chunk });
+        const pushed = await this.completeMutationOperation(
+          this.execute({ type: "pushStreamingMutation", upload, chunk }),
+        );
         if (pushed.type === "operationError") throw new Error(pushed.reason);
         if (pushed.type !== "streamingMutationPushed")
           return unexpected("pushStreamingMutation", pushed.type);
@@ -654,16 +659,30 @@ export class NativeForegroundDb {
           return unexpected("finishStreamingMutation", finished.type);
         return nativeWrite(this, finished.txId, rowId);
       },
-      abort: (): boolean => {
+      abort: async (): Promise<boolean> => {
         if (closed || this.closed) return false;
         closed = true;
-        const aborted = this.execute({ type: "abortStreamingMutation", upload });
+        const aborted = await this.completeMutationOperation(
+          this.execute({ type: "abortStreamingMutation", upload }),
+        );
         if (aborted.type === "operationError") throw new Error(aborted.reason);
         if (aborted.type !== "streamingMutationAborted")
           return unexpected("abortStreamingMutation", aborted.type);
         return aborted.aborted;
       },
     };
+  }
+
+  private async completeMutationOperation(
+    response: ForegroundResponse,
+  ): Promise<ForegroundResponse> {
+    while (response.type === "pending") {
+      const operation = response.operation;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      this.tick();
+      response = this.execute({ type: "poll", operation });
+    }
+    return response;
   }
 
   private withOneMutation(
@@ -838,13 +857,14 @@ function nativeWrite(
   txId: Uint8Array<ArrayBufferLike>,
   rowId: Uint8Array<ArrayBufferLike> = new Uint8Array(16),
 ): NativeForegroundWrite {
-  const id = formatUuid(txId);
+  const id = formatTransactionId(txId);
   let closed = false;
   return {
     txId: id,
     payload: new Uint8Array(),
     rowId: rowId.slice(),
     async wait(tier: string): Promise<void> {
+      if (closed) throw new Error("write state is unavailable");
       await db.waitForTransaction(txId, tier);
     },
     writeState: () => {
@@ -913,9 +933,9 @@ function unexpected(operation: string, response: string): never {
   );
 }
 
-function formatUuid(bytes: Uint8Array<ArrayBufferLike>): string {
+function formatTransactionId(bytes: Uint8Array<ArrayBufferLike>): string {
   if (bytes.byteLength !== 16)
     throw new Error("React Native native foreground returned malformed transaction id");
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return hex;
 }
