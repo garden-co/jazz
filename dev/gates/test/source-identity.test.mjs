@@ -70,7 +70,6 @@ test("identity reads survive a container checkout ownership boundary", () => {
   }
 });
 
-
 test("untracked nested repository sources retain tracked and untracked byte identity", () => {
   const root = fixture();
   try {

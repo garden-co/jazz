@@ -54,7 +54,10 @@ function untrackedContent(root, relative, excludePathspecs, ancestors = new Set(
   if (ancestors.has(real)) throw new Error("source identity: cyclic directory input");
   const nextAncestors = new Set([...ancestors, real]);
   const entries = git(absolute, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
-    .toString("utf8").split("\0").filter(Boolean).sort();
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .sort();
   const hash = crypto.createHash("sha256");
   for (const entry of entries) {
     const child = path.posix.join(relative, entry);
