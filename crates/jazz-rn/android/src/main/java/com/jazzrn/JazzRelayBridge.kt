@@ -172,10 +172,8 @@ data class TrustedRelayScopeConfig(
  * old value before admitting a changed authenticated scope.
  */
 object JazzRelayTrustedAdmission {
-  @JvmSynthetic
   fun admit(config: TrustedRelayScopeConfig): ByteArray = JazzRelayBridge.admitTrustedScope(config)
 
-  @JvmSynthetic
   fun beginPrivateSession(
     context: Context,
     serverUrl: String,
@@ -183,17 +181,14 @@ object JazzRelayTrustedAdmission {
     jwt: String,
   ): ByteArray = JazzRelayBridge.beginPrivateSession(context, serverUrl, appId, jwt)
 
-  @JvmSynthetic
   fun attachCanonicalSchema(session: ByteArray, schemaJson: String): ByteArray =
     JazzRelayBridge.attachCanonicalSchema(session, schemaJson)
 
-  @JvmSynthetic
   fun replace(previous: ByteArray?, next: TrustedRelayScopeConfig): ByteArray {
     previous?.let(JazzRelayBridge::revokeTrustedScope)
     return JazzRelayBridge.admitTrustedScope(next)
   }
 
-  @JvmSynthetic
   fun revoke(capability: ByteArray): Unit = JazzRelayBridge.revokeTrustedScope(capability)
 }
 

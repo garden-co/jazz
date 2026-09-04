@@ -1136,20 +1136,23 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
         new RegExp(`@JvmSynthetic\\s+@Synchronized\\s+fun ${method}`),
         `${method} must be synthetic to Java callers`,
       );
-    for (const method of [
-      "admit",
-      "beginPrivateSession",
-      "attachCanonicalSchema",
-      "replace",
-      "revoke",
-    ])
-      assert.match(
-        packedAndroidAdmission,
-        new RegExp(
-          `object JazzRelayTrustedAdmission \\{[\\s\\S]*@JvmSynthetic[\\s\\S]*fun ${method}`,
+    assert.doesNotMatch(
+      packedAndroidAdmission,
+      /object JazzRelayTrustedAdmission \{[\s\S]*@JvmSynthetic[\s\S]*fun beginPrivateSession/m,
+      "the public admission facade must remain callable from Java as well as Kotlin",
+    );
+    assert.throws(
+      () =>
+        assert.doesNotMatch(
+          packedAndroidAdmission.replace(
+            "  fun beginPrivateSession(\n",
+            "  @JvmSynthetic\n  fun beginPrivateSession(\n",
+          ),
+          /object JazzRelayTrustedAdmission \{[\s\S]*@JvmSynthetic[\s\S]*fun beginPrivateSession/m,
         ),
-        `the public Kotlin ${method} facade must remain Java-synthetic`,
-      );
+      /expected to not match/,
+      "making the public facade Java-synthetic must fail",
+    );
     assert.throws(
       () =>
         assert.match(
@@ -1166,7 +1169,8 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     // Kotlin `internal` compiles to public JVM bytecode. Compile the Kotlin
     // sources from the packed tarball in a standalone module, then use javac
     // as an external consumer: sensitive bridge entry points must not resolve
-    // from Java, while a second Kotlin module can use the Kotlin-only facade.
+    // from Java, while external Kotlin and Java consumers can use the public
+    // facade.
     const hasJvmToolchain = ["java", "javac"].every((command) => {
       try {
         execFileSync(command, ["-version"], { stdio: "ignore" });
@@ -1254,6 +1258,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
         { stdio: "inherit" },
       );
       const javaEscape = join(jvmReceiptDirectory, "JavaBridgeEscape.java");
+      const javaFacade = join(jvmReceiptDirectory, "JavaFacadeConsumer.java");
       await writeFile(
         javaEscape,
         [
@@ -1267,11 +1272,26 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
           "}",
         ].join("\n"),
       );
+      await writeFile(
+        javaFacade,
+        [
+          "package consumer;",
+          "import android.content.Context;",
+          "import com.jazzrn.JazzRelayTrustedAdmission;",
+          "class JavaFacadeConsumer {",
+          "  byte[] admit(Context context) {",
+          '    return JazzRelayTrustedAdmission.INSTANCE.beginPrivateSession(context, "https://relay.invalid", "app", "jwt");',
+          "  }",
+          "}",
+        ].join("\n"),
+      );
       const relayClasses = [
           join(jvmReceiptDirectory, "relay", "build", "classes", "kotlin", "main"),
           join(jvmReceiptDirectory, "relay", "build", "classes", "java", "main"),
         ].join(":"),
-        javaEscapeOutput = join(jvmReceiptDirectory, "java-escape-output");
+        javaEscapeOutput = join(jvmReceiptDirectory, "java-escape-output"),
+        javaFacadeOutput = join(jvmReceiptDirectory, "java-facade-output");
+      execFileSync("javac", ["-cp", relayClasses, "-d", javaFacadeOutput, javaFacade]);
       assert.throws(
         () => execFileSync("javac", ["-cp", relayClasses, "-d", javaEscapeOutput, javaEscape]),
         (error) =>
