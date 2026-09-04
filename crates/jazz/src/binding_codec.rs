@@ -387,5 +387,12 @@ mod tests {
             values[1],
             Value::Nullable(Some(Box::new(Value::String("roundtrip".to_owned()))))
         );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(
+            decode_rows(&trailing).is_err(),
+            "the shared decoder must reject bytes after the one canonical row payload"
+        );
     }
 }
