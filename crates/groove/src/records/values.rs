@@ -2309,3 +2309,7 @@ pub(super) fn usize_to_u32(value: usize) -> Result<u32, Error> {
 fn u32_to_usize(value: u32) -> Result<usize, Error> {
     value.try_into().map_err(|_| Error::LengthOverflow)
 }
+
+#[cfg(test)]
+#[path = "typed_identity_compatibility_proof.rs"]
+mod typed_identity_compatibility_proof;
