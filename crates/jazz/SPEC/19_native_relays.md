@@ -40,6 +40,18 @@ The relay is a normal non-history-complete `Db`:
 - No binding may read directly from SQLite or bypass a `Db` to answer an app
   query.
 
+One admitted persistent scope owns exactly one authenticated upstream socket
+worker. Foregrounds are leases on that relay, not socket owners: opening a
+second foreground reuses the scope worker and cannot create a competing bearer
+connection to the same SQLite store. The worker stays alive across a clean
+foreground handoff and is stopped only by trusted scope revocation or host
+teardown. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
+accepted only for `localhost`, IP loopback, or the documented Android emulator
+host aliases (`10.0.2.2` and `10.0.3.2`). A failed connect, bridge, owner pump,
+or established transport is recorded as a scope terminal error and surfaced to
+foreground ticks until a later authenticated reconnect clears it; it may never
+silently degrade into an indefinitely pending foreground operation.
+
 The scope key has no token material. Trusted platform code derives an opaque
 non-empty `auth_scope` only after authentication and admits the complete scope config to
 the native host: auth scope, SQLite path, schema, persistent `DbIdentity`, and
@@ -380,7 +392,11 @@ deadlock. Repeated close or unsubscribe reports `false`.
 ABI V1 also includes a deliberately narrow write family: `BeginTransaction` with
 the ordinary `mergeable` or `exclusive` core semantics, full-cell
 `Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
-`RollbackTransaction`. Cell payloads are the established postcard
+`RollbackTransaction`. `WaitForCoreTransaction` accepts only that foreground's
+previously committed public `txId` and becomes a pending operation until the
+ordinary foreground/relay/Edge/Core fate path reaches Core durability. It lets
+a host prove authoritative admission without reading relay SQLite; callers
+continue bounded ticks and `Poll` while it waits. Cell payloads are the established postcard
 `(RecordDescriptor, encoded-record)` envelope already used by NAPI/WASM; the
 foreground codec does not expose a React-Native row object representation.
 The host creates an opaque transaction handle, binds it to exactly one
@@ -395,7 +411,7 @@ the C boundary.
 This slice intentionally delegates every mutation to the existing core
 transaction APIs with their default options. It therefore does not invent
 branch targets, custom timestamps or write attribution, row-version CAS,
-large-value diffs, restore, or write-state/wait APIs. Full-cell local writes
+large-value diffs, restore, or write-state APIs. Full-cell local writes
 do not need a new pending protocol: requests which would require asynchronous
 large-value hydration are not representable by this codec. Existing `Pending`
 and `Poll` remain the async path for query/subscription materialization.
