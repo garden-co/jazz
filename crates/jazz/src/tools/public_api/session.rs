@@ -5,6 +5,7 @@
 //! - `claims`: JSON object with user-defined claims (roles, teams, etc.)
 //! - `auth_mode`: First-class auth-mode discriminator derived from the JWT `iss`
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -22,6 +23,33 @@ pub enum AuthMode {
     External,
     LocalFirst,
     Anonymous,
+}
+
+/// The non-authoritative identity projection used only to partition a local
+/// client cache before its bearer reaches the Edge.  This deliberately decodes
+/// the JWT payload without inspecting the header or signature: callers MUST
+/// NOT use it for admission, permissions, or transport identity.  The Edge
+/// remains the sole JWT verifier.
+///
+/// Keeping this tiny projection in the shared crate prevents native shells
+/// from growing subtly different base64url or `iss`/`sub` parsing rules.
+pub fn unverified_jwt_scope_subject(jwt: &str) -> Option<(String, String)> {
+    #[derive(Deserialize)]
+    struct Claims {
+        iss: String,
+        sub: String,
+    }
+
+    let payload = jwt.trim().split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let claims: Claims = serde_json::from_slice(&payload).ok()?;
+    if claims.iss.trim().is_empty() || claims.sub.trim().is_empty() {
+        return None;
+    }
+    Some((claims.iss, claims.sub))
 }
 
 /// Session context for policy evaluation.
@@ -402,5 +430,18 @@ mod tests {
         assert_eq!(s.get_string(&["authMode".into()]), Some("local-first"));
         assert_eq!(s.get_string(&["auth_mode".into()]), Some("local-first"));
         assert!(s.has_path(&["authMode".into()]));
+    }
+
+    #[test]
+    fn unverified_jwt_scope_subject_is_payload_only_and_fail_closed() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"iss":"https://issuer.example","sub":"person"}"#);
+        assert_eq!(
+            unverified_jwt_scope_subject(&format!("ignored.{payload}.ignored")),
+            Some(("https://issuer.example".to_owned(), "person".to_owned()))
+        );
+        for token in ["", "one-part", "a..c", "a.@@.c", "a.e30.c"] {
+            assert!(unverified_jwt_scope_subject(token).is_none(), "{token}");
+        }
     }
 }
