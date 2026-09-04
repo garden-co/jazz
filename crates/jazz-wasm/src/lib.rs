@@ -273,45 +273,93 @@ struct WasmStreamingMutationState {
     base: Option<BranchViewBase>,
 }
 
+enum WasmStreamingMutationLifecycle {
+    Open(Box<WasmStreamingMutationState>),
+    PushInFlight {
+        completion: oneshot::Receiver<Box<WasmStreamingMutationState>>,
+    },
+    AbortClaimed,
+    Closed,
+}
+
+enum WasmStreamingMutationAbortClaim {
+    Immediate(Box<WasmStreamingMutationState>),
+    AfterPush(oneshot::Receiver<Box<WasmStreamingMutationState>>),
+}
+
 #[wasm_bindgen(js_name = StreamingMutation)]
 pub struct WasmStreamingMutation {
-    state: Rc<RefCell<Option<WasmStreamingMutationState>>>,
+    state: Rc<RefCell<WasmStreamingMutationLifecycle>>,
+}
+
+fn streaming_mutation_closed() -> JsValue {
+    JsValue::from_str("streaming mutation is closed")
 }
 
 #[wasm_bindgen]
 impl WasmStreamingMutation {
     pub fn push(&self, chunk: Vec<u8>) -> js_sys::Promise {
         let state_cell = Rc::clone(&self.state);
-        future_to_promise(async move {
-            let mut state = state_cell
-                .borrow_mut()
-                .take()
-                .ok_or_else(|| JsValue::from_str("streaming mutation is closed"))?;
-            let result = match &state.db {
-                WasmDbInner::Memory(db) => {
-                    db.push_streaming_value_upload(&mut state.upload, &chunk)
-                        .await
-                }
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    db.push_streaming_value_upload(&mut state.upload, &chunk)
-                        .await
-                }
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        let (mut state, completion_tx) = {
+            let mut lifecycle = state_cell.borrow_mut();
+            let current =
+                std::mem::replace(&mut *lifecycle, WasmStreamingMutationLifecycle::Closed);
+            let WasmStreamingMutationLifecycle::Open(state) = current else {
+                *lifecycle = current;
+                return js_sys::Promise::reject(&streaming_mutation_closed());
             };
-            result.map_err(to_js_error)?;
-            *state_cell.borrow_mut() = Some(state);
-            Ok(JsValue::UNDEFINED)
+            let (completion_tx, completion) = oneshot::channel();
+            *lifecycle = WasmStreamingMutationLifecycle::PushInFlight { completion };
+            (state, completion_tx)
+        };
+
+        future_to_promise(async move {
+            let result = match &state.db {
+                WasmDbInner::Memory(db) => db
+                    .push_streaming_value_upload(&mut state.upload, &chunk)
+                    .await
+                    .map_err(to_js_error),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .push_streaming_value_upload(&mut state.upload, &chunk)
+                    .await
+                    .map_err(to_js_error),
+                WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+            };
+            let mut lifecycle = state_cell.borrow_mut();
+            match &mut *lifecycle {
+                WasmStreamingMutationLifecycle::AbortClaimed => {
+                    // The abort claim is made synchronously. Deliver the state to the
+                    // aborting operation even when push failed.
+                    let _ = completion_tx.send(state);
+                }
+                WasmStreamingMutationLifecycle::PushInFlight { .. } => {
+                    *lifecycle = if result.is_ok() {
+                        WasmStreamingMutationLifecycle::Open(state)
+                    } else {
+                        WasmStreamingMutationLifecycle::Closed
+                    };
+                }
+                _ => unreachable!("streaming mutation push completion lost its lifecycle"),
+            }
+            result.map(|()| JsValue::UNDEFINED)
         })
     }
 
     pub fn finish(&self) -> js_sys::Promise {
         let state_cell = Rc::clone(&self.state);
+        let state = {
+            let mut lifecycle = state_cell.borrow_mut();
+            let current =
+                std::mem::replace(&mut *lifecycle, WasmStreamingMutationLifecycle::Closed);
+            let WasmStreamingMutationLifecycle::Open(state) = current else {
+                *lifecycle = current;
+                return js_sys::Promise::reject(&streaming_mutation_closed());
+            };
+            *state
+        };
+
         future_to_promise(async move {
-            let state = state_cell
-                .borrow_mut()
-                .take()
-                .ok_or_else(|| JsValue::from_str("streaming mutation is closed"))?;
             let write = match &state.db {
                 WasmDbInner::Memory(db) => wasm_write_memory(
                     Rc::clone(db),
@@ -350,7 +398,7 @@ impl WasmStreamingMutation {
                     .await
                     .map_err(to_js_error)?,
                 ),
-                WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+                WasmDbInner::Closed => Err(streaming_mutation_closed()),
             }?;
             Ok(write.into())
         })
@@ -358,17 +406,47 @@ impl WasmStreamingMutation {
 
     pub fn abort(&self) -> js_sys::Promise {
         let state_cell = Rc::clone(&self.state);
-        future_to_promise(async move {
-            let Some(state) = state_cell.borrow_mut().take() else {
-                return Ok(JsValue::FALSE);
-            };
-            match &state.db {
-                WasmDbInner::Memory(db) => db.abort_streaming_value_upload(state.upload).await,
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => db.abort_streaming_value_upload(state.upload).await,
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        let claim = {
+            let mut lifecycle = state_cell.borrow_mut();
+            match std::mem::replace(&mut *lifecycle, WasmStreamingMutationLifecycle::Closed) {
+                WasmStreamingMutationLifecycle::Open(state) => {
+                    *lifecycle = WasmStreamingMutationLifecycle::AbortClaimed;
+                    Some(WasmStreamingMutationAbortClaim::Immediate(state))
+                }
+                WasmStreamingMutationLifecycle::PushInFlight { completion } => {
+                    *lifecycle = WasmStreamingMutationLifecycle::AbortClaimed;
+                    Some(WasmStreamingMutationAbortClaim::AfterPush(completion))
+                }
+                state => {
+                    *lifecycle = state;
+                    None
+                }
             }
-            .map_err(to_js_error)?;
+        };
+        let Some(claim) = claim else {
+            return js_sys::Promise::resolve(&JsValue::FALSE);
+        };
+        future_to_promise(async move {
+            let state = match claim {
+                WasmStreamingMutationAbortClaim::Immediate(state) => *state,
+                WasmStreamingMutationAbortClaim::AfterPush(completion) => {
+                    *completion.await.map_err(|_| streaming_mutation_closed())?
+                }
+            };
+            let result = match &state.db {
+                WasmDbInner::Memory(db) => db
+                    .abort_streaming_value_upload(state.upload)
+                    .await
+                    .map_err(to_js_error),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .abort_streaming_value_upload(state.upload)
+                    .await
+                    .map_err(to_js_error),
+                WasmDbInner::Closed => Err(streaming_mutation_closed()),
+            };
+            *state_cell.borrow_mut() = WasmStreamingMutationLifecycle::Closed;
+            result?;
             Ok(JsValue::TRUE)
         })
     }
@@ -2435,20 +2513,22 @@ impl WasmDb {
         }
         .map_err(to_js_error)?;
         Ok(WasmStreamingMutation {
-            state: Rc::new(RefCell::new(Some(WasmStreamingMutationState {
-                db: inner,
-                upload,
-                mutation,
-                table,
-                row_id,
-                cells,
-                column,
-                identity,
-                attribution,
-                updated_at_ms,
-                head,
-                base,
-            }))),
+            state: Rc::new(RefCell::new(WasmStreamingMutationLifecycle::Open(
+                Box::new(WasmStreamingMutationState {
+                    db: inner,
+                    upload,
+                    mutation,
+                    table,
+                    row_id,
+                    cells,
+                    column,
+                    identity,
+                    attribution,
+                    updated_at_ms,
+                    head,
+                    base,
+                }),
+            ))),
         })
     }
 
