@@ -125,12 +125,14 @@ cacheable outputs.
   ordinary PR's critical path.
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)
-- `dev/gates/invariant-registry.sh` parses both invariant registries and fails on
-  a malformed row, a duplicate id within one registry, a cited test that does not
-  exist, or a `✓`-covered invariant citing no test. `now` + `untested` is reported
-  but does not fail — that is documented debt the registry deliberately keeps
-  visible. Both registries escape literal `|` inside table cells as `\|`; an
-  unescaped pipe silently shreds a row.
+- `dev/gates/invariant-registry.sh` parses the one-line-per-record structured
+  invariant registry and fails on malformed/non-canonical JSON, a duplicate
+  domain/id, a cited
+  test that does not exist, or a `✓`-covered invariant citing no test. `now` +
+  `untested` is reported but does not fail — that is documented debt the registry
+  deliberately keeps visible. Add or amend exactly one sorted physical line in
+  `crates/invariant-registry.jsonl`; the two SPEC overview documents are
+  navigation, not the authoritative merge surface.
 - `node dev/gates/spec-open-questions.mjs` keeps every unresolved SPEC open
   question linked to a GitHub Issue while remaining fully offline.
 - `node dev/gates/ignored-tests.mjs` validates the exact compiled Rust ignored
