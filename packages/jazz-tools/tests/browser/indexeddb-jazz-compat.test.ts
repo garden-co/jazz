@@ -25,7 +25,11 @@ import {
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import {
+  blockJazzServerNetwork,
+  getJazzServerInfo,
+  unblockJazzServerNetwork,
+} from "./testing-server.js";
 import { sleep, TestCleanup, uniqueDbName, withTimeout } from "./support.js";
 
 const app = s.defineApp({
@@ -184,32 +188,42 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
     );
 
-    db = await openPersistentDb(config);
-    expect(await trackPhysicalDatabase(dbName)).toBe(physicalDbName);
-    const mixedMain = await db.all(app.documents, inspectorLocalQueryOptions({ branch: "main" }));
-    const mixedDraft = await db.all(app.documents, inspectorLocalQueryOptions({ branch: "draft" }));
-    const mixedProjects = await db.all(app.projects, inspectorLocalQueryOptions({}));
-    expect(mixedMain).toHaveLength(2);
-    expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));
-    expect(mixedMain).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          title: "current writer document",
-          branch: "main",
-          body: currentBody,
-        }),
-      ]),
-    );
-    expect(mixedDraft).toEqual(reopenedDraft);
-    expect(mixedProjects).toHaveLength(historicalProjects.length + 1);
-    expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
-    const currentProject = mixedProjects.find(
-      (project) => project.name === "current writer project",
-    );
-    expect(currentProject).toBeDefined();
-    expect(
-      mixedMain.find((document) => document.title === "current writer document")?.projectId,
-    ).toBe(currentProject!.id);
+    // Network isolation makes this a persistence receipt: the server cannot
+    // repair lost current pages before the post-reopen assertions.
+    await blockJazzServerNetwork(server.serverUrl);
+    try {
+      db = await openPersistentDb(config);
+      expect(await trackPhysicalDatabase(dbName)).toBe(physicalDbName);
+      const mixedMain = await db.all(app.documents, inspectorLocalQueryOptions({ branch: "main" }));
+      const mixedDraft = await db.all(
+        app.documents,
+        inspectorLocalQueryOptions({ branch: "draft" }),
+      );
+      const mixedProjects = await db.all(app.projects, inspectorLocalQueryOptions({}));
+      expect(mixedMain).toHaveLength(2);
+      expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));
+      expect(mixedMain).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            title: "current writer document",
+            branch: "main",
+            body: currentBody,
+          }),
+        ]),
+      );
+      expect(mixedDraft).toEqual(reopenedDraft);
+      expect(mixedProjects).toHaveLength(historicalProjects.length + 1);
+      expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
+      const currentProject = mixedProjects.find(
+        (project) => project.name === "current writer project",
+      );
+      expect(currentProject).toBeDefined();
+      expect(
+        mixedMain.find((document) => document.title === "current writer document")?.projectId,
+      ).toBe(currentProject!.id);
+    } finally {
+      await unblockJazzServerNetwork(server.serverUrl);
+    }
   }, 90_000);
 
   it("rejects a corrupt durable epoch before handing a public Jazz handle to the app", async () => {
