@@ -15,6 +15,16 @@ const packageJson = JSON.parse(
   await readFile(new URL("../../../crates/jazz-rn/package.json", import.meta.url), "utf8"),
 );
 const withJazzRn = require("../../../crates/jazz-rn/app.plugin.js");
+const androidRelayArchitectures = "armeabi-v7a,arm64-v8a,x86_64";
+
+function assertRelayAndroidArchitectures(gradleProperties, label) {
+  const architectures = gradleProperties.match(/^reactNativeArchitectures=(.*)$/m)?.[1];
+  assert.equal(
+    architectures,
+    androidRelayArchitectures,
+    `${label} must request exactly the three sealed relay ABIs`,
+  );
+}
 
 function productionDependencyNames(metadata, rootPackageName) {
   const packageById = new Map(metadata.packages.map((pkg) => [pkg.id, pkg]));
@@ -612,6 +622,19 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   return Promise.all([androidProperties, androidSettings, iosProperties, iosPodfile]).then(
     ([androidPropertiesText, androidSettingsText, iosPropertiesText, iosPodfileText]) => {
       assert.match(androidPropertiesText, /^newArchEnabled=true$/m);
+      assertRelayAndroidArchitectures(androidPropertiesText, "the generated Expo host");
+      assert.throws(
+        () =>
+          assertRelayAndroidArchitectures(
+            androidPropertiesText.replace(
+              `reactNativeArchitectures=${androidRelayArchitectures}`,
+              "reactNativeArchitectures=armeabi-v7a,arm64-v8a,x86,x86_64",
+            ),
+            "a planted generated Expo host",
+          ),
+        /exactly the three sealed relay ABIs/,
+        "the package contract must reject restoring retired x86",
+      );
       assert.match(androidSettingsText, /expo-autolinking-settings/);
       assert.match(androidSettingsText, /autolinkLibrariesFromCommand/);
       assert.match(iosPropertiesText, /"newArchEnabled": "true"/);
@@ -1087,6 +1110,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       readFile(join(appDirectory, "ios/Podfile"), "utf8"),
     ]);
     assert.match(androidProperties, /^newArchEnabled=true$/m);
+    assertRelayAndroidArchitectures(androidProperties, "a packed jazz-rn install");
     assert.match(androidSettings, /autolinkLibrariesFromCommand/);
     assert.match(iosProperties, /"newArchEnabled": "true"/);
     assert.match(iosPodfile, /use_native_modules!/);
