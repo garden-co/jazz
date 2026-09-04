@@ -1383,6 +1383,11 @@ pub struct CurrentRow {
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
     binding_fields: std::sync::Arc<Vec<CurrentRowBindingField>>,
+    /// Public logical names for descriptor slots whose internal carrier name
+    /// is not itself the query-visible field name.  A projected terminal can
+    /// carry a logical `user_title` slot while exposing it as `title`; this
+    /// mapping belongs to the producer boundary, not host-side inference.
+    binding_field_names: std::sync::Arc<Vec<Option<String>>>,
 }
 
 /// The native-host interpretation of one materialized record-descriptor field.
@@ -1455,6 +1460,7 @@ impl CurrentRow {
     }
 
     /// Construct a row whose descriptor has public logical query-result names.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn new_logical(table: impl Into<String>, record: OwnedRecord) -> Self {
         Self::new_with_binding_fields(table, record, CurrentRowBindingField::LogicalField)
     }
@@ -1473,16 +1479,39 @@ impl CurrentRow {
         record: OwnedRecord,
         binding_fields: Vec<CurrentRowBindingField>,
     ) -> Self {
+        let binding_field_names = vec![None; binding_fields.len()];
+        Self::new_with_explicit_binding_fields_and_names(
+            table,
+            record,
+            binding_fields,
+            binding_field_names,
+        )
+    }
+
+    /// Construct a row with explicit binding provenance and any logical
+    /// descriptor-name overrides supplied by its producer.
+    pub(crate) fn new_with_explicit_binding_fields_and_names(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        binding_fields: Vec<CurrentRowBindingField>,
+        binding_field_names: Vec<Option<String>>,
+    ) -> Self {
         assert_eq!(
             binding_fields.len(),
             record.descriptor().fields().len(),
             "native binding fields must align with their record descriptor"
+        );
+        assert_eq!(
+            binding_field_names.len(),
+            binding_fields.len(),
+            "native binding field names must align with their record descriptor"
         );
         Self {
             table: groove::Intern::new(table.into()),
             record: std::sync::Arc::new(record),
             deleted: false,
             binding_fields: std::sync::Arc::new(binding_fields),
+            binding_field_names: std::sync::Arc::new(binding_field_names),
         }
     }
 
@@ -1500,6 +1529,12 @@ impl CurrentRow {
     #[doc(hidden)]
     pub fn binding_fields(&self) -> &[CurrentRowBindingField] {
         &self.binding_fields
+    }
+
+    /// Producer-supplied public logical names, aligned with [`Self::binding_fields`].
+    #[doc(hidden)]
+    pub fn binding_field_names(&self) -> &[Option<String>] {
+        &self.binding_field_names
     }
 
     /// Logical table name.
@@ -1563,21 +1598,30 @@ impl CurrentRow {
         let fields = self.record.descriptor().fields();
         fields
             .iter()
-            .zip(self.binding_fields.iter())
-            .position(|(field, binding)| {
+            .zip(
+                self.binding_fields
+                    .iter()
+                    .zip(self.binding_field_names.iter()),
+            )
+            .position(|(field, (binding, _))| {
                 *binding == CurrentRowBindingField::PhysicalColumn
                     && field.name.as_deref() == Some(physical_name.as_str())
             })
-            // Logical records sometimes retain application fields under their
-            // public schema name. That fallback intentionally never accepts a
-            // logical `user_{column}` spelling, which is a distinct output.
+            // A terminal may carry a public logical column through an internal
+            // `user_{column}` slot. The producer-provided name is authoritative;
+            // never infer it by stripping a prefix, since a genuine logical
+            // `user_{column}` remains a distinct public output.
             .or_else(|| {
                 fields
                     .iter()
-                    .zip(self.binding_fields.iter())
-                    .position(|(field, binding)| {
+                    .zip(
+                        self.binding_fields
+                            .iter()
+                            .zip(self.binding_field_names.iter()),
+                    )
+                    .position(|(field, (binding, public_name))| {
                         *binding == CurrentRowBindingField::LogicalField
-                            && field.name.as_deref() == Some(column)
+                            && public_name.as_deref().or(field.name.as_deref()) == Some(column)
                     })
             })
     }
@@ -1589,6 +1633,11 @@ impl CurrentRow {
     ) -> Option<CurrentRowBindingField> {
         let index = self.application_column_index(table, column)?;
         self.binding_fields.get(index).copied()
+    }
+
+    fn binding_field_name_for_column(&self, table: &TableSchema, column: &str) -> Option<String> {
+        let index = self.application_column_index(table, column)?;
+        self.binding_field_names.get(index)?.clone()
     }
 
     /// Encoded groove record backing this projected current row.
@@ -1695,6 +1744,7 @@ impl CurrentRow {
             .and_then(|index| self.binding_fields.get(index).copied())
             .unwrap_or(CurrentRowBindingField::LogicalField);
         let mut binding_fields = vec![row_uuid_field];
+        let mut binding_field_names = vec![None];
         for column in projected_columns {
             let cell = self.cell(table, &column.name);
             let projected = if matches!(column.column_type, records::ValueType::Nullable(_)) {
@@ -1713,6 +1763,7 @@ impl CurrentRow {
                 self.binding_field_for_column(table, &column.name)
                     .unwrap_or(CurrentRowBindingField::LogicalField),
             );
+            binding_field_names.push(self.binding_field_name_for_column(table, &column.name));
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));
@@ -1728,12 +1779,14 @@ impl CurrentRow {
                             .unwrap_or(CurrentRowBindingField::LogicalField)
                     }),
             );
+            binding_field_names.extend(std::iter::repeat_n(None, 4));
         } else {
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
             binding_fields.extend([CurrentRowBindingField::LogicalField; 4]);
+            binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
         if let Some((time, node)) = self.projected_tx_alias() {
             values.push(Value::U64(time.0));
@@ -1743,11 +1796,13 @@ impl CurrentRow {
             values.push(Value::U64(0));
         }
         binding_fields.extend([CurrentRowBindingField::LogicalField; 2]);
+        binding_field_names.extend(std::iter::repeat_n(None, 2));
         let raw = descriptor.create(&values)?;
-        Ok(Self::new_with_explicit_binding_fields(
+        Ok(Self::new_with_explicit_binding_fields_and_names(
             table.name.clone(),
             OwnedRecord::new(raw, descriptor),
             binding_fields,
+            binding_field_names,
         ))
     }
 
@@ -1823,17 +1878,21 @@ impl CurrentRow {
         descriptor
             .fields()
             .iter()
-            .zip(self.binding_fields.iter())
+            .zip(
+                self.binding_fields
+                    .iter()
+                    .zip(self.binding_field_names.iter()),
+            )
             .enumerate()
-            .filter_map(move |(idx, (field, binding))| {
+            .filter_map(move |(idx, (field, (binding, public_name)))| {
                 let raw_name = field.name.as_ref()?.as_str();
                 // Descriptor provenance is part of the public field identity:
                 // a physical `user_check` denotes application column `check`,
                 // while a logical output legitimately named `user_check` must
                 // remain visible under that exact name.
-                let name = if *binding == CurrentRowBindingField::PhysicalColumn
-                    && raw_name.starts_with("user_")
-                {
+                let name = if *binding == CurrentRowBindingField::LogicalField {
+                    public_name.as_deref().unwrap_or(raw_name)
+                } else if raw_name.starts_with("user_") {
                     let name = self::query_engine::logical_user_column(raw_name);
                     self::query_engine::aggregate_output_logical_name(name).unwrap_or(name)
                 } else if let Some(name) =

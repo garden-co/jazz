@@ -1570,7 +1570,7 @@ where
                 .iter()
                 .filter(|(_, weight)| *weight > 0)
                 .map(|(record, _)| {
-                    CurrentRow::new_logical(
+                    CurrentRow::new(
                         shape.query().table.clone(),
                         OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
                     )
@@ -3993,7 +3993,10 @@ fn aggregate_current_row_from_record(
     }
     let descriptor = RecordDescriptor::new(fields);
     let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new_logical(
+    // This synthetic descriptor deliberately uses `user_{column}` names for
+    // the grouped source column and aggregate outputs.  Those are physical
+    // CurrentRow slots, not public logical fields named `user_{column}`.
+    Ok(CurrentRow::new(
         query.table.clone(),
         OwnedRecord::new(raw, descriptor),
     ))
