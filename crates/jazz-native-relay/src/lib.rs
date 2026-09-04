@@ -34,7 +34,7 @@ use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::time::TxTime;
 use jazz::tools::{OpenTransactionId, TransactionId};
-use jazz::wire::{TransportError, decode_sync_message, encode_sync_message};
+use jazz::wire::{TransportError, WireTransport, decode_sync_message, encode_sync_message};
 use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
 use thiserror::Error;
 
@@ -2975,6 +2975,37 @@ impl NativeRelayWire {
     }
 }
 
+/// Move ordinary semantic messages between the relay's owner-local queue and
+/// a negotiated native socket. The socket is always wrapped in
+/// `WireTransportAdapter`: this bridge never serializes `SyncMessage` bytes,
+/// frames, fragments, or reconnect protocol itself.
+///
+/// A native worker calls this in each bounded network turn, then requests the
+/// relay's ordinary pump. Keeping the bridge generic makes the production
+/// `WebSocketTransport` path and deterministic edge fixtures exercise exactly
+/// the same framing boundary.
+pub fn bridge_native_relay_wire_once<T: WireTransport>(
+    relay_wire: &NativeRelayWire,
+    upstream: &mut jazz::db::WireTransportAdapter<T>,
+) -> Result<bool, RelayError> {
+    let mut progressed = false;
+    for message in relay_wire.take_outbound()? {
+        upstream.send(message).map_err(|error| {
+            RelayError::ForegroundCommand(format!("native upstream send: {error:?}"))
+        })?;
+        progressed = true;
+    }
+    loop {
+        match upstream.try_recv() {
+            Some(message) => {
+                relay_wire.push_inbound(message)?;
+                progressed = true;
+            }
+            None => return Ok(progressed),
+        }
+    }
+}
+
 fn validate_encoded_peer_message_len(len: usize) -> Result<(), RelayError> {
     validate_logical_message_len(len).map_err(RelayError::PeerMessageTooLarge)
 }
@@ -4144,7 +4175,7 @@ mod tests {
     // Here we prove the native host does not accidentally create one durable
     // store per UI runtime or share it across explicit auth scopes.
     use super::*;
-    use jazz::db::InsertOptions;
+    use jazz::db::{InsertOptions, Transport, WireTransportAdapter};
     use jazz::groove::records::ValueType;
     use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
@@ -4152,6 +4183,23 @@ mod tests {
     use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
     use jazz::tx::TxId;
     use std::sync::atomic::AtomicBool;
+
+    #[derive(Default)]
+    struct TestWireTransport {
+        inbound: VecDeque<Vec<u8>>,
+        outbound: Vec<Vec<u8>>,
+    }
+
+    impl WireTransport for TestWireTransport {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+            self.outbound.push(frame);
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            self.inbound.pop_front()
+        }
+    }
 
     fn schema() -> JazzSchema {
         JazzSchema::new(
@@ -5689,6 +5737,47 @@ mod tests {
                 claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
             }
         );
+    }
+
+    #[test]
+    fn native_upstream_bridge_uses_the_negotiated_wire_adapter_in_both_directions() {
+        let outbound = SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0x61; 16]),
+            claims: BTreeMap::new(),
+        };
+        let inbound = SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0x62; 16]),
+            claims: BTreeMap::new(),
+        };
+        let relay_wire = NativeRelayWire::default();
+        relay_wire
+            .outbound
+            .lock()
+            .unwrap()
+            .push(outbound.clone(), "test relay outbound")
+            .unwrap();
+
+        // A peer adapter produces a real framed network payload. The relay
+        // bridge receives that frame only through another adapter; it cannot
+        // accidentally accept an unframed postcard message as a second wire.
+        let mut peer = WireTransportAdapter::current(TestWireTransport::default());
+        peer.send(inbound.clone()).unwrap();
+        let peer_wire = peer.into_inner();
+        let mut upstream = WireTransportAdapter::current(TestWireTransport {
+            inbound: peer_wire.outbound.into(),
+            outbound: Vec::new(),
+        });
+
+        assert!(bridge_native_relay_wire_once(&relay_wire, &mut upstream).unwrap());
+        assert_eq!(relay_wire.inbound.lock().unwrap().pop(), Some(inbound));
+
+        let sent_to_edge = upstream.into_inner().outbound;
+        assert_eq!(sent_to_edge.len(), 1);
+        let mut edge = WireTransportAdapter::current(TestWireTransport {
+            inbound: sent_to_edge.into(),
+            outbound: Vec::new(),
+        });
+        assert_eq!(edge.try_recv(), Some(outbound));
     }
 
     #[test]
