@@ -143,6 +143,25 @@ const app: s.App<AppSchema> = s.defineApp(schema);
 const { projects, todos } = app;
 type Todo = s.RowOf<typeof todos>;
 
+// Keep the maintained-index hydration fixture separate from the broadly used
+// worker-bridge schema: this test must exercise the same two-equality indexed
+// source shape as the native receipt, without changing unrelated test schemas.
+const maintainedIndexedSchema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s
+    .table({
+      title: s.string(),
+      done: s.boolean(),
+    })
+    .indexOnly(["title", "done"]),
+};
+type MaintainedIndexedSchema = s.Schema<typeof maintainedIndexedSchema>;
+const maintainedIndexedApp: s.App<MaintainedIndexedSchema> = s.defineApp(maintainedIndexedSchema);
+const { todos: maintainedIndexedTodos } = maintainedIndexedApp;
+type MaintainedIndexedTodo = s.RowOf<typeof maintainedIndexedTodos>;
+
 const transactionIdentitySchema = {
   projects: s.table({
     name: s.string(),
@@ -1748,6 +1767,187 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     unsubscribe();
   }, 90000);
+
+  /**
+   * The browser worker uses the same maintained indexed source as native
+   * subscriptions.  A fresh remote reader must hydrate its settled snapshot,
+   * keep an empty intersected equality source live for its first insert, and
+   * apply enter/leave changes when either equality changes.
+   *
+   * writer ──global write──► server ──settled indexed source──► fresh worker
+   *                                                         └──► subscription
+   */
+  it("maintains indexed remote subscriptions through IndexedDB worker hydration", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "maintained-indexed-worker-hydration",
+      undefined,
+      maintainedIndexedApp.wasmSchema,
+    );
+    const sharedLocalAuthToken = generateAuthSecret();
+    const writer = track(
+      await createDb({
+        appId: syncServer.appId,
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("maintained-indexed-worker-writer"),
+        },
+        serverUrl: syncServer.serverUrl,
+        secret: sharedLocalAuthToken,
+      }),
+    );
+    const seededTitle = `indexed-seeded-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const seededFirst = await writer
+      .insert(maintainedIndexedTodos, { title: seededTitle, done: false })
+      .wait({ tier: "global" });
+    const seededSecond = await writer
+      .insert(maintainedIndexedTodos, { title: seededTitle, done: false })
+      .wait({ tier: "global" });
+    const expectedSeededIds = [seededFirst.id, seededSecond.id].sort();
+
+    const fresh = track(
+      await createDb({
+        appId: syncServer.appId,
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("maintained-indexed-worker-fresh"),
+        },
+        serverUrl: syncServer.serverUrl,
+        secret: sharedLocalAuthToken,
+      }),
+    );
+
+    const settledSnapshots: MaintainedIndexedTodo[][] = [];
+    const stopSettled = trackSubscription(
+      fresh.subscribe(
+        maintainedIndexedTodos.where({ title: seededTitle, done: false }),
+        (rows) => settledSnapshots.push(rows),
+        { tier: "global" },
+      ),
+    );
+    await waitForCondition(
+      async () => settledSnapshots.length > 0,
+      15_000,
+      "fresh IndexedDB worker must receive an authoritative settled indexed snapshot",
+    );
+    // The first global callback is authoritative, not merely nonempty: a
+    // partial hydration that delivers either matching row is a failure.
+    expect(settledSnapshots[0]).toHaveLength(2);
+    expect(settledSnapshots[0]?.map((row) => row.id).sort()).toEqual(expectedSeededIds);
+    expect(settledSnapshots[0]?.every((row) => row.title === seededTitle && !row.done)).toBe(true);
+    // Keep the opening live long enough to catch a duplicated, partial, or
+    // stale settled snapshot before retiring this subscription.
+    await sleep(500);
+    expect(settledSnapshots).toHaveLength(1);
+    stopSettled();
+
+    const emptyTitle = `indexed-empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const emptySnapshots: MaintainedIndexedTodo[][] = [];
+    const stopEmpty = trackSubscription(
+      fresh.subscribe(
+        maintainedIndexedTodos.where({ title: emptyTitle, done: false }),
+        (rows) => emptySnapshots.push(rows),
+        {
+          tier: "global",
+        },
+      ),
+    );
+    await waitForCondition(
+      async () => emptySnapshots.some((rows) => rows.length === 0),
+      15_000,
+      "empty intersected equality source must settle before its first matching insert",
+    );
+    await writer
+      .insert(maintainedIndexedTodos, { title: emptyTitle, done: false })
+      .wait({ tier: "global" });
+    await waitForCondition(
+      async () =>
+        emptySnapshots.some(
+          (rows) => rows.length === 1 && rows[0]?.title === emptyTitle && rows[0]?.done === false,
+        ),
+      15_000,
+      "first matching remote insert must enter an initially empty indexed subscription",
+    );
+    await sleep(500);
+    expect(
+      emptySnapshots.filter(
+        (rows) => rows.length === 1 && rows[0]?.title === emptyTitle && rows[0]?.done === false,
+      ),
+    ).toHaveLength(1);
+    stopEmpty();
+
+    const transitionTitle = `indexed-transition-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const transition = await writer
+      .insert(maintainedIndexedTodos, { title: transitionTitle, done: true })
+      .wait({ tier: "global" });
+    const transitionSnapshots: MaintainedIndexedTodo[][] = [];
+    const stopTransition = trackSubscription(
+      fresh.subscribe(
+        maintainedIndexedTodos.where({ title: transitionTitle, done: false }),
+        (rows) => transitionSnapshots.push(rows),
+        { tier: "global" },
+      ),
+    );
+    const matchingTransition = { id: transition.id, title: transitionTitle, done: false };
+    const expectedTransitionSnapshots: { id: string; title: string; done: boolean }[][] = [];
+    const assertTransitionSnapshots = () => {
+      expect(
+        transitionSnapshots.map((rows) => rows.map(({ id, title, done }) => ({ id, title, done }))),
+      ).toEqual(expectedTransitionSnapshots);
+    };
+    const awaitTransitionSnapshot = async (
+      cursor: number,
+      expectedRows: { id: string; title: string; done: boolean }[],
+      message: string,
+    ) => {
+      await waitForCondition(async () => transitionSnapshots.length > cursor, 15_000, message);
+      expectedTransitionSnapshots.push(expectedRows);
+      assertTransitionSnapshots();
+    };
+    await awaitTransitionSnapshot(
+      0,
+      [],
+      "non-matching indexed row must not appear in the initial intersected snapshot",
+    );
+    let transitionCursor = transitionSnapshots.length;
+    await writer
+      .update(maintainedIndexedTodos, transition.id, { done: false })
+      .wait({ tier: "global" });
+    await awaitTransitionSnapshot(
+      transitionCursor,
+      [matchingTransition],
+      "changing an indexed equality must enter the remote maintained subscription",
+    );
+    transitionCursor = transitionSnapshots.length;
+    await writer
+      .update(maintainedIndexedTodos, transition.id, { title: `${transitionTitle}-outside` })
+      .wait({ tier: "global" });
+    await awaitTransitionSnapshot(
+      transitionCursor,
+      [],
+      "changing title equality must leave the remote maintained subscription",
+    );
+    transitionCursor = transitionSnapshots.length;
+    await writer
+      .update(maintainedIndexedTodos, transition.id, { title: transitionTitle })
+      .wait({ tier: "global" });
+    await awaitTransitionSnapshot(
+      transitionCursor,
+      [matchingTransition],
+      "restoring title equality must re-enter the remote maintained subscription",
+    );
+    transitionCursor = transitionSnapshots.length;
+    await writer
+      .update(maintainedIndexedTodos, transition.id, { done: true })
+      .wait({ tier: "global" });
+    await awaitTransitionSnapshot(
+      transitionCursor,
+      [],
+      "changing done equality back must leave the remote maintained subscription",
+    );
+    await sleep(500);
+    assertTransitionSnapshots();
+    stopTransition();
+  }, 120000);
 
   it("delivers an initial scoped subscription snapshot after seeding many synced rows", async () => {
     const sharedLocalAuthToken = generateAuthSecret();
