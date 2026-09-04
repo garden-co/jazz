@@ -293,7 +293,7 @@ async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding(
         )
         .expect("prepare public query");
     let reader = stream_reader(
-        db.subscribe(&query, JsValue::NULL)
+        db.subscribe(&query, JsValue::NULL, None)
             .expect("create public subscription"),
     );
 

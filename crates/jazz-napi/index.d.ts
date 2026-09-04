@@ -91,21 +91,7 @@ export declare class NapiDb {
   attachQuery(query: PreparedQuery, opts?: any | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): QueryAttachment
   queryAttachmentIsCovered(attachment: QueryAttachment): boolean
   detachQuery(attachment: QueryAttachment): void
-  subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  /**
-   * Subscribe through the authority of an explicit backend open. This
-   * context is selected by the private backend capability, never by a
-   * caller-supplied identity.
-   */
-  subscribeForBackend(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  subscribeRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  subscribeRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  /**
-   * Subscribe to relation IR through the authority of an explicit backend
-   * open, without exposing that authority as a public author parameter.
-   */
-  subscribeRelationQueryForBackend(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Subscription
   tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void

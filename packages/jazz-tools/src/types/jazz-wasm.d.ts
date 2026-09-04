@@ -184,8 +184,6 @@ declare module "jazz-wasm" {
       openTransactionId?: string,
       author?: Uint8Array,
     ): Uint8Array | Promise<Uint8Array>;
-    subscribeForBackend(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
-    subscribeRelationQueryForBackend(queryJson: string, opts: unknown): ReadableStream<unknown>;
     /** Attach coverage, optionally at an open transaction snapshot and/or explicit identity. */
     attachQuery(
       query: WasmPreparedQuery,
@@ -195,12 +193,10 @@ declare module "jazz-wasm" {
     ): QueryAttachment;
     queryAttachmentIsCovered(attachment: QueryAttachment): boolean;
     detachQuery(attachment: QueryAttachment): void;
-    subscribe(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
-    subscribeRelationQuery(queryJson: string, opts: unknown): ReadableStream<unknown>;
-    subscribeRelationQueryForIdentity(
-      queryJson: string,
-      author: Uint8Array,
+    subscribe(
+      query: WasmPreparedQuery,
       opts: unknown,
+      author?: Uint8Array,
     ): ReadableStream<unknown>;
 
     insert(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite;

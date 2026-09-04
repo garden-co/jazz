@@ -1804,7 +1804,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               ]);
             },
             prepareQuery: () => ({}),
-            subscribeForIdentity: () => {
+            subscribe: () => {
               throw new Error("reserved public session must be rejected before subscribing");
             },
             tick: () => undefined,
@@ -2958,7 +2958,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
-  it("rejects Gather subscriptions while preparing the original query", () => {
+  it("routes Gather subscriptions through the prepared-query subscription", () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -2985,7 +2985,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    expect(() =>
+    expect(
       runtime.createSubscription(
         JSON.stringify({
           table: "todos",
@@ -3008,8 +3008,8 @@ describe("NativeRuntimeAdapter server transport", () => {
           },
         }),
       ),
-    ).toThrow("Native runtime does not support relation query subscriptions");
-    expect(calls).toEqual([]);
+    ).toBe(1);
+    expect(calls).toEqual(["prepareQuery", "subscribe"]);
   });
 
   it("passes supported read tiers and propagation through native read options", async () => {
@@ -3085,12 +3085,9 @@ describe("NativeRuntimeAdapter server transport", () => {
         calls.push(openTransactionId ? "transaction" : "plain");
         return encodeRows([]);
       },
-      subscribeForBackend: () => {
-        calls.push("subscription");
-        return new ReadableStream();
-      },
-      subscribeRelationQueryForBackend: () => {
-        calls.push("relation-subscription");
+      subscribe: (query: { kind: "query" | "relation" }, _opts: unknown, author: Uint8Array) => {
+        if (author) throw new Error("backend authority must be implicit in its native open");
+        calls.push(query.kind === "relation" ? "relation-subscription" : "subscription");
         return new ReadableStream();
       },
       tick: () => undefined,
@@ -6800,7 +6797,6 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
           detachQuery: () => undefined,
           prepareQuery: () => ({}),
           subscribe: () => new ReadableStream(),
-          subscribeForIdentity: () => new ReadableStream(),
           tick: () => undefined,
         }),
       openBrowser: async () => {
@@ -6854,7 +6850,7 @@ function runtimeWithNativeRelationSubscriptionChunks(
     {
       openMemory: () =>
         fakeDb({
-          subscribeRelationQuery: () => ({
+          subscribe: () => ({
             readAll: () => chunks.splice(0),
             close: () => true,
           }),

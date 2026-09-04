@@ -40,16 +40,8 @@ describe("WASM backend read capability parity", () => {
         const attachment = db.attachQuery(query, opts);
         db.detachQuery(attachment);
         for (const read of reads) expect(await read()).toBeInstanceOf(Uint8Array);
-        if (backend) {
-          await db.subscribeForBackend(query, opts).cancel();
-          await db.subscribeRelationQueryForBackend(relation, opts).cancel();
-        } else {
-          for (const read of [
-            () => db.subscribeForBackend(query, opts),
-            () => db.subscribeRelationQueryForBackend(relation, opts),
-          ])
-            expect(read).toThrow(/explicit backend runtime/);
-        }
+        await db.subscribe(query, opts).cancel();
+        await db.subscribe(relationQuery, opts).cancel();
       } finally {
         db.rollbackTransaction(txId);
         db.close();

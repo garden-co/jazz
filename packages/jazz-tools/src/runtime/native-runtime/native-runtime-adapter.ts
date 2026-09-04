@@ -214,24 +214,10 @@ type NativeDb = {
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array, kind: "query" | "relation"): PreparedQuery;
-  subscribe?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
-  subscribeForIdentity?(
+  subscribe?(
     query: PreparedQuery,
-    author: Uint8Array,
     opts: unknown,
-  ): ReadableStream<unknown> | Subscription;
-  /** Authority-serving subscription owned by an explicit backend open. */
-  subscribeForBackend?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
-  subscribeRelationQuery?(queryJson: string, opts: unknown): ReadableStream<unknown> | Subscription;
-  subscribeRelationQueryForIdentity?(
-    queryJson: string,
-    author: Uint8Array,
-    opts: unknown,
-  ): ReadableStream<unknown> | Subscription;
-  /** Authority-serving relation subscription owned by an explicit backend open. */
-  subscribeRelationQueryForBackend?(
-    queryJson: string,
-    opts: unknown,
+    author?: Uint8Array,
   ): ReadableStream<unknown> | Subscription;
   insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
   update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: NativeUpdateOptions): Write;
@@ -1916,15 +1902,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
     let nativeSubscription: ReadableStream<unknown> | Subscription;
-    let preparedQuery: PreparedQuery | null = null;
+    let preparedQuery: PreparedQuery;
     try {
-      if (usesNativeRelationApi) {
-        nativeSubscription = this.subscribeRelationForContext(queryJson, opts, readContext);
-      } else {
-        const query = this.prepareQuery(queryJson);
-        preparedQuery = query;
-        nativeSubscription = this.subscribeForContext(query, opts, readContext);
-      }
+      preparedQuery = this.prepareQuery(queryJson);
+      nativeSubscription = this.subscribeForContext(preparedQuery, opts, readContext);
     } catch (error) {
       const nativeStack = error instanceof Error ? error.stack : undefined;
       throw new Error(
@@ -2465,49 +2446,9 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     context: NativeReadContext,
   ): ReadableStream<unknown> | Subscription {
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.subscribeForBackend) {
-          throw new Error("Native runtime does not support backend authority subscriptions");
-        }
-        return this.db.subscribeForBackend(query, opts);
-      case "session-authority":
-        if (!this.db.subscribeForIdentity) {
-          throw new Error("Native runtime does not support session-authority subscriptions");
-        }
-        return this.db.subscribeForIdentity(query, context.identity, opts);
-      case "client-local":
-        if (!this.db.subscribe) throw new Error("Native runtime does not support subscriptions");
-        return this.db.subscribe(query, opts);
-    }
-  }
-
-  private subscribeRelationForContext(
-    queryJson: string,
-    opts: unknown,
-    context: NativeReadContext,
-  ): ReadableStream<unknown> | Subscription {
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.subscribeRelationQueryForBackend) {
-          throw new Error(
-            "Native runtime does not support backend authority relation subscriptions",
-          );
-        }
-        return this.db.subscribeRelationQueryForBackend(queryJson, opts);
-      case "session-authority":
-        if (!this.db.subscribeRelationQueryForIdentity) {
-          throw new Error(
-            "Native runtime does not support session-authority relation subscriptions",
-          );
-        }
-        return this.db.subscribeRelationQueryForIdentity(queryJson, context.identity, opts);
-      case "client-local":
-        if (!this.db.subscribeRelationQuery) {
-          throw new Error("Native runtime does not support relation query subscriptions");
-        }
-        return this.db.subscribeRelationQuery(queryJson, opts);
-    }
+    if (!this.db.subscribe) throw new Error("Native runtime does not support subscriptions");
+    const author = context.kind === "session-authority" ? context.identity : undefined;
+    return this.db.subscribe(query, opts, author);
   }
 
   private attachQueryForContext(

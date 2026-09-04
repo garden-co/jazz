@@ -1009,33 +1009,6 @@ impl WasmDbInner {
         ))
     }
 
-    fn subscribe_relation_query(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.subscribe_relation_query(query, opts)
-        )
-        .map(
-            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
-        ))
-    }
-
-    fn subscribe_relation_query_for_identity(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.subscribe_relation_query_for_identity(query, opts, author),
-        )
-        .map(
-            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
-        ))
-    }
-
     fn attach_query(
         &self,
         query: &PreparedQuery,
@@ -1694,93 +1667,22 @@ impl WasmDb {
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = subscribeForBackend)]
-    pub fn subscribe_for_backend(
-        &self,
-        query: &WasmPreparedQuery,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        self.require_trusted_backend()?;
-        let query = &query.inner;
-        let opts = read_opts_from_js(opts)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_for_identity(query, opts, AuthorSubject::SYSTEM)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
     #[wasm_bindgen(js_name = subscribe)]
-    pub fn subscribe(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<JsValue, JsValue> {
-        let query = &query.inner;
-        let opts = read_opts_from_js(opts)?;
-        let inner = self.open_inner()?;
-        let stream = inner.subscribe(query, opts).map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeForIdentity)]
-    pub fn subscribe_for_identity(
+    pub fn subscribe(
         &self,
         query: &WasmPreparedQuery,
-        author: Vec<u8>,
         opts: JsValue,
+        author: Option<Vec<u8>>,
     ) -> Result<JsValue, JsValue> {
         let query = &query.inner;
         let opts = read_opts_from_js(opts)?;
-        let author = author_id_from_bytes(&author)?;
+        let author = self.read_author(author)?;
         let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_for_identity(query, opts, author)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeRelationQuery)]
-    pub fn subscribe_relation_query(
-        &self,
-        query_json: String,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let query = relation_query_from_json(&query_json)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_relation_query(&query, opts)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeRelationQueryForIdentity)]
-    pub fn subscribe_relation_query_for_identity(
-        &self,
-        query_json: String,
-        author: Vec<u8>,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let author = author_id_from_bytes(&author)?;
-        let query = relation_query_from_json(&query_json)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_relation_query_for_identity(&query, opts, author)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeRelationQueryForBackend)]
-    pub fn subscribe_relation_query_for_backend(
-        &self,
-        query_json: String,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        self.require_trusted_backend()?;
-        let opts = read_opts_from_js(opts)?;
-        let query = relation_query_from_json(&query_json)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_relation_query_for_identity(&query, opts, AuthorSubject::SYSTEM)
-            .map_err(to_js_error)?;
+        let stream = match author {
+            Some(author) => inner.subscribe_for_identity(query, opts, author),
+            None => inner.subscribe(query, opts),
+        }
+        .map_err(to_js_error)?;
         subscription_stream_to_js(inner, stream)
     }
 

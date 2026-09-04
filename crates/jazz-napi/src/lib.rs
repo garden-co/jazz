@@ -2719,227 +2719,37 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
+        author: Option<Uint8Array>,
     ) -> napi::Result<Subscription> {
         let query = &query.inner;
-        let opts = core_read_opts_from_json(opts)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe(query, opts)).map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe(query, opts)).map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
+        let author = match author {
+            Some(author) => Some(core_author_id_from_bytes(&author)?),
+            None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
+            None => None,
         };
-        Ok(Subscription { inner: Some(inner) })
-    }
-
-    #[napi(js_name = "subscribeForIdentity")]
-    pub fn subscribe_for_identity(
-        &self,
-        query: &PreparedQuery,
-        author: Uint8Array,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
-        opts: Option<JsonValue>,
-    ) -> napi::Result<Subscription> {
-        let query = &query.inner;
-        let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! subscribe {
+            ($db:expr, $variant:ident) => {{
+                let stream = match author {
+                    Some(author) => core_block_on($db.subscribe_for_identity(query, opts, author)),
+                    None => core_block_on($db.subscribe(query, opts)),
+                }
+                .map_err(napi_error)?;
+                NapiSubscription::$variant {
+                    db: Rc::clone($db),
+                    stream,
+                    pending_events: VecDeque::new(),
+                    pending_batch: None,
+                }
+            }};
+        }
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_for_identity(query, opts, author))
-                    .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_for_identity(query, opts, author))
-                    .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-        };
-        Ok(Subscription { inner: Some(inner) })
-    }
-
-    /// Subscribe through the authority of an explicit backend open. This
-    /// context is selected by the private backend capability, never by a
-    /// caller-supplied identity.
-    #[napi(js_name = "subscribeForBackend")]
-    pub fn subscribe_for_backend(
-        &self,
-        query: &PreparedQuery,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
-        opts: Option<JsonValue>,
-    ) -> napi::Result<Subscription> {
-        self.require_trusted_backend()?;
-        let query = &query.inner;
-        let opts = core_read_opts_from_json(opts)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_for_identity(
-                    query,
-                    opts,
-                    CoreAuthorSubject::SYSTEM,
-                ))
-                .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_for_identity(
-                    query,
-                    opts,
-                    CoreAuthorSubject::SYSTEM,
-                ))
-                .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-        };
-        Ok(Subscription { inner: Some(inner) })
-    }
-
-    #[napi(js_name = "subscribeRelationQuery")]
-    pub fn subscribe_relation_query(
-        &self,
-        query_json: String,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
-        opts: Option<JsonValue>,
-    ) -> napi::Result<Subscription> {
-        let query = core_relation_query_from_json(&query_json)?;
-        let opts = core_read_opts_from_json(opts)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_relation_query(&query, opts))
-                    .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_relation_query(&query, opts))
-                    .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-        };
-        Ok(Subscription { inner: Some(inner) })
-    }
-
-    #[napi(js_name = "subscribeRelationQueryForIdentity")]
-    pub fn subscribe_relation_query_for_identity(
-        &self,
-        query_json: String,
-        author: Uint8Array,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
-        opts: Option<JsonValue>,
-    ) -> napi::Result<Subscription> {
-        let query = core_relation_query_from_json(&query_json)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let opts = core_read_opts_from_json(opts)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
-                db: Rc::clone(db),
-                stream: core_block_on(
-                    db.subscribe_relation_query_for_identity(&query, opts, author),
-                )
-                .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
-                db: Rc::clone(db),
-                stream: core_block_on(
-                    db.subscribe_relation_query_for_identity(&query, opts, author),
-                )
-                .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-        };
-        Ok(Subscription { inner: Some(inner) })
-    }
-
-    /// Subscribe to relation IR through the authority of an explicit backend
-    /// open, without exposing that authority as a public author parameter.
-    #[napi(js_name = "subscribeRelationQueryForBackend")]
-    pub fn subscribe_relation_query_for_backend(
-        &self,
-        query_json: String,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
-        opts: Option<JsonValue>,
-    ) -> napi::Result<Subscription> {
-        self.require_trusted_backend()?;
-        let query = core_relation_query_from_json(&query_json)?;
-        let opts = core_read_opts_from_json(opts)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_relation_query_for_identity(
-                    &query,
-                    opts,
-                    CoreAuthorSubject::SYSTEM,
-                ))
-                .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
-                db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_relation_query_for_identity(
-                    &query,
-                    opts,
-                    CoreAuthorSubject::SYSTEM,
-                ))
-                .map_err(napi_error)?,
-                pending_events: VecDeque::new(),
-                pending_batch: None,
-            },
+            NapiDbInnerStorage::Memory(db) => subscribe!(db, Memory),
+            NapiDbInnerStorage::Persistent(db) => subscribe!(db, Persistent),
         };
         Ok(Subscription { inner: Some(inner) })
     }
