@@ -1459,12 +1459,6 @@ impl CurrentRow {
         Self::new_with_binding_fields(table, record, CurrentRowBindingField::PhysicalColumn)
     }
 
-    /// Construct a row whose descriptor has public logical query-result names.
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn new_logical(table: impl Into<String>, record: OwnedRecord) -> Self {
-        Self::new_with_binding_fields(table, record, CurrentRowBindingField::LogicalField)
-    }
-
     pub(crate) fn new_with_binding_fields(
         table: impl Into<String>,
         record: OwnedRecord,

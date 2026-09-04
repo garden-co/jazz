@@ -22,9 +22,13 @@ fn project_preserves_logical_binding_fields() {
             Value::U64(20),
         ])
         .unwrap();
-    let projected = CurrentRow::new_logical("items", OwnedRecord::new(raw, descriptor))
-        .project(&table, &["check".to_owned()])
-        .expect("project logical result");
+    let projected = CurrentRow::new_with_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingField::LogicalField,
+    )
+    .project(&table, &["check".to_owned()])
+    .expect("project logical result");
 
     assert_eq!(
         projected.binding_fields()[1],
