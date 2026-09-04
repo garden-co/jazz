@@ -790,7 +790,13 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
   // must therefore declare every direct dependency it needs; it cannot
   // accidentally reach this workspace's jazz-rn sources. The scaffold itself
   // supplies only its explicit Expo/React/React-Native peer graph.
-  const directory = await mkdtemp(join(tmpdir(), "jazz-rn-fresh-expo-"));
+  // Keep the copy at the same workspace depth as crates/jazz-rn. pnpm's
+  // package-local tool shims have relative store links, and the receipt's
+  // finalizer removes this exact temporary directory.
+  const directory = await mkdtemp(
+    join(new URL("../../../", import.meta.url).pathname, ".jazz-rn-fresh-expo-"),
+  );
+  const packageSourceDirectory = join(directory, "package-source");
   const packageDirectory = join(directory, "package");
   const installDirectory = join(directory, "installed-package");
   const installedNodeModules = join(installDirectory, "node_modules");
@@ -798,15 +804,59 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
   const appNodeModules = join(appDirectory, "node_modules");
   const bareAppDirectory = join(directory, "bare-react-native-app");
   const bareAppNodeModules = join(bareAppDirectory, "node_modules");
+  const jazzRnSourceDirectory = new URL("../../../crates/jazz-rn/", import.meta.url).pathname;
   const canonicalNodeModules = new URL(
     "../../../examples/todo-client-localfirst-expo/node_modules/",
     import.meta.url,
   ).pathname;
   try {
+    // npm's ignored lifecycle scripts must not decide whether this receipt has
+    // fresh JavaScript. Build an isolated copy explicitly so the tarball is
+    // made from this checkout's source without changing the worktree.
+    await cp(jazzRnSourceDirectory, packageSourceDirectory, {
+      recursive: true,
+      dereference: true,
+      filter: (source) => source !== join(jazzRnSourceDirectory, "node_modules"),
+    });
+    await symlink(
+      join(jazzRnSourceDirectory, "node_modules"),
+      join(packageSourceDirectory, "node_modules"),
+    );
+    assert.match(
+      await readFile(join(packageSourceDirectory, "src", "index.tsx"), "utf8"),
+      /NATIVE_RELAY_ABI_V1/,
+      "the isolated package source must contain the current ABI export before building",
+    );
+    execFileSync(
+      process.execPath,
+      [
+        join(jazzRnSourceDirectory, "node_modules", "react-native-builder-bob", "bin", "bob"),
+        "build",
+      ],
+      { cwd: packageSourceDirectory, stdio: "inherit" },
+    );
+    const compiledEntry = await readFile(
+      join(packageSourceDirectory, "lib", "module", "index.js"),
+      "utf8",
+    );
+    assert.match(
+      compiledEntry,
+      /NATIVE_RELAY_ABI_V1/,
+      "the source build must publish the current ABI export before npm packs it",
+    );
+    assert.throws(
+      () =>
+        assert.match(
+          compiledEntry.replace("NATIVE_RELAY_ABI_V1", "NATIVE_RELAY_ABI_VERSION"),
+          /NATIVE_RELAY_ABI_V1/,
+        ),
+      /did not match/,
+      "a stale compiled relay entry must fail before the tarball is packed",
+    );
     await mkdir(packageDirectory, { recursive: true });
     const packed = JSON.parse(
       execFileSync("npm", npmPackMachineArgs("--pack-destination", packageDirectory), {
-        cwd: new URL("../../../crates/jazz-rn/", import.meta.url),
+        cwd: packageSourceDirectory,
         encoding: "utf8",
       }),
     );
@@ -881,9 +931,9 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     await writeFile(
       join(appDirectory, "App.tsx"),
       [
-        'import { NATIVE_RELAY_ABI } from "jazz-rn";',
+        'import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "jazz-rn";',
         "",
-        "export const relayAbi: number = NATIVE_RELAY_ABI.maximum;",
+        "export const relayAbi: number = NATIVE_RELAY_ABI.maximum + NATIVE_RELAY_ABI_V1;",
         "",
       ].join("\n"),
     );
@@ -956,22 +1006,37 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
           encoding: "utf8",
         },
       );
-    // Ask the packed JavaScript entry point for its own ABI range. The native
-    // shim must track this published contract rather than pinning a historical
-    // version number: the receipt is specifically meant to catch a native/JS
-    // ABI mismatch after either side changes.
-    const packedRelayAbi = Number(
+    // Ask the packed JavaScript entry point for both its ABI range and the
+    // source-only V1 symbol. The latter makes a stale lib/ entry fail even
+    // when an older ABI range happened to remain import-compatible.
+    const sourceRelayAbi = Number(
+      /export const NATIVE_RELAY_ABI_V1 = (\d+) as const;/.exec(
+        await readFile(join(packageSourceDirectory, "src", "native-relay-abi.ts"), "utf8"),
+      )?.[1],
+    );
+    const packedRelayExports = JSON.parse(
       runPackedRelay(
         {
           JAZZ_RN_PACKED_NATIVE_AVAILABLE: "0",
           JAZZ_RN_PACKED_NATIVE_ABI: "0",
         },
-        'const { NATIVE_RELAY_ABI } = await import("jazz-rn"); process.stdout.write(String(NATIVE_RELAY_ABI.maximum));',
+        'const { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } = await import("jazz-rn"); process.stdout.write(JSON.stringify({ maximum: NATIVE_RELAY_ABI.maximum, v1: NATIVE_RELAY_ABI_V1 }));',
       ),
     );
+    const packedRelayAbi = Number(packedRelayExports.maximum);
     assert.ok(
       Number.isSafeInteger(packedRelayAbi) && packedRelayAbi > 0,
       "the packed relay must export a positive ABI version for its native fixture",
+    );
+    assert.equal(
+      packedRelayExports.v1,
+      sourceRelayAbi,
+      "the packed relay's ABI V1 export must be rebuilt from this checkout's source",
+    );
+    assert.equal(
+      packedRelayAbi,
+      packedRelayExports.v1,
+      "the packed relay ABI range and V1 export must come from the same source build",
     );
     assert.equal(
       runPackedRelay(
@@ -1084,10 +1149,10 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       join(bareAppDirectory, "App.tsx"),
       [
         'import { Text } from "react-native";',
-        'import { NATIVE_RELAY_ABI } from "jazz-rn";',
+        'import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "jazz-rn";',
         "",
         "export default function App() {",
-        "  return <Text>Jazz Relay ABI {NATIVE_RELAY_ABI.maximum}</Text>;",
+        "  return <Text>Jazz Relay ABI {NATIVE_RELAY_ABI.maximum + NATIVE_RELAY_ABI_V1}</Text>;",
         "}",
         "",
       ].join("\n"),
