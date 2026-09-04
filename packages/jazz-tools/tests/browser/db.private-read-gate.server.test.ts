@@ -75,19 +75,17 @@ const camelChatApp = schema.defineApp({
 });
 
 const permissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
-  policy.chats.allowRead.where(
-    anyOf([{ visibility: "public" }, { owner_id: session.claims["sub"] }]),
-  ),
+  policy.chats.allowRead.where(anyOf([{ visibility: "public" }, { owner_id: session.user }])),
   policy.chats.allowInsert.always(),
   policy.chats.allowUpdate.always(),
   policy.chats.allowDelete.always(),
 
-  policy.chat_members.allowRead.where({ user_id: session.claims["sub"] }),
+  policy.chat_members.allowRead.where({ user_id: session.user }),
   policy.chat_members.allowInsert.always(),
   policy.chat_members.allowUpdate.always(),
   policy.chat_members.allowDelete.always(),
 
-  policy.messages.allowRead.where({ owner_id: session.claims["sub"] }),
+  policy.messages.allowRead.where({ owner_id: session.user }),
   policy.messages.allowInsert.always(),
   policy.messages.allowUpdate.always(),
   policy.messages.allowDelete.always(),
@@ -104,7 +102,7 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
       { visibility: "public" },
       policy.chat_members.exists.where({
         chat_id: chat.id,
-        user_id: session.claims["sub"],
+        user_id: session.user,
       }),
     ]),
   ),
@@ -112,10 +110,10 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
   policy.chats.allowUpdate.always(),
   policy.chats.allowDelete.always(),
 
-  policy.chat_members.allowRead.where({ user_id: session.claims["sub"] }),
-  policy.chat_members.allowInsert.where({ user_id: session.claims["sub"] }),
+  policy.chat_members.allowRead.where({ user_id: session.user }),
+  policy.chat_members.allowInsert.where({ user_id: session.user }),
   policy.chat_members.allowUpdate.always(),
-  policy.chat_members.allowDelete.where({ user_id: session.claims["sub"] }),
+  policy.chat_members.allowDelete.where({ user_id: session.user }),
 
   policy.messages.allowRead.where((message) =>
     anyOf([
@@ -125,14 +123,14 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
       }),
       policy.chat_members.exists.where({
         chat_id: message.chat_id,
-        user_id: session.claims["sub"],
+        user_id: session.user,
       }),
     ]),
   ),
   policy.messages.allowInsert.where((message) =>
     policy.chat_members.exists.where({
       chat_id: message.chat_id,
-      user_id: session.claims["sub"],
+      user_id: session.user,
     }),
   ),
   policy.messages.allowUpdate.always(),
@@ -148,56 +146,59 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
   camelChatApp,
   ({ policy, anyOf, allowedTo, session }) => [
     policy.profiles.allowRead.where({}),
-    policy.profiles.allowInsert.where({ userId: session.claims["sub"] }),
-    policy.profiles.allowUpdate.where({ userId: session.claims["sub"] }),
+    policy.profiles.allowInsert.where({ userId: session.user }),
+    policy.profiles.allowUpdate.where({ userId: session.user }),
 
     policy.chats.allowRead.where((chat) =>
       anyOf([
         { isPublic: true },
         policy.chatMembers.exists.where({
           chatId: chat.id,
-          userId: session.claims["sub"],
+          userId: session.user,
         }),
         { joinCode: session.claims["join_code"] },
       ]),
     ),
-    policy.chats.allowInsert.where({ createdBy: session.claims["sub"] }),
-    policy.chats.allowUpdate.where({ createdBy: session.claims["sub"] }),
-    policy.chats.allowDelete.where({ createdBy: session.claims["sub"] }),
+    policy.chats.allowInsert.where({ createdBy: session.user }),
+    policy.chats.allowUpdate.where({ createdBy: session.user }),
+    policy.chats.allowDelete.where({ createdBy: session.user }),
 
     policy.chatMembers.allowRead.where((member) =>
       anyOf([
-        { userId: session.claims["sub"] },
+        { userId: session.user },
         policy.chatMembers.exists.where({
           chatId: member.chatId,
-          userId: session.claims["sub"],
+          userId: session.user,
         }),
       ]),
     ),
-    policy.chatMembers.allowInsert.where({ userId: session.claims["sub"] }),
+    policy.chatMembers.allowInsert.where({ userId: session.user }),
     policy.chatMembers.allowUpdate.always(),
-    policy.chatMembers.allowDelete.where({ userId: session.claims["sub"] }),
+    policy.chatMembers.allowDelete.where({ userId: session.user }),
 
     policy.messages.allowRead.where((message) =>
       anyOf([
         policy.chats.exists.where({ id: message.chatId, isPublic: true }),
         policy.chatMembers.exists.where({
           chatId: message.chatId,
-          userId: session.claims["sub"],
+          userId: session.user,
         }),
       ]),
     ),
     policy.messages.allowInsert.where((message) =>
       policy.chatMembers.exists.where({
         chatId: message.chatId,
-        userId: session.claims["sub"],
+        userId: session.user,
       }),
     ),
+    // `senderId` is a profile UUID; policy evaluation retains the native
+    // subject claim for this typed internal binding. Public ownership fields
+    // above use the canonical public `session.user` identity.
     policy.messages.allowDelete.where({ senderId: session.claims["sub"] }),
 
     policy.reactions.allowRead.where(allowedTo.read("messageId")),
-    policy.reactions.allowInsert.where({ userId: session.claims["sub"] }),
-    policy.reactions.allowDelete.where({ userId: session.claims["sub"] }),
+    policy.reactions.allowInsert.where({ userId: session.user }),
+    policy.reactions.allowDelete.where({ userId: session.user }),
   ],
 );
 
@@ -526,8 +527,16 @@ describe("raw websocket private read gate", () => {
     );
 
     const alice = await openUserDb(appId, serverUrl, "camel-chat-invite-alice");
-    const bobSecret = generateAuthSecret();
-    const bob = await openUserDb(appId, serverUrl, "camel-chat-invite-bob", bobSecret);
+    // Use the same external issuer/subject for both the invite-scoped and
+    // normal sessions. `session.user` deliberately includes that issuer, so a
+    // local-first identity is not interchangeable with this JWT identity.
+    const bobSubject = "invite-bob";
+    const bob = await openJwtUserDb(
+      appId,
+      serverUrl,
+      "camel-chat-invite-bob",
+      await getJazzServerJwtForUser(bobSubject, undefined, appId),
+    );
     const aliceUserId = requireUserId(alice, "Alice");
     const bobUserId = requireUserId(bob, "Bob");
     const joinCode = `join-${Date.now()}`;
@@ -590,7 +599,7 @@ describe("raw websocket private read gate", () => {
 
     const inviteSession = {
       issuer: "https://issuer.jazz.test",
-      user_id: bobUserId,
+      user_id: bobSubject,
       claims: { join_code: joinCode },
       authMode: "external" as const,
     };
@@ -598,7 +607,7 @@ describe("raw websocket private read gate", () => {
       appId,
       serverUrl,
       "camel-chat-invite-bob-scoped",
-      await getJazzServerJwtForUser(bobUserId, { join_code: joinCode }, appId),
+      await getJazzServerJwtForUser(bobSubject, { join_code: joinCode }, appId),
     );
 
     await expect(
@@ -1042,7 +1051,7 @@ async function publishSchemaAndPermissions(
 }
 
 function requireUserId(db: Db, label: string): string {
-  const userId = db.getAuthState().session?.claims.sub;
+  const userId = db.getAuthState().session?.user;
   if (!userId) {
     throw new Error(`${label} Db did not initialize a local-first session`);
   }
