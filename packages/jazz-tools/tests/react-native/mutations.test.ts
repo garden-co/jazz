@@ -27,7 +27,9 @@ describe("React Native public mutations through the real foreground C ABI", () =
       await db.delete(app.documents, row.id).wait({ tier: "local" });
       expect(await db.all(app.documents)).toEqual([]);
       await expect(
-        db.upsert(app.documents, row.id, { title: "must stay hidden" }).wait({ tier: "local" }),
+        db
+          .upsert(app.documents, row.id, { title: "must stay hidden", done: false })
+          .wait({ tier: "local" }),
       ).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
         code: "write_rejected",
