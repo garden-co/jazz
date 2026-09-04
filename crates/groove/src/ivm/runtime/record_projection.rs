@@ -1012,6 +1012,11 @@ pub(super) fn resolve_field_ref(
     match field {
         FieldRef::Name(name) => resolve_field_name(descriptor, name)
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone())),
+        FieldRef::StoredName(name) => descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some(name))
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone())),
         FieldRef::Resolved(index) => {
             if *index < descriptor.fields().len() {
                 Ok(*index)
@@ -1037,6 +1042,13 @@ pub(super) fn field_ref_name(
 ) -> Result<String, IvmRuntimeError> {
     match field {
         FieldRef::Name(name) => Ok(name.clone()),
+        FieldRef::StoredName(_) => {
+            let index = resolve_field_ref(descriptor, field)?;
+            Ok(descriptor.fields()[index]
+                .logical_name()
+                .expect("stored field references have a name")
+                .to_owned())
+        }
         FieldRef::Resolved(index) => field_name_at(descriptor, *index),
     }
 }

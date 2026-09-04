@@ -3078,10 +3078,18 @@ fn lower_order_key(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<TopByOrder, UnsupportedReason> {
-    let field = lower_field_ref(&key.value, plan, source, request, "order key")?;
-    Ok(match key.direction {
-        SortDirection::Asc => TopByOrder::asc(field),
-        SortDirection::Desc => TopByOrder::desc(field),
+    // Preserve source qualification validation before binding the exact carrier.
+    let lowered = lower_field_ref(&key.value, plan, source, request, "order key")?;
+    let field = match collect_window_source_field(source, &key.value) {
+        Some(field) => FieldRef::stored_name(field.name.clone().expect("window fields are named")),
+        None => FieldRef::name(lowered),
+    };
+    Ok(TopByOrder {
+        field,
+        direction: match key.direction {
+            SortDirection::Asc => groove::ivm::TopByDirection::Asc,
+            SortDirection::Desc => groove::ivm::TopByDirection::Desc,
+        },
     })
 }
 

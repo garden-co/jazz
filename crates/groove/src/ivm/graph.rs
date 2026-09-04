@@ -446,6 +446,9 @@ impl CollectBySlotBuilder {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FieldRef {
     Name(String),
+    /// Exact descriptor carrier name, bound by a compiler at a schema boundary.
+    /// This never resolves through a different field's logical identity.
+    StoredName(String),
     Resolved(usize),
 }
 
@@ -458,9 +461,14 @@ impl FieldRef {
         Self::Resolved(index)
     }
 
+    pub fn stored_name(name: impl Into<String>) -> Self {
+        Self::StoredName(name.into())
+    }
+
     pub fn display_name(&self) -> String {
         match self {
             Self::Name(name) => name.clone(),
+            Self::StoredName(name) => format!("stored:{name}"),
             Self::Resolved(index) => format!("#{index}"),
         }
     }

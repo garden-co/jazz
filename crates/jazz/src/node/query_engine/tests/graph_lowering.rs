@@ -253,7 +253,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
             limit: groove::ivm::TopByLimit::Finite(2),
         } if group_cols.is_empty()
             && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
-                field: groove::ivm::FieldRef::Name(field),
+                field: groove::ivm::FieldRef::StoredName(field),
                 direction: groove::ivm::TopByDirection::Asc,
             }] if field == "user_title")
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]

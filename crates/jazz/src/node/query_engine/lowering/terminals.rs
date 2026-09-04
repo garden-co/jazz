@@ -8,15 +8,6 @@ use super::*;
 use crate::node::query_eval::coerce_prepared_binding_value;
 use groove::records::{DescriptorField, FieldIdentity};
 
-fn resolved_source_field_name(source: &ResolvedSource, field: &str) -> Option<String> {
-    source
-        .row_shape
-        .descriptor
-        .field_index(field)
-        .and_then(|index| source.row_shape.descriptor.fields().get(index))
-        .and_then(|field| field.name.clone())
-}
-
 fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<String> {
     source
         .row_shape
@@ -1275,7 +1266,7 @@ fn align_collect_join_key_types(
                     slot.order_cols = keys
                         .iter()
                         .map(|key| {
-                            let field = collect_slot_input_for_value(slot, &key.value)?;
+                            let field = collect_slot_input_for_value(slot, &key.value, child)?;
                             Ok(match key.direction {
                                 SortDirection::Asc => TopByOrder::asc(field),
                                 SortDirection::Desc => TopByOrder::desc(field),
@@ -1298,7 +1289,7 @@ fn align_collect_join_key_types(
                         .unwrap_or(TopByLimit::Unbounded);
                     slot.tie_cols = tie_breaker
                         .iter()
-                        .map(|value| collect_slot_input_for_value(slot, value))
+                        .map(|value| collect_slot_input_for_value(slot, value, child))
                         .collect::<CapabilityResult<Vec<_>>>()?;
                 }
                 _ => {}
@@ -1339,7 +1330,7 @@ fn align_collect_root_window(
                 layout.root_order_cols = keys
                     .iter()
                     .map(|key| {
-                        let field = collect_root_input_for_value(layout, &key.value)?;
+                        let field = collect_root_input_for_value(layout, &key.value, source)?;
                         Ok(match key.direction {
                             SortDirection::Asc => TopByOrder::asc(field),
                             SortDirection::Desc => TopByOrder::desc(field),
@@ -1362,7 +1353,7 @@ fn align_collect_root_window(
                     .unwrap_or(TopByLimit::Unbounded);
                 layout.root_tie_cols = tie_breaker
                     .iter()
-                    .map(|value| collect_root_input_for_value(layout, value))
+                    .map(|value| collect_root_input_for_value(layout, value, source))
                     .collect::<CapabilityResult<Vec<_>>>()?;
             }
             _ => {}
@@ -1397,11 +1388,13 @@ fn retain_collect_root_value(
     value: &NormalizedValueRef,
     source: &ResolvedSource,
 ) -> CapabilityResult<()> {
-    let Some(requested_field) = collect_source_field_for_value(value) else {
+    let Some(descriptor_field) = collect_window_source_field(source, value) else {
         return Ok(());
     };
-    let source_field = resolved_source_field_name(source, requested_field)
-        .unwrap_or_else(|| user_column_field(requested_field));
+    let source_field = descriptor_field
+        .name
+        .clone()
+        .expect("source window fields are named");
     if layout
         .root_fields
         .iter()
@@ -1409,14 +1402,7 @@ fn retain_collect_root_value(
     {
         return Ok(());
     }
-    let source_value_type = source_field_type(source, &source_field)
-        .cloned()
-        .ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Operator(format!(
-                "collector root source {:?} does not provide window key {requested_field:?}",
-                source.row_shape.source
-            )))
-        })?;
+    let source_value_type = descriptor_field.value_type.clone();
     layout.root_fields.push(CollectFlatField {
         input: format!("__collect_root_{source_field}"),
         output: source_field.clone(),
@@ -1440,11 +1426,13 @@ fn retain_collect_slot_value(
     value: &NormalizedValueRef,
     source: &ResolvedSource,
 ) -> CapabilityResult<()> {
-    let Some(requested_field) = collect_source_field_for_value(value) else {
+    let Some(descriptor_field) = collect_window_source_field(source, value) else {
         return Ok(());
     };
-    let source_field = resolved_source_field_name(source, requested_field)
-        .unwrap_or_else(|| user_column_field(requested_field));
+    let source_field = descriptor_field
+        .name
+        .clone()
+        .expect("source window fields are named");
     if slot
         .fields
         .iter()
@@ -1452,14 +1440,7 @@ fn retain_collect_slot_value(
     {
         return Ok(());
     }
-    let source_value_type = source_field_type(source, &source_field)
-        .cloned()
-        .ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Operator(format!(
-                "collector child source {:?} does not provide window key {requested_field:?}",
-                source.row_shape.source
-            )))
-        })?;
+    let source_value_type = descriptor_field.value_type.clone();
     let prefix = slot
         .row_id_input
         .strip_suffix(&format!("_{}", source.row_shape.row_uuid_field))
@@ -1492,15 +1473,13 @@ fn retain_collect_slot_value(
 fn collect_root_input_for_value(
     layout: &CollectLayout,
     value: &NormalizedValueRef,
+    source: &ResolvedSource,
 ) -> CapabilityResult<String> {
-    match collect_source_field_for_value(value) {
+    match collect_window_source_field(source, value).and_then(|field| field.name.as_deref()) {
         Some(field) => layout
             .root_fields
             .iter()
-            .find(|candidate| {
-                candidate.source_field.as_deref() == Some(field)
-                    || candidate.source_public_name.as_deref() == Some(field)
-            })
+            .find(|candidate| candidate.source_field.as_deref() == Some(field))
             .map(|candidate| candidate.input.clone()),
         None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => layout
             .root_fields
@@ -1519,15 +1498,13 @@ fn collect_root_input_for_value(
 fn collect_slot_input_for_value(
     slot: &CollectSlotLayout,
     value: &NormalizedValueRef,
+    source: &ResolvedSource,
 ) -> CapabilityResult<String> {
-    match collect_source_field_for_value(value) {
+    match collect_window_source_field(source, value).and_then(|field| field.name.as_deref()) {
         Some(field) => slot
             .fields
             .iter()
-            .find(|candidate| {
-                candidate.source_field.as_deref() == Some(field)
-                    || candidate.source_public_name.as_deref() == Some(field)
-            })
+            .find(|candidate| candidate.source_field.as_deref() == Some(field))
             .map(|candidate| candidate.input.clone()),
         None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => {
             Some(slot.row_id_input.clone())
@@ -1541,20 +1518,43 @@ fn collect_slot_input_for_value(
     })
 }
 
-/// Map a normalized field reference to the canonical name retained by a
-/// resolved source. Provenance is source metadata, not a public projection
-/// field, but ordered and sliced collectors still need it as an internal key.
-fn collect_source_field_for_value(value: &NormalizedValueRef) -> Option<&str> {
-    match value {
-        NormalizedValueRef::SourceField { field, .. } => Some(field),
-        NormalizedValueRef::Provenance { field, .. } => Some(match field {
+/// Resolve a window reference at the application-to-source boundary. Declared
+/// columns use their canonical CurrentRow carrier, so a logical `user_title`
+/// cannot resolve to the carrier for `title`. Derived logical fields retain
+/// their explicit descriptor identity; provenance uses its metadata carrier.
+pub(super) fn collect_window_source_field<'a>(
+    source: &'a ResolvedSource,
+    value: &NormalizedValueRef,
+) -> Option<&'a DescriptorField> {
+    let descriptor = &source.row_shape.descriptor;
+    let carrier = match value {
+        NormalizedValueRef::SourceField { field, .. } => {
+            if source
+                .table_schema
+                .columns
+                .iter()
+                .any(|column| column.name == *field)
+            {
+                user_column_field(field)
+            } else {
+                return descriptor
+                    .field_index(field)
+                    .and_then(|index| descriptor.fields().get(index));
+            }
+        }
+        NormalizedValueRef::Provenance { field, .. } => match field {
             ProvenanceField::CreatedAt => "$createdAt",
             ProvenanceField::CreatedBy => "$createdBy",
             ProvenanceField::UpdatedAt => "$updatedAt",
             ProvenanceField::UpdatedBy => "$updatedBy",
-        }),
-        _ => None,
-    }
+        }
+        .to_owned(),
+        _ => return None,
+    };
+    descriptor
+        .fields()
+        .iter()
+        .find(|field| field.name.as_deref() == Some(carrier.as_str()))
 }
 
 pub(super) fn root_join_occurrence_fields(

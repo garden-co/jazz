@@ -5711,6 +5711,57 @@ mod tests {
         assert_eq!(values[4], CoreValue::U64(created.0));
     }
 
+    /// Alice's projected ordered windows keep `title` and `user_title`
+    /// distinct even though one public name matches the other's carrier.
+    #[tokio::test]
+    async fn projected_ordered_windows_distinguish_user_prefixed_columns() {
+        use crate::query::{OrderDirection, Query};
+
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .column("title", ColumnType::Text)
+                        .column("user_title", ColumnType::Text)
+                        .column("label", ColumnType::Text),
+                )
+                .build(),
+        )
+        .await;
+        for (id, title, user_title, label) in [
+            (1, "alpha", "zulu", "first by title"),
+            (2, "zulu", "alpha", "first by user_title"),
+        ] {
+            client
+                .upsert(
+                    "items",
+                    Uuid::from_u128(id),
+                    crate::row_input!("title" => title, "user_title" => user_title, "label" => label),
+                )
+                .expect("insert opposing sort values");
+        }
+        for (column, expected) in [
+            ("title", "first by title"),
+            ("user_title", "first by user_title"),
+        ] {
+            let rows = client
+                .query_results(
+                    Query::from("items")
+                        .order_by(column, OrderDirection::Asc)
+                        .limit(1)
+                        .select(["label"]),
+                    Some(DurabilityTier::Local),
+                )
+                .await
+                .expect("evaluate projected window");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].get("label"),
+                Some(&Value::Text(expected.to_owned()))
+            );
+        }
+    }
+
     #[tokio::test]
     async fn transaction_scoped_timestamp_override_is_rejected() {
         let client = JazzClient::test_client(declared_todo_schema()).await;

@@ -438,7 +438,7 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 output_field,
                 ..
             } => child_output(input).and_then(|mut fields| match field {
-                FieldRef::Name(field) => {
+                FieldRef::Name(field) | FieldRef::StoredName(field) => {
                     fields.remove(field);
                     fields.insert(output_field.clone());
                     Some(fields)
