@@ -163,7 +163,7 @@ pub(super) fn top_by_window_from_records(
 }
 
 pub(super) fn top_by_window_from_ordered_group(
-    records: Option<&BTreeMap<CollectByOrderKey, i64>>,
+    records: Option<&CollectByGroup>,
     top_by: &TopByOp,
 ) -> Vec<WindowedRecord> {
     let mut window = Vec::new();
@@ -172,7 +172,7 @@ pub(super) fn top_by_window_from_ordered_group(
         TopByLimit::Finite(limit) => Some(limit),
         TopByLimit::Unbounded => None,
     };
-    for ((_, record), weight) in records.into_iter().flatten() {
+    for ((_, record), weight) in records.into_iter().flat_map(CollectByGroup::iter) {
         if remaining == Some(0) {
             break;
         }
@@ -370,18 +370,9 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         let state_key = (sort_key, delta.record.clone());
         let group = state.groups.entry(group_key.clone()).or_default();
         let before_weight = group.get(&state_key).copied().unwrap_or_default();
-        let before_index = (before_weight > 0).then(|| {
-            group
-                .range(..state_key.clone())
-                .filter(|(_, weight)| **weight > 0)
-                .count()
-        });
+        let before_index = (before_weight > 0).then(|| group.count_before(&state_key));
         let after_weight = before_weight + delta.weight;
-        if after_weight == 0 {
-            group.remove(&state_key);
-        } else {
-            group.insert(state_key.clone(), after_weight);
-        }
+        group.set(state_key.clone(), after_weight);
         if !emit || (before_weight > 0) == (after_weight > 0) {
             continue;
         }
@@ -411,10 +402,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         let child_key = encoded_record_key_part(child_descriptor, &child_record, &[0])?;
         let path = vec![TerminalPathSegment::Collection(collection_field.to_owned())];
         if after_weight > 0 {
-            let index = group
-                .range(..state_key)
-                .filter(|(_, weight)| **weight > 0)
-                .count();
+            let index = group.count_before(&state_key);
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
                 root_key: group_key,
@@ -592,11 +580,7 @@ fn update_collect_by_root_terminal_state(
         let state_key = (sort_key, delta.record.clone());
         let group = state.groups.entry(group_key.clone()).or_default();
         let weight = group.get(&state_key).copied().unwrap_or_default() + delta.weight;
-        if weight == 0 {
-            group.remove(&state_key);
-        } else {
-            group.insert(state_key, weight);
-        }
+        group.set(state_key, weight);
     }
     state.groups.retain(|_, group| !group.is_empty());
     if !emit {
@@ -822,9 +806,7 @@ fn update_collect_by_root_terminal_state(
     Ok(operations)
 }
 
-fn collect_by_root_order_key(
-    group: &BTreeMap<CollectByOrderKey, i64>,
-) -> Option<CollectByOrderKey> {
+fn collect_by_root_order_key(group: &CollectByGroup) -> Option<CollectByOrderKey> {
     group
         .iter()
         .find(|(_, weight)| **weight > 0)

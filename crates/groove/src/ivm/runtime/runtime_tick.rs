@@ -713,10 +713,24 @@ impl IncrementalEvaluation<'_> {
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
         for (key, state) in &mut self.operator_states {
+            runtime.operator_states.remove(key);
             if let OperatorState::Recursive(recursive) = state {
                 recursive.value_mut().commit_staged_positive();
             }
-            runtime.operator_states.remove(key);
+            if let OperatorState::TopBy(top_by) = state {
+                top_by.value_mut().commit_overlays();
+            }
+            if let OperatorState::SemiJoin(semi_join) = state {
+                semi_join.commit_published_overlay();
+            }
+            if let OperatorState::AntiJoin(anti_join) = state {
+                anti_join.commit_published_overlay();
+            }
+            if let OperatorState::CollectBy(collect_by) = state {
+                for group in collect_by.groups.values_mut() {
+                    group.commit_overlay();
+                }
+            }
         }
         runtime
             .operator_states
@@ -1520,12 +1534,31 @@ impl<'a> EvaluationSession<'a> {
         }
     }
 
-    fn install(self, runtime: &mut IvmRuntime) {
+    fn install(mut self, runtime: &mut IvmRuntime) {
         for node in &self.relevant_nodes {
             runtime.operator_states.remove(&OperatorStateKey {
                 scope: ScopeId::root(),
                 node: *node,
             });
+        }
+        // Session hydration also establishes long-lived collector state. Fold
+        // its initially populated sparse groups now, otherwise the first
+        // incremental edit would COW-clone the entire hydration overlay.
+        for state in self.operator_states.values_mut() {
+            if let OperatorState::TopBy(top_by) = state {
+                top_by.value_mut().commit_overlays();
+            }
+            if let OperatorState::SemiJoin(semi_join) = state {
+                semi_join.commit_published_overlay();
+            }
+            if let OperatorState::AntiJoin(anti_join) = state {
+                anti_join.commit_published_overlay();
+            }
+            if let OperatorState::CollectBy(collect_by) = state {
+                for group in collect_by.groups.values_mut() {
+                    group.commit_overlay();
+                }
+            }
         }
         runtime.operator_states.extend(self.operator_states);
         for node in &self.relevant_nodes {
@@ -1534,6 +1567,12 @@ impl<'a> EvaluationSession<'a> {
                     runtime.arrangement_states.remove(key);
                 }
             }
+        }
+        // Hydration-created arrangements are the immutable bases for the
+        // next staged tick. Fold their initial overlays after removing the
+        // old live entries, just as incremental installation does.
+        for state in self.arrangement_states.values_mut() {
+            state.value_mut().commit_overlay();
         }
         runtime.arrangement_states.extend(self.arrangement_states);
         for node in &self.relevant_nodes {
