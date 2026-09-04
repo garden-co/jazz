@@ -4,6 +4,13 @@ const canonicalAuthorDecoder = new TextDecoder("utf-8", { fatal: true });
 const STORED_SCALAR_INLINE_TAG = 2;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
 const publicSessions = new WeakMap<Session, PublicSession>();
+// Verified-handler presentation metadata only. Internal sessions carry only
+// the policy-representable provider corpus used for runtime admission; a
+// complete verified JWT payload is associated with the same in-memory Session
+// object solely for PublicSession projection. This side table is deliberately
+// non-serialized and non-authoritative: it must never feed admission or
+// delegation, and clones intentionally do not retain it.
+const publicSessionClaims = new WeakMap<Session, Record<string, unknown>>();
 
 function cloneAndFreezeClaim(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -65,6 +72,21 @@ export function canonicalAuthorSubject(issuer: string, subject: string): string 
 }
 
 /**
+ * Associate complete verified JWT metadata with its internal policy session.
+ *
+ * @internal The mapping is deliberately identity-local and non-authoritative:
+ * callers must not turn this into a second serializable session representation
+ * or use it for admission/delegation.
+ */
+export function attachPublicSessionClaims<T extends Session>(
+  session: T,
+  claims: Record<string, unknown>,
+): T {
+  publicSessionClaims.set(session, claims);
+  return session;
+}
+
+/**
  * Attach the canonical logical user identity to a session crossing a public
  * binding boundary. Never preserve a caller-provided `user`: credentials
  * control `iss`/`sub`, and the identity is derived from those exact values.
@@ -77,7 +99,9 @@ export function withCanonicalUser(session: Session): PublicSession {
   const existing = publicSessions.get(session);
   if (existing) return existing;
   const user = canonicalAuthorSubject(session.issuer, session.user_id);
-  const claims = cloneAndFreezeClaim(session.claims) as Readonly<Record<string, unknown>>;
+  const claims = cloneAndFreezeClaim(
+    publicSessionClaims.get(session) ?? session.claims,
+  ) as Readonly<Record<string, unknown>>;
   const published: PublicSession = Object.freeze({
     user,
     claims,
