@@ -5,6 +5,8 @@ import type { NativeForegroundRuntime } from "../../src/react-native/native-fore
 
 type NativeHandle = object; // NAPI External with Rust Drop, never a pointer number.
 interface TestBinding {
+  __testRnDecodeForegroundCommand(command: Uint8Array): string;
+  __testRnForegroundResponseCorpus(): string;
   nativeArtifactFingerprint(): string;
   __testRnHostNew(): NativeHandle;
   __testRnHostAbiVersion(host: NativeHandle): number;
@@ -68,3 +70,13 @@ export function installPlatformHost(host: ReturnType<typeof createPlatformHost>)
   });
 }
 export default { getAbiVersion: () => abiVersion };
+
+// Cross-language codec probes use the same sealed bridge as the real host tests.
+export function decodeCommandInRust(command: Uint8Array): unknown {
+  return JSON.parse(binding.__testRnDecodeForegroundCommand(command));
+}
+export function rustResponseCorpus(): Uint8Array[] {
+  return (JSON.parse(binding.__testRnForegroundResponseCorpus()) as number[][]).map((bytes) =>
+    Uint8Array.from(bytes),
+  );
+}

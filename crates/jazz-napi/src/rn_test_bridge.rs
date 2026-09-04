@@ -305,3 +305,40 @@ pub fn host_attach_canonical_schema(
 pub fn host_revoke(host: &External<RnTestHost>, capability: Uint8Array) -> Result<()> {
     host.revoke(capability)
 }
+
+/// Inspect the real Rust request type without executing a database operation.
+/// This test-only seam detects TS ordinal/field drift across the language boundary.
+#[napi(js_name = "__testRnDecodeForegroundCommand", skip_typescript)]
+pub fn decode_foreground_command(command: Uint8Array) -> Result<String> {
+    let (decoded, remainder) = postcard::take_from_bytes::<ForegroundDbCommandRequest>(&command)
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    let canonical =
+        postcard::to_allocvec(&decoded).map_err(|error| Error::from_reason(error.to_string()))?;
+    if !remainder.is_empty() || canonical.as_slice() != command.as_ref() {
+        return Err(Error::from_reason("non-canonical foreground command"));
+    }
+    serde_json::to_string(&decoded).map_err(|error| Error::from_reason(error.to_string()))
+}
+
+/// Rust-produced response bytes, consumed by the ordinary RN TS decoder.
+#[napi(js_name = "__testRnForegroundResponseCorpus", skip_typescript)]
+pub fn foreground_response_corpus() -> Result<String> {
+    let responses = [
+        ForegroundDbCommandResponse::Pending { operation: 256 },
+        ForegroundDbCommandResponse::OperationError {
+            reason: "codec boundary: λ".into(),
+        },
+        ForegroundDbCommandResponse::TransactionSettled { tx_id: [7; 16] },
+        ForegroundDbCommandResponse::NativeConnectionStatus {
+            configured: true,
+            explicitly_offline: false,
+            connected: true,
+        },
+    ];
+    let bytes = responses
+        .iter()
+        .map(postcard::to_allocvec)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    serde_json::to_string(&bytes).map_err(|error| Error::from_reason(error.to_string()))
+}
