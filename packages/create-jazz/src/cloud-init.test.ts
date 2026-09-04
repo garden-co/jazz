@@ -153,7 +153,7 @@ describe("runHostedInit", () => {
       expect(values["BACKEND_SECRET"]).toBe("");
     });
 
-    it("names the error class on stderr", async () => {
+    it("keeps the HTTP failure diagnostic actionable without serializing the error", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockRejectedValue(
         new cloudProvision.ProvisionHttpError(API_URL, 503),
       );
@@ -166,7 +166,7 @@ describe("runHostedInit", () => {
       });
 
       const warnArgs = warnSpy.mock.calls.map((c: unknown[]) => c.join(" "));
-      expect(warnArgs.some((w: string) => w.includes("ProvisionHttpError"))).toBe(true);
+      expect(warnArgs.some((w: string) => w.includes("HTTP 503 provisioning error"))).toBe(true);
     });
   });
 
@@ -187,9 +187,16 @@ describe("runHostedInit", () => {
       expect(values["JAZZ_ADMIN_SECRET"]).toBe("");
     });
 
-    it("names the error class on stderr", async () => {
+    it("does not leak credentials embedded in a network error", async () => {
+      const adminSecret = "admin-secret-from-network-error";
+      const backendSecret = "backend-secret-from-network-error";
       vi.spyOn(cloudProvision, "provisionHostedApp").mockRejectedValue(
-        new cloudProvision.ProvisionNetworkError(API_URL, new TypeError("Failed to fetch")),
+        new cloudProvision.ProvisionNetworkError(
+          API_URL,
+          new TypeError(
+            `Failed to fetch: adminSecret=${adminSecret}, backendSecret=${backendSecret}`,
+          ),
+        ),
       );
 
       await runHostedInit({
@@ -200,7 +207,10 @@ describe("runHostedInit", () => {
       });
 
       const warnArgs = warnSpy.mock.calls.map((c: unknown[]) => c.join(" "));
-      expect(warnArgs.some((w: string) => w.includes("ProvisionNetworkError"))).toBe(true);
+      const output = warnArgs.join("\n");
+      expect(output).toContain("network provisioning error");
+      expect(output).not.toContain(adminSecret);
+      expect(output).not.toContain(backendSecret);
     });
   });
 
@@ -364,11 +374,36 @@ describe("runHostedInit", () => {
       expect(warnSpy).not.toHaveBeenCalled();
 
       const warnMessages = logs.filter((l) => l.kind === "warn").map((l) => l.message);
-      expect(warnMessages.some((m) => m.includes("ProvisionHttpError"))).toBe(true);
+      expect(warnMessages.some((m) => m.includes("HTTP 503 provisioning error"))).toBe(true);
     });
   });
 
   describe("writeHostedEnv throws (outer catch)", () => {
+    it("does not serialize a write error containing a credential", async () => {
+      const backendSecret = "backend-secret-from-write-error";
+      vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
+        appId: "app-safe-error",
+        adminSecret: "admin-safe-error",
+        backendSecret,
+      });
+      vi.spyOn(cloudEnv, "writeHostedEnv")
+        .mockImplementationOnce(() => {
+          throw new Error(`could not save BACKEND_SECRET=${backendSecret}`);
+        })
+        .mockImplementationOnce(() => {});
+
+      await runHostedInit({
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+      });
+
+      const output = warnSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+      expect(output).toContain("init-env failed unexpectedly");
+      expect(output).not.toContain(backendSecret);
+    });
+
     it("best-effort writes empty placeholder and returns successfully without throwing", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
         appId: "app-carol",
