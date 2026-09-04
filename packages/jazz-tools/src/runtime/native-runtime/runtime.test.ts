@@ -351,7 +351,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: (...args: unknown[]) => {
+            all: (...args: unknown[]) => {
               calls.push(args);
               return encodeRows([]);
             },
@@ -411,7 +411,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: (...args: unknown[]) => {
+            all: (...args: unknown[]) => {
               calls.push(args);
               return encodeRows([]);
             },
@@ -500,7 +500,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: (...args: unknown[]) => {
+            all: (...args: unknown[]) => {
               calls.push(args);
               return encodeRows([]);
             },
@@ -549,7 +549,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
+            all: () => {
               relationQueries += 1;
               return encodeRows([]);
             },
@@ -601,7 +601,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
+            all: () => {
               relationQueries += 1;
               return encodeRows([]);
             },
@@ -645,7 +645,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
+            all: () => {
               relationQueries += 1;
               return encodeRows([]);
             },
@@ -2375,8 +2375,14 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     await expect(
       runtime.query(JSON.stringify({ table: "todos", relation_ir: unsupportedJoinRelationIr() })),
-    ).rejects.toThrow("Native runtime does not support relation queries");
-    expect(calls).toEqual([]);
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "should not be read" }],
+      },
+    ]);
+    expect(calls).toEqual(["prepareQuery", "all"]);
   });
 
   it("lowers simple Project relation IR while preparing the original subscription query", () => {
@@ -2812,19 +2818,9 @@ describe("NativeRuntimeAdapter server transport", () => {
               calls.push("prepareQuery");
               return {};
             },
-            allRelationSnapshot: () => {
-              calls.push("allRelationSnapshot");
-              return encodeTerminalRelationSnapshot(relationSchema);
-            },
             all: () => {
               calls.push("all");
-              return encodeRows([
-                {
-                  table: "todos",
-                  rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                  title: "should not be read",
-                },
-              ]);
+              return encodeTerminalRelationSnapshot(relationSchema);
             },
             tick: () => undefined,
           }),
@@ -2858,7 +2854,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       valuesByColumn?: Map<string, unknown>;
     }>;
 
-    expect(calls).toEqual(["prepareQuery", "allRelationSnapshot"]);
+    expect(calls).toEqual(["prepareQuery", "all"]);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.table).toBe("users");
     expect(rows[0]?.valuesByColumn?.get("todosViaOwner")).toEqual({
@@ -3065,27 +3061,29 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("selects one backend authority context for plain, relation, subscription, and transaction reads", async () => {
     const calls: string[] = [];
+    let prepared = 0;
     const nativeDb = fakeDb({
-      prepareQuery: () => ({}),
-      all: (_query: unknown, _opts: unknown, openTransactionId: string, author: Uint8Array) => {
-        if (author) throw new Error("backend authority must be implicit in its native open");
-        calls.push(openTransactionId ? "transaction" : "plain");
-        return encodeRows([]);
-      },
-      allRelationQuery: (_query: unknown, _opts: unknown, author: Uint8Array) => {
-        if (author) throw new Error("backend authority must be implicit in its native open");
-        calls.push("relation");
-        return encodeRows([]);
-      },
-      allRelationSnapshot: (
-        _query: unknown,
+      prepareQuery: (_bytes: Uint8Array, kind: "query" | "relation") => ({
+        kind,
+        sequence: prepared++,
+      }),
+      all: (
+        query: { kind: "query" | "relation"; sequence: number },
         _opts: unknown,
         openTransactionId: string,
         author: Uint8Array,
       ) => {
         if (author) throw new Error("backend authority must be implicit in its native open");
-        calls.push(openTransactionId ? "transaction-snapshot" : "snapshot");
-        return encodeRelationSnapshot([]);
+        if (query.kind === "relation") {
+          calls.push("relation");
+          return encodeRows([]);
+        }
+        if (query.sequence === 2) {
+          calls.push(openTransactionId ? "transaction-snapshot" : "snapshot");
+          return encodeRelationSnapshot([]);
+        }
+        calls.push(openTransactionId ? "transaction" : "plain");
+        return encodeRows([]);
       },
       subscribeForBackend: () => {
         calls.push("subscription");
@@ -4356,8 +4354,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
-              calls.push("allRelationQuery");
+            all: () => {
+              calls.push("all");
               return new Uint8Array();
             },
             tick: () => undefined,
@@ -4393,8 +4391,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationSnapshot: () => {
-              calls.push("allRelationSnapshot");
+            all: () => {
+              calls.push("all");
               return new Uint8Array([0]);
             },
             prepareQuery: () => {
@@ -4478,8 +4476,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
-              calls.push("allRelationQuery");
+            all: () => {
+              calls.push("all");
               return new Uint8Array([0]);
             },
             tick: () => undefined,
@@ -7905,6 +7903,7 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
     // it. Individual tests can still explicitly set this to `undefined` when
     // exercising the missing-binding diagnostic.
     wireFeatures: () => CLIENT_WIRE_FEATURES,
+    prepareQuery: () => ({}),
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     beginTransaction: (

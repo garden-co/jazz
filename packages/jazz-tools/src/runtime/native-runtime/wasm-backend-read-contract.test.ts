@@ -25,17 +25,16 @@ describe("WASM backend read capability parity", () => {
           true,
         ),
       );
-      const query = db.prepareQuery(queryFromTable("notes"));
+      const query = db.prepareQuery(queryFromTable("notes"), "query");
       const relation = translateQuery(app.notes.where({}).hopTo("folder")._build(), app.wasmSchema);
+      const relationQuery = db.prepareQuery(new TextEncoder().encode(relation), "relation");
       const opts = { tier: "local" };
       const txId = createOpenTransactionId();
       db.beginTransaction(txId, "mergeable");
       const reads = [
-        () => db.allAsync(query, opts),
-        () => db.allAsync(query, opts, txId),
-        () => db.allRelationSnapshot(query, opts),
-        () => db.allRelationSnapshot(query, opts, txId),
-        () => db.allRelationQuery(relation, opts),
+        () => db.all(query, opts),
+        () => db.all(query, opts, txId),
+        () => db.all(relationQuery, opts),
       ];
       try {
         const attachment = db.attachQuery(query, opts);

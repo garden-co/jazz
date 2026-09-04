@@ -177,29 +177,15 @@ declare module "jazz-wasm" {
     attachMergeableTx(openTransactionId: string): WasmTx;
     attachExclusiveTx(openTransactionId: string): WasmTx;
 
-    prepareQuery(query: Uint8Array): WasmPreparedQuery;
+    prepareQuery(query: Uint8Array, kind: "query" | "relation"): WasmPreparedQuery;
     all(
       query: WasmPreparedQuery,
       opts: unknown,
       openTransactionId?: string,
       author?: Uint8Array,
     ): Uint8Array | Promise<Uint8Array>;
-    allAsync(
-      query: WasmPreparedQuery,
-      opts: unknown,
-      openTransactionId?: string,
-      author?: Uint8Array,
-    ): Promise<Uint8Array>;
-    allRelationSnapshot(
-      query: WasmPreparedQuery,
-      opts: unknown,
-      openTransactionId?: string,
-      author?: Uint8Array,
-    ): Promise<Uint8Array>;
-    allRelationQuery(queryJson: string, opts: unknown, author?: Uint8Array): Promise<Uint8Array>;
     subscribeForBackend(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
     subscribeRelationQueryForBackend(queryJson: string, opts: unknown): ReadableStream<unknown>;
-    one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     /** Attach coverage, optionally at an open transaction snapshot and/or explicit identity. */
     attachQuery(
       query: WasmPreparedQuery,

@@ -95,6 +95,13 @@ where
         self.prepare_query_bound(query, BTreeMap::new())
     }
 
+    /// Normalize relation syntax into the same prepared-query representation
+    /// used by every other read path.
+    #[doc(hidden)]
+    pub fn prepare_relation_query(&self, query: &RelationQuery) -> Result<PreparedQuery, Error> {
+        self.prepare_query(&relation_query_to_query(query)?)
+    }
+
     /// Prepare a query with explicit parameter bindings.
     pub fn prepare_query_bound(
         &self,

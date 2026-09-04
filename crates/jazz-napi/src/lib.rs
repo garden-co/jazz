@@ -63,7 +63,7 @@ use jazz::db::{
     DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
     MutationErrorCallback as CoreMutationErrorCallback, PeerConnection as CorePeerConnection,
-    PreparedQuery as PreparedQueryInner, Propagation as CorePropagation,
+    PreparedQuery as CorePreparedQuery, Propagation as CorePropagation,
     QueryAttachment as CoreQueryAttachment, ReadOpts as CoreReadOpts, RowCells as CoreRowCells,
     SeededRowIdSource as CoreSeededRowIdSource, StreamingValueUpload as CoreStreamingValueUpload,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionStream,
@@ -334,7 +334,7 @@ impl CoreWireTransport for NapiWireTransport {
 
 #[napi(js_name = "PreparedQuery")]
 pub struct PreparedQuery {
-    inner: PreparedQueryInner,
+    inner: CorePreparedQuery,
 }
 
 #[napi(js_name = "QueryAttachment")]
@@ -2436,31 +2436,54 @@ impl NapiDb {
     }
 
     #[napi(js_name = "prepareQuery")]
-    pub fn prepare_query(&self, query: Uint8Array) -> napi::Result<PreparedQuery> {
-        let query: CoreQuery = postcard::from_bytes(&query)
-            .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
+    pub fn prepare_query(
+        &self,
+        query: Uint8Array,
+        #[napi(ts_arg_type = "'query' | 'relation'")] kind: String,
+    ) -> napi::Result<PreparedQuery> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let inner = match db {
-            NapiDbInnerStorage::Memory(db) => db.prepare_query(&query),
-            NapiDbInnerStorage::Persistent(db) => db.prepare_query(&query),
-        }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let inner = match kind.as_str() {
+            "query" => {
+                let query: CoreQuery = postcard::from_bytes(&query)
+                    .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
+                match db {
+                    NapiDbInnerStorage::Memory(db) => db.prepare_query(&query),
+                    NapiDbInnerStorage::Persistent(db) => db.prepare_query(&query),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?
+            }
+            "relation" => {
+                let query_json = std::str::from_utf8(&query).map_err(|error| {
+                    napi::Error::from_reason(format!("decode relation query UTF-8: {error}"))
+                })?;
+                let query = core_relation_query_from_json(query_json)?;
+                match db {
+                    NapiDbInnerStorage::Memory(db) => db.prepare_relation_query(&query),
+                    NapiDbInnerStorage::Persistent(db) => db.prepare_relation_query(&query),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?
+            }
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "prepared query kind must be query or relation",
+                ));
+            }
+        };
         Ok(PreparedQuery { inner })
     }
 
-    /// Execute an ordinary prepared read. The optional transaction id selects
-    /// that transaction's snapshot and staged overlay; an explicit author
-    /// selects trusted-serving authorization. Backend authority is inferred
-    /// only from an explicit backend open.
+    /// Execute any prepared read. The prepared handle selects flat rows,
+    /// relation output, or a relation snapshot; transaction and authorization
+    /// context remain ordinary call options.
     #[napi]
     pub fn all(
         &self,
         query: &PreparedQuery,
         #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
         open_transaction_id: Option<String>,
@@ -2485,23 +2508,51 @@ impl NapiDb {
                 let db = Rc::clone($db);
                 let query = query.inner.clone();
                 native_read_or_pending(Box::pin(async move {
-                    let mut rows = match open_tx {
-                        Some(open_tx) => {
-                            db.all_in_open_transaction(open_tx, &query, opts, author)
-                                .await
+                    if query.shape().query().array_subqueries.is_empty() {
+                        let mut rows = match open_tx {
+                            Some(open_tx) => {
+                                db.all_in_open_transaction(open_tx, &query, opts, author)
+                                    .await
+                            }
+                            None => match author {
+                                Some(author) => db.all_for_identity(&query, opts, author).await,
+                                None => db.all(&query, opts).await,
+                            },
                         }
-                        None => match author {
-                            Some(author) => db.all_for_identity(&query, opts, author).await,
-                            None => db.all(&query, opts).await,
-                        },
-                    }
-                    .map_err(napi_error)?;
-                    db.hydrate_rows_for_binding(&mut rows)
-                        .await
                         .map_err(napi_error)?;
-                    encode_core_rows(&rows)
-                        .map(Uint8Array::new)
-                        .map_err(napi_error)
+                        db.hydrate_rows_for_binding(&mut rows)
+                            .await
+                            .map_err(napi_error)?;
+                        encode_core_rows(&rows)
+                            .map(Uint8Array::new)
+                            .map_err(napi_error)
+                    } else {
+                        let in_transaction = open_tx.is_some();
+                        let mut snapshot = match open_tx {
+                            Some(open_tx) => {
+                                db.relation_snapshot_in_open_transaction(
+                                    open_tx, &query, opts, author,
+                                )
+                                .await
+                            }
+                            None => match author {
+                                Some(author) => {
+                                    db.all_relation_snapshot_for_identity(&query, opts, author)
+                                        .await
+                                }
+                                None => db.all_relation_snapshot(&query, opts).await,
+                            },
+                        }
+                        .map_err(napi_error)?;
+                        if !in_transaction {
+                            db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                                .await
+                                .map_err(napi_error)?;
+                        }
+                        encode_core_relation_snapshot(&snapshot)
+                            .map(Uint8Array::new)
+                            .map_err(napi_error)
+                    }
                 }))
             }};
         }
@@ -2530,120 +2581,6 @@ impl NapiDb {
             NapiDbInnerStorage::Persistent(db) => db.set_identity_claims(author, claims),
         }
         Ok(())
-    }
-
-    /// Materialize a prepared relation snapshot, optionally through an open
-    /// transaction and/or explicit trusted-serving identity.
-    #[napi(js_name = "allRelationSnapshot")]
-    pub fn all_relation_snapshot(
-        &self,
-        query: &PreparedQuery,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
-        opts: Option<JsonValue>,
-        open_transaction_id: Option<String>,
-        author: Option<Uint8Array>,
-    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
-        let opts = core_read_opts_from_json(opts)?;
-        let open_tx = open_transaction_id
-            .map(|id| id.parse::<CoreOpenTransactionId>())
-            .transpose()
-            .map_err(napi::Error::from_reason)?;
-        let author = match author {
-            Some(author) => Some(core_author_id_from_bytes(&author)?),
-            None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
-            None => None,
-        };
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        macro_rules! read {
-            ($db:expr) => {{
-                let db = Rc::clone($db);
-                let query = query.inner.clone();
-                native_read_or_pending(Box::pin(async move {
-                    let in_transaction = open_tx.is_some();
-                    let mut snapshot = match open_tx {
-                        Some(open_tx) => {
-                            db.relation_snapshot_in_open_transaction(open_tx, &query, opts, author)
-                                .await
-                        }
-                        None => match author {
-                            Some(author) => {
-                                db.all_relation_snapshot_for_identity(&query, opts, author)
-                                    .await
-                            }
-                            None => db.all_relation_snapshot(&query, opts).await,
-                        },
-                    }
-                    .map_err(napi_error)?;
-                    if !in_transaction {
-                        db.hydrate_relation_snapshot_for_binding(&mut snapshot)
-                            .await
-                            .map_err(napi_error)?;
-                    }
-                    encode_core_relation_snapshot(&snapshot)
-                        .map(Uint8Array::new)
-                        .map_err(napi_error)
-                }))
-            }};
-        }
-        match db {
-            NapiDbInnerStorage::Memory(db) => read!(db),
-            NapiDbInnerStorage::Persistent(db) => read!(db),
-        }
-    }
-
-    /// Execute relation IR directly. Relation-IR reads do not currently
-    /// support transaction overlays.
-    #[napi(js_name = "allRelationQuery")]
-    pub fn all_relation_query(
-        &self,
-        query_json: String,
-        #[napi(
-            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
-        )]
-        opts: Option<JsonValue>,
-        author: Option<Uint8Array>,
-    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
-        let query = core_relation_query_from_json(&query_json)?;
-        let opts = core_read_opts_from_json(opts)?;
-        let author = match author {
-            Some(author) => Some(core_author_id_from_bytes(&author)?),
-            None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
-            None => None,
-        };
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        macro_rules! read {
-            ($db:expr) => {{
-                let db = Rc::clone($db);
-                native_read_or_pending(Box::pin(async move {
-                    let mut snapshot = match author {
-                        Some(author) => {
-                            db.all_relation_query_for_identity(&query, opts, author)
-                                .await
-                        }
-                        None => db.all_relation_query(&query, opts).await,
-                    }
-                    .map_err(napi_error)?;
-                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
-                        .await
-                        .map_err(napi_error)?;
-                    encode_core_rows(&snapshot.rows)
-                        .map(Uint8Array::new)
-                        .map_err(napi_error)
-                }))
-            }};
-        }
-        match db {
-            NapiDbInnerStorage::Memory(db) => read!(db),
-            NapiDbInnerStorage::Persistent(db) => read!(db),
-        }
     }
 
     #[napi(js_name = "localCurrentRow")]
@@ -2678,6 +2615,7 @@ impl NapiDb {
         open_transaction_id: Option<String>,
         author: Option<Uint8Array>,
     ) -> napi::Result<QueryAttachment> {
+        let query = &query.inner;
         let opts = core_read_opts_from_json(opts)?;
         let open_tx = open_transaction_id
             .map(|id| id.parse::<CoreOpenTransactionId>())
@@ -2698,9 +2636,9 @@ impl NapiDb {
                     None => {
                         let inner = match author {
                             Some(author) => {
-                                $db.attach_query_with_opts_for_identity(&query.inner, opts, author)
+                                $db.attach_query_with_opts_for_identity(query, opts, author)
                             }
-                            None => $db.attach_query_with_opts(&query.inner, opts),
+                            None => $db.attach_query_with_opts(query, opts),
                         }
                         .map_err(napi_error)?;
                         Ok(QueryAttachment::from_ready(inner))
@@ -2708,7 +2646,7 @@ impl NapiDb {
                     Some(open_tx) => {
                         let snapshot = $db.enqueue_open_transaction_snapshot(open_tx);
                         let db = Rc::clone($db);
-                        let query = query.inner.clone();
+                        let query = query.clone();
                         Ok(QueryAttachment::pending(Box::pin(async move {
                             let snapshot = snapshot
                                 .await
@@ -2782,6 +2720,7 @@ impl NapiDb {
         )]
         opts: Option<JsonValue>,
     ) -> napi::Result<Subscription> {
+        let query = &query.inner;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
@@ -2790,13 +2729,13 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
                 db: Rc::clone(db),
-                stream: core_block_on(db.subscribe(&query.inner, opts)).map_err(napi_error)?,
+                stream: core_block_on(db.subscribe(query, opts)).map_err(napi_error)?,
                 pending_events: VecDeque::new(),
                 pending_batch: None,
             },
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
                 db: Rc::clone(db),
-                stream: core_block_on(db.subscribe(&query.inner, opts)).map_err(napi_error)?,
+                stream: core_block_on(db.subscribe(query, opts)).map_err(napi_error)?,
                 pending_events: VecDeque::new(),
                 pending_batch: None,
             },
@@ -2814,6 +2753,7 @@ impl NapiDb {
         )]
         opts: Option<JsonValue>,
     ) -> napi::Result<Subscription> {
+        let query = &query.inner;
         let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
@@ -2823,14 +2763,14 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
                 db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                stream: core_block_on(db.subscribe_for_identity(query, opts, author))
                     .map_err(napi_error)?,
                 pending_events: VecDeque::new(),
                 pending_batch: None,
             },
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
                 db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                stream: core_block_on(db.subscribe_for_identity(query, opts, author))
                     .map_err(napi_error)?,
                 pending_events: VecDeque::new(),
                 pending_batch: None,
@@ -2852,6 +2792,7 @@ impl NapiDb {
         opts: Option<JsonValue>,
     ) -> napi::Result<Subscription> {
         self.require_trusted_backend()?;
+        let query = &query.inner;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
@@ -2861,7 +2802,7 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
                 db: Rc::clone(db),
                 stream: core_block_on(db.subscribe_for_identity(
-                    &query.inner,
+                    query,
                     opts,
                     CoreAuthorSubject::SYSTEM,
                 ))
@@ -2872,7 +2813,7 @@ impl NapiDb {
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
                 db: Rc::clone(db),
                 stream: core_block_on(db.subscribe_for_identity(
-                    &query.inner,
+                    query,
                     opts,
                     CoreAuthorSubject::SYSTEM,
                 ))

@@ -73,25 +73,14 @@ export declare class NapiDb {
   rollbackTransaction(openTransactionId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
-  prepareQuery(query: Uint8Array): PreparedQuery
+  prepareQuery(query: Uint8Array, kind: 'query' | 'relation'): PreparedQuery
   /**
-   * Execute an ordinary prepared read. The optional transaction id selects
-   * that transaction's snapshot and staged overlay; an explicit author
-   * selects trusted-serving authorization. Backend authority is inferred
-   * only from an explicit backend open.
+   * Execute any prepared read. The prepared handle selects flat rows,
+   * relation output, or a relation snapshot; transaction and authorization
+   * context remain ordinary call options.
    */
-  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
+  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
-  /**
-   * Materialize a prepared relation snapshot, optionally through an open
-   * transaction and/or explicit trusted-serving identity.
-   */
-  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
-  /**
-   * Execute relation IR directly. Relation-IR reads do not currently
-   * support transaction overlays.
-   */
-  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   /**
    * Attach query coverage using one native entry point. An optional open

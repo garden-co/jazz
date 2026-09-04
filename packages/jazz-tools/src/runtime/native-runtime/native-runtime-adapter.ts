@@ -202,23 +202,6 @@ type NativeDb = {
     openTransactionId?: OpenTransactionId,
     author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
-  allAsync?(
-    query: PreparedQuery,
-    opts: unknown,
-    openTransactionId?: OpenTransactionId,
-    author?: Uint8Array,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  allRelationQuery?(
-    queryJson: string,
-    opts: unknown,
-    author?: Uint8Array,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  allRelationSnapshot?(
-    query: PreparedQuery,
-    opts: unknown,
-    openTransactionId?: OpenTransactionId,
-    author?: Uint8Array,
-  ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
@@ -230,7 +213,7 @@ type NativeDb = {
   ): unknown;
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
-  prepareQuery(query: Uint8Array): PreparedQuery;
+  prepareQuery(query: Uint8Array, kind: "query" | "relation"): PreparedQuery;
   subscribe?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
   subscribeForIdentity?(
     query: PreparedQuery,
@@ -1852,9 +1835,9 @@ export class NativeRuntimeAdapter implements Runtime {
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
-    // Relation-IR lowering still has a JSON-only binding API.  Array includes
-    // below use the transaction-aware snapshot ABI instead, so they preserve
-    // staged writes and do not fall back to the owner's ordinary view.
+    // Relation IR is normalized by prepareQuery into the same native handle
+    // as ordinary queries. Transaction overlays for this syntax remain
+    // unsupported until its semantics are defined.
     if (pendingTx && queryUsesNativeRelationApi(coreQueryJson)) {
       throw new Error("Native runtime does not support relation reads inside a transaction");
     }
@@ -1865,13 +1848,13 @@ export class NativeRuntimeAdapter implements Runtime {
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
+    const query = this.prepareQuery(coreQueryJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       await this.waitForStrictRemoteQueryTransport(tier);
       if (this.closed) return [];
-      const payload = await this.readRelationQueryForContext(coreQueryJson, opts, readContext);
+      const payload = await this.readRowsForContextAsync(query, opts, readContext);
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
-    const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session, pendingTx);
     if (this.closed) return [];
     if (!pendingTx) {
@@ -1880,7 +1863,7 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
         if (pendingTx) {
-          const payload = await this.readRelationSnapshotForContext(
+          const payload = await this.readRowsForContextAsync(
             query,
             opts,
             readContext,
@@ -1892,7 +1875,7 @@ export class NativeRuntimeAdapter implements Runtime {
             subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
           );
         }
-        const payload = await this.readRelationSnapshotForContext(query, opts, readContext);
+        const payload = await this.readRowsForContextAsync(query, opts, readContext);
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
@@ -2337,7 +2320,10 @@ export class NativeRuntimeAdapter implements Runtime {
       return rows[0];
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.db.all(query, readOptions());
+    const rows = this.db.all(query, {
+      ...(readOptions() as Record<string, unknown>),
+      sync: true,
+    });
     if (typeof (rows as Promise<unknown>).then === "function") {
       throw new Error("write merge requires the synchronous native read boundary");
     }
@@ -2413,7 +2399,12 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     context: NativeReadContext,
   ): Uint8Array {
-    const result = this.db.all(query, opts, undefined, this.nativeReadAuthor(context));
+    const result = this.db.all(
+      query,
+      { ...(opts as Record<string, unknown>), sync: true },
+      undefined,
+      this.nativeReadAuthor(context),
+    );
     if (typeof (result as Promise<unknown>).then === "function") {
       throw new Error("native read is asynchronous; use the asynchronous read boundary");
     }
@@ -2439,9 +2430,7 @@ export class NativeRuntimeAdapter implements Runtime {
     openTransactionId?: OpenTransactionId,
   ): NativeReadResult | Promise<NativeReadResult> {
     const author = this.nativeReadAuthor(context);
-    return this.db.allAsync
-      ? this.db.allAsync(query, opts, openTransactionId, author)
-      : this.db.all(query, opts, openTransactionId, author);
+    return this.db.all(query, opts, openTransactionId, author);
   }
 
   private nativeReadAuthor(context: NativeReadContext): Uint8Array | undefined {
@@ -2469,33 +2458,6 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     return { kind: "client-local" };
-  }
-
-  private readRelationQueryForContext(
-    queryJson: string,
-    opts: unknown,
-    context: NativeReadContext,
-  ): Promise<Uint8Array> {
-    if (!this.db.allRelationQuery) {
-      throw new Error("Native runtime does not support relation queries");
-    }
-    return this.awaitNativeRead(
-      this.db.allRelationQuery(queryJson, opts, this.nativeReadAuthor(context)),
-    );
-  }
-
-  private readRelationSnapshotForContext(
-    query: PreparedQuery,
-    opts: unknown,
-    context: NativeReadContext,
-    openTransactionId?: OpenTransactionId,
-  ): Promise<Uint8Array> {
-    if (!this.db.allRelationSnapshot) {
-      throw new Error("Native runtime does not support relation snapshots");
-    }
-    return this.awaitNativeRead(
-      this.db.allRelationSnapshot(query, opts, openTransactionId, this.nativeReadAuthor(context)),
-    );
   }
 
   private subscribeForContext(
@@ -2657,12 +2619,16 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {
-    const queryBytes = encodeQueryJson(queryJson, this.schema);
-    const key = bytesKey(queryBytes);
+    const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
+    const queryBytes =
+      kind === "relation"
+        ? new TextEncoder().encode(queryJson)
+        : encodeQueryJson(queryJson, this.schema);
+    const key = `${kind}:${bytesKey(queryBytes)}`;
     let query = this.preparedQueries.get(key);
     if (!query) {
       try {
-        query = this.db.prepareQuery(queryBytes);
+        query = this.db.prepareQuery(queryBytes, kind);
       } catch (error) {
         throw new Error(`Core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
       }
