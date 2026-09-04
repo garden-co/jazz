@@ -13,7 +13,9 @@ or find one directly with `rg '"id":"INV-API-1"' crates/invariant-registry.jsonl
 `dev/gates/invariant-registry.sh` validates the record shape, stable IDs,
 duplicate IDs, cited Rust/TypeScript tests, covered-without-test mistakes, and
 a one-time parity receipt for all 334 Jazz records migrated from the legacy
-table.
+table. The gate commits that frozen receipt's digest and Jazz/Groove record
+counts, so removing a record together with its receipt line cannot erase
+legacy coverage; newly introduced JSONL records need no receipt amendment.
 It reports `now` + `untested` as visible documented debt without failing.
 Groove-owned IDs live in
 [`../../groove/SPEC/INVARIANTS.md`](../../groove/SPEC/INVARIANTS.md).

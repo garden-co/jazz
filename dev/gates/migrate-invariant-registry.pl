@@ -51,6 +51,8 @@ sub parse_table {
             implementation => $implementation, status => $status, coverage => $coverage,
         };
     }
+    die "$source: no legacy invariant table found; this historical converter only accepts the pre-JSONL table format\n"
+        unless $in_rows;
     return @records;
 }
 sub canonical_line {
