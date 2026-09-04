@@ -1,4 +1,11 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,6 +56,7 @@ describe("writeHostedEnv", () => {
       expect(content).toContain("BACKEND_SECRET=backend_secret");
       expect(content).not.toContain(TODO_COMMENT);
       expect(content.endsWith("\n")).toBe(true);
+      expect(readdirSync(dir).some((name) => name.startsWith(".env.create-jazz-"))).toBe(false);
     });
   });
 
@@ -91,6 +99,34 @@ describe("writeHostedEnv", () => {
       expect(content).toContain("JAZZ_ADMIN_SECRET=original_admin");
       expect(content).toContain("BACKEND_SECRET=original_backend");
       expect(content).not.toContain("new_app");
+    });
+
+    it("tightens an unchanged complete hosted env to 0600 on POSIX", () => {
+      const existing =
+        "NEXT_PUBLIC_JAZZ_APP_ID=original_app\n" +
+        "NEXT_PUBLIC_JAZZ_SERVER_URL=https://original.example.com\n" +
+        "JAZZ_ADMIN_SECRET=original_admin\n" +
+        "BACKEND_SECRET=original_backend\n";
+      const envPath = join(dir, ".env");
+      writeFileSync(envPath, existing);
+      if (process.platform !== "win32") chmodSync(envPath, 0o644);
+
+      writeHostedEnv({
+        dir,
+        values: {
+          NEXT_PUBLIC_JAZZ_APP_ID: "original_app",
+          NEXT_PUBLIC_JAZZ_SERVER_URL: "https://original.example.com",
+          JAZZ_ADMIN_SECRET: "original_admin",
+          BACKEND_SECRET: "original_backend",
+        },
+      });
+
+      expect(readEnv(dir)).toBe(existing);
+      // Windows uses ACLs rather than POSIX mode bits, so this assertion is
+      // intentionally limited to platforms where chmod is the security model.
+      if (process.platform !== "win32") {
+        expect(statSync(envPath).mode & 0o777).toBe(0o600);
+      }
     });
   });
 
@@ -165,13 +201,14 @@ describe("writeHostedEnv", () => {
     });
   });
 
-  describe("slice 11: empty-value placeholders treated as present (P2.2)", () => {
-    it("preserves empty placeholders and emits console.warn when all four keys are present but empty", () => {
+  describe("slice 11: empty-value placeholders are unconfigured", () => {
+    it("replaces empty hosted placeholders while preserving unrelated and non-empty values", () => {
       const placeholder =
         TODO_COMMENT +
         "\n" +
+        "UNRELATED=value\n" +
         "NEXT_PUBLIC_JAZZ_APP_ID=\n" +
-        "NEXT_PUBLIC_JAZZ_SERVER_URL=\n" +
+        "NEXT_PUBLIC_JAZZ_SERVER_URL=https://existing.example.com\n" +
         "JAZZ_ADMIN_SECRET=\n" +
         "BACKEND_SECRET=\n";
       writeFileSync(join(dir, ".env"), placeholder);
@@ -180,21 +217,21 @@ describe("writeHostedEnv", () => {
         dir,
         values: {
           NEXT_PUBLIC_JAZZ_APP_ID: "app_real",
-          NEXT_PUBLIC_JAZZ_SERVER_URL: "https://jazz.example.com",
+          NEXT_PUBLIC_JAZZ_SERVER_URL: "https://new.example.com",
           JAZZ_ADMIN_SECRET: "admin_real",
           BACKEND_SECRET: "backend_real",
         },
       });
 
       const content = readEnv(dir);
-      expect(content).toBe(placeholder);
+      expect(content).toContain("UNRELATED=value");
+      expect(content).toContain("NEXT_PUBLIC_JAZZ_APP_ID=app_real");
+      expect(content).toContain("NEXT_PUBLIC_JAZZ_SERVER_URL=https://existing.example.com");
+      expect(content).toContain("JAZZ_ADMIN_SECRET=admin_real");
+      expect(content).toContain("BACKEND_SECRET=backend_real");
 
       expect(warnSpy).toHaveBeenCalledOnce();
-      const warnArg: string = warnSpy.mock.calls[0][0];
-      expect(warnArg).toContain("NEXT_PUBLIC_JAZZ_APP_ID");
-      expect(warnArg).toContain("NEXT_PUBLIC_JAZZ_SERVER_URL");
-      expect(warnArg).toContain("JAZZ_ADMIN_SECRET");
-      expect(warnArg).toContain("BACKEND_SECRET");
+      expect(warnSpy.mock.calls[0][0]).toContain("NEXT_PUBLIC_JAZZ_SERVER_URL");
     });
   });
 
@@ -300,7 +337,7 @@ describe("writeHostedEnv", () => {
       expect(content.includes("\r")).toBe(false);
     });
 
-    it("treats CRLF empty values (KEY=\\r\\n) as present, not missing", () => {
+    it("replaces CRLF empty values with supplied values", () => {
       const existing =
         "NEXT_PUBLIC_JAZZ_APP_ID=\r\n" +
         "NEXT_PUBLIC_JAZZ_SERVER_URL=\r\n" +
@@ -311,15 +348,19 @@ describe("writeHostedEnv", () => {
       writeHostedEnv({
         dir,
         values: {
-          NEXT_PUBLIC_JAZZ_APP_ID: "should_be_ignored",
-          NEXT_PUBLIC_JAZZ_SERVER_URL: "should_be_ignored",
-          JAZZ_ADMIN_SECRET: "should_be_ignored",
-          BACKEND_SECRET: "should_be_ignored",
+          NEXT_PUBLIC_JAZZ_APP_ID: "app_real",
+          NEXT_PUBLIC_JAZZ_SERVER_URL: "https://jazz.example.com",
+          JAZZ_ADMIN_SECRET: "admin_real",
+          BACKEND_SECRET: "backend_real",
         },
       });
 
       const content = readEnv(dir);
-      expect(content).not.toContain("should_be_ignored");
+      expect(content).toContain("NEXT_PUBLIC_JAZZ_APP_ID=app_real");
+      expect(content).toContain("NEXT_PUBLIC_JAZZ_SERVER_URL=https://jazz.example.com");
+      expect(content).toContain("JAZZ_ADMIN_SECRET=admin_real");
+      expect(content).toContain("BACKEND_SECRET=backend_real");
+      expect(content.includes("\r")).toBe(false);
     });
   });
 
