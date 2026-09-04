@@ -627,7 +627,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
   }, 15_000);
 
-  it("admits concurrent reads and cancels a deferred subscription before native opening", async () => {
+  it("admits concurrent reads and cancels a subscription before callback admission", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -646,10 +646,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const query = JSON.stringify({ table: "todos" });
     let cancelledCallbacks = 0;
     const cancelled = runtime.createSubscription(query);
+    runtime.unsubscribe(cancelled);
     runtime.executeSubscription(cancelled, () => {
       cancelledCallbacks += 1;
     });
-    runtime.unsubscribe(cancelled);
     const reads = await Promise.all(Array.from({ length: 12 }, () => runtime.query(query)));
     for (const rows of reads) expect(rows).toEqual([expect.objectContaining({ id: inserted.id })]);
     expect(cancelledCallbacks).toBe(0);

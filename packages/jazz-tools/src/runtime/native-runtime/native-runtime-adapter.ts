@@ -1999,9 +1999,6 @@ export class NativeRuntimeAdapter implements Runtime {
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
-    if (pendingTx?.identity && session && !sameBytes(pendingTx.identity, session.identity)) {
-      throw new Error("Native runtime transaction cannot mix read identities");
-    }
     const requestSession = pendingTx?.identity ? (pendingTx.requestSession ?? session) : session;
     // Relation-IR lowering still has a JSON-only binding API.  Array includes
     // below use the transaction-aware snapshot ABI instead, so they preserve
@@ -2129,39 +2126,39 @@ export class NativeRuntimeAdapter implements Runtime {
     });
     if (immediateSource) return handle;
     const subscription = this.subscriptions.get(handle)!;
-    void (async () => {
-      let native: ReadableStream<unknown> | Subscription;
-      if (usesNativeRelationApi) {
-        this.applySessionClaims(session);
-        native = this.subscribeRelationForContext(queryJson, opts, readContext);
-      } else {
-        const query = await this.prepareQueryForRead(
-          queryJson,
-          session,
-          subscription.openingAbort!.signal,
-        );
-        if (subscription.cancelled || this.closed) return;
-        subscription.query = query;
-        native = this.db.subscribeAsync
-          ? await this.awaitNativeOperation(
-              this.db.subscribeAsync(query, opts, this.nativeReadAuthor(readContext)),
-              subscription.openingAbort!.signal,
-            )
-          : this.subscribeForContext(query, opts, readContext);
-      }
+    const install = (native: ReadableStream<unknown> | Subscription) => {
       subscription.sources = [{ source: subscriptionSource(native), reading: false }];
       if (subscription.cancelled || this.closed) {
         closeSubscriptionSourceState(subscription);
         return;
       }
       if (subscription.callback) this.startSubscriptionReader(handle, subscription);
-    })().catch((error) => {
+    };
+    const fail = (error: unknown) => {
       if (!subscription.cancelled && !this.closed)
         this.failSubscription(
           subscription,
           error instanceof Error ? error : new Error(String(error)),
         );
-    });
+    };
+    const open = (query: PreparedQuery) => {
+      if (subscription.cancelled || this.closed) throw new Error("native operation was cancelled");
+      subscription.query = query;
+      return this.db.subscribeAsync
+        ? this.awaitNativeOperation(
+            this.db.subscribeAsync(query, opts, this.nativeReadAuthor(readContext)),
+            subscription.openingAbort!.signal,
+          )
+        : this.subscribeForContext(query, opts, readContext);
+    };
+    try {
+      const query = this.prepareQueryForRead(queryJson, session, subscription.openingAbort!.signal);
+      const opening = query instanceof Promise ? query.then(open) : open(query);
+      if (opening instanceof Promise) void opening.then(install).catch(fail);
+      else install(opening);
+    } catch (error) {
+      fail(error);
+    }
     return handle;
   }
 
@@ -2852,10 +2849,10 @@ export class NativeRuntimeAdapter implements Runtime {
     await this.readRowsForContextAsync(query, opts, this.nativeReadContext(session));
   }
 
-  private async awaitNativeOperation<T>(
+  private awaitNativeOperation<T>(
     pending: PendingNativeOperation<T>,
     signal?: AbortSignal,
-  ): Promise<T> {
+  ): T | Promise<T> {
     let wakeVersion = 0;
     let resume: (() => void) | undefined;
     let cancelled = false;
@@ -2871,8 +2868,12 @@ export class NativeRuntimeAdapter implements Runtime {
     };
     this.pendingNativeAdmissionCancels.add(cancel);
     signal?.addEventListener("abort", cancel, { once: true });
-    try {
-      pending.setWake(wake);
+    const cleanup = () => {
+      this.pendingNativeAdmissionCancels.delete(cancel);
+      signal?.removeEventListener("abort", cancel);
+      pending.cancel();
+    };
+    const advance = (): T | Promise<T> => {
       for (;;) {
         if (this.closed || cancelled || signal?.aborted)
           throw new Error("native operation was cancelled");
@@ -2887,24 +2888,32 @@ export class NativeRuntimeAdapter implements Runtime {
           wake();
         });
         if (wakeVersion !== observed) continue;
-        await new Promise<void>((resolve) => {
+        return new Promise<void>((resolve) => {
           resume = resolve;
           if (wakeVersion !== observed) resolve();
+        }).then(() => {
+          resume = undefined;
+          return advance();
         });
-        resume = undefined;
       }
-    } finally {
-      this.pendingNativeAdmissionCancels.delete(cancel);
-      signal?.removeEventListener("abort", cancel);
-      pending.cancel();
+    };
+    try {
+      pending.setWake(wake);
+      const result = advance();
+      if (result instanceof Promise) return result.finally(cleanup);
+      cleanup();
+      return result;
+    } catch (error) {
+      cleanup();
+      throw error;
     }
   }
 
-  private async prepareQueryForRead(
+  private prepareQueryForRead(
     queryJson: string,
     session: RuntimeSession | null,
     signal?: AbortSignal,
-  ): Promise<PreparedQuery> {
+  ): PreparedQuery | Promise<PreparedQuery> {
     if (!this.db.prepareQueryAsync) {
       this.applySessionClaims(session);
       return this.prepareQuery(queryJson);
@@ -2920,9 +2929,12 @@ export class NativeRuntimeAdapter implements Runtime {
       contextual ? session.identity : undefined,
       contextual ? session.claims : undefined,
     );
-    const query = await this.awaitNativeOperation(pending, signal);
-    if (!contextual) this.preparedQueries.set(key, query);
-    return query;
+    const remember = (query: PreparedQuery) => {
+      if (!contextual) this.preparedQueries.set(key, query);
+      return query;
+    };
+    const query = this.awaitNativeOperation(pending, signal);
+    return query instanceof Promise ? query.then(remember) : remember(query);
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {

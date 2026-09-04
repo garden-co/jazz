@@ -186,6 +186,13 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
       subscription.cancel();
       attachment.cancel();
 
+      let cancelledCallbacks = 0;
+      const cancelled = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+      runtime.executeSubscription(cancelled, () => {
+        cancelledCallbacks += 1;
+      });
+      runtime.unsubscribe(cancelled);
+
       let finished = false;
       const query = runtime.query(JSON.stringify({ table: "todos" })).then(
         (rows) => {
@@ -201,7 +208,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
         JSON.stringify({ table: "todos" }),
         undefined,
         "local",
-        JSON.stringify({ propagation: "local_only" }),
+        JSON.stringify({ propagation: "local-only" }),
       );
       const opening = deferredVoid();
       let openingError: unknown;
@@ -217,6 +224,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
       await expect(withWatchdog(query, "woken concurrent query")).resolves.toEqual({ rows: [] });
       await withWatchdog(opening.promise, "woken concurrent subscription");
       expect(openingError).toBeUndefined();
+      expect(cancelledCallbacks).toBe(0);
       await upload.abort();
     } finally {
       commitGate.release();
