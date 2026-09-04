@@ -6083,7 +6083,7 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 }
 
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
-    records::RecordDescriptor::new([("cell", column.column_type.clone())])
+    records::RecordDescriptor::new([("cell", crate::schema::storage_column_type(column))])
         .create(std::slice::from_ref(value))?;
     Ok(())
 }

@@ -8025,6 +8025,81 @@ mod tests {
         client.close().unwrap();
     }
 
+    #[test]
+    fn ordinary_multi_large_scalar_insert_settles_through_native_relay() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config(directory.path().join("multi-large.sqlite"), Some("large"));
+        config.schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("documents")
+                        .column("body", ColumnType::Text)
+                        .column("payload", ColumnType::Bytea)
+                        .column("metadata", ColumnType::Json { schema: None })
+                        .column("done", ColumnType::Boolean),
+                )
+                .build(),
+        )
+        .unwrap();
+        let relay = NativeRelay::spawn(config).unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x54; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let (tx_id, _) = relay
+            .run(move |worker| {
+                let descriptor = RecordDescriptor::new([
+                    ("body", ValueType::String),
+                    ("payload", ValueType::Bytes),
+                    ("metadata", ValueType::String),
+                    ("done", ValueType::Bool),
+                ]);
+                let prefix = "a".repeat(70000);
+                let json_prefix = prefix.clone();
+                let mut bytes = vec![7; 70006];
+                bytes[70000..].copy_from_slice(&[0, 1, 2, 3, 4, 5]);
+                let raw = descriptor
+                    .create(&[
+                        Value::String(format!("{prefix}A😀BC")),
+                        Value::Bytes(bytes),
+                        Value::String(format!(
+                            "{{\"padding\":\"{json_prefix}\",\"nested\":{{\"answer\":42}}}}"
+                        )),
+                        Value::Bool(false),
+                    ])
+                    .unwrap();
+                worker.direct_foreground_mutation(
+                    id,
+                    ForegroundMutationKind::Insert,
+                    "documents".into(),
+                    None,
+                    postcard::to_allocvec(&(descriptor, raw)).unwrap(),
+                    "{}".into(),
+                )
+            })
+            .unwrap();
+        let mut wait = client
+            .wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local)
+            .unwrap();
+        for _ in 0..100 {
+            let ForegroundOperationPoll::Pending { operation } = wait else {
+                break;
+            };
+            relay
+                .pump()
+                .expect("multi-large local settlement must preserve the underlying relay error");
+            wait = client.poll_foreground_operation(operation).unwrap();
+        }
+        assert!(matches!(
+            wait,
+            ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
+        ));
+        client.close().unwrap();
+    }
+
     // Internal receipt: deterministic owner contention is not exposed by the public JS API.
     #[test]
     fn standalone_mutation_queues_behind_a_held_owner() {
