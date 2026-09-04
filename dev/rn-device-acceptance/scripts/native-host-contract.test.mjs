@@ -405,10 +405,20 @@ function assertPublicClientRelayReadback(source) {
     ts.isTryStatement(lifecycle),
     "relay readback must use try/finally after client creation",
   );
-  assert.equal(
-    lifecycle.catchClause,
-    undefined,
-    "relay readback must not swallow lifecycle failures",
+  const catchStatements = lifecycle.catchClause?.block.statements;
+  assert.ok(
+    lifecycle.catchClause &&
+      lifecycle.catchClause.variableDeclaration &&
+      isIdentifier(lifecycle.catchClause.variableDeclaration.name, "error") &&
+      catchStatements?.length === 2 &&
+      ts.isExpressionStatement(catchStatements[0]) &&
+      ts.isBinaryExpression(catchStatements[0].expression) &&
+      isIdentifier(catchStatements[0].expression.left, "failed") &&
+      catchStatements[0].expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      catchStatements[0].expression.right.kind === ts.SyntaxKind.TrueKeyword &&
+      ts.isThrowStatement(catchStatements[1]) &&
+      isIdentifier(catchStatements[1].expression, "error"),
+    "relay readback must mark and rethrow lifecycle failures before cleanup",
   );
   assert.ok(lifecycle.finallyBlock, "relay readback must shut down in finally");
   const tryStatements = lifecycle.tryBlock.statements;
@@ -509,21 +519,18 @@ function assertPublicClientRelayReadback(source) {
 
   assert.equal(
     lifecycle.finallyBlock.statements.length,
-    2,
-    "relay readback finally must unsubscribe before client shutdown",
+    1,
+    "relay readback finally must preserve failures while retiring its subscription and client",
   );
-  const [unsubscribe, shutdown] = lifecycle.finallyBlock.statements;
+  const [cleanup] = lifecycle.finallyBlock.statements;
   assert.ok(
-    ts.isExpressionStatement(unsubscribe) &&
-      ts.isCallExpression(unsubscribe.expression) &&
-      isIdentifier(unsubscribe.expression.expression, "unsubscribe"),
-    "relay readback must unsubscribe before shutdown",
-  );
-  assert.ok(
-    ts.isExpressionStatement(shutdown) &&
-      awaitCall(shutdown.expression)?.arguments.length === 0 &&
-      isPropertyAccess(awaitCall(shutdown.expression)?.expression, "client", "shutdown"),
-    "relay readback must await client.shutdown() in finally",
+    ts.isExpressionStatement(cleanup) &&
+      awaitCall(cleanup.expression)?.arguments.length === 3 &&
+      isIdentifier(awaitCall(cleanup.expression)?.expression, "finishSeedClient") &&
+      isIdentifier(awaitCall(cleanup.expression)?.arguments[0], "unsubscribe") &&
+      ts.isArrowFunction(awaitCall(cleanup.expression)?.arguments[1]) &&
+      isIdentifier(awaitCall(cleanup.expression)?.arguments[2], "failed"),
+    "relay readback must await failure-preserving subscription and client cleanup",
   );
   assert.ok(
     client.pos < subscribeStatement.pos,
@@ -531,7 +538,7 @@ function assertPublicClientRelayReadback(source) {
   );
   assert.ok(subscribeStatement.pos < rows.pos, "subscription publication must precede public read");
   assert.ok(rows.pos < assertion.pos, "public read must precede the persisted-title assertion");
-  assert.ok(assertion.pos < shutdown.pos, "persisted-title assertion must precede final shutdown");
+  assert.ok(assertion.pos < cleanup.pos, "persisted-title assertion must precede final cleanup");
 }
 
 test("Android fixture BuildConfig fields and package registration remain compile-shaped", () => {
@@ -1048,20 +1055,23 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   );
   const swallowedFailure = highLevelForeground.replace(
     relayReadback,
-    relayReadback.replace("} finally {", "} catch { } finally {"),
+    relayReadback.replace("    failed = true;\n    throw error;", ""),
   );
   assert.throws(
     () => assertPublicClientRelayReadback(swallowedFailure),
-    /must not swallow lifecycle failures/,
+    /must mark and rethrow lifecycle failures before cleanup/,
     "relay readback must reject an empty catch that hides read or assertion failures",
   );
   const leakedSubscription = highLevelForeground.replace(
     relayReadback,
-    relayReadback.replace("    unsubscribe();\n    await client.shutdown();", "    await client.shutdown();"),
+    relayReadback.replace(
+      "    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);",
+      "    await client.shutdown();",
+    ),
   );
   assert.throws(
     () => assertPublicClientRelayReadback(leakedSubscription),
-    /unsubscribe before client shutdown/,
+    /failure-preserving subscription and client cleanup/,
     "relay readback must retire its propagation subscription after failure or success",
   );
   assertPublicClientSeedStages(highLevelForeground);

@@ -95,7 +95,8 @@ export async function proveHighLevelForegroundRelayReadback(
   runNonce: string,
 ): Promise<void> {
   const client = await createJazzClient(clientConfig(capability));
-  let unsubscribe = () => {};
+  let unsubscribe = () => {},
+    failed = false;
   try {
     const title = persistedTitleForRun(runNonce);
     let observed = false;
@@ -110,9 +111,11 @@ export async function proveHighLevelForegroundRelayReadback(
       rows.map((row) => row.title),
       runNonce,
     );
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    unsubscribe();
-    await client.shutdown();
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
   }
 }
 

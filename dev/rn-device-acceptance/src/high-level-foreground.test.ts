@@ -41,3 +41,25 @@ test("a teardown-only failure surfaces after shutdown still runs", async () => {
   );
   assert.equal(shutdowns, 1);
 });
+
+test("relay readback cleanup preserves its publication failure and still shuts down", async () => {
+  const primary = new Error("missing run marker");
+  let shutdowns = 0;
+  await assert.rejects(async () => {
+    try {
+      throw primary;
+    } catch (error) {
+      await finishSeedClient(
+        () => {
+          throw new Error("unsubscribe failed");
+        },
+        async () => {
+          shutdowns += 1;
+        },
+        true,
+      );
+      throw error;
+    }
+  }, primary);
+  assert.equal(shutdowns, 1);
+});
