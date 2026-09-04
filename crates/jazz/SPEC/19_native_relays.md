@@ -387,8 +387,13 @@ unsupported operations must fail closed until their acceptance gates pass.
 | 32              | AbortStreamingMutation: upload u64                       | 23 StreamingMutationAborted: aborted bool               |
 | 33              | AllRelationQuery: query_json string, options_json string | existing 3 Rows                                         |
 
-The BeginStreamingMutation field contract must be settled and byte-pinned
-before its handler is enabled. Subscription event ordinal 3 is reserved for
+BeginStreamingMutation has ordered fields mutation enum, table string,
+row_id 16 raw bytes, cells byte vector, column string, options_json string.
+Request 34 is LocalCurrentRow: table string, row_id 16 raw bytes; its response
+is existing 3 Rows. Request 35 is UpdateLargeValues: table string, row_id
+16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option
+u64; its response is existing 14 TransactionCommitted. The continuation bytes
+are pinned by `foreground_continuation_v1_byte_contract`. Subscription event ordinal 3 is reserved for
 StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
 terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
 terminal operations use `binding_codec::terminal_operations_to_json`.

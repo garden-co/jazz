@@ -484,8 +484,44 @@ pub enum ForegroundDbCommandRequest {
     DisconnectNativeUpstream,
     ReconnectNativeUpstream,
     NativeConnectionStatus,
-    /// Public admitted identity only, never bearer or arbitrary claims.
     NativeSessionMetadata,
+    WriteState {
+        tx_id: [u8; 16],
+    },
+    DrainMutationErrors,
+    BeginStreamingMutation {
+        mutation: ForegroundMutationKind,
+        table: String,
+        row_id: [u8; 16],
+        cells: Vec<u8>,
+        column: String,
+        options_json: String,
+    },
+    PushStreamingMutation {
+        upload: u64,
+        chunk: Vec<u8>,
+    },
+    FinishStreamingMutation {
+        upload: u64,
+    },
+    AbortStreamingMutation {
+        upload: u64,
+    },
+    AllRelationQuery {
+        query_json: String,
+        options_json: String,
+    },
+    LocalCurrentRow {
+        table: String,
+        row_id: [u8; 16],
+    },
+    UpdateLargeValues {
+        table: String,
+        row_id: [u8; 16],
+        patch: Vec<u8>,
+        descriptors_json: String,
+        updated_at_ms: Option<u64>,
+    },
 }
 
 /// Frozen postcard mutation ordinals within the V1 StageMutation envelope.
@@ -570,6 +606,19 @@ pub enum ForegroundDbCommandResponse {
     NativeSessionMetadata {
         issuer: String,
         user_id: String,
+    },
+    WriteState {
+        state_json: String,
+    },
+    MutationErrors {
+        events_json: String,
+    },
+    StreamingMutationOpened {
+        upload: u64,
+    },
+    StreamingMutationPushed,
+    StreamingMutationAborted {
+        aborted: bool,
     },
 }
 
@@ -2817,6 +2866,20 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                     Ok(response) => response,
                     Err(status) => return status,
                 },
+            }
+        }
+        // Continuations remain explicit until their API handlers are integrated.
+        ForegroundDbCommandRequest::WriteState { .. }
+        | ForegroundDbCommandRequest::DrainMutationErrors
+        | ForegroundDbCommandRequest::BeginStreamingMutation { .. }
+        | ForegroundDbCommandRequest::PushStreamingMutation { .. }
+        | ForegroundDbCommandRequest::FinishStreamingMutation { .. }
+        | ForegroundDbCommandRequest::AbortStreamingMutation { .. }
+        | ForegroundDbCommandRequest::AllRelationQuery { .. }
+        | ForegroundDbCommandRequest::LocalCurrentRow { .. }
+        | ForegroundDbCommandRequest::UpdateLargeValues { .. } => {
+            ForegroundDbCommandResponse::OperationError {
+                reason: "foreground command handler is unavailable".to_owned(),
             }
         }
     };
@@ -9164,6 +9227,127 @@ mod tests {
         .enumerate()
         {
             assert_eq!(postcard::to_allocvec(&kind).unwrap(), vec![ordinal as u8]);
+        }
+    }
+
+    #[test]
+    fn foreground_continuation_v1_byte_contract() {
+        // Internal byte fixtures pin host/OTA compatibility that row-level
+        // database assertions cannot observe.
+        let cases = [
+            (ForegroundDbCommandRequest::NativeSessionMetadata, vec![26]),
+            (
+                ForegroundDbCommandRequest::WriteState { tx_id: [7; 16] },
+                [vec![27], vec![7; 16]].concat(),
+            ),
+            (ForegroundDbCommandRequest::DrainMutationErrors, vec![28]),
+            (
+                ForegroundDbCommandRequest::BeginStreamingMutation {
+                    mutation: ForegroundMutationKind::Update,
+                    table: "t".into(),
+                    row_id: [7; 16],
+                    cells: vec![9],
+                    column: "c".into(),
+                    options_json: "{}".into(),
+                },
+                [
+                    vec![29, 1, 1, 116],
+                    vec![7; 16],
+                    vec![1, 9, 1, 99, 2, 123, 125],
+                ]
+                .concat(),
+            ),
+            (
+                ForegroundDbCommandRequest::PushStreamingMutation {
+                    upload: 128,
+                    chunk: vec![9],
+                },
+                vec![30, 128, 1, 1, 9],
+            ),
+            (
+                ForegroundDbCommandRequest::FinishStreamingMutation { upload: 128 },
+                vec![31, 128, 1],
+            ),
+            (
+                ForegroundDbCommandRequest::AbortStreamingMutation { upload: 128 },
+                vec![32, 128, 1],
+            ),
+            (
+                ForegroundDbCommandRequest::AllRelationQuery {
+                    query_json: "{}".into(),
+                    options_json: "{}".into(),
+                },
+                vec![33, 2, 123, 125, 2, 123, 125],
+            ),
+            (
+                ForegroundDbCommandRequest::LocalCurrentRow {
+                    table: "t".into(),
+                    row_id: [7; 16],
+                },
+                [vec![34, 1, 116], vec![7; 16]].concat(),
+            ),
+            (
+                ForegroundDbCommandRequest::UpdateLargeValues {
+                    table: "t".into(),
+                    row_id: [7; 16],
+                    patch: vec![9],
+                    descriptors_json: "[]".into(),
+                    updated_at_ms: Some(128),
+                },
+                [
+                    vec![35, 1, 116],
+                    vec![7; 16],
+                    vec![1, 9, 2, 91, 93, 1, 128, 1],
+                ]
+                .concat(),
+            ),
+        ];
+        for (command, bytes) in cases {
+            assert_eq!(postcard::to_allocvec(&command).unwrap(), bytes);
+            assert_eq!(
+                postcard::from_bytes::<ForegroundDbCommandRequest>(&bytes).unwrap(),
+                command
+            );
+        }
+        let responses = [
+            (
+                ForegroundDbCommandResponse::NativeSessionMetadata {
+                    issuer: "i".into(),
+                    user_id: "u".into(),
+                },
+                vec![18, 1, 105, 1, 117],
+            ),
+            (
+                ForegroundDbCommandResponse::WriteState {
+                    state_json: "{}".into(),
+                },
+                vec![19, 2, 123, 125],
+            ),
+            (
+                ForegroundDbCommandResponse::MutationErrors {
+                    events_json: "[]".into(),
+                },
+                vec![20, 2, 91, 93],
+            ),
+            (
+                ForegroundDbCommandResponse::StreamingMutationOpened { upload: 128 },
+                vec![21, 128, 1],
+            ),
+            (
+                ForegroundDbCommandResponse::StreamingMutationPushed,
+                vec![22],
+            ),
+            (
+                ForegroundDbCommandResponse::StreamingMutationAborted { aborted: true },
+                vec![23, 1],
+            ),
+        ];
+        for (response, bytes) in responses {
+            assert_eq!(postcard::to_allocvec(&response).unwrap(), bytes);
+            assert_eq!(
+                postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap(),
+                response
+            );
         }
     }
 
