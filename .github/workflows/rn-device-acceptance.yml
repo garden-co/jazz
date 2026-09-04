@@ -154,9 +154,10 @@ jobs:
         )
       }}
     name: Android device acceptance
-    # GitHub-hosted Linux runners expose Android hardware acceleration; this
-    # Blacksmith image did not expose a usable /dev/kvm.
-    runs-on: ubuntu-24.04
+    # Keep Android and iOS installed-app receipts on the dedicated Blacksmith
+    # fleet. They are deliberately label/manual only, never an ordinary PR
+    # gate; the runner is selected for x86_64 Android emulation support.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -166,13 +167,25 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          prefix-key: rn-device-android-ubuntu-2404
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**') }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .cache/android-device-acceptance
+          key: rn-device-android-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
       - run: pnpm install --frozen-lockfile
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       - name: Grant the runner user access to KVM
         shell: bash
         run: |
-          [[ -c /dev/kvm ]] || { echo "Android acceptance requires a GitHub-hosted KVM device" >&2; exit 1; }
+          [[ -c /dev/kvm ]] || { echo "Android acceptance requires a KVM-capable runner" >&2; exit 1; }
           sudo setfacl -m "u:${USER}:rw" /dev/kvm
           [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance could not grant the runner user KVM access" >&2; exit 1; }
       - name: Bootstrap pinned lane-local Android toolchain

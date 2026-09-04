@@ -902,14 +902,14 @@ test("Android bootstrap rejects corrupt pinned archives before extraction", () =
   assert.match(bootstrap, /cargo-ndk" --version/);
 });
 
-test("dispatch device workflow uses hosted KVM while source jobs remain cheap", () => {
+test("dispatch device workflow uses Blacksmith KVM while source jobs remain cheap", () => {
   const workflow = fs.readFileSync(
     path.join(root, "../../.github/workflows/rn-device-acceptance.yml"),
     "utf8",
   );
   assert.match(
     workflow,
-    /android-device-acceptance:[\s\S]*runs-on: ubuntu-24\.04[\s\S]*Grant the runner user access to KVM[\s\S]*setfacl -m "u:\$\{USER\}:rw" \/dev\/kvm/,
+    /android-device-acceptance:[\s\S]*runs-on: blacksmith-4vcpu-ubuntu-2404[\s\S]*Grant the runner user access to KVM[\s\S]*setfacl -m "u:\$\{USER\}:rw" \/dev\/kvm/,
   );
   assert.match(workflow, /android-source-scaffold:[\s\S]*runs-on: blacksmith-4vcpu-ubuntu-2404/);
   assert.match(workflow, /ios-source-scaffold:[\s\S]*runs-on: blacksmith-6vcpu-macos-15/);
