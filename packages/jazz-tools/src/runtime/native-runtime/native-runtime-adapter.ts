@@ -7088,7 +7088,7 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
  * private-looking prefix.
  */
 function publicPhysicalFieldName(name: string): string {
-  const withoutUserPrefix = name.startsWith("user_") ? name.slice("user_".length) : name;
+  const withoutUserPrefix = name.startsWith("_app_") ? name.slice("_app_".length) : name;
   return withoutUserPrefix.startsWith("__jazz_aggregate_")
     ? withoutUserPrefix.slice("__jazz_aggregate_".length)
     : withoutUserPrefix;

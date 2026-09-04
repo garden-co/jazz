@@ -3603,7 +3603,7 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
         .columns
         .iter()
         .filter_map(|column| {
-            let storage_name = format!("user_{}", column.name);
+            let storage_name = crate::schema::app_storage_column_name(&column.name);
             current
                 .field_index(&storage_name)
                 .and_then(|index| current.fields().get(index))

@@ -108,8 +108,8 @@ describe("native row codec", () => {
     ];
     const currentRow = [
       { name: "row_uuid", valueType: { tag: 11 } },
-      { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
-      { name: "user_done", valueType: { tag: 15, inner: { tag: 7 } } },
+      { name: "_app_title", valueType: { tag: 15, inner: { tag: 8 } } },
+      { name: "_app_done", valueType: { tag: 15, inner: { tag: 7 } } },
       { name: "$createdBy", valueType: { tag: 8 } },
     ];
     const nullableLogicalNames = [

@@ -1650,6 +1650,15 @@ impl CurrentRow {
         (self.record.descriptor(), self.record.raw())
     }
 
+    /// Read one application field through its explicit publication binding.
+    /// Unlike a descriptor/carrier lookup this remains exact when a literal
+    /// application name equals another field's generated storage carrier.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn application_field(&self, name: &str) -> Option<Value> {
+        let index = self.application_column_index_by_name(name)?;
+        self.record.borrowed().get_idx(index).ok()
+    }
+
     pub(crate) fn raw_field(&self, field: &str) -> Option<Value> {
         let idx = self.record.descriptor().field_index(field)?;
         self.record.borrowed().get_idx(idx).ok()

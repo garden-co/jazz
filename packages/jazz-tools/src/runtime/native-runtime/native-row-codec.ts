@@ -369,9 +369,7 @@ function createRecordWithLayout(
 }
 
 export function fieldIndex(descriptor: DescriptorField[], name: string): number {
-  const index = descriptor.findIndex(
-    (field) => field.name === name || field.name === `user_${name}`,
-  );
+  const index = descriptor.findIndex((field) => field.name === name);
   if (index < 0) {
     throw new Error(
       `missing ${name} field in [${descriptor.map((field) => field.name ?? "<anonymous>").join(", ")}]`,
@@ -618,7 +616,7 @@ function terminalLayoutValueTypeMatchesColumn(
   // `sparse` describes the TS wildcard/storage carrier, not the declared
   // public value. Rust collector descriptors have already removed it.
   const logicalColumn = logicalStorageColumns([column])[0]!;
-  // Provenance lives in fixed CurrentRow system fields, not nullable user_
+  // Provenance lives in fixed CurrentRow system fields, not nullable _app_
   // carriers. Author subjects are already canonical text at the native/public
   // boundary; timestamps retain their native scalar storage type.
   if (isProvenanceMagicColumn(column.name)) {
@@ -660,7 +658,7 @@ export function assertTerminalRootDescriptorCompatible(
     false,
   );
   // CurrentRow is a distinct physical layout. Its row key is named row_uuid
-  // and its nullable application-cell carriers live in the user_ namespace.
+  // and its nullable application-cell carriers live in the _app_ namespace.
   // Do not accept a nullable logical descriptor here: doing so would make an
   // arbitrary reordering of same-typed fields indistinguishable from a native
   // CurrentRow record.
@@ -668,7 +666,7 @@ export function assertTerminalRootDescriptorCompatible(
     descriptor,
     "row_uuid",
     publicColumns,
-    (column) => `user_${column.name}`,
+    (column) => `_app_${column.name}`,
     true,
   );
   if (!matchesLogical && !matchesPhysical && !matchesCurrentRow) {

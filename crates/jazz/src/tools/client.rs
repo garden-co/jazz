@@ -3096,13 +3096,9 @@ impl PublicQueryDecoder {
                                     "unknown column {column} on table {table}"
                                 ))
                             })?;
-                        let physical_column = crate::node::query_engine::user_column_field(column);
-                        let value = row
-                            .raw_field(&physical_column)
-                            .or_else(|| row.raw_field(column))
-                            .ok_or_else(|| {
-                                JazzError::Query(format!("row missing column {column}"))
-                            })?;
+                        let value = row.application_field(column).ok_or_else(|| {
+                            JazzError::Query(format!("row missing column {column}"))
+                        })?;
                         let column_schema = &table_schema.columns.columns[position];
                         if matches!(value, CoreValue::Nullable(None)) && !column_schema.nullable {
                             return Err(JazzError::Query(format!(
@@ -5759,6 +5755,69 @@ mod tests {
                 rows[0].get("label"),
                 Some(&Value::Text(expected.to_owned()))
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_owned_carriers_preserve_literal_storage_and_aggregate_prefix_names() {
+        use crate::query::{OrderDirection, Query};
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .column("_app_1", ColumnType::Integer)
+                        .column("score", ColumnType::Integer)
+                        .column("_app_score", ColumnType::Integer)
+                        .column("user_score", ColumnType::Integer)
+                        .column("sum_score", ColumnType::Integer),
+                )
+                .build(),
+        )
+        .await;
+        client
+            .upsert(
+                "items",
+                Uuid::from_u128(1),
+                crate::row_input!(
+                    "_app_1" => 11_i32, "score" => 1_i32, "_app_score" => 9_i32,
+                    "user_score" => 17_i32, "sum_score" => 23_i32
+                ),
+            )
+            .unwrap();
+        client
+            .upsert(
+                "items",
+                Uuid::from_u128(2),
+                crate::row_input!(
+                    "_app_1" => 12_i32, "score" => 9_i32, "_app_score" => 1_i32,
+                    "user_score" => 18_i32, "sum_score" => 24_i32
+                ),
+            )
+            .unwrap();
+        for (order, expected) in [
+            ("score", [11, 1, 9, 17, 23]),
+            ("_app_score", [12, 9, 1, 18, 24]),
+        ] {
+            let rows = client
+                .query_results(
+                    Query::from("items")
+                        .order_by(order, OrderDirection::Asc)
+                        .limit(1),
+                    Some(DurabilityTier::Local),
+                )
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            for (name, expected) in ["_app_1", "score", "_app_score", "user_score", "sum_score"]
+                .into_iter()
+                .zip(expected)
+            {
+                assert_eq!(
+                    rows[0].get(name),
+                    Some(&Value::Integer(expected)),
+                    "{order}: {name}"
+                );
+            }
         }
     }
 

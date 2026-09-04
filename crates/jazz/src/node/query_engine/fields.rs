@@ -2,7 +2,7 @@ use super::ClaimPath;
 use crate::schema::TableSchema;
 use groove::records::DescriptorField;
 
-pub(crate) const USER_COLUMN_PREFIX: &str = "user_";
+pub(crate) use crate::schema::APP_COLUMN_PREFIX as USER_COLUMN_PREFIX;
 /// Physical namespace for aggregate result values.
 ///
 /// Aggregate aliases are public-facing names and can legally collide with a
@@ -17,7 +17,7 @@ const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
 
 pub(crate) fn user_column_field(column: &str) -> String {
-    format!("{USER_COLUMN_PREFIX}{column}")
+    crate::schema::app_storage_column_name(column)
 }
 
 /// Canonical physical `CurrentRow` field order. Query readers and public
@@ -165,7 +165,7 @@ pub(crate) fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
 }
 
 pub(crate) fn table_user_column_field(table: &str, column: &str) -> String {
-    format!("user__{table}__{column}")
+    format!("{USER_COLUMN_PREFIX}_{table}__{column}")
 }
 
 #[cfg(test)]

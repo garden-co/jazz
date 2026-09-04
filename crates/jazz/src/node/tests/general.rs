@@ -98,21 +98,21 @@ fn project_keeps_literal_aggregate_shaped_column_names() {
 
 #[test]
 fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff() {
-    // A terminal can reuse `user_title` as its private carrier for the public
+    // A terminal can reuse `_app_title` as its private carrier for the public
     // application field `title`, while also exposing a genuine logical output
-    // named `user_title`. The explicit override, rather than prefix stripping,
+    // named `_app_title`. The explicit override, rather than prefix stripping,
     // distinguishes them.
     let table = TableSchema::new("items", [ColumnSchema::new("title", ColumnType::String)]);
     let descriptor = records::RecordDescriptor::new([
         ("row_uuid".to_owned(), records::ValueType::Uuid),
-        ("user_title".to_owned(), records::ValueType::String),
-        ("user_title".to_owned(), records::ValueType::String),
+        ("_app_title".to_owned(), records::ValueType::String),
+        ("_app_title".to_owned(), records::ValueType::String),
     ]);
     let raw = descriptor
         .create(&[
             Value::Uuid(row(0x6a).0),
             Value::String("application title".to_owned()),
-            Value::String("genuine logical user_title".to_owned()),
+            Value::String("genuine logical _app_title".to_owned()),
         ])
         .unwrap();
     let terminal = CurrentRow::new_with_explicit_binding_fields_and_names(
@@ -139,14 +139,14 @@ fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff()
 
     let physical_descriptor = records::RecordDescriptor::new([
         ("row_uuid".to_owned(), records::ValueType::Uuid),
-        ("user_title".to_owned(), records::ValueType::String),
-        ("user_title".to_owned(), records::ValueType::String),
+        ("_app_title".to_owned(), records::ValueType::String),
+        ("_app_title".to_owned(), records::ValueType::String),
     ]);
     let physical_raw = physical_descriptor
         .create(&[
             Value::Uuid(row(0x6a).0),
             Value::String("application title".to_owned()),
-            Value::String("genuine logical user_title".to_owned()),
+            Value::String("genuine logical _app_title".to_owned()),
         ])
         .unwrap();
     let physical_then_logical = CurrentRow::new_with_explicit_binding_fields_and_names(
@@ -167,15 +167,15 @@ fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff()
 
 #[test]
 fn projection_prefers_tagged_physical_column_over_reverse_order_logical_collision() {
-    // A hybrid collector may expose a logical `user_check` beside the physical
-    // storage field `user_check`. Descriptor position is not provenance: the
+    // A hybrid collector may expose a logical `_app_check` beside the physical
+    // storage field `_app_check`. Descriptor position is not provenance: the
     // logical field deliberately comes first here, and projecting schema
     // column `check` must still select the physical true value.
     let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
     let descriptor = records::RecordDescriptor::new([
         ("row_uuid".to_owned(), records::ValueType::Uuid),
-        ("user_check".to_owned(), records::ValueType::Bool),
-        ("user_check".to_owned(), records::ValueType::Bool),
+        ("_app_check".to_owned(), records::ValueType::Bool),
+        ("_app_check".to_owned(), records::ValueType::Bool),
     ]);
     let raw = descriptor
         .create(&[

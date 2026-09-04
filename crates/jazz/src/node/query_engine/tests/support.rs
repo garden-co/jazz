@@ -658,9 +658,9 @@ impl SourceGraphPreparer for FakeSourceResolver {
             let mut descriptor_fields = vec![
                 ("table", ValueType::String),
                 ("row_uuid", ValueType::Uuid),
-                ("user_title", ValueType::String),
-                ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
-                ("user_tag", ValueType::Nullable(Box::new(ValueType::String))),
+                ("_app_title", ValueType::String),
+                ("_app_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+                ("_app_tag", ValueType::Nullable(Box::new(ValueType::String))),
                 ("tx_time", ValueType::U64),
                 ("tx_node_id", ValueType::U64),
                 ("schema_version", ValueType::Uuid),
@@ -809,10 +809,10 @@ impl SourceGraphPreparer for InlineCollectorResolver {
             let descriptor = RecordDescriptor::new([
                 ("row_uuid", ValueType::Uuid),
                 (
-                    "user_title",
+                    "_app_title",
                     ValueType::Nullable(Box::new(ValueType::String)),
                 ),
-                ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+                ("_app_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
                 ("$createdAt", ValueType::U64),
                 ("$createdBy", ValueType::Uuid),
                 ("$updatedAt", ValueType::U64),

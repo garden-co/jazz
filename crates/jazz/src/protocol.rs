@@ -883,7 +883,7 @@ impl VersionRecord {
             field
                 .name
                 .as_deref()
-                .is_some_and(|name| name.starts_with("user_"))
+                .is_some_and(|name| name.starts_with(crate::schema::APP_COLUMN_PREFIX))
         };
         let fields = self.record.descriptor().fields();
         let fixed_names = [
@@ -6136,7 +6136,28 @@ mod tests {
             assert!(crate::wire::decode_sync_message(&remote).is_err());
         }
 
+        let legacy_prefix_descriptor =
+            RecordDescriptor::new(table.wire_record_descriptor().fields().iter().map(|field| {
+                let name = field
+                    .name
+                    .as_deref()
+                    .map(|name| {
+                        if name == "_app_title" {
+                            "user_title".to_owned()
+                        } else {
+                            name.to_owned()
+                        }
+                    })
+                    .expect("wire fields are named");
+                (name, field.value_type.clone())
+            }));
+        let legacy_prefix_message =
+            malformed_message(make_record(legacy_prefix_descriptor, base_values()));
+        let legacy_prefix_remote = postcard::to_allocvec(&legacy_prefix_message).unwrap();
+        assert!(crate::wire::decode_sync_message(&legacy_prefix_remote).is_err());
+
         // A valid immutable receipt is closed under the guarded codec.
+        assert!(version.validate_receipt().is_ok());
         let valid = malformed_message(version);
         let bytes = crate::wire::encode_sync_message(&valid).unwrap();
         assert_eq!(crate::wire::decode_sync_message(&bytes).unwrap(), valid);

@@ -136,3 +136,40 @@ descriptor codec directly when constructing a result payload; that known failing
 boundary remains visible. `ResultCurrent`, aggregate payload recovery, root-layout
 hashes, the binding ABI, and both cross-version database directions remain
 unproven. There is no shared-format-complete claim.
+
+## Source-owned carrier parity trial
+
+Schema constructors now produce the same durable carrier names as the contained
+writer. `schema::app_storage_column_name` prefixes an application name exactly
+once with `_app_`: `score` becomes `_app_score`, literal `_app_score` becomes
+`_app__app_score`, and literal `user_score` becomes `_app_user_score`. Qualified
+execution carriers use `_app__{table}__{column}`. Physical catalogue fields remain
+`_app_{PhysicalColumnId}`; the catalogue, not a string parser, supplies physical
+identity. These namespaces can have identical strings in different roles, so
+runtime `FieldIdentity` and explicit publication bindings remain authoritative.
+
+The producer/read-side changes cover history and current content schemas,
+branch/current indexes (`by_app_{column}`), immutable receipt descriptors and
+validation, query source field constructors and source type lookup, and the
+native row shape/name helpers. Physical indexes remain
+`by_physical_app_v1_{PhysicalColumnId}`. Prefixing is performed at the owning
+constructor, never by rewriting an arbitrary terminal descriptor before encoding.
+No descriptor or hash golden bytes are updated in this trial.
+
+Public conversion resolves a requested application column through the CurrentRow
+application binding. Looking up a generated carrier with the general logical
+field resolver is incorrect: with application columns `score` and `_app_score`,
+that lookup can return the second column's value for the first. A public client
+regression orders each column separately and verifies every returned value,
+including literal `_app_1`, `user_score`, and aggregate-shaped `sum_score`.
+Names in the reserved `__jazz_` namespace remain rejected by the public schema.
+
+This establishes constructor spelling and collision handling within the typed
+implementation, not complete byte compatibility. In particular the native ABI
+still differs: the shared target is contained `StoredColumn { id: u64,
+outputName: string }`, with its ID supplied explicitly by the catalogue/source
+producer. The current typed `PhysicalColumn(string)` cannot satisfy that contract.
+ResultCurrent payloads, root-layout hashes, descriptor serde in peer VersionRecord
+messages, and full database write/open/write/reopen in both directions remain
+unproven. Execution Slot/NamedSlot recovery must be demonstrated at those owners;
+this trial must not be described as a completed format freeze.
