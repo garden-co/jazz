@@ -99,22 +99,13 @@ export interface JwtPayload {
   exp?: unknown;
 }
 
-/** RFC 7519 registered transport/security claims. They never come from app metadata. */
-const REGISTERED_JWT_CLAIMS = new Set(["iss", "sub", "aud", "exp", "nbf", "iat", "jti"]);
-
-/**
- * Select the app metadata in a standard flat JWT payload. The registered JWT
- * claims above are transport/security fields; every other JSON value, including
- * `null`, arrays, and objects, remains available to application code.
- */
-function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> | null {
+/** Preserve the complete verified JWT payload for the public session surface. */
+function claimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> | null {
   // A null-prototype dictionary makes every JSON key a data property. In
   // particular, assigning an untrusted `__proto__` key to `{}` would invoke
   // Object.prototype's legacy setter instead of preserving the claim.
   const claims: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const [name, value] of Object.entries(payload).sort(compareUtf8)) {
-    if (!REGISTERED_JWT_CLAIMS.has(name)) claims[name] = value;
-  }
+  for (const [name, value] of Object.entries(payload).sort(compareUtf8)) claims[name] = value;
   return claims;
 }
 
@@ -125,7 +116,7 @@ function reservedPolicyClaimsFromJwtPayload(payload: JwtPayload): Record<string,
   // in `Session.claims` would make every fresh anonymous proof look like a
   // different authorization scope even though anonymous policy is shared.
   const { jazz_pub_key: _proofKey, ...policyPayload } = payload;
-  return policyClaimsFromJwtPayload(policyPayload);
+  return claimsFromJwtPayload(policyPayload);
 }
 
 function compareUtf8([left]: [string, unknown], [right]: [string, unknown]): number {
@@ -224,7 +215,7 @@ export function internalSessionFromJwtPayload(payload: JwtPayload): Session | nu
   const issuer = asUsableSubjectString(payload.iss);
   if (!subject || !issuer || isReservedJazzIssuer(issuer)) return null;
 
-  const claims = policyClaimsFromJwtPayload(payload);
+  const claims = claimsFromJwtPayload(payload);
   if (!claims) return null;
 
   return {

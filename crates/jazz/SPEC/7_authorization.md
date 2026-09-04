@@ -47,19 +47,21 @@ Invariant digest:
   authority across tables.
 - `INV-RLS-23`: Jazz derives the reserved logical `session.user` and user
   authorship from the exact trusted JWT subject pair `(iss, sub)`, represented
-  portably as canonical JSON `[iss,sub]`. Registered JWT transport/security
-  claims, including `iss` and `sub`, are not application metadata and are
-  excluded from public `session.claims`; a provider claim named `user` remains
-  available as `session.claims["user"]`.
+  portably as canonical JSON `[iss,sub]`. `session.user` is the only authorship
+  identity: registered JWT transport/security claims, including `iss` and `sub`,
+  remain inspectable metadata in public `session.claims` and a provider claim
+  named `user` remains available as `session.claims["user"]`.
   Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
   the reserved system issuer. Local intern handles MUST never become wire,
   storage, query, equality, or ordering values.
-- `INV-RLS-25`: External JWT application metadata MUST use the flat JWT
-  payload: every non-registered top-level claim is exposed at
-  `session.claims[<name>]`. The registered transport/security claim names are
-  exactly `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, and `jti`. Jazz MUST NOT
-  require, unwrap, merge, or otherwise specially interpret a nested `claims`
-  object; it is ordinary application metadata when present.
+- `INV-RLS-25`: External JWT metadata MUST preserve the complete verified JWT
+  payload at `session.claims[<name>]`, including registered claims `iss`, `sub`,
+  `aud`, `exp`, `nbf`, `iat`, and `jti`, plus every custom top-level claim.
+  Jazz MUST NOT require, unwrap, merge, or otherwise specially interpret a
+  nested `claims` object; it is ordinary metadata when present. Objects
+  (including recursively object-containing arrays) remain visible through the
+  structured session surface but are omitted, without rejecting authentication,
+  from the non-recursive Groove policy identity.
 - `INV-RLS-24`: Client mutation staging MUST NOT issue a definitive read- or write-policy verdict from partial local state. Update/upsert read visibility and write policy are enforced by the fate authority against its complete admitted policy inputs.
 
 ## Details
