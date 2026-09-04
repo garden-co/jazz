@@ -2209,6 +2209,7 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
   const androidFiles = [
     "arm64-v8a/libjazz_native_relay.a",
     "armeabi-v7a/libjazz_native_relay.a",
+    "x86/libjazz_native_relay.a",
     "x86_64/libjazz_native_relay.a",
   ];
   const iosFiles = [
