@@ -104,7 +104,7 @@ pub(super) fn collect_layout(
     }
     let mut next_slot = 0usize;
     let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
-    disambiguate_collect_fields(&mut root_fields, &slots);
+    disambiguate_collect_fields(&mut root_fields, &slots, root_source);
     Ok(CollectLayout {
         root_fields,
         root_occurrence_inputs,
@@ -119,16 +119,28 @@ pub(super) fn collect_layout(
 // Public collection aliases may equal a stored column's internal carrier name.
 // Keep aliases intact and move only the carrier; binding metadata retains the
 // stored column's source identity and public name.
-fn disambiguate_collect_fields(fields: &mut [CollectFlatField], slots: &[CollectSlotLayout]) {
+fn disambiguate_collect_fields(
+    fields: &mut [CollectFlatField],
+    slots: &[CollectSlotLayout],
+    source: &ResolvedSource,
+) {
     let mut occupied = fields
         .iter()
         .map(|field| field.output.clone())
         .chain(slots.iter().map(|slot| slot.collection_field.clone()))
         .collect::<BTreeSet<_>>();
     for (index, field) in fields.iter_mut().enumerate() {
-        if slots
-            .iter()
-            .any(|slot| slot.collection_field == field.output)
+        let is_stored = field.source_field.as_deref().is_some_and(|name| {
+            source
+                .stored_column_ids
+                .keys()
+                .any(|column| app_column_field(column) == name)
+        });
+        if is_stored
+            && !field.is_row_id
+            && slots
+                .iter()
+                .any(|slot| slot.collection_field == field.output)
         {
             let mut candidate = format!("__collect_stored_{index}");
             while !occupied.insert(candidate.clone()) {

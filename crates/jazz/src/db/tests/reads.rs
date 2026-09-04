@@ -2702,3 +2702,47 @@ fn relation_alias_does_not_collide_with_stored_column_carrier() {
         crate::binding_codec::RowDescriptorFieldName::ResultField { name: "_app_check" }
     )));
 }
+
+#[test]
+fn relation_alias_cannot_replace_internal_root_row_key() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("review_parents")
+                    .column("check", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("review_children")
+                    .nullable_fk_column("parent", "review_parents"),
+            ),
+    );
+    let db = open_db(0xed, AuthorSubject::for_test_bytes([0xed; 16]), &schema);
+    let parent = db
+        .insert(
+            "review_parents",
+            BTreeMap::from([("check".to_owned(), Value::String("stored".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    db.insert(
+        "review_children",
+        BTreeMap::from([(
+            "parent".to_owned(),
+            Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    let query = Query::from("review_parents").array_subquery(
+        ArraySubquery::new("row_uuid", "review_children", "parent", "id").select(["id"]),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let error = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("output field names must be unique"),
+        "{error}"
+    );
+}
