@@ -396,13 +396,15 @@ export function validateNapiStage(
   // semantic ABI guard, so Windows CRLF must compare equal to the checked-in
   // LF surface while every other generated difference remains fatal.
   const normalizeLineEndings = (value) => value.replaceAll("\r\n", "\n");
-  if (normalizeLineEndings(generatedDeclarations) !== normalizeLineEndings(stableDeclarations))
+  const normalizedGeneratedDeclarations = normalizeLineEndings(generatedDeclarations);
+  const normalizedStableDeclarations = normalizeLineEndings(stableDeclarations);
+  if (normalizedGeneratedDeclarations !== normalizedStableDeclarations)
     throw new Error(
       declarationMismatchDiagnostic(
         stableDeclarationsPath,
         declarations,
-        stableDeclarations,
-        generatedDeclarations,
+        normalizedStableDeclarations,
+        normalizedGeneratedDeclarations,
       ),
     );
   if (target !== hostTarget) return;

@@ -395,6 +395,32 @@ test("Windows line endings do not create false declaration drift", () => {
   }
 });
 
+test("Windows declaration drift points at the substantive changed line", () => {
+  const root = fixture();
+  try {
+    const staged = stage(root, ".napi-stage-windows-drift", "next");
+    const stableDeclarations = join(root, "index.d.ts");
+    writeFileSync(stableDeclarations, "export declare const first: 1\nexport declare const second: 2\n");
+    writeFileSync(
+      join(staged, "index.d.ts"),
+      "export declare const first: 1\r\nexport declare const second: 3\r\n",
+    );
+    assert.throws(
+      () =>
+        validateNapiStage(
+          staged,
+          "jazz-napi.linux-x64-gnu.node",
+          "next",
+          "cross-target",
+          { stableDeclarationsPath: stableDeclarations },
+        ),
+      /first difference near line 2/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the package declaration overlay exposes Promise close without leaking the raw pollable ABI", () => {
   const root = fixture();
   try {
