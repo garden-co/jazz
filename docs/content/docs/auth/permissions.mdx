@@ -210,9 +210,10 @@ You can use these edit metadata magic columns directly in `permissions.ts`. This
 
 For the most common case, Jazz also exposes `policy.<table>.managedByCreator()` and `isCreator` as
 shorthand for the same `$createdBy === session.user` condition. `session.user` is the
-canonical `[iss,sub]` logical author. Raw provider identity fields remain available as
-`session.claims.iss` and `session.claims.sub` for application-owned columns. You can still write the raw
-`$createdBy` comparison yourself whenever you want the explicit form.
+canonical `[iss,sub]` logical author. Registered provider identity fields are deliberately absent
+from public `session.claims`; applications that need the raw subject in their own columns should
+publish it separately as a non-registered custom claim. You can still write the raw `$createdBy`
+comparison yourself whenever you want the explicit form.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts
