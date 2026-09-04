@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import test from "node:test";
 import {
   assertCoreObservation,
   boundedHarnessOutput,
   startLocalEdgeSessionHarness,
+  stopForOfflineRestart,
 } from "./edge-session-harness.mjs";
 
 const nonce = "12345678-1234-4234-9234-123456789abc";
@@ -217,4 +219,47 @@ test("observer source stays read-only and Core-connected; planted Edge reader an
     () => assertCoreObserverContract(`${source}\n observer.insert("todos", fake);`),
     /cannot manufacture/,
   );
+});
+
+test("offline restart rejects a live endpoint even after its claimed parent exited", async () => {
+  const server = createServer((socket) => socket.end());
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const stoppedChild = { exitCode: 0, signalCode: null };
+  try {
+    await assert.rejects(stopForOfflineRestart(stoppedChild, port), /upstream remains reachable/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+  await stopForOfflineRestart(stoppedChild, port);
+});
+
+test("both drivers establish offline provenance before reopening the unchanged scope", () => {
+  for (const platform of ["android", "ios"]) {
+    const driver = readFileSync(new URL(`./run-${platform}.mjs`, import.meta.url), "utf8");
+    assert.ok(
+      driver.indexOf("await localSession.waitForCoreObservation()") <
+        driver.indexOf("await localSession.stopForOfflineRestart()"),
+    );
+    assert.ok(
+      driver.indexOf("await localSession.stopForOfflineRestart()") <
+        driver.indexOf('await launchAndAssert("verify")'),
+    );
+    assert.match(driver, /JAZZ_DEVICE_REOPEN_PROVENANCE/);
+  }
+  const foreground = readFileSync(
+    new URL("../src/high-level-foreground.ts", import.meta.url),
+    "utf8",
+  ).split("export async function proveHighLevelForegroundRestart")[1];
+  const assertRestart = (source) => {
+    const subscribe = source.indexOf("client.db.subscribe");
+    const wait = source.indexOf("await waitForPublication");
+    const read = source.indexOf("client.db.all");
+    assert.ok(subscribe >= 0 && wait > subscribe && read > wait);
+    assert.match(source, /assertPersistedTitleForRun/);
+    assert.match(source, /finishSeedClient/);
+  };
+  assertRestart(foreground);
+  assert.throws(() => assertRestart(foreground.replace("client.db.subscribe", "missingSubscription")));
+  assert.throws(() => assertRestart(foreground.replace("await waitForPublication", "missingWait")));
 });

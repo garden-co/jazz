@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { isDeviceRunNonce, persistedTitleForRun } from "../src/run-marker.ts";
 
@@ -47,8 +48,8 @@ function harnessDiagnostic({ child, stdout, stderr, device }) {
   ].join("; ");
 }
 
-/** Start the host-only multi-thread Edge/Core fixture and retain it across the
- * seed/verify process boundary. The fixture emits fresh JWTs at runtime; this
+/** Start the host-only multi-thread Edge/Core fixture for the seed phase; stop
+ * it before offline verification. The fixture emits fresh JWTs at runtime; this
  * driver passes them directly to the native fixture and never writes
  * them to source, Gradle config, logs, or a receipt. */
 export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
@@ -150,8 +151,41 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       }
       return assertCoreObservation(observation, runNonce);
     },
+    stopForOfflineRestart: () => stopForOfflineRestart(child, session.edge_port),
     endpoint: `http://${host}:${session.edge_port}`,
     bearerA: session.bearer_a,
     bearerB: session.bearer_b,
   };
+}
+
+/** Fail closed: a stopped process alone is insufficient if a descendant still
+ * serves Edge. Preserve the original endpoint for the native SQLite scope. */
+export async function stopForOfflineRestart(child, port) {
+  if (child.exitCode === null && !child.signalCode) {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("upstream did not stop")), 5_000);
+      child.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+      child.kill("SIGTERM");
+    });
+  }
+  await new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    socket.setTimeout(1_000);
+    socket.once("connect", () => {
+      socket.destroy();
+      reject(new Error("offline restart refused: upstream remains reachable"));
+    });
+    socket.once("error", (error) => {
+      socket.destroy();
+      if (error.code === "ECONNREFUSED") resolve();
+      else reject(new Error("offline restart endpoint refusal was not established"));
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      reject(new Error("offline restart endpoint probe timed out"));
+    });
+  });
 }

@@ -159,6 +159,16 @@ try {
   // A full process termination is required: backgrounding could retain the old
   // JSI bridge and relay owner and would not establish restart durability.
   simctl(["terminate", udid, "dev.jazz.rndeviceacceptance"]);
+  await localSession.stopForOfflineRestart();
+  console.log(
+    "JAZZ_DEVICE_REOPEN_PROVENANCE " +
+      JSON.stringify({
+        platform: "ios",
+        runNonce,
+        upstream: "stopped-and-endpoint-refused",
+        scopeEndpoint: "unchanged",
+      }),
+  );
   await launchAndAssert("verify");
 } finally {
   localSession.child.kill("SIGTERM");

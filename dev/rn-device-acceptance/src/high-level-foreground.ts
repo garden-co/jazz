@@ -122,20 +122,36 @@ export async function proveHighLevelForegroundRelayReadback(
 /**
  * Materialize the row written by a prior process through `createJazzClient`.
  * This deliberately does not use the byte-level fixture or read SQLite: it is
- * the public API half of the process-restart receipt.
+ * the public API half of the process-restart receipt. The driver has stopped
+ * upstream before this launch; the marker must arrive from local relay storage.
  */
 export async function proveHighLevelForegroundRestart(
   capability: Uint8Array,
   runNonce: string,
 ): Promise<void> {
   const client = await createJazzClient(clientConfig(capability));
+  let unsubscribe = () => {},
+    failed = false;
   try {
+    const title = persistedTitleForRun(runNonce);
+    let observed = false;
+    unsubscribe = client.db.subscribe(app.todos, (todos) => {
+      observed ||= todos.some((todo) => todo.title === title);
+    });
+    if (!(await waitForPublication(() => observed))) {
+      throw new Error(
+        "restarted high-level React Native foreground did not receive the persisted marker",
+      );
+    }
     const rows = await client.db.all(app.todos);
     assertPersistedTitleForRun(
       rows.map((row) => row.title),
       runNonce,
     );
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    await client.shutdown();
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
   }
 }

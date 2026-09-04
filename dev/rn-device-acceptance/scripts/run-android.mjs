@@ -136,6 +136,16 @@ try {
   );
   // This must be a process boundary: no JSI alias or relay process can survive.
   androidAdb(["shell", "am", "force-stop", "dev.jazz.rndeviceacceptance"]);
+  await localSession.stopForOfflineRestart();
+  console.log(
+    "JAZZ_DEVICE_REOPEN_PROVENANCE " +
+      JSON.stringify({
+        platform: "android",
+        runNonce,
+        upstream: "stopped-and-endpoint-refused",
+        scopeEndpoint: "unchanged",
+      }),
+  );
   await launchAndAssert("verify");
 } finally {
   localSession.child.kill("SIGTERM");
