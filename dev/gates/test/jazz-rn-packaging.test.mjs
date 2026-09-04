@@ -17,17 +17,17 @@ const packageJson = JSON.parse(
 const withJazzRn = require("../../../crates/jazz-rn/app.plugin.js");
 const androidRelayArchitectures = "armeabi-v7a,arm64-v8a,x86_64";
 
-function parseExpoMachineJson(stdout, label) {
-  // Expo's autolinker normally writes one JSON document. Some Expo releases
-  // prefix it with structured informational lines, however; accept only that
-  // known prelude and keep arbitrary stdout a hard failure.
+function parseMachineJsonWithStructuredInfoPrelude(stdout, label) {
+  // Tool commands normally write one JSON document. Expo and Bob can prefix
+  // it with structured informational lines, however; accept only that known
+  // prelude and keep arbitrary stdout a hard failure.
   const jsonStart = stdout.search(/^[{[]/m);
   assert.notEqual(jsonStart, -1, `${label} did not emit a JSON document`);
   const prelude = stdout.slice(0, jsonStart);
   assert.match(
     prelude,
     /^(?:(?:ℹ \[[^\]\r\n]+\][^\r\n]*)?\r?\n)*$/,
-    `${label} may prefix JSON only with Expo informational lines`,
+    `${label} may prefix JSON only with structured tool informational lines`,
   );
   return JSON.parse(stdout.slice(jsonStart));
 }
@@ -41,22 +41,34 @@ function assertRelayAndroidArchitectures(gradleProperties, label) {
   );
 }
 
-test("Expo machine JSON accepts its informational prelude but no arbitrary stdout", () => {
+test("machine JSON accepts structured tool info but no arbitrary stdout", () => {
   assert.deepEqual(
-    parseExpoMachineJson(
+    parseMachineJsonWithStructuredInfoPrelude(
       'ℹ [module] inspecting React Native configuration\n{"relay":"packed"}\n',
       "Expo",
     ),
     { relay: "packed" },
   );
-  assert.throws(
-    () => parseExpoMachineJson('warning: unexpected output\n{"relay":"packed"}\n', "Expo"),
-    /only with Expo informational lines/,
-    "unstructured stdout must not be mistaken for an Expo JSON prelude",
+  assert.deepEqual(
+    parseMachineJsonWithStructuredInfoPrelude(
+      'ℹ [typescript] compiling package sources\n[{"filename":"jazz-rn.tgz"}]\n',
+      "npm pack",
+    ),
+    [{ filename: "jazz-rn.tgz" }],
+    "Bob's TypeScript informational stdout must not hide npm pack's JSON receipt",
   );
   assert.throws(
     () =>
-      parseExpoMachineJson(
+      parseMachineJsonWithStructuredInfoPrelude(
+        'warning: unexpected output\n{"relay":"packed"}\n',
+        "tool",
+      ),
+    /only with structured tool informational lines/,
+    "unstructured stdout must not be mistaken for a tool JSON prelude",
+  );
+  assert.throws(
+    () =>
+      parseMachineJsonWithStructuredInfoPrelude(
         'ℹ [module] inspecting React Native configuration\n{"relay":}\n',
         "Expo",
       ),
@@ -64,7 +76,8 @@ test("Expo machine JSON accepts its informational prelude but no arbitrary stdou
     "an allowed informational prelude must not make malformed JSON acceptable",
   );
   assert.throws(
-    () => parseExpoMachineJson('{"relay":"packed"}\ntrailing output\n', "Expo"),
+    () =>
+      parseMachineJsonWithStructuredInfoPrelude('{"relay":"packed"}\ntrailing output\n', "Expo"),
     SyntaxError,
     "valid JSON must not permit non-whitespace trailing stdout",
   );
@@ -630,7 +643,7 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   }
 
   const autolink = (platform) =>
-    parseExpoMachineJson(
+    parseMachineJsonWithStructuredInfoPrelude(
       execFileSync(
         process.execPath,
         [
@@ -765,7 +778,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
   ).pathname;
   try {
     await mkdir(packageDirectory, { recursive: true });
-    const packed = JSON.parse(
+    const packed = parseMachineJsonWithStructuredInfoPrelude(
       execFileSync(
         "npm",
         ["pack", "--ignore-scripts", "--json", "--pack-destination", packageDirectory],
@@ -774,6 +787,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
           encoding: "utf8",
         },
       ),
+      "npm pack",
     );
     assert.deepEqual(packed.length, 1, "packing jazz-rn must produce one npm tarball");
     const tarball = join(packageDirectory, packed[0].filename);
@@ -992,11 +1006,12 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       cwd: appDirectory,
       stdio: "inherit",
     });
-    const bareReactNativeConfig = JSON.parse(
+    const bareReactNativeConfig = parseMachineJsonWithStructuredInfoPrelude(
       execFileSync(join(canonicalNodeModules, ".bin", "react-native"), ["config"], {
         cwd: appDirectory,
         encoding: "utf8",
       }),
+      "bare React Native config",
     );
     assert.equal(
       bareReactNativeConfig.dependencies["jazz-rn"].platforms.android.packageInstance,
@@ -1091,11 +1106,12 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       cwd: bareAppDirectory,
       stdio: "inherit",
     });
-    const directBareReactNativeConfig = JSON.parse(
+    const directBareReactNativeConfig = parseMachineJsonWithStructuredInfoPrelude(
       execFileSync(join(canonicalNodeModules, ".bin", "react-native"), ["config"], {
         cwd: bareAppDirectory,
         encoding: "utf8",
       }),
+      "direct bare React Native config",
     );
     const directBareJazzRn = directBareReactNativeConfig.dependencies["jazz-rn"];
     assert.ok(directBareJazzRn, "a direct bare host must discover the packed jazz-rn package");
@@ -1374,7 +1390,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     assert.match(iosPodfile, /use_native_modules!/);
 
     const expoAutolink = (platform) =>
-      parseExpoMachineJson(
+      parseMachineJsonWithStructuredInfoPrelude(
         execFileSync(
           process.execPath,
           [
@@ -2041,11 +2057,12 @@ test("a dry package includes every staged native relay artifact class", async ()
       await mkdir(dirname(destination), { recursive: true });
       await writeFile(destination, "staged-native-artifact\n");
     }
-    const receipt = JSON.parse(
+    const receipt = parseMachineJsonWithStructuredInfoPrelude(
       execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
         cwd: directory,
         encoding: "utf8",
       }),
+      "npm pack --dry-run",
     );
     const packed = new Set(receipt[0].files.map(({ path }) => path));
     for (const path of staged) {
