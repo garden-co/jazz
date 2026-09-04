@@ -83,7 +83,7 @@ use jazz::ids::{
 use jazz::protocol::{
     BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
     PermissionAdvice as CorePermissionAdvice, PermissionAdviceAction as CorePermissionAdviceAction,
-    ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
+    ReadViewSpec as CoreReadViewSpec,
 };
 use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
@@ -333,6 +333,7 @@ pub struct PreparedQuery {
 
 #[napi(js_name = "QueryAttachment")]
 pub struct QueryAttachment {
+    wake: RefCell<Option<Waker>>,
     state: Rc<RefCell<QueryAttachmentState>>,
 }
 
@@ -342,15 +343,34 @@ enum QueryAttachmentState {
     Detached,
 }
 
+#[napi]
 impl QueryAttachment {
-    fn from_ready(inner: CoreQueryAttachment) -> Self {
-        Self {
-            state: Rc::new(RefCell::new(QueryAttachmentState::Ready(inner))),
-        }
+    #[napi(js_name = "setWake")]
+    pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
+        *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: std::sync::Arc::new(callback),
+        })));
     }
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<bool>> {
+        if matches!(*self.state.borrow(), QueryAttachmentState::Detached) {
+            return Err(napi::Error::from_reason("query attachment is detached"));
+        }
+        self.poll_ready().map(|ready| ready.then_some(true))
+    }
+    #[napi]
+    pub fn cancel(&self) {
+        if matches!(*self.state.borrow(), QueryAttachmentState::Pending(_)) {
+            *self.state.borrow_mut() = QueryAttachmentState::Detached;
+        }
+        self.wake.borrow_mut().take();
+    }
+}
 
+impl QueryAttachment {
     fn pending(future: LocalBoxFuture<'static, napi::Result<CoreQueryAttachment>>) -> Self {
         Self {
+            wake: RefCell::new(None),
             state: Rc::new(RefCell::new(QueryAttachmentState::Pending(future))),
         }
     }
@@ -365,8 +385,12 @@ impl QueryAttachment {
             *self.state.borrow_mut() = state;
             return Ok(ready);
         };
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
         match Pin::new(&mut future).poll(&mut context) {
             Poll::Ready(result) => {
                 *self.state.borrow_mut() = QueryAttachmentState::Ready(result?);
@@ -417,6 +441,96 @@ pub struct Write {
 #[napi]
 pub struct PendingNativeRead {
     future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
+}
+
+/// Thread-affine query preparation waiting for the core owner.
+#[napi]
+pub struct PendingNativePreparation {
+    future: RefCell<Option<LocalBoxFuture<'static, napi::Result<PreparedQuery>>>>,
+    wake: RefCell<Option<Waker>>,
+}
+
+#[napi]
+impl PendingNativePreparation {
+    #[napi(js_name = "setWake")]
+    pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
+        *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: std::sync::Arc::new(callback),
+        })));
+    }
+
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<PreparedQuery>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "query preparation is complete or cancelled",
+            ));
+        };
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
+    }
+}
+
+/// Thread-affine subscription opening waiting for the core owner.
+#[napi]
+pub struct PendingNativeSubscription {
+    future: RefCell<Option<LocalBoxFuture<'static, napi::Result<Subscription>>>>,
+    wake: RefCell<Option<Waker>>,
+}
+
+#[napi]
+impl PendingNativeSubscription {
+    #[napi(js_name = "setWake")]
+    pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
+        *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: std::sync::Arc::new(callback),
+        })));
+    }
+
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<Subscription>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "subscription opening is complete or cancelled",
+            ));
+        };
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
+    }
 }
 
 /// A JavaScript-thread-owned permission preflight which is waiting for an
@@ -2704,6 +2818,47 @@ impl NapiDb {
         Ok(PreparedQuery { inner })
     }
 
+    #[napi(js_name = "prepareQueryAsync")]
+    pub fn prepare_query_async(
+        &self,
+        query: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+    ) -> napi::Result<PendingNativePreparation> {
+        let admission = author
+            .map(|author| {
+                let author = core_author_id_from_bytes(&author)?;
+                Ok::<_, napi::Error>((author, core_claims_from_json(author, claims)?))
+            })
+            .transpose()?;
+        let query: CoreQuery = postcard::from_bytes(&query)
+            .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! prepare {
+            ($db:expr) => {{
+                let db = Rc::clone($db);
+                Ok(PendingNativePreparation {
+                    wake: RefCell::new(None),
+                    future: RefCell::new(Some(Box::pin(async move {
+                        let inner = db.prepare_query_async(&query).await.map_err(napi_error)?;
+                        let inner = match admission {
+                            Some((author, claims)) => inner.with_identity_claims(author, claims),
+                            None => inner,
+                        };
+                        Ok(PreparedQuery { inner })
+                    }))),
+                })
+            }};
+        }
+        match db {
+            NapiDbInnerStorage::Memory(db) => prepare!(db),
+            NapiDbInnerStorage::Persistent(db) => prepare!(db),
+        }
+    }
+
     /// Execute an ordinary prepared read. The optional transaction id selects
     /// that transaction's snapshot and staged overlay; an explicit author
     /// selects trusted-serving authorization. Backend authority is inferred
@@ -2947,46 +3102,13 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         macro_rules! attach {
             ($db:expr) => {{
-                match open_tx {
-                    None => {
-                        let inner = match author {
-                            Some(author) => {
-                                $db.attach_query_with_opts_for_identity(&query.inner, opts, author)
-                            }
-                            None => $db.attach_query_with_opts(&query.inner, opts),
-                        }
-                        .map_err(napi_error)?;
-                        Ok(QueryAttachment::from_ready(inner))
-                    }
-                    Some(open_tx) => {
-                        let snapshot = $db.enqueue_open_transaction_snapshot(open_tx);
-                        let db = Rc::clone($db);
-                        let query = query.inner.clone();
-                        Ok(QueryAttachment::pending(Box::pin(async move {
-                            let snapshot = snapshot
-                                .await
-                                .map_err(|_| {
-                                    napi::Error::from_reason(
-                                        "transaction snapshot request was dropped",
-                                    )
-                                })?
-                                .map_err(napi_error)?;
-                            let mut opts = opts;
-                            opts.read_view = CoreReadViewSpec {
-                                source: CoreReadViewSourceSpec::Snapshot {
-                                    snapshot: snapshot.into(),
-                                },
-                            };
-                            match author {
-                                Some(author) => {
-                                    db.attach_query_with_opts_for_identity(&query, opts, author)
-                                }
-                                None => db.attach_query_with_opts(&query, opts),
-                            }
-                            .map_err(napi_error)
-                        })))
-                    }
-                }
+                let db = Rc::clone($db);
+                let query = query.inner.clone();
+                Ok(QueryAttachment::pending(Box::pin(async move {
+                    db.attach_query_with_opts_async(&query, opts, open_tx, author)
+                        .await
+                        .map_err(napi_error)
+                })))
             }};
         }
         match db {
@@ -3055,6 +3177,53 @@ impl NapiDb {
             },
         };
         Ok(Subscription { inner: Some(inner) })
+    }
+
+    #[napi(js_name = "subscribeAsync")]
+    pub fn subscribe_async(
+        &self,
+        query: &PreparedQuery,
+        opts: Option<JsonValue>,
+        author: Option<Uint8Array>,
+    ) -> napi::Result<PendingNativeSubscription> {
+        let opts = core_read_opts_from_json(opts)?;
+        let author = match author {
+            Some(author) => Some(core_author_id_from_bytes(&author)?),
+            None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
+            None => None,
+        };
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! subscribe {
+            ($db:expr, $variant:ident) => {{
+                let db = Rc::clone($db);
+                let query = query.inner.clone();
+                Ok(PendingNativeSubscription {
+                    wake: RefCell::new(None),
+                    future: RefCell::new(Some(Box::pin(async move {
+                        let stream = match author {
+                            Some(author) => db.subscribe_for_identity(&query, opts, author).await,
+                            None => db.subscribe(&query, opts).await,
+                        }
+                        .map_err(napi_error)?;
+                        Ok(Subscription {
+                            inner: Some(NapiSubscription::$variant {
+                                db,
+                                stream,
+                                pending_events: VecDeque::new(),
+                                pending_batch: None,
+                            }),
+                        })
+                    }))),
+                })
+            }};
+        }
+        match db {
+            NapiDbInnerStorage::Memory(db) => subscribe!(db, Memory),
+            NapiDbInnerStorage::Persistent(db) => subscribe!(db, Persistent),
+        }
     }
 
     #[napi(js_name = "subscribeForIdentity")]

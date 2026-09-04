@@ -225,6 +225,24 @@ declare module "jazz-wasm" {
     attachExclusiveTx(openTransactionId: string): WasmTx;
 
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
+    prepareQueryAsync(
+      query: Uint8Array,
+      author?: Uint8Array,
+      claims?: Record<string, unknown>,
+    ): {
+      poll(): WasmPreparedQuery | undefined;
+      cancel(): void;
+      setWake(callback: () => void): void;
+    };
+    subscribeAsync(
+      query: WasmPreparedQuery,
+      opts?: unknown,
+      author?: Uint8Array,
+    ): {
+      poll(): ReadableStream<unknown> | undefined;
+      cancel(): void;
+      setWake(callback: () => void): void;
+    };
     all(
       query: WasmPreparedQuery,
       opts: unknown,
