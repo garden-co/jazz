@@ -265,11 +265,21 @@ impl Lens {
         direction: Direction,
     ) -> Option<(String, String)> {
         let transform = self.transform(direction);
-        let current_table = self.translate_table(table, direction)?;
+        let mut current_table = table.to_string();
         let mut current_column = column.to_string();
 
         for op in &transform.ops {
             match op {
+                LensOp::RenameTable { old_name, new_name } => {
+                    if current_table == *old_name {
+                        current_table = new_name.clone();
+                    }
+                }
+                LensOp::AddTable { table, .. } | LensOp::RemoveTable { table, .. } => {
+                    if current_table == *table {
+                        return None;
+                    }
+                }
                 LensOp::RenameColumn {
                     table: op_table,
                     old_name,
@@ -291,9 +301,6 @@ impl Lens {
                 LensOp::AddColumn { .. } => {
                     // New columns don't affect existing column references.
                 }
-                LensOp::RenameTable { .. }
-                | LensOp::AddTable { .. }
-                | LensOp::RemoveTable { .. } => {}
             }
         }
 
@@ -530,6 +537,128 @@ mod tests {
         assert_eq!(
             lens.translate_table_and_column("users", "name", Direction::Forward),
             Some(("users".to_string(), "name".to_string()))
+        );
+    }
+
+    // This stays at the lens seam because callers observe only the translated
+    // identifier, not the operation-by-operation identity transitions.
+    #[test]
+    fn lens_translate_table_and_column_applies_mixed_renames_in_operation_order() {
+        let source = make_hash(1);
+        let target = make_hash(2);
+
+        let column_then_table = Lens::new(
+            source,
+            target,
+            LensTransform::with_ops(vec![
+                LensOp::RenameColumn {
+                    table: "users".to_string(),
+                    old_name: "email".to_string(),
+                    new_name: "address".to_string(),
+                },
+                LensOp::RenameTable {
+                    old_name: "users".to_string(),
+                    new_name: "accounts".to_string(),
+                },
+                LensOp::AddColumn {
+                    table: "accounts".to_string(),
+                    column: "nickname".to_string(),
+                    column_type: ColumnType::Text,
+                    default: Value::Null,
+                },
+                LensOp::RemoveColumn {
+                    table: "accounts".to_string(),
+                    column: "retired".to_string(),
+                    column_type: ColumnType::Text,
+                    default: Value::Null,
+                },
+            ]),
+        );
+
+        assert_eq!(
+            column_then_table.translate_table_and_column("users", "email", Direction::Forward),
+            Some(("accounts".to_string(), "address".to_string()))
+        );
+        assert_eq!(
+            column_then_table.translate_table_and_column(
+                "accounts",
+                "address",
+                Direction::Backward
+            ),
+            Some(("users".to_string(), "email".to_string()))
+        );
+        assert_eq!(
+            column_then_table.translate_table_and_column("users", "nickname", Direction::Forward),
+            Some(("accounts".to_string(), "nickname".to_string()))
+        );
+        assert_eq!(
+            column_then_table.translate_table_and_column("users", "retired", Direction::Forward),
+            None
+        );
+        assert_eq!(
+            column_then_table.translate_table_and_column(
+                "accounts",
+                "retired",
+                Direction::Backward
+            ),
+            Some(("users".to_string(), "retired".to_string()))
+        );
+
+        let table_then_column = Lens::new(
+            source,
+            target,
+            LensTransform::with_ops(vec![
+                LensOp::RenameTable {
+                    old_name: "users".to_string(),
+                    new_name: "accounts".to_string(),
+                },
+                LensOp::RenameColumn {
+                    table: "accounts".to_string(),
+                    old_name: "email".to_string(),
+                    new_name: "address".to_string(),
+                },
+                LensOp::AddColumn {
+                    table: "accounts".to_string(),
+                    column: "nickname".to_string(),
+                    column_type: ColumnType::Text,
+                    default: Value::Null,
+                },
+                LensOp::RemoveColumn {
+                    table: "accounts".to_string(),
+                    column: "retired".to_string(),
+                    column_type: ColumnType::Text,
+                    default: Value::Null,
+                },
+            ]),
+        );
+
+        assert_eq!(
+            table_then_column.translate_table_and_column("users", "email", Direction::Forward),
+            Some(("accounts".to_string(), "address".to_string()))
+        );
+        assert_eq!(
+            table_then_column.translate_table_and_column(
+                "accounts",
+                "address",
+                Direction::Backward
+            ),
+            Some(("users".to_string(), "email".to_string()))
+        );
+        assert_eq!(
+            table_then_column.translate_table_and_column("users", "nickname", Direction::Forward),
+            Some(("accounts".to_string(), "nickname".to_string()))
+        );
+        assert_eq!(
+            table_then_column.translate_table_and_column("users", "retired", Direction::Forward),
+            None
+        );
+        assert_eq!(
+            table_then_column.translate_table_and_column(
+                "accounts",
+                "retired",
+                Direction::Backward
+            ),
+            Some(("users".to_string(), "retired".to_string()))
         );
     }
 
