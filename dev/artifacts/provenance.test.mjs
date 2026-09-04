@@ -395,7 +395,7 @@ test("NAPI provenance batches real-size CRLF inputs without masking staged or di
   withRepositoryGitProvenance(() => {
     const root = fixture();
     const source = join(root, "crates/jazz-napi/src/lib.rs");
-    writeFileSync(source, "// real-size provenance input\n".repeat(60_000));
+    writeFileSync(source, "// real-size provenance π input\n".repeat(60_000));
     git(root, ["init", "--quiet"]);
     git(root, ["config", "user.email", "tests@example.invalid"]);
     git(root, ["config", "user.name", "Jazz tests"]);

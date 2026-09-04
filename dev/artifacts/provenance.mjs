@@ -229,7 +229,8 @@ function trackedInputContents(root, paths) {
       const blob = objects.stdout.subarray(offset, offset + size);
       const working = readFileSync(join(root, path));
       const onlyExpectedLineEndings =
-        crlfSmudge && Buffer.from(working.toString("latin1").replaceAll("\r\n", "\n")).equals(blob);
+        crlfSmudge &&
+        Buffer.from(working.toString("latin1").replaceAll("\r\n", "\n"), "latin1").equals(blob);
       // A Git clean filter can hide bytes that the compiler will still read.
       // The index blob is authoritative only when the worktree matches it, or
       // when core.autocrlf accounts for the entire difference.
