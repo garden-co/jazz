@@ -371,27 +371,43 @@ pub enum ForegroundDbCommandRequest {
     /// Run one bounded ordinary core turn for this foreground and its relay.
     Tick,
     /// Compile and retain a canonical query in this foreground DB.
-    PrepareQuery { query: Vec<u8> },
+    PrepareQuery {
+        query: Vec<u8>,
+    },
     /// Materialize the current local-first result for a retained query.
-    All { query: u64 },
+    All {
+        query: u64,
+    },
     /// Open a local-first subscription for a retained query.
-    Subscribe { query: u64 },
+    Subscribe {
+        query: u64,
+    },
     /// Drain currently publishable events without waiting. Each delta is
     /// encoded through `jazz::binding_codec`, exactly like NAPI and WASM.
-    DrainSubscription { subscription: u64 },
+    DrainSubscription {
+        subscription: u64,
+    },
     /// Cancel one subscription and wait for the core finalization ack.
-    Unsubscribe { subscription: u64 },
+    Unsubscribe {
+        subscription: u64,
+    },
     /// Close this foreground alias. Repeated closes report `closed: false`.
     Close,
     /// Poll one foreground-owned operation which previously suspended on
     /// chunk or peer I/O. Polling never drives the owner thread to completion.
-    Poll { operation: u64 },
+    Poll {
+        operation: u64,
+    },
     /// Drop one suspended operation. Repeated or unknown cancels report
     /// `cancelled: false`.
-    Cancel { operation: u64 },
+    Cancel {
+        operation: u64,
+    },
     /// Open a foreground-owned core transaction. The host chooses the opaque
     /// handle and binds it permanently to this foreground identity.
-    BeginTransaction { kind: ForegroundTransactionKind },
+    BeginTransaction {
+        kind: ForegroundTransactionKind,
+    },
     /// Stage one full-cell insert under an open foreground transaction. This
     /// reuses the existing native encoded-cell record vocabulary.
     Insert {
@@ -422,14 +438,63 @@ pub enum ForegroundDbCommandRequest {
     },
     /// Commit one open foreground transaction. The response returns the
     /// public committed `txId`, not the mutable transaction handle.
-    CommitTransaction { transaction: u64 },
+    CommitTransaction {
+        transaction: u64,
+    },
     /// Roll back one open foreground transaction. Closing or revoking a
     /// foreground also abandons all its still-open transactions.
-    RollbackTransaction { transaction: u64 },
+    RollbackTransaction {
+        transaction: u64,
+    },
     /// Wait for a committed foreground transaction to reach authoritative
     /// Core admission. This remains a pending operation so the platform keeps
     /// driving its ordinary native relay ticks while the Edge/Core path runs.
-    WaitForCoreTransaction { tx_id: [u8; 16] },
+    WaitForCoreTransaction {
+        tx_id: [u8; 16],
+    },
+    /// Canonical native read options, with an optional foreground transaction.
+    AllWithOptions {
+        query: u64,
+        options_json: String,
+        transaction: Option<u64>,
+    },
+    /// Relation snapshot using the same native read options and transaction.
+    AllRelationSnapshotWithOptions {
+        query: u64,
+        options_json: String,
+        transaction: Option<u64>,
+    },
+    SubscribeWithOptions {
+        query: u64,
+        options_json: String,
+    },
+    WaitForTransaction {
+        tx_id: [u8; 16],
+        tier: String,
+    },
+    /// Options use the established native JSON option vocabulary; author identity
+    /// remains bound to the admitted foreground capability.
+    StageMutation {
+        transaction: u64,
+        mutation: ForegroundMutationKind,
+        table: String,
+        row_id: Option<[u8; 16]>,
+        cells: Vec<u8>,
+        options_json: String,
+    },
+    DisconnectNativeUpstream,
+    ReconnectNativeUpstream,
+    NativeConnectionStatus,
+}
+
+/// Frozen postcard mutation ordinals within the V1 StageMutation envelope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ForegroundMutationKind {
+    Insert,
+    Update,
+    Upsert,
+    Delete,
+    Restore,
 }
 
 /// The two existing Jazz transaction semantics. This native byte vocabulary
@@ -495,6 +560,11 @@ pub enum ForegroundDbCommandResponse {
     },
     TransactionSettled {
         tx_id: [u8; 16],
+    },
+    NativeConnectionStatus {
+        configured: bool,
+        explicitly_offline: bool,
+        connected: bool,
     },
 }
 
@@ -2521,6 +2591,20 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                     Ok(response) => response,
                     Err(status) => return status,
                 },
+            }
+        }
+        // Each extension fails closed until its handler is installed. Keep this
+        // list explicit so future vocabulary additions require dispatch review.
+        ForegroundDbCommandRequest::AllWithOptions { .. }
+        | ForegroundDbCommandRequest::AllRelationSnapshotWithOptions { .. }
+        | ForegroundDbCommandRequest::SubscribeWithOptions { .. }
+        | ForegroundDbCommandRequest::WaitForTransaction { .. }
+        | ForegroundDbCommandRequest::StageMutation { .. }
+        | ForegroundDbCommandRequest::DisconnectNativeUpstream
+        | ForegroundDbCommandRequest::ReconnectNativeUpstream
+        | ForegroundDbCommandRequest::NativeConnectionStatus => {
+            ForegroundDbCommandResponse::OperationError {
+                reason: "foreground command handler is unavailable".to_owned(),
             }
         }
     };
@@ -8409,6 +8493,92 @@ mod tests {
             .unwrap(),
             [vec![16], vec![6; 16]].concat()
         );
+    }
+
+    // Internal byte assertions are necessary: public row results cannot reveal
+    // a changed enum ordinal or option encoding that breaks installed hosts.
+    #[test]
+    fn foreground_extension_v1_byte_contract() {
+        let cases = [
+            (
+                ForegroundDbCommandRequest::AllWithOptions {
+                    query: 128,
+                    options_json: "{}".into(),
+                    transaction: None,
+                },
+                vec![18, 128, 1, 2, 123, 125, 0],
+            ),
+            (
+                ForegroundDbCommandRequest::AllRelationSnapshotWithOptions {
+                    query: 1,
+                    options_json: "{}".into(),
+                    transaction: Some(256),
+                },
+                vec![19, 1, 2, 123, 125, 1, 128, 2],
+            ),
+            (
+                ForegroundDbCommandRequest::SubscribeWithOptions {
+                    query: 1,
+                    options_json: "{}".into(),
+                },
+                vec![20, 1, 2, 123, 125],
+            ),
+            (
+                ForegroundDbCommandRequest::WaitForTransaction {
+                    tx_id: [7; 16],
+                    tier: "core".into(),
+                },
+                [vec![21], vec![7; 16], vec![4, 99, 111, 114, 101]].concat(),
+            ),
+            (
+                ForegroundDbCommandRequest::StageMutation {
+                    transaction: 1,
+                    mutation: ForegroundMutationKind::Restore,
+                    table: "t".into(),
+                    row_id: None,
+                    cells: vec![],
+                    options_json: "{}".into(),
+                },
+                vec![22, 1, 4, 1, 116, 0, 0, 2, 123, 125],
+            ),
+            (
+                ForegroundDbCommandRequest::DisconnectNativeUpstream,
+                vec![23],
+            ),
+            (
+                ForegroundDbCommandRequest::ReconnectNativeUpstream,
+                vec![24],
+            ),
+            (ForegroundDbCommandRequest::NativeConnectionStatus, vec![25]),
+        ];
+        for (command, bytes) in cases {
+            assert_eq!(postcard::to_allocvec(&command).unwrap(), bytes);
+            assert_eq!(
+                postcard::from_bytes::<ForegroundDbCommandRequest>(&bytes).unwrap(),
+                command
+            );
+        }
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandResponse::NativeConnectionStatus {
+                configured: true,
+                explicitly_offline: false,
+                connected: true
+            })
+            .unwrap(),
+            vec![17, 1, 0, 1]
+        );
+        for (ordinal, kind) in [
+            ForegroundMutationKind::Insert,
+            ForegroundMutationKind::Update,
+            ForegroundMutationKind::Upsert,
+            ForegroundMutationKind::Delete,
+            ForegroundMutationKind::Restore,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(postcard::to_allocvec(&kind).unwrap(), vec![ordinal as u8]);
+        }
     }
 
     #[test]

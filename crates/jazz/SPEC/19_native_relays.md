@@ -355,6 +355,33 @@ before opening a foreground. Unknown or malformed command/response bytes fail
 closed, with no partially returned buffer. Command outputs are copied into
 JS-owned memory before Rust frees its response allocation.
 
+**V1 foreground extension registry.** Existing request ordinals 0–17 and
+response ordinals 0–16 remain byte-for-byte unchanged. The additional request
+ordinals, in declaration/field order, are:
+
+| Ordinal | Request                        | Ordered fields                                                                                                   |
+| ------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| 18      | AllWithOptions                 | query u64, options_json string, transaction option u64                                                           |
+| 19      | AllRelationSnapshotWithOptions | query u64, options_json string, transaction option u64                                                           |
+| 20      | SubscribeWithOptions           | query u64, options_json string                                                                                   |
+| 21      | WaitForTransaction             | tx_id 16 raw bytes, tier string                                                                                  |
+| 22      | StageMutation                  | transaction u64, mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string |
+| 23      | DisconnectNativeUpstream       | none                                                                                                             |
+| 24      | ReconnectNativeUpstream        | none                                                                                                             |
+| 25      | NativeConnectionStatus         | none                                                                                                             |
+
+The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
+Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:
+configured, explicitly_offline, connected. All fields use postcard 1's existing
+canonical V1 envelope: unsigned varints, UTF-8 strings/byte vectors prefixed by
+varint byte length, options with a 0/1 presence byte, and raw fixed arrays.
+Options strings reuse the established native binding JSON option vocabulary;
+validation belongs to the shared native option parser, never the host bridge.
+A supported discriminant does not grant capabilities or change admission identity.
+The byte-level Rust contract is pinned by
+`foreground_extension_v1_byte_contract`; additive handler availability must be
+verified by the corresponding real C ABI acceptance tests.
+
 **V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
 local-first query lifecycle `PrepareQuery`, `All`, `Subscribe`,
