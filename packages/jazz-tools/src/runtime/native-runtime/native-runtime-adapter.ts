@@ -2365,6 +2365,13 @@ export class NativeRuntimeAdapter implements Runtime {
     return features;
   }
 
+  nativeUpstreamConfigured(): boolean {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.nativeUpstreamConfigured();
+    // Configured authority remains configured during explicit disconnect;
+    // exclusive confirmation must wait for it rather than settle locally.
+    return this.db.nativeConnectionStatus?.().configured === true;
+  }
+
   async disconnect(
     options: { rejectWaiters?: boolean; preservePreHelloRetry?: boolean } = {},
   ): Promise<void> {

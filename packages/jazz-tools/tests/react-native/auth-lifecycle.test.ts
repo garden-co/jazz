@@ -75,6 +75,7 @@ it("revokes the old foreground before opening an isolated newly admitted identit
       ...first.config,
       nativeRelay: { capability: newCapability },
     });
+    await expect(old.all(app.notes, { tier: "local" })).rejects.toThrow();
     expect(current.getAuthState().session?.user).toBe(
       JSON.stringify(["https://auth.example", "second"]),
     );
