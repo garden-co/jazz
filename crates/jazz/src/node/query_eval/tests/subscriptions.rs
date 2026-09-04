@@ -65,7 +65,7 @@ fn exclusive_snapshot_applies_same_cut_to_policy_relation_sources() {
     commit_global_issue(&mut node, 0, "open", reader, 1);
     node.record_authoritative_settled_through(GlobalTime(1));
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive_for_test(tx_id, reader).unwrap();
+    node.open_exclusive_for_identity(tx_id, reader).unwrap();
 
     commit_global_cells(
         &mut node,
