@@ -1269,7 +1269,10 @@ test("on-demand WebKit IndexedDB receipt scopes build caches to its repository",
   assert.match(webkitIndexedDbReceipt, /uses: \.\/\.github\/actions\/setup-build/);
   assert.equal(
     parse(
-      webkitIndexedDbReceipt.replace("  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}\n", ""),
+      webkitIndexedDbReceipt.replace(
+        "  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}\n",
+        "",
+      ),
     ).env?.CACHE_SCOPE_REPOSITORY_ID,
     undefined,
   );
