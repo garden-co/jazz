@@ -90,11 +90,6 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
-  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
-  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string | PendingNativeRead
-  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | undefined | null | PendingNativeRead
-  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write | PendingNativeWrite
-  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write | PendingNativeWrite
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
@@ -132,14 +127,6 @@ export declare class PendingNativeSubscriptionBatch {
    * to retry a retained chunk-hydration batch.
    */
   retryAfterMs(): number | null
-}
-
-/**
- * Thread-affine large-value mutation setup which is waiting for local or
- * routed chunks. The completed value is the ordinary write receipt.
- */
-export declare class PendingNativeWrite {
-  poll(): Write | null
 }
 
 export declare class PreparedQuery {

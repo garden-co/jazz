@@ -143,7 +143,6 @@ type NativeWriteOptions = {
 type PendingNativeRead = { poll(): Uint8Array | null };
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
-type PendingNativeWrite = { poll(): Write | null };
 type PendingNativePermissionAdvice = {
   poll(): string | null;
   cancel(): void;
@@ -151,10 +150,6 @@ type PendingNativePermissionAdvice = {
 
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
-}
-
-function isPendingNativeWrite(value: unknown): value is PendingNativeWrite {
-  return typeof (value as PendingNativeWrite | null)?.poll === "function";
 }
 
 function requireNativeWrite(value: Write | Uint8Array | null | undefined): Write {
@@ -280,40 +275,6 @@ type NativeDb = {
     maxAgeMs?: number | null,
   ): void;
   evictExpiredStagedLargeValues?(): number | Promise<number>;
-  readValueRange?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    start: number,
-    end: number,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  readTextUtf16Range?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    start: number,
-    end: number,
-  ): string | PendingNativeRead | Promise<string | PendingNativeRead>;
-  readJsonPointer?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    pointer: string,
-  ): unknown | PendingNativeRead | Promise<unknown | PendingNativeRead>;
-  appendValue?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    bytes: Uint8Array,
-  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
-  spliceValue?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    offset: number,
-    deleteLength: number,
-    insert: Uint8Array,
-  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
   updateLargeValues?(
     table: string,
     rowId: Uint8Array,
@@ -974,106 +935,6 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime does not expose large-value staging maintenance");
     }
     return await this.db.evictExpiredStagedLargeValues();
-  }
-
-  async readValueRange(
-    table: string,
-    objectId: string,
-    column: string,
-    start: number,
-    end: number,
-  ): Promise<Uint8Array> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.readValueRange(table, objectId, column, start, end);
-    }
-    if (!this.db.readValueRange) throw new Error("Native runtime does not expose value ranges");
-    return this.awaitNativeRead(
-      this.db.readValueRange(table, parseUuid(objectId), column, start, end),
-    );
-  }
-
-  async readTextUtf16Range(
-    table: string,
-    objectId: string,
-    column: string,
-    start: number,
-    end: number,
-  ): Promise<string> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.readTextUtf16Range(table, objectId, column, start, end);
-    }
-    if (!this.db.readTextUtf16Range) {
-      throw new Error("Native runtime does not expose UTF-16 value ranges");
-    }
-    const result = await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
-    return isPendingNativeRead(result)
-      ? new TextDecoder().decode(await this.awaitNativeRead(result))
-      : result;
-  }
-
-  async readJsonPointer(
-    table: string,
-    objectId: string,
-    column: string,
-    pointer: string,
-  ): Promise<unknown> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.readJsonPointer(table, objectId, column, pointer);
-    }
-    if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
-    let value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
-    if (isPendingNativeRead(value)) {
-      value = new TextDecoder().decode(await this.awaitNativeRead(value));
-    }
-    return typeof value === "string" ? JSON.parse(value) : value;
-  }
-
-  async appendValue(
-    table: string,
-    objectId: string,
-    column: string,
-    bytes: Uint8Array,
-  ): Promise<MutationResult> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.appendValue(table, objectId, column, bytes);
-    }
-    if (!this.db.appendValue) throw new Error("Native runtime does not expose value append");
-    const write = await this.db.appendValue(table, parseUuid(objectId), column, bytes);
-    return this.finishMutation(
-      isPendingNativeWrite(write) ? await this.awaitNativeWrite(write) : write,
-    );
-  }
-
-  async spliceValue(
-    table: string,
-    objectId: string,
-    column: string,
-    offset: number,
-    deleteLength: number,
-    insert: Uint8Array,
-  ): Promise<MutationResult> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.spliceValue(
-        table,
-        objectId,
-        column,
-        offset,
-        deleteLength,
-        insert,
-      );
-    }
-    if (!this.db.spliceValue) throw new Error("Native runtime does not expose value splice");
-    const write = await this.db.spliceValue(
-      table,
-      parseUuid(objectId),
-      column,
-      offset,
-      deleteLength,
-      insert,
-    );
-    return this.finishMutation(
-      isPendingNativeWrite(write) ? await this.awaitNativeWrite(write) : write,
-    );
   }
 
   acceptPeer(claims: Record<string, unknown> = {}): Transport {
@@ -2477,16 +2338,6 @@ export class NativeRuntimeAdapter implements Runtime {
       if (this.closed) throw new Error("large-value hydration was cancelled by runtime shutdown");
       const bytes = result.poll();
       if (bytes !== null) return bytes;
-      await this.pumpServerTransport();
-      await sleep(0);
-    }
-  }
-
-  private async awaitNativeWrite(pending: PendingNativeWrite): Promise<Write> {
-    for (;;) {
-      if (this.closed) throw new Error("large-value mutation was cancelled by runtime shutdown");
-      const write = pending.poll();
-      if (write !== null) return write;
       await this.pumpServerTransport();
       await sleep(0);
     }

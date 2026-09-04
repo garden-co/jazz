@@ -176,40 +176,6 @@ export interface Runtime {
     write_context_json?: string | null,
   ): MutationResult;
   delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
-  readValueRange?(
-    table: string,
-    objectId: string,
-    column: string,
-    start: number,
-    end: number,
-  ): Promise<Uint8Array>;
-  readTextUtf16Range?(
-    table: string,
-    objectId: string,
-    column: string,
-    start: number,
-    end: number,
-  ): Promise<string>;
-  readJsonPointer?(
-    table: string,
-    objectId: string,
-    column: string,
-    pointer: string,
-  ): Promise<unknown>;
-  appendValue?(
-    table: string,
-    objectId: string,
-    column: string,
-    bytes: Uint8Array,
-  ): Promise<MutationResult>;
-  spliceValue?(
-    table: string,
-    objectId: string,
-    column: string,
-    offset: number,
-    deleteLength: number,
-    insert: Uint8Array,
-  ): Promise<MutationResult>;
   canInsertLocally?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
   canReadLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
   canUpdateLocally?(
