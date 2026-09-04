@@ -372,6 +372,27 @@ ordinals, in declaration/field order, are:
 | 24      | ReconnectNativeUpstream        | none                                                                                                             |
 | 25      | NativeConnectionStatus         | none                                                                                                             |
 
+The following ordinals are reserved for the coordinated V1 continuation.
+Reservation alone does not imply that a native artifact implements a handler;
+unsupported operations must fail closed until their acceptance gates pass.
+
+| Request ordinal | Reserved request                                         | Response ordinal / payload                              |
+| --------------- | -------------------------------------------------------- | ------------------------------------------------------- |
+| 26              | NativeSessionMetadata (no fields)                        | 18 NativeSessionMetadata: issuer string, user_id string |
+| 27              | WriteState: tx_id 16 raw bytes                           | 19 WriteState: state_json string                        |
+| 28              | DrainMutationErrors (no fields)                          | 20 MutationErrors: events_json string                   |
+| 29              | BeginStreamingMutation                                   | 21 StreamingMutationOpened: upload u64                  |
+| 30              | PushStreamingMutation: upload u64, chunk byte vector     | 22 StreamingMutationPushed (no fields)                  |
+| 31              | FinishStreamingMutation: upload u64                      | existing 14 TransactionCommitted                        |
+| 32              | AbortStreamingMutation: upload u64                       | 23 StreamingMutationAborted: aborted bool               |
+| 33              | AllRelationQuery: query_json string, options_json string | existing 3 Rows                                         |
+
+The BeginStreamingMutation field contract must be settled and byte-pinned
+before its handler is enabled. Subscription event ordinal 3 is reserved for
+StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
+terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
+terminal operations use `binding_codec::terminal_operations_to_json`.
+
 The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
 Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:
 configured, explicitly_offline, connected. All fields use postcard 1's existing
