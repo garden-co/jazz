@@ -107,6 +107,7 @@ pub struct RoutedMultisinkTerminal {
     pub route_fields: Vec<String>,
     /// Binding descriptor positions paired with `route_fields`.
     pub route_value_indices: Vec<usize>,
+    /// Exact physical carrier names in the terminal output descriptor.
     pub public_fields: Vec<String>,
 }
 
@@ -1422,7 +1423,8 @@ fn validate_public_output_for_shape(
 fn bound_routed_multisink_graph(
     terminal: &RoutedMultisinkTerminal,
     binding_values: &[Value],
-) -> GraphBuilder {
+    output: &RecordDescriptor,
+) -> Result<GraphBuilder, IvmRuntimeError> {
     let predicates = terminal
         .route_fields
         .iter()
@@ -1453,15 +1455,32 @@ fn bound_routed_multisink_graph(
         let input = predicate
             .map(|predicate| input.as_ref().clone().filter(predicate))
             .unwrap_or_else(|| input.as_ref().clone());
-        return GraphBuilder::CollectBy {
+        return Ok(GraphBuilder::CollectBy {
             input: Arc::new(input),
             collect: Box::new(collect),
-        };
+        });
     }
     let graph = predicate
         .map(|predicate| terminal.graph.clone().filter(predicate))
         .unwrap_or_else(|| terminal.graph.clone());
-    graph.project(terminal.public_fields.clone())
+    let fields = terminal
+        .public_fields
+        .iter()
+        .map(|name| {
+            let source = FieldRef::stored_name(name.clone());
+            let index = resolve_field_ref(output, &source)?;
+            let field = &output.fields()[index];
+            Ok(ProjectField {
+                expression: ProjectExpr::Field(source),
+                output_name: name.clone(),
+                output_identity: field
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| records::FieldIdentity::Name(name.clone())),
+            })
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    Ok(graph.project_fields(fields))
 }
 
 /// A routed terminal is compiled once but a bound subscription executes one
@@ -3229,10 +3248,13 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
             }
             let output = self.infer_builder_output(&terminal.graph)?;
-            for field in terminal.route_fields.iter().chain(&terminal.public_fields) {
+            for field in &terminal.route_fields {
                 if output.field_index(field).is_none() {
                     return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
                 }
+            }
+            for field in &terminal.public_fields {
+                resolve_field_ref(&output, &FieldRef::stored_name(field.clone()))?;
             }
         }
         self.logical_nodes_requested += terminals
@@ -3361,12 +3383,16 @@ impl IvmRuntime {
                 .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
                 .sum::<usize>() as u64;
             let mut outputs = BTreeMap::new();
-            for (sink, terminal) in &shape.terminals {
-                let mut terminal = terminal.terminal.clone();
+            for (sink, prepared_terminal) in &shape.terminals {
+                let mut terminal = prepared_terminal.terminal.clone();
                 if let Some(fields) = public_fields.get(sink) {
                     terminal.public_fields = fields.clone();
                 }
-                let graph = bound_routed_multisink_graph(&terminal, binding_values);
+                let graph = bound_routed_multisink_graph(
+                    &terminal,
+                    binding_values,
+                    &prepared_terminal.output.output,
+                )?;
                 let output = runtime.add_dedup_graph(&graph)?;
                 outputs.insert(sink.clone(), output);
             }

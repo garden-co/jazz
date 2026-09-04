@@ -2843,10 +2843,11 @@ fn lower_join_key_ref(
         if source
             .row_shape
             .descriptor
-            .field_index(&declared_id)
-            .is_some()
+            .fields()
+            .iter()
+            .any(|candidate| candidate.name.as_deref() == Some(declared_id.as_str()))
         {
-            return require_source_field(source, &declared_id);
+            return Ok(declared_id);
         }
         return require_source_field(source, &source.row_shape.row_uuid_field);
     }

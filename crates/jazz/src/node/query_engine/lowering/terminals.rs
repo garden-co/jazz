@@ -2991,19 +2991,13 @@ fn aggregate_app_row_descriptor(
     let mut fields = Vec::new();
     for value in group_by {
         let field = aggregate_source_field_name(value, source)?;
-        let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
-            Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Runtime(format!(
-                    "aggregate group field {field:?} is missing from resolved descriptor"
-                ))],
-                explain: ExplainPlan::default(),
-            })
-        })?;
+        // `aggregate_source_field_name` has already selected a physical carrier.
         let descriptor_field = source
             .row_shape
             .descriptor
-            .field_index(&field)
-            .and_then(|index| source.row_shape.descriptor.fields().get(index))
+            .fields()
+            .iter()
+            .find(|candidate| candidate.name.as_deref() == Some(field.as_str()))
             .cloned()
             .ok_or_else(|| {
                 Box::new(CapabilityReport {
@@ -3015,7 +3009,7 @@ fn aggregate_app_row_descriptor(
             })?;
         fields.push(DescriptorField {
             name: Some(field),
-            value_type,
+            value_type: descriptor_field.value_type,
             identity: descriptor_field.identity,
         });
     }

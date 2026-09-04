@@ -153,8 +153,9 @@ fn reachable_root_reference_field(source: &ResolvedSource, field: &str) -> Strin
     if source
         .row_shape
         .descriptor
-        .field_index(&user_field)
-        .is_some()
+        .fields()
+        .iter()
+        .any(|candidate| candidate.name.as_deref() == Some(user_field.as_str()))
         || field != "id"
     {
         user_field
