@@ -102,7 +102,16 @@ case "$platform" in
     )
     for android_abi in "${!rust_targets[@]}"; do
       rust_target=${rust_targets[$android_abi]}
-      cargo ndk -t "$android_abi" build --manifest-path "$relay_manifest" --release
+      if [[ "$rust_target" == armv7-linux-androideabi ]]; then
+        # rust-librocksdb-sys enables this GCC/Clang extension for every
+        # non-MSVC target, but Android's 32-bit ARM clang does not implement
+        # __uint128_t. cc-rs appends target-specific CXXFLAGS after its build
+        # script's defines, so this narrowly overrides only the armv7 build.
+        CXXFLAGS_armv7_linux_androideabi="${CXXFLAGS_armv7_linux_androideabi:-} -UHAVE_UINT128_EXTENSION" \
+          cargo ndk -t "$android_abi" build --manifest-path "$relay_manifest" --release
+      else
+        cargo ndk -t "$android_abi" build --manifest-path "$relay_manifest" --release
+      fi
       mkdir -p "$stage/$android_abi"
       cp "$root/target/$rust_target/release/libjazz_native_relay.a" "$stage/$android_abi/"
     done

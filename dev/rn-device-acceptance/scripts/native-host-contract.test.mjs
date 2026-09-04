@@ -127,6 +127,11 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   assert.match(builder, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(builder, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(builder, /\[x86_64\]=x86_64-linux-android/);
+  assert.match(
+    builder,
+    /CXXFLAGS_armv7_linux_androideabi=.*-UHAVE_UINT128_EXTENSION/,
+    "the 32-bit ARM build must override RocksDB's unsupported uint128 define",
+  );
 });
 
 function assertAtomicAndroidDiagnostic(fixture) {
