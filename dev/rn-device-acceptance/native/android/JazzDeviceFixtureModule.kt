@@ -5,8 +5,7 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
-import com.jazzrn.JazzRelayTrustedAdmission
-import com.jazzrn.TrustedRelayScopeConfig
+import com.jazzrn.JazzRelayBridge
 import android.util.Base64
 import android.os.Build
 import android.system.Os
@@ -20,8 +19,9 @@ import java.security.MessageDigest
 /**
  * Test-app-only trusted fixture. It is compiled into the development build,
  * not sourced from Metro, an intent, or an OTA update. JavaScript receives
- * only the random capability; identity, claims, SQLite path, and schema stay
- * native. JAZZ_DEVICE_* values are build-time CI test fixtures only.
+ * only the random capability; endpoint and short-lived bearers arrive from
+ * the local Edge/Core harness as launch-only native inputs. No bearer,
+ * signing material, or trusted generic-admission configuration is checked in.
  */
 class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
   private var capability: ByteArray? = null
@@ -81,42 +81,60 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
   )
   override fun getName() = "JazzDeviceFixture"
 
-  private fun scopeConfig(authScope: String): TrustedRelayScopeConfig {
-    val userB = authScope == "fixture-user-b"
-    val node = if (userB) "22222222-2222-4222-8222-222222222222" else "11111111-1111-4111-8111-111111111111"
-    return TrustedRelayScopeConfig(
-      appNamespace = BuildConfig.JAZZ_DEVICE_APP_NAMESPACE,
-      storageNamespace = BuildConfig.JAZZ_DEVICE_STORAGE_NAMESPACE,
-      authScope = authScope,
-      // Scope-specific files make a switch physically as well as logically
-      // distinct. JavaScript cannot select either path.
-      sqlitePath = reactApplicationContext.filesDir.resolve("jazz-device-$authScope.sqlite").absolutePath,
-      schemaJson = BuildConfig.JAZZ_DEVICE_SCHEMA_JSON,
-      identityJson = "{\"node\":\"$node\",\"author\":\"[\\\"https://jazz.device.test\\\",\\\"$authScope\\\"]\"}",
-      claimsJson = BuildConfig.JAZZ_DEVICE_VERIFIED_CLAIMS_JSON,
+  private data class PrivateSessionInputs(val endpoint: String, val bearer: String)
+
+  /** The harness is the only source of endpoint/bearer material. JavaScript
+   * never sees either value; it receives only the capability returned after
+   * the Rust private-session and credential-free schema handoff. */
+  private fun privateSessionInputs(scope: String): PrivateSessionInputs {
+    val activity = reactApplicationContext.currentActivity
+      ?: error("acceptance activity is unavailable")
+    val endpoint = activity.intent.getStringExtra("jazzDeviceEdgeEndpoint")
+      ?: error("acceptance launch did not include a local Edge endpoint")
+    val bearerKey = if (scope == "b") "jazzDeviceBearerB" else "jazzDeviceBearerA"
+    val bearer = activity.intent.getStringExtra(bearerKey)
+      ?: error("acceptance launch did not include an ephemeral bearer")
+    require(endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
+      "invalid local Edge endpoint"
+    }
+    require(bearer.length in 16..16_384 && bearer.count { it == '.' } == 2) {
+      "invalid ephemeral bearer"
+    }
+    return PrivateSessionInputs(endpoint, bearer)
+  }
+
+  private fun admitPrivateSession(scope: String): ByteArray {
+    val inputs = privateSessionInputs(scope)
+    val setup = JazzRelayBridge.beginPrivateSession(
+      reactApplicationContext,
+      inputs.endpoint,
+      BuildConfig.JAZZ_DEVICE_APP_ID,
+      inputs.bearer,
     )
+    return JazzRelayBridge.attachCanonicalSchema(setup, BuildConfig.JAZZ_DEVICE_SCHEMA_JSON)
   }
 
   @ReactMethod fun admittedCapability(promise: Promise) {
     try {
-      capability ?: JazzRelayTrustedAdmission.admit(scopeConfig(BuildConfig.JAZZ_DEVICE_AUTH_SCOPE))
+      capability ?: admitPrivateSession("a")
         .also { capability = it }
       promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
   }
 
   @ReactMethod fun logout(promise: Promise) {
-    capability?.let(JazzRelayTrustedAdmission::revoke)
+    capability?.let(JazzRelayBridge::revokeTrustedScope)
     capability = null
     promise.resolve(null)
   }
 
-  /** Scope B is selected solely by trusted fixture code. Replacing it revokes
-   * A before B can be admitted, so stale JS capability bytes cannot cross it. */
+  /** The native fixture revokes A before it accepts harness bearer B, so stale
+   * JS capability bytes cannot cross the authenticated scope boundary. */
   @ReactMethod fun switchAuthScope(promise: Promise) {
     try {
-      JazzRelayTrustedAdmission.replace(capability, scopeConfig("fixture-user-b"))
-        .also { capability = it }
+      capability?.let(JazzRelayBridge::revokeTrustedScope)
+      capability = null
+      admitPrivateSession("b").also { capability = it }
       promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
   }

@@ -331,13 +331,7 @@ test("Android fixture BuildConfig fields and package registration remain compile
     "android/app/src/main/java/dev/jazz/rndeviceacceptance/JazzDeviceFixturePackage.kt",
   );
   const host = read("android/app/src/main/java/dev/jazz/rndeviceacceptance/MainApplication.kt");
-  for (const field of [
-    "APP_NAMESPACE",
-    "STORAGE_NAMESPACE",
-    "AUTH_SCOPE",
-    "SCHEMA_JSON",
-    "VERIFIED_CLAIMS_JSON",
-  ]) {
+  for (const field of ["APP_ID", "SCHEMA_JSON"]) {
     assert.match(gradle, new RegExp(`buildConfigField "String", "JAZZ_DEVICE_${field}"`));
     assert.match(fixture, new RegExp(`BuildConfig\\.JAZZ_DEVICE_${field}`));
   }
@@ -346,10 +340,13 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(registration, /listOf\(JazzDeviceFixtureModule\(context\)\)/);
   assert.match(host, /add\(JazzDeviceFixturePackage\(\)\)/);
   assert.match(fixture, /Build\.FINGERPRINT/);
-  assert.match(fixture, /scopeConfig\(authScope: String\)/);
-  assert.match(fixture, /fixture-user-b/);
-  assert.match(fixture, /JazzRelayTrustedAdmission\.replace/);
-  assert.match(fixture, /jazz-device-\$authScope\.sqlite/);
+  assert.match(fixture, /privateSessionInputs\(scope: String\)/);
+  assert.match(fixture, /jazzDeviceEdgeEndpoint/);
+  assert.match(fixture, /jazzDeviceBearerA/);
+  assert.match(fixture, /jazzDeviceBearerB/);
+  assert.match(fixture, /JazzRelayBridge\.beginPrivateSession/);
+  assert.match(fixture, /JazzRelayBridge\.attachCanonicalSchema/);
+  assert.doesNotMatch(fixture, /JazzRelayTrustedAdmission|TrustedRelayScopeConfig|admitTrustedScope/);
   assert.match(fixture, /jazzDeviceRunNonce/);
   assert.match(fixture, /applicationInfo\.sourceDir/);
   assert.match(fixture, /MessageDigest\.getInstance\("SHA-256"\)/);
@@ -431,6 +428,18 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
 
 test("Android acceptance reads only bounded receipt and allowlisted diagnostic tags", () => {
   const driver = read("scripts/run-android.mjs");
+  const fixture = read("native/android/JazzDeviceFixtureModule.kt");
+  assert.match(driver, /rn_edge_session_harness/);
+  assert.match(driver, /http:\/\/10\.0\.2\.2:\$\{session\.edge_port\}/);
+  for (const input of [
+    "jazzDeviceEdgeEndpoint",
+    "jazzDeviceBearerA",
+    "jazzDeviceBearerB",
+  ]) {
+    assert.match(driver, new RegExp(`"${input}"`));
+    assert.match(fixture, new RegExp(`"${input}"`));
+  }
+  assert.doesNotMatch(driver, /console\.log\([^)]*bearer/i);
   assert.match(
     driver,
     /"logcat",[\s\S]*"-d",[\s\S]*"-v",[\s\S]*"threadtime",[\s\S]*"ReactNativeJS:I",[\s\S]*"JazzDeviceAcceptance:E",[\s\S]*"\*:S"/,

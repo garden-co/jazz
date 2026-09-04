@@ -20,17 +20,14 @@ function copyTemplate(config, platform, source, destination, afterCopy) {
 function injectAndroidBuildConfig(root) {
   const buildGradle = path.join(root, "app/build.gradle");
   const source = fs.readFileSync(buildGradle, "utf8");
-  if (source.includes("JAZZ_DEVICE_APP_NAMESPACE")) return;
+  if (source.includes("JAZZ_DEVICE_APP_ID")) return;
   const marker =
     'buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\\"${findProperty(\'reactNativeReleaseLevel\') ?: \'stable\'}\\""';
   const fields = [
-    "        // Public non-secret compile fixtures; a device job supplies only test material.",
-    '        buildConfigField "String", "JAZZ_DEVICE_APP_NAMESPACE", "\\"jazz-device-acceptance\\""',
-    '        buildConfigField "String", "JAZZ_DEVICE_STORAGE_NAMESPACE", "\\"acceptance-fixture\\""',
-    '        buildConfigField "String", "JAZZ_DEVICE_AUTH_SCOPE", "\\"fixture-user-a\\""',
+    "        // Schema/app metadata is public; endpoint and ephemeral bearers are",
+    "        // launch-only inputs from the local Rust Edge/Core harness.",
+    '        buildConfigField "String", "JAZZ_DEVICE_APP_ID", "\\"jazz-device-acceptance\\""',
     '        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", "\\"{\\\\\"tables\\\\\":{\\\\\"todos\\\\\":{\\\\\"columns\\\\\":[{\\\\\"name\\\\\":\\\\\"title\\\\\",\\\\\"column_type\\\\\":{\\\\\"type\\\\\":\\\\\"Text\\\\\"},\\\\\"nullable\\\\\":false}]}}}\\""',
-    '        buildConfigField "String", "JAZZ_DEVICE_VERIFIED_IDENTITY_JSON", "\\"{\\\\\"node\\\\\":\\\\\"11111111-1111-4111-8111-111111111111\\\\\",\\\\\"author\\\\\":\\\\\"[\\\\\\\\\\\\\"https://jazz.device.test\\\\\\\\\\\\\",\\\\\\\\\\\\\"fixture-user-a\\\\\\\\\\\\\"]\\\\\"}\\""',
-    '        buildConfigField "String", "JAZZ_DEVICE_VERIFIED_CLAIMS_JSON", "\\"{}\\""',
   ].join("\n");
   if (!source.includes(marker))
     throw new Error("Expo app build.gradle no longer has the BuildConfig insertion marker");
