@@ -39,10 +39,10 @@ pub use crate::node::CommitUnitTrust;
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
-    LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
-    PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
+    CommitUnitIngestContext, CurrentRow, CurrentRowBindingField, EdgeCacheBudget,
+    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
+    NodeState, PreparedQueryPlanHandle, PublicationOutcome, PublishedTransaction, QueryReadProfile,
+    RelationEdge, RelationSnapshot, RowProvenance, TransactionBranchRowState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -4114,7 +4114,7 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
                 format!("invalid scalar projection from Groove terminal: {error}"),
             )
         })?;
-        let row = CurrentRow::new(table, OwnedRecord::new(raw, scalar_descriptor));
+        let row = CurrentRow::new_logical(table, OwnedRecord::new(raw, scalar_descriptor));
         let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
         Ok(ResultNode {
             occurrence,
@@ -5475,7 +5475,11 @@ fn materialize_subscription_terminal_record(
                 "retained terminal root position is outside snapshot",
             )
         })?;
-        *root = CurrentRow::new(root.table().to_owned(), record.record()?);
+        *root = CurrentRow::new_with_explicit_binding_fields(
+            root.table().to_owned(),
+            record.record()?,
+            root.binding_fields().to_vec(),
+        );
     }
     Ok(())
 }
@@ -5575,13 +5579,35 @@ fn terminal_subscription_output_row(
 
     Ok(SubscriptionOutputRow {
         occurrence_id,
-        row: CurrentRow::new(
+        row: CurrentRow::new_with_explicit_binding_fields(
             table.to_owned(),
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
+            terminal_root_binding_fields(layout),
         ),
         previous_index,
         index,
     })
+}
+
+/// Derive the explicit producer provenance for every terminal descriptor slot.
+///
+/// Both terminal-delta decoding and local maintained-view reset snapshots use
+/// this exact mapping; treating a hybrid collector record as wholly logical
+/// loses the distinction between a physical `user_{column}` and a logical
+/// field with that same name.
+pub(crate) fn terminal_root_binding_fields(
+    layout: &TerminalRootLayout,
+) -> Vec<CurrentRowBindingField> {
+    let binding_for_carrier = |carrier| match carrier {
+        TerminalRootCarrier::CurrentRow => CurrentRowBindingField::PhysicalColumn,
+        TerminalRootCarrier::Logical => CurrentRowBindingField::LogicalField,
+    };
+    let mut fields =
+        vec![binding_for_carrier(layout.carrier); layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        fields[field.slot] = binding_for_carrier(field.carrier);
+    }
+    fields
 }
 
 /// Decode the Groove ordered key used to address one root output occurrence.

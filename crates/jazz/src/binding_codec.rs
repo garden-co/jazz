@@ -8,10 +8,9 @@ use serde::Serialize;
 
 use crate::db::{RemovedRow, SubscriptionOutputRow};
 use crate::ids::RowUuid;
-use crate::node::{CurrentRow, RelationSnapshot};
+use crate::node::{CurrentRow, CurrentRowBindingField, RelationSnapshot};
 use crate::tools::ResultKey;
 use groove::ivm::TerminalOperation;
-use groove::records::RecordDescriptor;
 
 /// Rust-owned frozen v1 binding corpus. Test harnesses may expose this through
 /// a generated host artifact, but consumers must still decode its payloads
@@ -19,13 +18,36 @@ use groove::records::RecordDescriptor;
 pub const BINDING_CODEC_GOLDEN_FIXTURE: &str =
     include_str!("../fixtures/binding_codec_golden.json");
 
-/// A contiguous run of rows with one table and physical record descriptor.
+/// The explicit binding provenance of one record-descriptor field.
+///
+/// This is deliberately part of the native-host descriptor, rather than
+/// inferred from a field name. A collector descriptor may mix Jazz's physical
+/// `user_{column}` fields with logical fields that legitimately use the same
+/// spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RowDescriptorFieldName<'a> {
+    /// A persisted CurrentRow field using Jazz's private physical name.
+    PhysicalColumn(&'a str),
+    /// A query, relation, or collector field using its public logical name.
+    LogicalField(&'a str),
+}
+
+/// One native binding descriptor entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RowDescriptorField<'a> {
+    /// Explicit field provenance and exact descriptor name.
+    pub name: RowDescriptorFieldName<'a>,
+    /// Exact Groove type used to decode this record slot.
+    pub value_type: groove::records::ValueType,
+}
+
+/// A contiguous run of rows with one table and record descriptor.
 #[derive(Clone, Debug, Serialize)]
 pub struct RowBatch<'a> {
     /// Logical table name.
     pub table: &'a str,
-    /// Exact descriptor required to decode `rows.raw`.
-    pub descriptor: RecordDescriptor,
+    /// Exact tagged descriptor required to decode `rows.raw`.
+    pub descriptor: Vec<RowDescriptorField<'a>>,
     /// Rows in producer order.
     pub rows: Vec<Row<'a>>,
 }
@@ -140,13 +162,36 @@ pub fn encode_subscription_delta(
     })
 }
 
-/// Group only adjacent rows with equal table and descriptor.
+/// Group only adjacent rows with equal table and tagged descriptor.
 pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
         let (descriptor, raw) = row.encoded_record();
+        let binding_descriptor = descriptor
+            .fields()
+            .iter()
+            .zip(row.binding_fields())
+            .map(|(field, binding)| {
+                let name = field
+                    .name
+                    .as_deref()
+                    .expect("native row descriptor fields must be named");
+                let name = match binding {
+                    CurrentRowBindingField::PhysicalColumn => {
+                        RowDescriptorFieldName::PhysicalColumn(name)
+                    }
+                    CurrentRowBindingField::LogicalField => {
+                        RowDescriptorFieldName::LogicalField(name)
+                    }
+                };
+                RowDescriptorField {
+                    name,
+                    value_type: field.value_type.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
         match batches.last_mut() {
-            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
+            Some(batch) if batch.table == row.table() && batch.descriptor == binding_descriptor => {
                 batch.rows.push(Row {
                     row_id: row.row_uuid(),
                     deleted: row.is_deleted(),
@@ -155,7 +200,7 @@ pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
             }
             _ => batches.push(RowBatch {
                 table: row.table(),
-                descriptor: descriptor.clone(),
+                descriptor: binding_descriptor,
                 rows: vec![Row {
                     row_id: row.row_uuid(),
                     deleted: row.is_deleted(),
@@ -185,4 +230,51 @@ pub fn terminal_operations_to_json(
         wire.remove("root_descriptor");
     }
     Ok(encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::CurrentRowBindingField;
+    use groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+
+    #[test]
+    fn tagged_descriptor_preserves_hybrid_physical_and_logical_user_check_fields() {
+        // The field tags exist only at this internal host ABI boundary. Keep
+        // this direct regression here so a hybrid collector cannot silently
+        // collapse physical `check` and logical `user_check` into one plan.
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid".to_owned(), ValueType::Uuid),
+            ("user_check".to_owned(), ValueType::String),
+            ("user_check".to_owned(), ValueType::Bytes),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(uuid::Uuid::from_bytes([0x5c; 16])),
+                Value::String("physical".to_owned()),
+                Value::Bytes(b"logical".to_vec()),
+            ])
+            .expect("encode hybrid record");
+        let row = CurrentRow::new_with_explicit_binding_fields(
+            "notes",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                CurrentRowBindingField::PhysicalColumn,
+                CurrentRowBindingField::PhysicalColumn,
+                CurrentRowBindingField::LogicalField,
+            ],
+        );
+
+        let rows = [row];
+        let batches = row_batches(&rows);
+        assert_eq!(batches.len(), 1);
+        assert!(matches!(
+            batches[0].descriptor[1].name,
+            RowDescriptorFieldName::PhysicalColumn("user_check")
+        ));
+        assert!(matches!(
+            batches[0].descriptor[2].name,
+            RowDescriptorFieldName::LogicalField("user_check")
+        ));
+    }
 }

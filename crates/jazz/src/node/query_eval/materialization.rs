@@ -1225,7 +1225,17 @@ where
                                 "collector terminal key cannot identify its root occurrence",
                             )
                         })?,
-                        CurrentRow::new(local.result_table.clone(), record),
+                        CurrentRow::new_with_explicit_binding_fields(
+                            local.result_table.clone(),
+                            record,
+                            crate::db::terminal_root_binding_fields(
+                                local
+                                    .terminal_root_layout()
+                                    .ok_or(Error::InvalidStoredValue(
+                                        "collector terminal has no root layout",
+                                    ))?,
+                            ),
+                        ),
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;

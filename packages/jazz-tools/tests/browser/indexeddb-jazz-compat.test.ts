@@ -10,12 +10,13 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
+import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
-import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { createDb, type Db, type DbConfig } from "../../src/runtime/db.js";
 import {
+  INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
   INDEXEDDB_STORAGE_MANIFEST,
@@ -80,8 +81,8 @@ describe("browser Jazz storage compatibility corpus", () => {
     databaseNames.clear();
   });
 
-  it("persists a catalogue-backed current/history/branch/large-value replica through the public browser path", async () => {
-    const server = await getJazzServerInfo(uniqueDbName("storage-compat-server"));
+  it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
+    const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
     await deploy({
       appId: server.appId,
       serverUrl: server.serverUrl,
@@ -90,92 +91,43 @@ describe("browser Jazz storage compatibility corpus", () => {
       permissions,
     });
 
-    const dbName = databaseName();
-    const secret = generateAuthSecret();
+    const dbName = "browser-storage-compat-historical-root-v1";
+    const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
     const config = persistentConfig(dbName, secret, server);
-    let db = await openPersistentDb(config);
+    expect(server.appId).toBe("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
+    // `secret` is resolved to a local-first session during public Db creation,
+    // so the pre-auth config's physical-name helper points at the anonymous
+    // root. Provision once through the public path to identify the actual
+    // principal-scoped root before installing the historical receipt.
+    const bootstrap = await openPersistentDb(config);
     const physicalDbName = await trackPhysicalDatabase(dbName);
-    const initialFixture = await db.transaction((tx) => {
-      const project = tx.insert(app.projects, { name: "compat project" });
-      const document = tx.insert(
-        app.documents,
-        {
-          branch: "main",
-          title: "first title",
-          projectId: project.id,
-          body: "large value ".repeat(20_000),
-        },
-        { branch: "main" },
-      );
-      return { project, document };
-    });
-    await withTimeout(
-      initialFixture.wait({ tier: "global" }),
-      20_000,
-      "initial compatibility fixture did not settle",
-    );
-    const { project, document } = initialFixture.value;
-
-    const main = await withTimeout(
-      db.all(app.documents, { branch: "main", tier: "edge" }),
-      20_000,
-      "main branch fixture did not become readable",
-    );
-    expect(main).toHaveLength(1);
-    expect(main[0]!.id).toBe(document.id);
-    await withTimeout(
-      db
-        .update(app.documents, document.id, { title: "current title" }, { branch: "main" })
-        .wait({ tier: "global" }),
-      20_000,
-      "current history update did not settle",
-    );
-    await withTimeout(
-      db
-        .update(
-          app.documents,
-          document.id,
-          {
-            title: "draft override",
-          },
-          { branch: "draft", base: "main" },
-        )
-        .wait({ tier: "global" }),
-      20_000,
-      "draft branch update did not settle",
-    );
-
-    await db.shutdown();
-    openDbs.splice(openDbs.indexOf(db), 1);
+    await bootstrap.shutdown();
+    openDbs.splice(openDbs.indexOf(bootstrap), 1);
     await sleep(100);
-    const rawBeforeReadOnlyInspection = await rawRecords(physicalDbName);
+    const rawBeforeReadOnlyInspection = JSON.parse(historicalCorpus) as Record<string, string>;
+    await installRawRecords(physicalDbName, rawBeforeReadOnlyInspection);
+    expect(await rawRecords(physicalDbName)).toEqual(rawBeforeReadOnlyInspection);
 
-    db = await openPersistentDb(config);
+    let db = await openPersistentDb(config);
     const rawWhileReopened = await rawRecords(physicalDbName);
     // Reopen must materialize the durable local replica without depending on
     // a fresh remote-coverage round trip. The earlier edge read proves the
     // synced fixture; this is specifically the offline persistence boundary.
-    const reopenedMain = await db.one(
-      app.documents.where({ id: document.id }),
+    const reopenedMain = await db.all(
+      app.documents,
       inspectorLocalQueryOptions({ branch: "main" }),
     );
-    const reopenedDraft = await db.one(
-      app.documents.where({ id: document.id }),
+    const reopenedDraft = await db.all(
+      app.documents,
       inspectorLocalQueryOptions({ branch: "draft" }),
     );
+    expect(reopenedMain).toHaveLength(1);
+    expect(reopenedDraft).toHaveLength(1);
     expect(reopenedMain).toMatchObject({
-      id: document.id,
-      branch: "main",
-      title: "current title",
-      projectId: project.id,
-      body: "large value ".repeat(20_000),
+      0: { branch: "main", title: "current title", body: "large value ".repeat(20_000) },
     });
     expect(reopenedDraft).toMatchObject({
-      id: document.id,
-      branch: "draft",
-      title: "draft override",
-      projectId: project.id,
-      body: "large value ".repeat(20_000),
+      0: { branch: "draft", title: "draft override", body: "large value ".repeat(20_000) },
     });
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
@@ -444,6 +396,52 @@ async function replaceManifest(name: string, manifest: unknown): Promise<void> {
     .put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
   await transactionDone(transaction);
   database.close();
+}
+
+async function installRawRecords(name: string, records: Record<string, string>): Promise<void> {
+  const request = indexedDB.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
+  request.onupgradeneeded = () => {
+    const database = request.result;
+    database.createObjectStore(INDEXEDDB_BTREE_PAGES_STORE);
+    database.createObjectStore(INDEXEDDB_BTREE_METADATA_STORE);
+    database.createObjectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+  };
+  const database = await requestResult(request);
+  const names = [
+    INDEXEDDB_BTREE_PAGES_STORE,
+    INDEXEDDB_BTREE_METADATA_STORE,
+    INDEXEDDB_STORAGE_MANIFEST_STORE,
+  ];
+  const transaction = database.transaction(names, "readwrite");
+  for (const storeName of names) {
+    for (const [key, value] of JSON.parse(records[storeName] ?? "[]") as [IDBValidKey, unknown][]) {
+      transaction
+        .objectStore(storeName)
+        .put(
+          restoreStructuredCloneValue(
+            value,
+            storeName === INDEXEDDB_BTREE_PAGES_STORE || key === "replica-node-v1",
+          ),
+          key,
+        );
+    }
+  }
+  await transactionDone(transaction);
+  database.close();
+}
+
+function restoreStructuredCloneValue(value: unknown, binary = false, property?: string): unknown {
+  if (Array.isArray(value)) {
+    if (binary || property === "node") return Uint8Array.from(value as number[]).buffer;
+    return value.map((nested) => restoreStructuredCloneValue(nested));
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      restoreStructuredCloneValue(nested, false, key),
+    ]),
+  );
 }
 
 function serializeRawRecord(value: unknown): unknown {

@@ -1570,7 +1570,7 @@ where
                 .iter()
                 .filter(|(_, weight)| *weight > 0)
                 .map(|(record, _)| {
-                    CurrentRow::new(
+                    CurrentRow::new_logical(
                         shape.query().table.clone(),
                         OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
                     )
@@ -3993,7 +3993,7 @@ fn aggregate_current_row_from_record(
     }
     let descriptor = RecordDescriptor::new(fields);
     let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
+    Ok(CurrentRow::new_logical(
         query.table.clone(),
         OwnedRecord::new(raw, descriptor),
     ))
