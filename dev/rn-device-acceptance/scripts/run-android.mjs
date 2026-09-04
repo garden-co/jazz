@@ -33,7 +33,10 @@ async function startLocalEdgeSessionHarness() {
   );
   let output = "";
   const session = await new Promise((resolveSession, rejectSession) => {
-    const timeout = setTimeout(() => rejectSession(new Error("local Edge/Core harness timed out")), 60_000);
+    const timeout = setTimeout(
+      () => rejectSession(new Error("local Edge/Core harness timed out")),
+      60_000,
+    );
     child.stdout.on("data", (chunk) => {
       output += chunk;
       const line = output.split(/\r?\n/).find((item) => item.startsWith("JAZZ_RN_EDGE_SESSION "));
@@ -51,7 +54,9 @@ async function startLocalEdgeSessionHarness() {
     });
     child.once("exit", (code) => {
       clearTimeout(timeout);
-      rejectSession(new Error(`local Edge/Core harness exited before readiness (${code ?? "signal"})`));
+      rejectSession(
+        new Error(`local Edge/Core harness exited before readiness (${code ?? "signal"})`),
+      );
     });
   });
   if (
