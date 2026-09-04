@@ -1993,14 +1993,24 @@ pub(super) fn project_source_fields_from_prefix_rewrapping_nullable(
         .descriptor
         .fields()
         .iter()
-        .filter_map(|field| field.name.as_ref())
-        .map(|field| {
-            let source_field = format!("{prefix}{field}");
-            if nullable_field == Some(field.as_str()) {
-                ProjectField::nullable(source_field, field.clone())
-            } else {
-                ProjectField::renamed(source_field, field.clone())
-            }
+        .filter_map(|field| {
+            let name = field.name.as_ref()?;
+            let source_field = FieldRef::stored_name(format!("{prefix}{name}"));
+            // This projection restores a source row after joins or policy
+            // filtering. Retain its source identity, rather than turning its
+            // private carrier spelling into a new logical application name.
+            Some(ProjectField {
+                expression: if nullable_field == Some(name.as_str()) {
+                    groove::ivm::ProjectExpr::Nullable(source_field)
+                } else {
+                    groove::ivm::ProjectExpr::Field(source_field)
+                },
+                output_name: name.clone(),
+                output_identity: field
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| FieldIdentity::Name(name.clone())),
+            })
         })
         .collect()
 }

@@ -5763,6 +5763,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn joined_ordered_window_keeps_root_cells_and_duplicate_occurrences() {
+        use crate::query::{OrderDirection, Query};
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(TableSchema::builder("people").column("name", ColumnType::Text))
+                .table(TableSchema::builder("tasks").fk_column("owner", "people"))
+                .build(),
+        )
+        .await;
+        for (id, name) in [(1, "alpha"), (2, "middle"), (3, "zulu")] {
+            client
+                .upsert(
+                    "people",
+                    Uuid::from_u128(id),
+                    crate::row_input!("name" => name),
+                )
+                .unwrap();
+        }
+        for (id, owner) in [(11, 1), (12, 1), (13, 2), (14, 3)] {
+            client
+                .upsert(
+                    "tasks",
+                    Uuid::from_u128(id),
+                    crate::row_input!("owner" => ObjectId::from_uuid(Uuid::from_u128(owner))),
+                )
+                .unwrap();
+        }
+        let rows = client
+            .query_results(
+                Query::from("people")
+                    .join_via_column("tasks", "owner", "id", [])
+                    .order_by("name", OrderDirection::Desc)
+                    .offset(1)
+                    .limit(3),
+                Some(DurabilityTier::Local),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.get("name")).collect::<Vec<_>>(),
+            [
+                Some(&Value::Text("middle".into())),
+                Some(&Value::Text("alpha".into())),
+                Some(&Value::Text("alpha".into()))
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn transaction_scoped_timestamp_override_is_rejected() {
         let client = JazzClient::test_client(declared_todo_schema()).await;
         let transaction = client.begin_transaction().expect("open transaction");

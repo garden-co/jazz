@@ -4344,23 +4344,9 @@ pub(super) fn global_current_storage_fields(
 }
 
 fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
-    RecordDescriptor::new(
-        std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
-            .chain(table.columns.iter().map(|column| {
-                (
-                    user_column_field(&column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone())),
-                )
-            }))
-            .chain([
-                ("$createdBy".to_owned(), ValueType::String),
-                ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), ValueType::String),
-                ("$updatedAt".to_owned(), ValueType::U64),
-                ("tx_time".to_owned(), ValueType::U64),
-                ("tx_node_id".to_owned(), ValueType::U64),
-            ]),
-    )
+    // Source metadata and the executable canonical-row projection must carry
+    // the same logical identities before subsequent joins restore this shape.
+    current_row_descriptor_with_hidden_source_fields(table, &BTreeMap::new())
 }
 
 pub(super) fn empty_authorized_row_id_graph() -> GraphBuilder {
