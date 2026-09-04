@@ -6054,8 +6054,9 @@ function nativeRowFieldPlans(
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
     const field = batch.descriptor[index];
-    const fieldName = field?.kind === "stored-column" ? field.outputName : field?.name;
-    if (!fieldName || (field?.kind === "result-field" && isInternalField(fieldName))) {
+    if (!field || field.kind === "hidden-metadata") continue;
+    const fieldName = field.kind === "stored-column" ? field.outputName : field.name;
+    if (!fieldName) {
       continue;
     }
 
@@ -7060,17 +7061,6 @@ function canonicalJson(value: unknown): string {
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
-}
-
-function isInternalField(name?: string): boolean {
-  return (
-    name === "row_uuid" ||
-    name === "tx_node_id" ||
-    name === "tx_time" ||
-    name === "schema_version" ||
-    name === "parents" ||
-    name === "authored_columns"
-  );
 }
 
 function isHiddenIncludeColumn(name: string): boolean {

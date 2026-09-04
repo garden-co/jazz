@@ -194,7 +194,7 @@ retain its compiler bindings; changing it globally is not this migration.
 ## Unified native publication trial
 
 A CurrentRow now has one per-slot publication metadata owner:
-`StoredColumn { PhysicalColumnId, output_name }`, `ResultField { name, visible }`,
+`StoredColumn { PhysicalColumnId, output_name }`, `ResultField { name, visibility }`,
 or construction-only `UnresolvedSourceCell { output_name }`. Constructor roles
 and compatibility name accessors do not store additional copies. Query
 `FieldIdentity` remains independent: a compiler Slot is not assumed to be a
@@ -206,9 +206,21 @@ The root layout asserts that its public slot name agrees with its binding.
 
 The native codec serializes only finalized bindings. Variant0 is exactly
 `StoredColumn { id: u64, output_name: string }`; variant1 is exactly
-`ResultField { name: string }`. Unresolved cells fail serialization rather than
-acquiring a fabricated ID. Hidden metadata uses an explicit ResultField name,
-while visibility remains an internal application-cell classification.
+`ResultField { name: string }`; variant2 is exactly
+`HiddenMetadata { name: string }`. These are ordered postcard enum tags, followed
+by the named payload fields in the order shown. Unresolved cells fail
+serialization rather than acquiring a fabricated ID.
+
+Result visibility has three producer-owned roles: ApplicationCell,
+PublicProvenance and HiddenMetadata. Subscription application-cell comparison
+includes ApplicationCell and stored cells, while public magic provenance is
+excluded from that comparison. Native publication emits ApplicationCell and
+PublicProvenance as tag1, and only HiddenMetadata as tag2. Consumers suppress
+only tag2, never a spelling. `$createdAt` and `$updatedBy` remain public even
+when explicitly projected. A visible `COUNT(*) AS schema_version` can coexist
+with hidden `schema_version` metadata without collision. Catalogue identity and
+output names belong to StoredColumn; compiler Name/Slot identities are not
+serialized in this native publication envelope.
 
 The native type envelope recursively writes the contained serde shape: a record
 is an ordered vector of `{ name: Option<string>, value_type }`, without runtime
@@ -226,20 +238,37 @@ Grouped one-shot publication retains the source column's catalogue ID; grouped
 subscription reset remains blocked by the existing aggregate group-identity
 failures and is a separately scoped compiler repair.
 
-### Unresolved visibility ambiguity in the contained ABI
+### Approved pre-freeze native visibility uplift
 
-The frozen native ResultField encoding has no visibility discriminator.
-`frozen_result_field_bytes_cannot_distinguish_public_alias_from_hidden_metadata`
-constructs visible and hidden `schema_version: U64` fields and demonstrates
-identical publication bytes. Query validation permits `COUNT(*) AS schema_version`
-(it rejects the `__jazz_aggregate_` alias namespace, not this name), whereas the
-contained native adapter suppresses a ResultField with that name as metadata.
-The same ambiguity exists for names such as `tx_time`. StoredColumn fields with
-these public names remain distinguishable by their explicit variant.
+The original two-tag ABI cannot distinguish a valid result alias from same-named
+hidden metadata. The executable counterexample uses `schema_version: U64`; query
+validation permits `COUNT(*) AS schema_version`, but the contained adapter hid
+that name. The approved shared target adds HiddenMetadata as tag2 while retaining
+exact tag0/tag1 encodings. It changes native host publication only, not durable
+Groove descriptors, catalogue/index names, row keys or hashes.
 
-No wire-format change or new alias rejection resolves this in this trial. A
-producer contract that keeps internal metadata out of public publication, or
-another explicitly reviewed source/context rule, needs proof before claiming
-lossless shared semantics. VersionRecord peer-wire descriptors, durable
+`explicit_hidden_metadata_tag_preserves_same_named_public_alias` now places
+hidden metadata, a visible alias and public magic provenance in one row. It pins
+`02 0e schema_version` versus `01 0e schema_version`. The TypeScript consumer
+fixture verifies the visible value survives and the hidden value does not leak;
+the real Db producer fixture exercises public magic projection and aggregate
+aliases as well as current, nested, join and root-reset publication.
+
+The native golden update is intentional: only row_uuid metadata tags change
+from1 to2 in populated relation snapshots and subscription deltas. Existing
+stored IDs, visible names, recursive types, row bytes, edges, keys and ordering
+must remain identical. The original two-tag codec fixture still pins tag0/tag1.
+
+Both implementation alternatives must adopt the same third tag before freeze.
+The contained implementation must classify engine metadata at source/projection
+owners, carry it through caches and root reducers, and preserve explicit public
+magic provenance as ResultField1. Its adapter must remove name-based hiding and
+skip only tag2. Merely updating its enum/decoder is insufficient: a logical
+alias with no separate output-name override must stay visible, so absence of an
+override cannot classify hidden metadata. No physical ID may be inferred from
+carrier spelling or compiler slots.
+
+This typed trial does not yet prove the contained producer port or two-way host
+artifact compatibility. VersionRecord peer-wire descriptors, durable
 ResultCurrent payloads, root-layout hashes, grouped reset, and both directions
 of database reopen/recovery still prevent a shared-format-complete claim.

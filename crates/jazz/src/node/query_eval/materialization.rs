@@ -1066,7 +1066,7 @@ where
                         .cloned()
                         .unwrap_or_else(|| CurrentRowPublicationField::ResultField {
                             name: name.to_owned(),
-                            visible: false,
+                            visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
                         }))
                 })
                 .collect::<Result<Vec<_>, Error>>()?,

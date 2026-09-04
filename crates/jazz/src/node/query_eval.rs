@@ -3999,7 +3999,7 @@ fn aggregate_current_row_from_record(
     let raw = descriptor.create(&values)?;
     let mut publication_fields = vec![CurrentRowPublicationField::ResultField {
         name: "row_uuid".to_owned(),
-        visible: false,
+        visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
     }];
     if let Some(group_by) = &aggregate.group_by {
         publication_fields.push(CurrentRowPublicationField::UnresolvedSourceCell {
@@ -4009,7 +4009,7 @@ fn aggregate_current_row_from_record(
     publication_fields.extend(aggregate.aggregates.iter().map(|output| {
         CurrentRowPublicationField::ResultField {
             name: output.alias.clone(),
-            visible: true,
+            visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
         }
     }));
     Ok(CurrentRow::new_with_publication_fields(

@@ -5608,7 +5608,7 @@ pub(crate) fn terminal_root_publication_fields(
         .iter()
         .map(|field| CurrentRowPublicationField::ResultField {
             name: field.name.clone().expect("terminal fields are named"),
-            visible: false,
+            visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
         })
         .collect::<Vec<_>>();
     for field in &layout.public_fields {

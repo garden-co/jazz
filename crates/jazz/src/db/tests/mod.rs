@@ -101,7 +101,7 @@ fn terminal_root_binding_fields_preserve_hybrid_public_slot_provenance() {
             TerminalRootPublicField {
                 publication: crate::node::CurrentRowPublicationField::ResultField {
                     name: "user_check".to_owned(),
-                    visible: true,
+                    visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
                 },
                 name: "user_check".to_owned(),
                 descriptor_field_name: "user_check".to_owned(),

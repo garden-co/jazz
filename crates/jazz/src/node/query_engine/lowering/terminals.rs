@@ -28,7 +28,7 @@ fn source_publication_field(source: &ResolvedSource, name: String) -> CurrentRow
         },
         None => CurrentRowPublicationField::ResultField {
             name,
-            visible: true,
+            visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
         },
     }
 }
@@ -48,7 +48,11 @@ fn collect_publication_fields(
                 }
                 _ => CurrentRowPublicationField::ResultField {
                     name: field.output.clone(),
-                    visible: !field.is_row_id,
+                    visibility: if field.is_row_id {
+                        crate::node::CurrentRowResultVisibility::HiddenMetadata
+                    } else {
+                        crate::node::CurrentRowResultVisibility::ApplicationCell
+                    },
                 },
             };
             (field.output.clone(), binding)
@@ -59,7 +63,7 @@ fn collect_publication_fields(
             slot.collection_field.clone(),
             CurrentRowPublicationField::ResultField {
                 name: slot.collection_field.clone(),
-                visible: true,
+                visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
             },
         )
     }));
@@ -1826,7 +1830,8 @@ fn lowered_aggregate_terminals(
                             aggregate_output_field(&output.output.name),
                             CurrentRowPublicationField::ResultField {
                                 name: output.output.name.clone(),
-                                visible: true,
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::ApplicationCell,
                             },
                         );
                     }

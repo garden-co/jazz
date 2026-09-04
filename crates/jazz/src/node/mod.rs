@@ -1397,6 +1397,29 @@ pub enum CurrentRowBindingRole {
     LogicalField,
 }
 
+/// Application cells, public provenance, and private engine metadata have
+/// different publication roles even when their names happen to be identical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurrentRowResultVisibility {
+    /// A query-visible application cell, included in subscription cell comparison.
+    ApplicationCell,
+    /// Public magic provenance, available to explicit projections and row metadata.
+    PublicProvenance,
+    /// Engine bookkeeping carried only for decoding/internal identity.
+    HiddenMetadata,
+}
+
+impl CurrentRowResultVisibility {
+    /// Classify metadata constructed by the CurrentRow producer, not a wire
+    /// field guessed by a consumer. Explicit application outputs bypass this.
+    pub(crate) fn current_row_metadata(name: &str) -> Self {
+        match name {
+            "$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt" => Self::PublicProvenance,
+            _ => Self::HiddenMetadata,
+        }
+    }
+}
+
 /// One producer-owned publication binding. Runtime query slots are separate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CurrentRowPublicationField {
@@ -1411,8 +1434,8 @@ pub enum CurrentRowPublicationField {
     ResultField {
         /// Exact name sent to the host.
         name: String,
-        /// Whether this is an application cell rather than hidden metadata.
-        visible: bool,
+        /// Explicit application/provenance/internal role assigned by the producer.
+        visibility: CurrentRowResultVisibility,
     },
     /// Construction-only source cell, resolved before publication.
     UnresolvedSourceCell {
@@ -1429,9 +1452,9 @@ impl CurrentRowPublicationField {
             }
             Self::ResultField {
                 name,
-                visible: true,
+                visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
             } => Some(name),
-            Self::ResultField { visible: false, .. } => None,
+            Self::ResultField { .. } => None,
         }
     }
 
@@ -1571,13 +1594,17 @@ impl CurrentRow {
                             }
                             None => CurrentRowPublicationField::ResultField {
                                 name: name.to_owned(),
-                                visible: false,
+                                visibility: CurrentRowResultVisibility::current_row_metadata(name),
                             },
                         }
                     }
                     CurrentRowBindingRole::LogicalField => {
                         CurrentRowPublicationField::ResultField {
-                            visible: public_name.is_some(),
+                            visibility: if public_name.is_some() {
+                                CurrentRowResultVisibility::ApplicationCell
+                            } else {
+                                CurrentRowResultVisibility::current_row_metadata(name)
+                            },
                             name: public_name.unwrap_or_else(|| name.to_owned()),
                         }
                     }

@@ -2664,7 +2664,16 @@ fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joi
             .any(|field| matches!(field.name,
         RowDescriptorFieldName::StoredColumn { id, output_name: "title" } if id == title_id))
     );
+    assert!(current_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::HiddenMetadata { name: "tx_time" }
+    )));
+    assert!(current_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::ResultField { name: "$createdAt" }
+    )));
     for query in [
+        Query::from("todos").select(["title", "$createdAt", "$updatedBy"]),
         Query::from("todos").aggregate([crate::query::Aggregate::count().alias("schema_version")]),
         Query::from("users").array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id")),
         Query::from("users").join_via_column("todos", "owner_id", "id", []),
@@ -2684,6 +2693,12 @@ fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joi
             }
             assert!(batches[0].descriptor.iter().any(|field| matches!(field.name,
                 RowDescriptorFieldName::ResultField { name } if name == aggregate.aggregates[0].alias)));
+        }
+        if query.table == "todos" && query.aggregate.is_none() {
+            let batches = row_batches(&rows).unwrap();
+            for name in ["$createdAt", "$updatedBy"] {
+                assert!(batches[0].descriptor.iter().any(|field| matches!(field.name, RowDescriptorFieldName::ResultField { name: published } if published == name)), "projected public provenance {name} remains visible");
+            }
         }
         let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
         let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());

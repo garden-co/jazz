@@ -1534,7 +1534,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
     let current_binding_descriptor = vec![
         RowDescriptorField {
-            name: RowDescriptorFieldName::ResultField { name: "row_uuid" },
+            name: RowDescriptorFieldName::HiddenMetadata { name: "row_uuid" },
             value_type: ValueType::Uuid,
         },
         RowDescriptorField {
@@ -1547,7 +1547,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     ];
     let logical_binding_descriptor = vec![
         RowDescriptorField {
-            name: RowDescriptorFieldName::ResultField { name: "row_uuid" },
+            name: RowDescriptorFieldName::HiddenMetadata { name: "row_uuid" },
             value_type: ValueType::Uuid,
         },
         RowDescriptorField {

@@ -39,10 +39,16 @@ export type NativeResultFieldDescriptorField = {
   valueType: ValueType;
   kind: "result-field";
 };
+export type NativeHiddenMetadataDescriptorField = {
+  name: string;
+  valueType: ValueType;
+  kind: "hidden-metadata";
+};
 /** Explicit Rust-to-JavaScript provenance for one descriptor field. */
 export type NativeRowDescriptorField =
   | NativeStoredColumnDescriptorField
-  | NativeResultFieldDescriptorField;
+  | NativeResultFieldDescriptorField
+  | NativeHiddenMetadataDescriptorField;
 export type NativeRowBatch = {
   table: string;
   descriptor: NativeRowDescriptorField[];
@@ -105,7 +111,7 @@ export function writeNativeRowDescriptor(
 ): void {
   writer.vec((fieldWriter, index) => {
     const field = descriptor[index]!;
-    fieldWriter.u64(field.kind === "result-field" ? 1 : 0);
+    fieldWriter.u64(field.kind === "stored-column" ? 0 : field.kind === "result-field" ? 1 : 2);
     if (field.kind === "stored-column") {
       fieldWriter.u64(field.id);
       fieldWriter.string(field.outputName);
@@ -130,6 +136,13 @@ export function readNativeRowDescriptor(reader: PostcardReaderLike): NativeRowDe
     if (kindTag === 1) {
       return {
         kind: "result-field",
+        name: fieldReader.string(),
+        valueType: readValueType(fieldReader),
+      };
+    }
+    if (kindTag === 2) {
+      return {
+        kind: "hidden-metadata",
         name: fieldReader.string(),
         valueType: readValueType(fieldReader),
       };

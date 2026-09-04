@@ -1832,7 +1832,8 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
                                     .get(name)
                                     .cloned()
                                     .unwrap_or_else(|| name.to_owned()),
-                                visible: true,
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::ApplicationCell,
                             },
                         ),
                         // The compiler binds this identity before terminal
@@ -3390,7 +3391,7 @@ mod tests {
                     "__jazz_include_project".to_owned(),
                     crate::node::CurrentRowPublicationField::ResultField {
                         name: "project".to_owned(),
-                        visible: true,
+                        visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
                     },
                 ),
             ]),
@@ -3442,7 +3443,7 @@ mod tests {
                 TerminalRootPublicField {
                     publication: crate::node::CurrentRowPublicationField::ResultField {
                         name: "project".to_owned(),
-                        visible: true
+                        visibility: crate::node::CurrentRowResultVisibility::ApplicationCell
                     },
                     name: "project".to_owned(),
                     descriptor_field_name: "__jazz_include_project".to_owned(),

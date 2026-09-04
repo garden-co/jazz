@@ -39,6 +39,11 @@ pub enum RowDescriptorFieldName<'a> {
         /// Exact result name.
         name: &'a str,
     },
+    /// Explicit engine metadata; consumers must never hide a result by its name.
+    HiddenMetadata {
+        /// Exact metadata field name.
+        name: &'a str,
+    },
 }
 
 /// One native binding descriptor entry.
@@ -189,8 +194,16 @@ pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::E
                             output_name,
                         }
                     }
-                    CurrentRowPublicationField::ResultField { name, .. } => {
-                        RowDescriptorFieldName::ResultField { name }
+                    CurrentRowPublicationField::ResultField { name, visibility } => {
+                        match visibility {
+                            crate::node::CurrentRowResultVisibility::HiddenMetadata => {
+                                RowDescriptorFieldName::HiddenMetadata { name }
+                            }
+                            crate::node::CurrentRowResultVisibility::ApplicationCell
+                            | crate::node::CurrentRowResultVisibility::PublicProvenance => {
+                                RowDescriptorFieldName::ResultField { name }
+                            }
+                        }
                     }
                     CurrentRowPublicationField::UnresolvedSourceCell { .. } => {
                         return Err(postcard::Error::SerdeSerCustom);
@@ -326,7 +339,7 @@ mod tests {
                 vec![
                     Binding::ResultField {
                         name: "row_uuid".to_owned(),
-                        visible: false,
+                        visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
                     },
                     Binding::StoredColumn {
                         id: PhysicalColumnId(1),
@@ -349,11 +362,11 @@ mod tests {
             vec![
                 Binding::ResultField {
                     name: "row_uuid".to_owned(),
-                    visible: false,
+                    visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
                 },
                 Binding::ResultField {
                     name: "title".to_owned(),
-                    visible: true,
+                    visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
                 },
             ],
         );
@@ -379,12 +392,18 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             actual_hex, expected_hex,
-            "the original contained golden bytes are frozen"
+            "the shared native publication golden bytes are frozen"
         );
 
         #[derive(Serialize, serde::Deserialize)]
+        enum SharedPublicationField {
+            StoredColumn { id: u64, output_name: String },
+            ResultField { name: String },
+            HiddenMetadata { name: String },
+        }
+        #[derive(Serialize, serde::Deserialize)]
         struct FrozenField {
-            name: FrozenPublicationField,
+            name: SharedPublicationField,
             value_type: ValueType,
         }
         #[derive(Serialize, serde::Deserialize)]
@@ -408,7 +427,7 @@ mod tests {
         assert_eq!(postcard::to_allocvec(&read).unwrap(), actual);
         assert!(matches!(
             read.rows[0].descriptor[1].name,
-            FrozenPublicationField::StoredColumn { id: 1, .. }
+            SharedPublicationField::StoredColumn { id: 1, .. }
         ));
 
         let mut unresolved = stored(0x11, Some("first"));
@@ -421,7 +440,7 @@ mod tests {
             vec![
                 Binding::ResultField {
                     name: "row_uuid".to_owned(),
-                    visible: false,
+                    visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
                 },
                 Binding::UnresolvedSourceCell {
                     output_name: "title".to_owned(),
@@ -435,46 +454,74 @@ mod tests {
     }
 
     #[test]
-    fn frozen_result_field_bytes_cannot_distinguish_public_alias_from_hidden_metadata() {
+    fn explicit_hidden_metadata_tag_preserves_same_named_public_alias() {
         use crate::node::CurrentRowPublicationField as Binding;
+        use crate::node::CurrentRowResultVisibility as Visibility;
+        // Native publication roles are not observable through a Rust row map;
+        // pin the host descriptor and its aligned values at this ABI boundary.
         let descriptor = RecordDescriptor::new([
             ("row_uuid", ValueType::Uuid),
             ("schema_version", ValueType::U64),
+            ("aggregate_alias", ValueType::U64),
+            ("$createdAt", ValueType::U64),
         ]);
         let raw = descriptor
             .create(&[
                 Value::Uuid(uuid::Uuid::from_bytes([0x63; 16])),
+                Value::U64(99),
                 Value::U64(1),
+                Value::U64(123),
             ])
             .unwrap();
-        let record = OwnedRecord::new(raw, descriptor);
-        let row = |visible| {
-            CurrentRow::new_with_publication_fields(
-                "items",
-                record.clone(),
-                vec![
-                    Binding::ResultField {
-                        name: "row_uuid".to_owned(),
-                        visible: false,
-                    },
-                    Binding::ResultField {
-                        name: "schema_version".to_owned(),
-                        visible,
-                    },
-                ],
-            )
-        };
-        let public_alias = row(true);
-        let hidden_metadata = row(false);
-        assert_ne!(
-            public_alias.publication_fields(),
-            hidden_metadata.publication_fields()
+        let row = CurrentRow::new_with_publication_fields(
+            "items",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                Binding::ResultField {
+                    name: "row_uuid".into(),
+                    visibility: Visibility::HiddenMetadata,
+                },
+                Binding::ResultField {
+                    name: "schema_version".into(),
+                    visibility: Visibility::HiddenMetadata,
+                },
+                Binding::ResultField {
+                    name: "schema_version".into(),
+                    visibility: Visibility::ApplicationCell,
+                },
+                Binding::ResultField {
+                    name: "$createdAt".into(),
+                    visibility: Visibility::PublicProvenance,
+                },
+            ],
+        );
+        let rows = [row];
+        let batches = row_batches(&rows).unwrap();
+        assert_eq!(
+            batches[0].descriptor[1].name,
+            RowDescriptorFieldName::HiddenMetadata {
+                name: "schema_version"
+            }
         );
         assert_eq!(
-            encode_rows(&[public_alias]).unwrap(),
-            encode_rows(&[hidden_metadata]).unwrap(),
-            "the exact contained ResultField ABI has no visibility discriminator"
+            batches[0].descriptor[2].name,
+            RowDescriptorFieldName::ResultField {
+                name: "schema_version"
+            }
         );
+        assert_eq!(
+            batches[0].descriptor[3].name,
+            RowDescriptorFieldName::ResultField { name: "$createdAt" }
+        );
+        assert_eq!(
+            postcard::to_allocvec(&batches[0].descriptor[1].name).unwrap(),
+            b"\x02\x0eschema_version"
+        );
+        assert_eq!(
+            postcard::to_allocvec(&batches[0].descriptor[2].name).unwrap(),
+            b"\x01\x0eschema_version"
+        );
+        assert!(!encode_rows(&rows).unwrap().is_empty());
     }
 
     #[test]
@@ -500,7 +547,7 @@ mod tests {
             vec![
                 CurrentRowPublicationField::ResultField {
                     name: "row_uuid".to_owned(),
-                    visible: false,
+                    visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
                 },
                 CurrentRowPublicationField::StoredColumn {
                     id: PhysicalColumnId(7),
@@ -508,7 +555,7 @@ mod tests {
                 },
                 CurrentRowPublicationField::ResultField {
                     name: "user_check".to_owned(),
-                    visible: true,
+                    visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
                 },
             ],
         );

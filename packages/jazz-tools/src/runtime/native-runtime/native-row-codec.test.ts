@@ -13,6 +13,8 @@ import {
   assertTerminalRootDescriptorCompatible,
   fieldIndex,
   readDescriptor,
+  readNativeRowDescriptor,
+  writeNativeRowDescriptor,
   storageColumnValueType,
   writeDescriptor,
 } from "./native-row-codec.js";
@@ -29,6 +31,19 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
+  it("pins explicit hidden metadata tag 2 and rejects unknown publication tags", () => {
+    const descriptor = [
+      { kind: "hidden-metadata" as const, name: "schema_version", valueType: { tag: 3 } },
+    ];
+    const writer = new PostcardWriter();
+    writeNativeRowDescriptor(writer, descriptor);
+    expect(Buffer.from(writer.finish()).toString("hex")).toBe(
+      "01020e736368656d615f76657273696f6e03",
+    );
+    expect(readNativeRowDescriptor(new PostcardReader(writer.finish()))).toEqual(descriptor);
+    expect(() => readNativeRowDescriptor(new PostcardReader(Uint8Array.from([1, 3])))).toThrow();
+  });
+
   it("round-trips sealed internal physical value types without exposing them as columns", () => {
     const descriptor = [
       { name: "raw_text", valueType: { tag: 10, internal: { tag: 0 } } },
