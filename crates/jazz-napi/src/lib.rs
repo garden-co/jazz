@@ -655,8 +655,6 @@ pub struct Transport {
     inner: NapiTransportInner,
     queues: WireQueues,
     auxiliary_pump: jazz::db::PeerIoPump,
-    protocol_version: u16,
-    features: u64,
 }
 
 #[napi(js_name = "Subscription")]
@@ -970,7 +968,7 @@ impl Transport {
     ) -> napi::Result<Option<Uint8Array>> {
         core_block_on(
             self.auxiliary_pump
-                .route_incoming_wire_frame(frame.to_vec(), self.features),
+                .route_incoming_wire_frame(frame.to_vec()),
         )
         .map(|frame| frame.map(Uint8Array::new))
         .map_err(napi::Error::from_reason)
@@ -981,7 +979,7 @@ impl Transport {
         let mut frames = Vec::new();
         while let Some(frame) = self
             .auxiliary_pump
-            .take_outbound_wire_frame(self.protocol_version, self.features, None)
+            .take_outbound_wire_frame()
             .map_err(napi::Error::from_reason)?
         {
             frames.push(Uint8Array::new(frame));
@@ -4415,10 +4413,6 @@ impl NapiDb {
             inner,
             queues,
             auxiliary_pump,
-            protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
-            features: jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
         })
     }
 
@@ -4502,8 +4496,6 @@ impl NapiDb {
             inner,
             queues,
             auxiliary_pump,
-            protocol_version,
-            features,
         })
     }
 
@@ -5658,7 +5650,7 @@ struct JazzServerLifecycle {
 }
 
 enum JazzServerState {
-    Running(JazzServerInner),
+    Running(Box<JazzServerInner>),
     Stopping,
     Stopped(std::result::Result<(), String>),
 }
@@ -5826,7 +5818,7 @@ impl JazzServer {
         if let Some(server) = shutdown_owner {
             let lifecycle = Arc::clone(&self.lifecycle);
             tokio::spawn(async move {
-                let result = AssertUnwindSafe(shutdown_jazz_server(server))
+                let result = AssertUnwindSafe(shutdown_jazz_server(*server))
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|_| Err("JazzServer shutdown task panicked".to_owned()));
@@ -5870,7 +5862,7 @@ impl JazzServer {
         let (changed, _) = tokio::sync::watch::channel(());
         Self {
             lifecycle: Arc::new(JazzServerLifecycle {
-                state: Mutex::new(JazzServerState::Running(inner)),
+                state: Mutex::new(JazzServerState::Running(Box::new(inner))),
                 changed,
             }),
         }
@@ -5883,7 +5875,7 @@ impl JazzServer {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         match &*state {
-            JazzServerState::Running(server) => Ok(f(server)),
+            JazzServerState::Running(server) => Ok(f(server.as_ref())),
             JazzServerState::Stopping => Err(napi::Error::from_reason("JazzServer is stopping")),
             JazzServerState::Stopped(_) => {
                 Err(napi::Error::from_reason("JazzServer has been stopped"))

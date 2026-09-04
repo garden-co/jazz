@@ -1065,6 +1065,65 @@ async fn unique_indices_reject_existing_conflicting_values() {
     );
 }
 
+// This stays at the Groove database seam because unique-index delta ordering
+// is consolidated before any public Jazz query or mutation result exists.
+/// A batch atomically transfers a unique title from `alice` (id 7) to `bob`
+/// (id 8), regardless of whether its delete or insert is submitted first.
+///
+/// ```text
+/// alice ──retract──┐
+/// bob   ──insert───┴──► durable unique index ──► bob owns title
+/// ```
+#[futures_test::test]
+async fn durable_unique_indices_allow_atomic_replacement_within_one_batch() {
+    for insert_first in [false, true] {
+        let storage =
+            MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
+        let mut database = Database::new(unique_indexed_albums_schema(), storage)
+            .await
+            .unwrap();
+
+        let mut batch = database.open_batch();
+        batch.insert(
+            "albums",
+            vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+        );
+        database.commit_batch(batch).await.unwrap();
+
+        let mut batch = database.open_batch();
+        if insert_first {
+            batch.insert(
+                "albums",
+                vec![Value::U64(8), Value::String("Blue Train".to_owned())],
+            );
+            batch.delete("albums", PrimaryKeyValue::U64(7));
+        } else {
+            batch.delete("albums", PrimaryKeyValue::U64(7));
+            batch.insert(
+                "albums",
+                vec![Value::U64(8), Value::String("Blue Train".to_owned())],
+            );
+        }
+        database.commit_batch(batch).await.unwrap();
+
+        assert_eq!(
+            record_values(
+                database
+                    .index_scan(
+                        "albums",
+                        "unique_albums_by_title",
+                        &[Value::String("Blue Train".to_owned())],
+                    )
+                    .await
+                    .unwrap()
+            ),
+            [vec![Value::U64(8), Value::String("Blue Train".to_owned())]]
+        );
+    }
+}
+
+/// `alice` owns a title before `bob` attempts a competing positive insertion;
+/// the durable unique index rejects every attempt and retains `alice`.
 #[futures_test::test]
 async fn durable_unique_indices_reject_positive_delta_for_existing_different_record() {
     let storage =
@@ -1092,39 +1151,41 @@ async fn durable_unique_indices_reject_positive_delta_for_existing_different_rec
     ));
 }
 
+/// Competing same-batch positive owners (`alice` and `bob`) fail closed before
+/// the durable unique index writes, in either insertion order.
 #[futures_test::test]
 async fn unique_indices_reject_conflicts_within_one_batch() {
-    let storage =
-        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
-    let mut database = Database::new(unique_indexed_albums_schema(), storage)
-        .await
-        .unwrap();
-
-    let mut batch = database.open_batch();
-    batch.insert(
-        "albums",
-        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
-    );
-    batch.insert(
-        "albums",
-        vec![Value::U64(8), Value::String("Blue Train".to_owned())],
-    );
-
-    assert!(matches!(
-        database.commit_batch(batch).await.unwrap_err(),
-        Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { .. })
-    ));
-    assert!(
-        database
-            .storage
-            .prefix(
-                "indices".to_owned(),
-                b"albums\0unique_albums_by_title\0".to_vec()
-            )
+    for ids in [[7_u64, 8], [8, 7]] {
+        let storage =
+            MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
+        let mut database = Database::new(unique_indexed_albums_schema(), storage)
             .await
-            .unwrap()
-            .is_empty()
-    );
+            .unwrap();
+
+        let mut batch = database.open_batch();
+        for id in ids {
+            batch.insert(
+                "albums",
+                vec![Value::U64(id), Value::String("Blue Train".to_owned())],
+            );
+        }
+
+        assert!(matches!(
+            database.commit_batch(batch).await.unwrap_err(),
+            Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { .. })
+        ));
+        assert!(
+            database
+                .storage
+                .prefix(
+                    "indices".to_owned(),
+                    b"albums\0unique_albums_by_title\0".to_vec()
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 #[futures_test::test]
@@ -1287,6 +1348,366 @@ async fn persisted_indices_can_be_deleted_after_restart() {
             )]
         );
     }
+}
+
+/// A public backfill with duplicate positive owners is rejected cleanly in
+/// either order: `alice` and `bob` keep using the unmodified database.
+#[futures_test::test]
+async fn rejected_live_unique_backfill_preserves_runtime_storage_and_usability() {
+    for records in [
+        [(7_u64, "Blue Train"), (8_u64, "Blue Train")],
+        [(8_u64, "Blue Train"), (7_u64, "Blue Train")],
+    ] {
+        let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+        let mut database = Database::new(albums_schema(), storage).await.unwrap();
+        let mut batch = database.open_batch();
+        for (id, title) in records {
+            batch.insert(
+                "albums",
+                vec![Value::U64(id), Value::String(title.to_owned())],
+            );
+        }
+        database.commit_batch(batch).await.unwrap();
+
+        let schema_before = database.ivm_runtime.schema().clone();
+        let stats_before = database.runtime_stats();
+        let nodes_before = database.ivm_runtime.retained_node_ids();
+        let index_prefix = b"albums\0unique_albums_by_title\0";
+        let index_bytes_before = database
+            .storage
+            .prefix("indices".to_owned(), index_prefix.to_vec())
+            .await
+            .unwrap();
+        let rows_before = database.primary_key_scan("albums", &[]).await.unwrap();
+        control.take_observed();
+
+        let index = IndexSchema::new("unique_albums_by_title", ["title"]).unique();
+        let error = database
+            .register_table_index("albums", index.clone())
+            .await
+            .expect_err("duplicate positive backfill must reject");
+        assert!(matches!(
+            error,
+            Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { index: name })
+                if name == "albums.unique_albums_by_title"
+        ));
+        assert!(
+            !control
+                .take_observed()
+                .contains(&TestStorageOperation::WriteMany),
+            "rejected backfill must not submit registration writes"
+        );
+        assert_eq!(database.ivm_runtime.schema(), &schema_before);
+        assert_eq!(database.runtime_stats(), stats_before);
+        assert_eq!(database.ivm_runtime.retained_node_ids(), nodes_before);
+        assert_eq!(
+            database
+                .storage
+                .prefix("indices".to_owned(), index_prefix.to_vec())
+                .await
+                .unwrap(),
+            index_bytes_before
+        );
+        assert_eq!(
+            database.primary_key_scan("albums", &[]).await.unwrap(),
+            rows_before
+        );
+        assert!(database.ensure_usable().is_ok());
+        assert!(matches!(
+            database
+                .index_get(
+                    "albums",
+                    "unique_albums_by_title",
+                    &[Value::String("Blue Train".to_owned())],
+                )
+                .await,
+            Err(Error::IndexNotFound { table, index })
+                if table == "albums" && index == "unique_albums_by_title"
+        ));
+        let retry_error = database
+            .register_table_index("albums", index.clone())
+            .await
+            .expect_err("the duplicate must continue rejecting before correction");
+        assert!(matches!(
+            retry_error,
+            Error::IvmRuntime(IvmRuntimeError::UniqueIndexViolation { index: name })
+                if name == "albums.unique_albums_by_title"
+        ));
+
+        let mut correction = database.open_batch();
+        correction.delete("albums", PrimaryKeyValue::U64(8));
+        correction.insert(
+            "albums",
+            vec![Value::U64(9), Value::String("Kind of Blue".to_owned())],
+        );
+        database.commit_batch(correction).await.unwrap();
+        database
+            .register_table_index("albums", index)
+            .await
+            .unwrap();
+        assert_eq!(
+            record_values(
+                database
+                    .index_get(
+                        "albums",
+                        "unique_albums_by_title",
+                        &[Value::String("Blue Train".to_owned())],
+                    )
+                    .await
+                    .unwrap()
+            ),
+            [vec![Value::U64(7), Value::String("Blue Train".to_owned())]]
+        );
+        assert_eq!(
+            record_values(
+                database
+                    .index_get(
+                        "albums",
+                        "unique_albums_by_title",
+                        &[Value::String("Kind of Blue".to_owned())],
+                    )
+                    .await
+                    .unwrap()
+            ),
+            [vec![
+                Value::U64(9),
+                Value::String("Kind of Blue".to_owned())
+            ]]
+        );
+    }
+}
+
+async fn assert_poisoned_registration_lifecycle(database: &mut Database) {
+    assert!(matches!(
+        database.primary_key_scan("albums", &[]).await,
+        Err(Error::DatabasePoisoned)
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(9), Value::String("Kind of Blue".to_owned())],
+    );
+    assert!(matches!(
+        database.commit_batch(batch).await,
+        Err(Error::DatabasePoisoned)
+    ));
+    assert!(matches!(
+        database
+            .register_table_index("albums", IndexSchema::new("other", ["title"]))
+            .await,
+        Err(Error::DatabasePoisoned)
+    ));
+    database.close().await.unwrap();
+}
+
+/// A registration write failure after `alice`'s backfill starts poisons the
+/// database so `bob` cannot observe or extend potentially partial state.
+#[futures_test::test]
+async fn live_index_backfill_write_failure_remains_poisoning() {
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    let schema_before = database.ivm_runtime.schema().clone();
+    let stats_before = database.runtime_stats();
+    let nodes_before = database.ivm_runtime.retained_node_ids();
+    let index_bytes_before = database
+        .storage
+        .prefix(
+            "indices".to_owned(),
+            b"albums\0unique_albums_by_title\0".to_vec(),
+        )
+        .await
+        .unwrap();
+    control.take_observed();
+    control.fail_next(TestStorageOperation::WriteMany);
+
+    let error = database
+        .register_table_index(
+            "albums",
+            IndexSchema::new("unique_albums_by_title", ["title"]).unique(),
+        )
+        .await
+        .expect_err("registration write failure must be returned");
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::Storage(crate::storage::Error::Backend {
+            backend: "test",
+            ..
+        }))
+    ));
+    assert_eq!(
+        control
+            .take_observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::WriteMany)
+            .count(),
+        1
+    );
+    assert_eq!(database.ivm_runtime.schema(), &schema_before);
+    assert_eq!(database.runtime_stats(), stats_before);
+    assert_eq!(database.ivm_runtime.retained_node_ids(), nodes_before);
+    assert_eq!(
+        database
+            .storage
+            .prefix(
+                "indices".to_owned(),
+                b"albums\0unique_albums_by_title\0".to_vec(),
+            )
+            .await
+            .unwrap(),
+        index_bytes_before
+    );
+    assert_poisoned_registration_lifecycle(&mut database).await;
+}
+
+/// A storage I/O failure while hydrating `alice`'s live index poisons the
+/// database before `bob` can perform another operation.
+#[futures_test::test]
+async fn live_index_hydration_io_failure_remains_poisoning() {
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_column_family("albums");
+    let schema_before = database.ivm_runtime.schema().clone();
+    let stats_before = database.runtime_stats();
+    let nodes_before = database.ivm_runtime.retained_node_ids();
+    let index_bytes_before = database
+        .storage
+        .prefix(
+            "indices".to_owned(),
+            b"albums\0unique_albums_by_title\0".to_vec(),
+        )
+        .await
+        .unwrap();
+    control.take_observed();
+    control.fail_next(TestStorageOperation::ScanOpen);
+
+    let error = database
+        .register_table_index(
+            "albums",
+            IndexSchema::new("unique_albums_by_title", ["title"]).unique(),
+        )
+        .await
+        .expect_err("hydration IO failure must be returned");
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::Storage(crate::storage::Error::Backend {
+            backend: "test",
+            ..
+        }))
+    ));
+    let observed = control.take_observed();
+    assert!(observed.contains(&TestStorageOperation::ScanOpen));
+    assert!(!observed.contains(&TestStorageOperation::WriteMany));
+    assert_eq!(database.ivm_runtime.schema(), &schema_before);
+    assert_eq!(database.runtime_stats(), stats_before);
+    assert_eq!(database.ivm_runtime.retained_node_ids(), nodes_before);
+    assert_eq!(
+        database
+            .storage
+            .prefix(
+                "indices".to_owned(),
+                b"albums\0unique_albums_by_title\0".to_vec(),
+            )
+            .await
+            .unwrap(),
+        index_bytes_before
+    );
+    assert_poisoned_registration_lifecycle(&mut database).await;
+}
+
+/// A runtime record-decoding failure during `alice`'s backfill poisons the
+/// database before `bob` can use it again.
+#[futures_test::test]
+async fn live_index_non_unique_runtime_error_remains_poisoning() {
+    let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    database
+        .storage
+        .set(
+            "albums".to_owned(),
+            PrimaryKeyValue::U64(7).into_bytes(),
+            vec![0xff],
+        )
+        .await
+        .unwrap();
+    let schema_before = database.ivm_runtime.schema().clone();
+    let stats_before = database.runtime_stats();
+    let nodes_before = database.ivm_runtime.retained_node_ids();
+    let index_bytes_before = database
+        .storage
+        .prefix(
+            "indices".to_owned(),
+            b"albums\0unique_albums_by_title\0".to_vec(),
+        )
+        .await
+        .unwrap();
+    let table_bytes_before = database
+        .storage
+        .prefix("albums".to_owned(), Vec::new())
+        .await
+        .unwrap();
+    control.take_observed();
+
+    let error = database
+        .register_table_index(
+            "albums",
+            IndexSchema::new("unique_albums_by_title", ["title"]).unique(),
+        )
+        .await
+        .expect_err("record encoding failure must be returned");
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::RecordEncoding(_))
+    ));
+    assert!(
+        !control
+            .take_observed()
+            .contains(&TestStorageOperation::WriteMany)
+    );
+    assert_eq!(database.ivm_runtime.schema(), &schema_before);
+    assert_eq!(database.runtime_stats(), stats_before);
+    assert_eq!(database.ivm_runtime.retained_node_ids(), nodes_before);
+    assert_eq!(
+        database
+            .storage
+            .prefix(
+                "indices".to_owned(),
+                b"albums\0unique_albums_by_title\0".to_vec(),
+            )
+            .await
+            .unwrap(),
+        index_bytes_before
+    );
+    assert_eq!(
+        database
+            .storage
+            .prefix("albums".to_owned(), Vec::new())
+            .await
+            .unwrap(),
+        table_bytes_before
+    );
+    assert_poisoned_registration_lifecycle(&mut database).await;
 }
 
 #[futures_test::test]
