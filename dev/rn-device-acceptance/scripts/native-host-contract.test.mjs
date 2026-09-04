@@ -101,8 +101,8 @@ function assertArmv7RocksDbBuildConfiguration(builder) {
   );
   assert.doesNotMatch(
     branch.groups.otherTargets,
-    /CXXFLAGS_armv7_linux_androideabi|-UHAVE_UINT128_EXTENSION/,
-    "arm64 and x86_64 builds must retain their unmodified cargo invocation",
+    /CXXFLAGS_armv7_linux_androideabi|-UHAVE_UINT128_EXTENSION|POSIX_MADV_/,
+    "arm64 and x86_64 builds must retain their unmodified cargo invocation without API 21 aliases",
   );
   assert.match(
     branch.groups.otherTargets,
@@ -191,6 +191,17 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
       ),
     /NDK API 21 RocksDB compatibility flags/,
     "the contract must reject removing an API 21 POSIX_MADV alias",
+  );
+  assert.throws(
+    () =>
+      assertArmv7RocksDbBuildConfiguration(
+        builder.replace(
+          "      else\n        cargo ndk",
+          '      else\n        CXXFLAGS_arm64_linux_android="-DPOSIX_MADV_NORMAL=MADV_NORMAL" cargo ndk',
+        ),
+      ),
+    /without API 21 aliases/,
+    "the contract must reject leaking an API 21 alias into the ordinary Android builds",
   );
 });
 
