@@ -911,6 +911,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
     );
     workerGlobal.__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
     const wasmModule = await loadWorkerWasmModule(options.runtimeSources);
+    (wasmModule as unknown as { __testSyncAutopsyEnable?(): void }).__testSyncAutopsyEnable?.();
     context.disposeTelemetry = installWasmTelemetry({
       wasmModule,
       collectorUrl: options.telemetryCollectorUrl,
@@ -1462,6 +1463,19 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       } satisfies BrowserInspectorControlEvent);
       return;
     }
+    if (message.type === "sync-autopsy") {
+      void wasmModulePromise?.then((wasmModule) => {
+        const dump = (
+          wasmModule as unknown as { __testSyncAutopsyDump?(): string }
+        ).__testSyncAutopsyDump?.();
+        port.postMessage({
+          type: "sync-autopsy",
+          id: message.id,
+          dump: dump ?? "sync autopsy unavailable",
+        } satisfies BrowserInspectorControlEvent);
+      });
+      return;
+    }
     if (message.type === "terminate-worker") {
       if (contexts.size > 0) {
         port.postMessage({
@@ -1787,6 +1801,14 @@ function attachPeerTransport(
     activeRuntime,
     subscriber,
     (frames) => {
+      if (peer.context.options.logLevel === "trace") {
+        recordWorkerLifecycle(
+          "peer-frame-output",
+          peer.context.options.dbName,
+          peer.context.options.authSessionKey,
+          { frameCount: frames.length },
+        );
+      }
       const copies = transferableFrames(frames);
       peer.port.postMessage(
         { type: "frames", frames: copies } satisfies BrowserFollowerPortEvent,
@@ -1800,6 +1822,17 @@ function attachPeerTransport(
             type: "relay-trace",
             entries: entries.map((entry) => ({ ...entry, hop: "worker-tab" })),
           });
+        }
+      : undefined,
+    peer.context.options.logLevel === "trace"
+      ? (_phase, frameCount) => {
+          if (frameCount === 0) return;
+          recordWorkerLifecycle(
+            "peer-frame-drain",
+            peer.context.options.dbName,
+            peer.context.options.authSessionKey,
+            { frameCount },
+          );
         }
       : undefined,
   );

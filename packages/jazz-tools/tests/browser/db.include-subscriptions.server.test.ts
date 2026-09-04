@@ -334,20 +334,26 @@ describe("websocket include subscriptions", () => {
       10_000,
       "authoritative insert did not settle globally",
     );
-    await waitForCondition(
-      async () =>
-        includingSnapshots.some(
-          (rows) =>
-            rows.length === 1 &&
-            rows[0]?.id === note.id &&
-            rows[0]?.org?.id === org.id &&
-            rows[0]?.user_check?.id === userCheck.id,
-        ) && refFilteredSnapshots.some((rows) => rows.length === 1 && rows[0]?.id === note.id),
-      15_000,
-      `overlapping include/ref carriers did not project the live row exactly once; including=${JSON.stringify(
-        includingSnapshots.slice(-4),
-      )}; refFiltered=${JSON.stringify(refFilteredSnapshots.slice(-4))}`,
-    );
+    try {
+      await waitForCondition(
+        async () =>
+          includingSnapshots.some(
+            (rows) =>
+              rows.length === 1 &&
+              rows[0]?.id === note.id &&
+              rows[0]?.org?.id === org.id &&
+              rows[0]?.user_check?.id === userCheck.id,
+          ) && refFilteredSnapshots.some((rows) => rows.length === 1 && rows[0]?.id === note.id),
+        15_000,
+        `overlapping include/ref carriers did not project the live row exactly once; including=${JSON.stringify(
+          includingSnapshots.slice(-4),
+        )}; refFiltered=${JSON.stringify(refFilteredSnapshots.slice(-4))}`,
+      );
+    } catch (error) {
+      throw new Error(
+        `${error}; workerLifecycle=${JSON.stringify(await workerLifecycle(browser))}`,
+      );
+    }
 
     await expect(
       browser.all(app.todos.where({ id: todo.id }), { tier: "local" }),
@@ -376,9 +382,50 @@ async function openDb(
       serverUrl,
       adminSecret,
       secret,
+      logLevel: "trace",
       driver: { type: "persistent", dbName: uniqueDbName(label) },
     }),
   );
+}
+
+async function workerLifecycle(db: Db): Promise<unknown> {
+  const port = await (
+    db as unknown as { openInspectorControlPort(): Promise<MessagePort> }
+  ).openInspectorControlPort();
+  const id = 1;
+  try {
+    const lifecycle = await new Promise<unknown[]>((resolve) => {
+      const onMessage = (
+        event: MessageEvent<{ type?: string; id?: number; entries?: unknown[] }>,
+      ) => {
+        if (event.data.type !== "lifecycle-trace" || event.data.id !== id) return;
+        port.removeEventListener("message", onMessage);
+        resolve(event.data.entries ?? []);
+      };
+      port.addEventListener("message", onMessage);
+      port.start();
+      port.postMessage({ type: "lifecycle-trace", id });
+    });
+    const autopsy = await new Promise<string>((resolve) => {
+      const autopsyId = 2;
+      const onMessage = (event: MessageEvent<{ type?: string; id?: number; dump?: string }>) => {
+        if (event.data.type !== "sync-autopsy" || event.data.id !== autopsyId) return;
+        port.removeEventListener("message", onMessage);
+        resolve(event.data.dump ?? "");
+      };
+      port.addEventListener("message", onMessage);
+      port.postMessage({ type: "sync-autopsy", id: autopsyId });
+    });
+    const foregroundAutopsy = (
+      globalThis as typeof globalThis & {
+        __jazzTestSyncAutopsy?: { __testSyncAutopsyDump?(): string };
+      }
+    ).__jazzTestSyncAutopsy?.__testSyncAutopsyDump?.();
+    return { lifecycle, autopsy, foregroundAutopsy };
+  } finally {
+    port.postMessage({ type: "close" });
+    port.close();
+  }
 }
 
 async function publishSchemaAndPermissions(
