@@ -8,7 +8,7 @@ use groove::schema::ColumnType;
 use super::{
     Aggregate, AggregateFunction, ColumnSchema, CurrentRow, Error, ResultMemberEntry, RowUuid,
     SyntheticReplacementToken, TableSchema, Value, aggregate_output_app_field,
-    aggregate_output_column, aggregate_result_member_row_uuid, app_column_field, nullable_value,
+    aggregate_output_column, aggregate_result_member_row_uuid, app_column_field,
 };
 
 pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Ordering {
@@ -43,7 +43,10 @@ pub(super) fn aggregate_row_cell(
         app_column_field(column)
     };
     let idx = row.record.descriptor().field_index(&field)?;
-    nullable_value(row.record.borrowed().get_idx(idx).ok()?).ok()?
+    match row.record.borrowed().get_idx(idx).ok()? {
+        Value::Nullable(value) => value.map(|value| *value),
+        value => Some(value),
+    }
 }
 
 pub(super) fn aggregate_result_table(
