@@ -2263,6 +2263,7 @@ dependencies = [
  "jazz-storage-rocksdb",
  "postcard",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
