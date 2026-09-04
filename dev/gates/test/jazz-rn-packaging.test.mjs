@@ -54,6 +54,20 @@ test("Expo machine JSON accepts its informational prelude but no arbitrary stdou
     /only with Expo informational lines/,
     "unstructured stdout must not be mistaken for an Expo JSON prelude",
   );
+  assert.throws(
+    () =>
+      parseExpoMachineJson(
+        'ℹ [module] inspecting React Native configuration\n{"relay":}\n',
+        "Expo",
+      ),
+    SyntaxError,
+    "an allowed informational prelude must not make malformed JSON acceptable",
+  );
+  assert.throws(
+    () => parseExpoMachineJson('{"relay":"packed"}\ntrailing output\n', "Expo"),
+    SyntaxError,
+    "valid JSON must not permit non-whitespace trailing stdout",
+  );
 });
 
 function productionDependencyNames(metadata, rootPackageName) {
