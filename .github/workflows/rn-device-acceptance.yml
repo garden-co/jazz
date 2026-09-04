@@ -212,6 +212,7 @@ jobs:
           # Linux session, never the portable test double used by macOS tests.
           export JAZZ_ANDROID_SESSION_LAUNCHER=setsid
           export JAZZ_ANDROID_SESSION_PROCESS_GROUP=1
+          relay_abis=armeabi-v7a,arm64-v8a,x86_64
           [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance requires readable/writable /dev/kvm after the KVM access step" >&2; exit 1; }
           dev/rn-device-acceptance/scripts/create-android-avd.sh \
             jazz-device-acceptance-api35 \
@@ -220,7 +221,12 @@ jobs:
             jazz-device-acceptance-api35 \
             "$cache/emulator.log" \
             "$ANDROID_AVD_HOME/jazz-device-acceptance-api35.avd/config.ini"
-          (cd dev/rn-device-acceptance/android && NODE_ENV=production ./gradlew :app:assembleRelease --console=plain)
+          (
+            cd dev/rn-device-acceptance/android
+            grep -Fx "reactNativeArchitectures=${relay_abis}" gradle.properties
+            ./gradlew -q -PreactNativeArchitectures="${relay_abis}" :app:properties | grep -Fx "reactNativeArchitectures: ${relay_abis}"
+            NODE_ENV=production ./gradlew -PreactNativeArchitectures="${relay_abis}" :app:assembleRelease --console=plain
+          )
           export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
           export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           pnpm --filter rn-device-acceptance device:android

@@ -67,6 +67,12 @@ android {
   defaultConfig {
     minSdkVersion getExtOrIntegerDefault("minSdkVersion")
     targetSdkVersion getExtOrIntegerDefault("targetSdkVersion")
+    // AGP's external CMake tasks otherwise build every default ABI even when
+    // the consuming React Native app narrows reactNativeArchitectures. The
+    // relay package has sealed libraries for only these three targets.
+    ndk {
+      abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
+    }
     buildConfigField "boolean", "IS_NEW_ARCHITECTURE_ENABLED", isNewArchitectureEnabled().toString()
     consumerProguardFiles 'proguard-rules.pro'
 

@@ -80,6 +80,25 @@ function assertRnDeviceWorkflowContract(workflow) {
   );
 }
 
+function assertAndroidRelayAssemblyAbiContract(libraryBuild, workflow) {
+  assert.match(
+    libraryBuild,
+    /ndk \{\s*abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"\s*\}/,
+    "jazz-rn's external CMake build must filter to its three sealed relay ABIs",
+  );
+  assert.doesNotMatch(
+    libraryBuild,
+    /abiFilters[^}]*"x86"/s,
+    "jazz-rn must not ask CMake to build retired 32-bit x86",
+  );
+  const assembly = jobSection(workflow, "android-device-acceptance");
+  assert.match(
+    assembly,
+    /relay_abis=armeabi-v7a,arm64-v8a,x86_64[\s\S]*grep -Fx "reactNativeArchitectures=\$\{relay_abis\}" gradle\.properties[\s\S]*:app:properties \| grep -Fx "reactNativeArchitectures: \$\{relay_abis\}"[\s\S]*NODE_ENV=production \.\/gradlew -PreactNativeArchitectures="\$\{relay_abis\}" :app:assembleRelease/,
+    "the installed-device build must prove and pass the effective supported ABI set at assembly",
+  );
+}
+
 test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   const sources = new Map([
     [
@@ -101,6 +120,10 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
       fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/android/build.gradle"), "utf8"),
     ],
     ["Android acceptance metadata", read("android/gradle.properties")],
+    [
+      "Android relay library build",
+      fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/android/build.gradle"), "utf8"),
+    ],
     ["Android stage verifier", read("scripts/android-relay-stage.mjs")],
     [
       "RN dependency bootstrap",
@@ -139,6 +162,24 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   assert.match(builder, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(builder, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(builder, /\[x86_64\]=x86_64-linux-android/);
+  assertAndroidRelayAssemblyAbiContract(
+    sources.get("Android relay library build"),
+    sources.get("Android device workflow"),
+  );
+  assert.throws(
+    () =>
+      assertAndroidRelayAssemblyAbiContract(
+        sources.get("Android relay library build"),
+        sources
+          .get("Android device workflow")
+          .replace(
+            '-PreactNativeArchitectures="${relay_abis}" :app:assembleRelease',
+            ":app:assembleRelease",
+          ),
+      ),
+    /effective supported ABI set/,
+    "the contract must reject an assembly that relies only on generated properties",
+  );
 });
 
 function assertAtomicAndroidDiagnostic(fixture) {
