@@ -1796,9 +1796,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }),
     );
     const seededTitle = `indexed-seeded-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await writer
+    const seededFirst = await writer
       .insert(maintainedIndexedTodos, { title: seededTitle, done: false })
       .wait({ tier: "global" });
+    const seededSecond = await writer
+      .insert(maintainedIndexedTodos, { title: seededTitle, done: false })
+      .wait({ tier: "global" });
+    const expectedSeededIds = [seededFirst.id, seededSecond.id].sort();
 
     const fresh = track(
       await createDb({
@@ -1825,8 +1829,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
       15_000,
       "fresh IndexedDB worker must receive an authoritative settled indexed snapshot",
     );
-    expect(settledSnapshots[0]).toHaveLength(1);
-    expect(settledSnapshots[0]?.[0]).toMatchObject({ title: seededTitle, done: false });
+    // The first global callback is authoritative, not merely nonempty: a
+    // partial hydration that delivers either matching row is a failure.
+    expect(settledSnapshots[0]).toHaveLength(2);
+    expect(settledSnapshots[0]?.map((row) => row.id).sort()).toEqual(expectedSeededIds);
+    expect(settledSnapshots[0]?.every((row) => row.title === seededTitle && !row.done)).toBe(true);
     stopSettled();
 
     const emptyTitle = `indexed-empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
